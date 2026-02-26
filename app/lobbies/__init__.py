@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, render_template
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
-from app.models import Lobby, LobbyParticipant, User, Character
+from app.models import Lobby, LobbyParticipant, User, Character, GameState
 
 lobbies_bp = Blueprint('lobbies', __name__)
 
@@ -20,6 +20,8 @@ def create_lobby():
     participant = LobbyParticipant(lobby_id=lobby.id, user_id=user_id)
     db.session.add(participant)
     db.session.commit()
+
+    print(f"DEBUG: Created lobby {lobby.id}, added participant user_id={user_id}")
 
     return jsonify({
         'id': lobby.id,
@@ -68,8 +70,10 @@ def join_lobby(lobby_id):
         return jsonify({'error': 'Lobby not found'}), 404
 
     # Проверяем, не участник ли уже
-    if LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first():
-        return jsonify({'error': 'Already in lobby'}), 400
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if participant:
+        # Если уже есть – всё равно считаем успехом (перенаправляем в лобби)
+        return jsonify({'message': 'Already in lobby'}), 200
 
     participant = LobbyParticipant(lobby_id=lobby_id, user_id=user_id)
     db.session.add(participant)
@@ -141,20 +145,31 @@ def select_character(lobby_id):
 @jwt_required()
 def get_participants_characters(lobby_id):
     user_id = get_jwt_identity()
+    print(f"DEBUG: user_id={user_id}, lobby_id={lobby_id}")
+
+    # Проверяем, что пользователь состоит в лобби
     participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
     if not participant:
+        print("DEBUG: User not in lobby")
         return jsonify({'error': 'You are not in this lobby'}), 403
 
     lobby = Lobby.query.get(lobby_id)
     if not lobby:
+        print("DEBUG: Lobby not found")
         return jsonify({'error': 'Lobby not found'}), 404
 
     is_gm = (lobby.gm_id == user_id)
+    print(f"DEBUG: is_gm={is_gm}")
+
+    # Получаем всех участников лобби
     participants = LobbyParticipant.query.filter_by(lobby_id=lobby_id).all()
+    print(f"DEBUG: Found {len(participants)} participants in lobby")
+
     result = []
     for p in participants:
-        if not is_gm and p.user_id != user_id:
-            continue
+        # Если не ГМ и это не текущий пользователь, пропускаем
+        pass
+
         user_data = {
             'user_id': p.user_id,
             'username': p.user.username
@@ -167,9 +182,33 @@ def get_participants_characters(lobby_id):
                     'name': char.name,
                     'data': char.data
                 }
+                print(f"DEBUG: Participant {p.user_id} has character {char.name}")
             else:
                 user_data['character'] = None
+                print(f"DEBUG: Participant {p.user_id} has invalid character_id {p.character_id}")
         else:
             user_data['character'] = None
+            print(f"DEBUG: Participant {p.user_id} has no character selected")
+
         result.append(user_data)
+
+    print(f"DEBUG: Returning {len(result)} participants")
     return jsonify(result), 200
+
+@lobbies_bp.route('/<int:lobby_id>/map', methods=['GET'])
+@jwt_required()
+def get_map(lobby_id):
+    user_id = get_jwt_identity()
+    # Проверяем, что пользователь в лобби
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'Not in lobby'}), 403
+
+    game_state = GameState.query.filter_by(lobby_id=lobby_id).first()
+    if not game_state:
+        # Если нет состояния, создаём пустое
+        game_state = GameState(lobby_id=lobby_id)
+        db.session.add(game_state)
+        db.session.commit()
+
+    return jsonify(game_state.map_data), 200

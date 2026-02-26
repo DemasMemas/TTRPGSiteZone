@@ -1,7 +1,4 @@
-// static/lobby.js (модуль)
-import * as THREE from 'three';
-import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
-import { addMarker, moveMarker, removeMarker, loadMarkers } from './lobby3d.js';
+// static/lobby.js — полная рабочая версия с отладкой
 
 const socket = io();
 let currentLobbyId = null;
@@ -11,7 +8,7 @@ let username = localStorage.getItem('username');
 console.log('Token exists:', !!token);
 console.log('Current URL:', window.location.href);
 
-// Извлекаем ID лобби
+// Извлекаем ID лобби из URL (формат /lobbies/123/page)
 const pathParts = window.location.pathname.split('/').filter(p => p !== '');
 if (pathParts.length >= 2 && pathParts[0] === 'lobbies') {
     currentLobbyId = pathParts[1];
@@ -37,15 +34,15 @@ socket.on('connect', () => {
 socket.on('authenticated', (data) => {
     console.log('Authenticated as', data.username);
     addMessage('system', `Вы вошли как ${data.username}`);
-    loadLobbyInfo();
-    loadMyCharacters();
-    loadParticipantsCharacters();
-    loadMap(); // загружаем карту
+    loadLobbyInfo();                // загружаем название лобби
+    loadMyCharacters();              // заполняем селектор своими персонажами
+    loadParticipantsCharacters();    // загружаем персонажей в лобби
+    loadMap();
 });
 
 socket.on('user_joined', (data) => {
     addMessage('system', `${data.username} присоединился к лобби`);
-    loadParticipantsCharacters();
+    loadParticipantsCharacters();    // обновляем список
 });
 
 socket.on('new_message', (data) => {
@@ -56,20 +53,7 @@ socket.on('error', (data) => {
     alert('Ошибка: ' + data.message);
 });
 
-// События карты
-socket.on('marker_added', (marker) => {
-    addMarker(marker);
-});
-
-socket.on('marker_moved', (data) => {
-    moveMarker(data.id, data.x, data.y);
-});
-
-socket.on('marker_deleted', (data) => {
-    removeMarker(data.id);
-});
-
-// ----- Основные функции интерфейса (чат, список участников и т.д.) -----
+// ----- Основные функции интерфейса -----
 async function loadLobbyInfo() {
     try {
         const response = await fetch(`/lobbies/${currentLobbyId}`, {
@@ -78,6 +62,7 @@ async function loadLobbyInfo() {
         if (!response.ok) throw new Error('Ошибка загрузки лобби');
         const lobby = await response.json();
         document.getElementById('lobby-name').textContent = lobby.name;
+        // обновляем список участников (простой, без персонажей)
         updateParticipantsList(lobby.participants, lobby.gm_id);
     } catch (error) {
         console.error('loadLobbyInfo error:', error);
@@ -101,7 +86,6 @@ function addMessage(username, text, timestamp) {
     if (!chat) return;
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message';
-    if (username.startsWith('System')) msgDiv.classList.add('system');
     const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : '';
     msgDiv.innerHTML = `<span class="username">${username}:</span> ${text} <span class="timestamp">${timeStr}</span>`;
     chat.appendChild(msgDiv);
@@ -140,7 +124,7 @@ async function leaveLobby() {
     }
 }
 
-// ----- Работа с персонажами (полные реализации) -----
+// ----- Работа с персонажами -----
 async function loadMyCharacters() {
     try {
         const response = await fetch('/characters/', {
@@ -231,7 +215,14 @@ function displayCharacters(participants) {
             charDiv.className = 'character-card';
             charDiv.innerHTML = `<h4>${p.character.name} (${p.username})</h4>`;
             // Проверяем наличие навыков
-            const skills = p.character.data?.skills || {};
+            let skills = {};
+            if (p.character.data?.skills) {
+                skills = p.character.data.skills;
+            } else if (p.character.data?.data?.skills) {
+                skills = p.character.data.data.skills;
+            } else {
+                skills = p.character.data || {};
+            }
             console.log('Skills for', p.character.name, skills);
             if (Object.keys(skills).length === 0) {
                 // Если навыков нет, показываем заглушку
@@ -273,41 +264,129 @@ function rollSkill(characterId, skillName) {
     });
 }
 
-// ----- Карта (загрузка с сервера) -----
+// ----- Карта -----
+let canvas = document.getElementById('game-map');
+let ctx = canvas.getContext('2d');
+let mapData = { width: 10, height: 10, markers: [] };
+let currentMarkerType = 'default';
+let draggingMarkerId = null;
+
+function setMarkerType(type) {
+    currentMarkerType = type;
+    document.getElementById('current-marker-type').textContent = type;
+}
+
 async function loadMap() {
     try {
         const response = await fetch(`/lobbies/${currentLobbyId}/map`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
-            const mapData = await response.json();
-            loadMarkers(mapData.markers); // функция из lobby3d.js
+            mapData = await response.json();
+            drawMap();
         }
     } catch (error) {
         console.error('Error loading map', error);
     }
 }
 
-// Экспортируем функции, которые нужны для глобального доступа (если есть inline-обработчики)
-window.sendMessage = sendMessage;
-window.leaveLobby = leaveLobby;
-window.selectCharacter = selectCharacter;
-window.rollSkill = rollSkill;
+function drawMap() {
+    ctx.clearRect(0, 0, 500, 500);
+    let cellSize = 50;
+    ctx.strokeStyle = '#ccc';
+    for (let i = 0; i <= mapData.width; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * cellSize, 0);
+        ctx.lineTo(i * cellSize, 500);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, i * cellSize);
+        ctx.lineTo(500, i * cellSize);
+        ctx.stroke();
+    }
 
-let currentMarkerType = 'default';
-window.setMarkerType = (type) => {
-    currentMarkerType = type;
-    document.getElementById('current-marker-type').textContent = type;
-};
-
-window.addMarkerAtCenter = () => {
-    // Генерируем случайные координаты в пределах от -5 до 5
-    const x = Math.floor(Math.random() * 10) - 5;
-    const y = Math.floor(Math.random() * 10) - 5;
-    socket.emit('add_marker', {
-        token,
-        lobby_id: currentLobbyId,
-        x, y,
-        type: currentMarkerType
+    mapData.markers.forEach(marker => {
+        ctx.beginPath();
+        ctx.arc(marker.x * cellSize + cellSize/2, marker.y * cellSize + cellSize/2, 15, 0, 2 * Math.PI);
+        ctx.fillStyle = marker.type === 'blue' ? 'blue' : (marker.type === 'green' ? 'green' : 'red');
+        ctx.fill();
+        ctx.strokeStyle = 'black';
+        ctx.stroke();
     });
-};
+}
+
+// Добавление метки по клику
+canvas.addEventListener('click', (e) => {
+    let rect = canvas.getBoundingClientRect();
+    let x = Math.floor((e.clientX - rect.left) / 50);
+    let y = Math.floor((e.clientY - rect.top) / 50);
+    if (x >= 0 && x < mapData.width && y >= 0 && y < mapData.height) {
+        socket.emit('add_marker', {
+            token,
+            lobby_id: currentLobbyId,
+            x, y,
+            type: currentMarkerType
+        });
+    }
+});
+
+// Начало перетаскивания
+canvas.addEventListener('mousedown', (e) => {
+    let rect = canvas.getBoundingClientRect();
+    let mouseX = (e.clientX - rect.left);
+    let mouseY = (e.clientY - rect.top);
+    for (let marker of mapData.markers) {
+        let mx = marker.x * 50 + 25;
+        let my = marker.y * 50 + 25;
+        let dist = Math.hypot(mx - mouseX, my - mouseY);
+        if (dist < 15) {
+            draggingMarkerId = marker.id;
+            break;
+        }
+    }
+});
+
+// Перемещение
+canvas.addEventListener('mousemove', (e) => {
+    if (draggingMarkerId !== null) {
+        let rect = canvas.getBoundingClientRect();
+        let x = Math.floor((e.clientX - rect.left) / 50);
+        let y = Math.floor((e.clientY - rect.top) / 50);
+        if (x >= 0 && x < mapData.width && y >= 0 && y < mapData.height) {
+            let marker = mapData.markers.find(m => m.id === draggingMarkerId);
+            if (marker && (marker.x !== x || marker.y !== y)) {
+                socket.emit('move_marker', {
+                    token,
+                    lobby_id: currentLobbyId,
+                    marker_id: draggingMarkerId,
+                    x, y
+                });
+            }
+        }
+    }
+});
+
+// Завершение перетаскивания
+canvas.addEventListener('mouseup', () => {
+    draggingMarkerId = null;
+});
+
+// Сокетные события
+socket.on('marker_added', (marker) => {
+    mapData.markers.push(marker);
+    drawMap();
+});
+
+socket.on('marker_moved', (data) => {
+    let marker = mapData.markers.find(m => m.id === data.id);
+    if (marker) {
+        marker.x = data.x;
+        marker.y = data.y;
+        drawMap();
+    }
+});
+
+socket.on('marker_deleted', (data) => {
+    mapData.markers = mapData.markers.filter(m => m.id !== data.id);
+    drawMap();
+});

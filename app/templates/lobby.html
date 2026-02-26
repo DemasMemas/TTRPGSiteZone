@@ -4,50 +4,71 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Лобби</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        #chat { border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: 10px; margin-bottom: 10px; }
-        .message { margin-bottom: 5px; }
-        .username { font-weight: bold; }
-        .timestamp { color: #999; font-size: 0.8em; margin-left: 10px; }
-        #participants { margin-bottom: 20px; }
-    </style>
+    <!-- Подключаем внешний CSS -->
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Карта импортов для Three.js -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.128.0/build/three.module.js"
+        }
+      }
+    </script>
+    <!-- Socket.IO должен быть загружен ДО lobby.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 </head>
 <body>
-    <h1>Лобби: <span id="lobby-name"></span></h1>
-    <div id="participants">
-        <h3>Участники:</h3>
-        <ul id="participants-list"></ul>
+    <!-- Контейнер для 3D-сцены -->
+    <div id="canvas-container" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 1;"></div>
+
+    <!-- Интерфейс поверх 3D -->
+    <div class="ui-overlay">
+        <!-- Верхняя панель -->
+        <div class="top-bar">
+            <h1 id="lobby-name">Загрузка...</h1>
+            <button class="btn btn-secondary" onclick="leaveLobby()">Покинуть лобби</button>
+        </div>
+
+        <!-- Левая панель: чат -->
+        <div class="chat-panel">
+            <div class="panel-header">Чат</div>
+            <div id="chat" class="chat-messages"></div>
+            <div class="chat-input-area">
+                <input type="text" id="message-input" placeholder="Введите сообщение...">
+                <button class="btn btn-primary" onclick="sendMessage()">→</button>
+            </div>
+        </div>
+
+        <!-- Правая панель: участники и персонажи -->
+        <div class="right-panel">
+            <div class="panel-header">Участники</div>
+            <ul id="participants-list" class="participants-list"></ul>
+
+            <div class="panel-header" style="margin-top: 15px;">Ваши персонажи</div>
+            <div class="character-selector">
+                <select id="character-select" class="character-select">
+                    <option value="">-- выберите --</option>
+                </select>
+                <button class="btn btn-primary btn-sm" onclick="selectCharacter()">Выбрать</button>
+            </div>
+
+            <div class="panel-header" style="margin-top: 15px;">Персонажи в лобби</div>
+            <div id="characters-list" class="characters-list"></div>
+        </div>
+
+        <!-- Нижняя панель управления картой -->
+        <div class="map-tools">
+            <div class="marker-types">
+                <button class="marker-btn red" onclick="setMarkerType('default')">🔴</button>
+                <button class="marker-btn blue" onclick="setMarkerType('blue')">🔵</button>
+                <button class="marker-btn green" onclick="setMarkerType('green')">🟢</button>
+                <span>Тип: <span id="current-marker-type">default</span></span>
+            </div>
+            <button class="btn btn-primary" onclick="addMarkerAtCenter()">➕ Добавить метку</button>
+        </div>
     </div>
 
-    <div id="chat"></div>
-    <input type="text" id="message-input" placeholder="Введите сообщение" style="width: 300px;">
-    <button onclick="sendMessage()">Отправить</button>
-    <button onclick="leaveLobby()">Покинуть лобби</button>
-
-    <div id="character-selector" style="margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;">
-        <h4>Выбрать персонажа для этого лобби</h4>
-        <select id="character-select">
-            <option value="">-- загрузка... --</option>
-        </select>
-        <button onclick="selectCharacter()">Выбрать</button>
-    </div>
-
-    <!-- Панель отображения персонажей участников (ГМ видит всех, игрок – себя) -->
-    <div id="characters-panel" style="border: 1px solid #ccc; padding: 10px; margin-bottom: 20px;">
-        <h3>Персонажи в лобби</h3>
-        <div id="characters-list"></div>
-    </div>
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <script src="/static/lobby.js"></script>
+    <!-- Основной скрипт лобби (модуль) -->
+    <script type="module" src="/static/lobby.js"></script>
 </body>
 </html>
-
-<style>
-    .system-message { color: gray; font-style: italic; }
-    .character-card { border: 1px solid #aaa; margin: 5px; padding: 10px; border-radius: 5px; }
-    .skills-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
-    .skill-button { padding: 5px 10px; background: #e0e0e0; border: none; cursor: pointer; border-radius: 3px; }
-    .skill-button:hover { background: #d0d0d0; }
-</style>

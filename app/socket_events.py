@@ -6,7 +6,7 @@ from flask import request
 from flask_socketio import join_room, leave_room, emit
 from flask_jwt_extended import decode_token
 from app import socketio, db
-from app.models import User, Lobby, LobbyParticipant, Character
+from app.models import User, Lobby, LobbyParticipant, Character, GameState
 
 
 # Вспомогательная функция для получения пользователя по токену
@@ -18,11 +18,11 @@ def get_user_from_token(token):
     except:
         return None
 
+
 @socketio.on('connect')
 def handle_connect():
-    # При подключении клиент должен отправить токен и id лобби
-    # Мы пока просто принимаем соединение
     print('Client connected')
+
 
 @socketio.on('authenticate')
 def handle_authenticate(data):
@@ -36,19 +36,16 @@ def handle_authenticate(data):
         emit('error', {'message': 'Invalid token'})
         return
 
-    # Проверяем, что пользователь состоит в этом лобби
     from app.models import LobbyParticipant
     participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user.id).first()
     if not participant:
         emit('error', {'message': 'You are not in this lobby'})
         return
 
-    # Сохраняем информацию о пользователе в сессии сокета
-    # В SocketIO есть request.sid, можно хранить соответствие в словаре, но проще использовать комнаты
     join_room(f"lobby_{lobby_id}")
     emit('authenticated', {'username': user.username}, room=request.sid)
-    # Уведомляем других, что пользователь подключился
     emit('user_joined', {'username': user.username}, room=f"lobby_{lobby_id}")
+
 
 @socketio.on('send_message')
 def handle_message(data):
@@ -63,22 +60,19 @@ def handle_message(data):
         emit('error', {'message': 'Invalid token'})
         return
 
-    # Проверяем, является ли сообщение командой
     if message.startswith('/roll'):
         parts = message.split(' ', 1)
         if len(parts) == 2:
             expression = parts[1]
             result, description = roll_dice(expression)
             if result is None:
-                # Если ошибка, отправляем только автору?
                 emit('new_message', {
                     'username': 'System',
                     'message': description,
                     'timestamp': datetime.now(timezone.utc).isoformat()
-                }, room=request.sid)  # только отправителю
+                }, room=request.sid)
                 return
             else:
-                # Отправляем результат всем
                 emit('new_message', {
                     'username': user.username,
                     'message': f"/roll {expression}: {description}",
@@ -93,17 +87,17 @@ def handle_message(data):
             }, room=request.sid)
             return
 
-    # Обычное сообщение
     emit('new_message', {
         'username': user.username,
         'message': message,
         'timestamp': datetime.now(timezone.utc).isoformat()
     }, room=f"lobby_{lobby_id}")
 
+
 @socketio.on('disconnect')
 def handle_disconnect():
-    # При отключении можно удалить пользователя из комнат (но комнаты автоматически очищаются при отключении)
     print('Client disconnected')
+
 
 @socketio.on('roll_skill')
 def handle_roll_skill(data):
@@ -112,6 +106,7 @@ def handle_roll_skill(data):
     character_id = data.get('character_id')
     skill_name = data.get('skill_name')
     extra_modifier = data.get('extra_modifier', 0)
+
     if not all([token, lobby_id, character_id, skill_name]):
         emit('error', {'message': 'Missing data'}, room=request.sid)
         return
@@ -137,8 +132,33 @@ def handle_roll_skill(data):
         emit('error', {'message': 'You cannot roll for this character'}, room=request.sid)
         return
 
-    skill_bonus = character.data.get('skills', {}).get(skill_name)
+    # Универсальный поиск навыка
+    char_data = character.data
+    skill_bonus = None
+
+    if isinstance(char_data, dict):
+        # Прямой путь: data.skills
+        if 'skills' in char_data:
+            skill_bonus = char_data['skills'].get(skill_name)
+        # Вложенный путь: data.data.skills
+        elif 'data' in char_data and isinstance(char_data['data'], dict):
+            if 'skills' in char_data['data']:
+                skill_bonus = char_data['data']['skills'].get(skill_name)
+            else:
+                # Может быть skills прямо внутри data.data
+                for k, v in char_data['data'].items():
+                    if isinstance(v, dict) and skill_name in v:
+                        skill_bonus = v[skill_name]
+                        break
+        else:
+            # Обходим все поля верхнего уровня в поисках словаря, содержащего skill_name
+            for k, v in char_data.items():
+                if isinstance(v, dict) and skill_name in v:
+                    skill_bonus = v[skill_name]
+                    break
+
     if skill_bonus is None:
+        print(f"ERROR: Skill {skill_name} not found in character data: {char_data}")
         emit('error', {'message': f'Skill {skill_name} not found'}, room=request.sid)
         return
 
@@ -152,3 +172,103 @@ def handle_roll_skill(data):
         'message': message,
         'timestamp': datetime.now(timezone.utc).isoformat()
     }, room=f"lobby_{lobby_id}")
+
+@socketio.on('add_marker')
+def handle_add_marker(data):
+    token = data.get('token')
+    lobby_id = data.get('lobby_id')
+    x = data.get('x')
+    y = data.get('y')
+    marker_type = data.get('type', 'default')
+
+    if not all([token, lobby_id, x is not None, y is not None]):
+        return
+
+    user = get_user_from_token(token)
+    if not user:
+        emit('error', {'message': 'Invalid token'}, room=request.sid)
+        return
+
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user.id).first()
+    if not participant:
+        emit('error', {'message': 'Not in lobby'}, room=request.sid)
+        return
+
+    # Загружаем или создаём GameState
+    game_state = GameState.query.filter_by(lobby_id=lobby_id).first()
+    if not game_state:
+        game_state = GameState(lobby_id=lobby_id)
+        db.session.add(game_state)
+
+    # Добавляем метку
+    markers = game_state.map_data.get('markers', [])
+    new_marker = {
+        'id': len(markers) + 1,  # простой ID
+        'x': x,
+        'y': y,
+        'type': marker_type,
+        'created_by': user.username
+    }
+    markers.append(new_marker)
+    game_state.map_data['markers'] = markers
+    db.session.commit()
+
+    # Рассылаем всем в лобби
+    emit('marker_added', new_marker, room=f"lobby_{lobby_id}")
+
+@socketio.on('move_marker')
+def handle_move_marker(data):
+    token = data.get('token')
+    lobby_id = data.get('lobby_id')
+    marker_id = data.get('marker_id')
+    new_x = data.get('x')
+    new_y = data.get('y')
+
+    if not all([token, lobby_id, marker_id, new_x is not None, new_y is not None]):
+        return
+
+    user = get_user_from_token(token)
+    if not user:
+        emit('error', {'message': 'Invalid token'}, room=request.sid)
+        return
+
+    game_state = GameState.query.filter_by(lobby_id=lobby_id).first()
+    if not game_state:
+        return
+
+    markers = game_state.map_data.get('markers', [])
+    for marker in markers:
+        if marker.get('id') == marker_id:
+            marker['x'] = new_x
+            marker['y'] = new_y
+            break
+
+    game_state.map_data['markers'] = markers
+    db.session.commit()
+
+    emit('marker_moved', {'id': marker_id, 'x': new_x, 'y': new_y}, room=f"lobby_{lobby_id}")
+
+@socketio.on('delete_marker')
+def handle_delete_marker(data):
+    token = data.get('token')
+    lobby_id = data.get('lobby_id')
+    marker_id = data.get('marker_id')
+
+    if not all([token, lobby_id, marker_id]):
+        return
+
+    user = get_user_from_token(token)
+    if not user:
+        emit('error', {'message': 'Invalid token'}, room=request.sid)
+        return
+
+    game_state = GameState.query.filter_by(lobby_id=lobby_id).first()
+    if not game_state:
+        return
+
+    markers = game_state.map_data.get('markers', [])
+    markers = [m for m in markers if m.get('id') != marker_id]
+    game_state.map_data['markers'] = markers
+    db.session.commit()
+
+    emit('marker_deleted', {'id': marker_id}, room=f"lobby_{lobby_id}")
