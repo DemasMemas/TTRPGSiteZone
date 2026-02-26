@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Лобби</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #chat { border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: 10px; margin-bottom: 10px; }
+        .message { margin-bottom: 5px; }
+        .username { font-weight: bold; }
+        .timestamp { color: #999; font-size: 0.8em; margin-left: 10px; }
+        #participants { margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Лобби: <span id="lobby-name"></span></h1>
+    <div id="participants">
+        <h3>Участники:</h3>
+        <ul id="participants-list"></ul>
+    </div>
+
+    <div id="chat"></div>
+    <input type="text" id="message-input" placeholder="Введите сообщение" style="width: 300px;">
+    <button onclick="sendMessage()">Отправить</button>
+    <button onclick="leaveLobby()">Покинуть лобби</button>
+
+    <div id="character-selector" style="margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;">
+        <h4>Выбрать персонажа для этого лобби</h4>
+        <select id="character-select">
+            <option value="">-- загрузка... --</option>
+        </select>
+        <button onclick="selectCharacter()">Выбрать</button>
+    </div>
+
+    <!-- Панель отображения персонажей участников (ГМ видит всех, игрок – себя) -->
+    <div id="characters-panel" style="border: 1px solid #ccc; padding: 10px; margin-bottom: 20px;">
+        <h3>Персонажи в лобби</h3>
+        <div id="characters-list"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="/static/lobby.js"></script>
+</body>
+</html>
+
+<style>
+    .system-message { color: gray; font-style: italic; }
+    .character-card { border: 1px solid #aaa; margin: 5px; padding: 10px; border-radius: 5px; }
+    .skills-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+    .skill-button { padding: 5px 10px; background: #e0e0e0; border: none; cursor: pointer; border-radius: 3px; }
+    .skill-button:hover { background: #d0d0d0; }
+</style>

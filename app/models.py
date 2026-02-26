@@ -28,3 +28,24 @@ class Character(db.Model):
 
     # связь с пользователем (backref уже есть в модели User, но можно добавить явно)
     user = db.relationship('User', backref='characters')
+
+class Lobby(db.Model):
+    __tablename__ = 'lobbies'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    gm_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    is_active = db.Column(db.Boolean, default=True)
+
+    # связи
+    gm = db.relationship('User', foreign_keys=[gm_id])
+    participants = db.relationship('LobbyParticipant', backref='lobby', lazy=True, cascade='all, delete-orphan')
+
+class LobbyParticipant(db.Model):
+    __tablename__ = 'lobby_participants'
+    lobby_id = db.Column(db.Integer, db.ForeignKey('lobbies.id'), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)
+    joined_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    character_id = db.Column(db.Integer, db.ForeignKey('characters.id', name='fk_lobby_participant_character'), nullable=True)
+    user = db.relationship('User')
+    character = db.relationship('Character')

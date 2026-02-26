@@ -89,6 +89,7 @@ async function loadApp() {
     document.getElementById('username').textContent = localStorage.getItem('username') || '';
 
     await loadCharacters();
+    await loadLobbies();
 }
 
 // Загрузить список персонажей
@@ -152,6 +153,86 @@ async function createCharacter() {
         } else {
             const err = await response.json();
             alert(err.error || 'Ошибка создания');
+        }
+    } catch (error) {
+        alert('Ошибка сети');
+    }
+}
+
+async function createLobby() {
+    const token = localStorage.getItem('access_token');
+    if (!token) return;
+
+    const name = document.getElementById('lobby-name').value;
+    if (!name) {
+        alert('Введите название лобби');
+        return;
+    }
+
+    try {
+        const response = await fetch('/lobbies/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ name })
+        });
+        if (response.ok) {
+            const lobby = await response.json();
+            console.log('Lobby created:', lobby);
+            window.location.href = `/lobbies/${lobby.id}/page`; // Должно сработать
+        } else {
+            const err = await response.json();
+            alert(err.error || 'Ошибка создания лобби');
+        }
+    } catch (error) {
+        alert('Ошибка сети');
+    }
+}
+
+async function loadLobbies() {
+    const token = localStorage.getItem('access_token');
+    if (!token) return;
+
+    try {
+        const response = await fetch('/lobbies/', {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.status === 401) {
+            logout();
+            return;
+        }
+        const lobbies = await response.json();
+        const list = document.getElementById('lobbies-list');
+        list.innerHTML = '';
+        lobbies.forEach(lobby => {
+            const li = document.createElement('li');
+            li.innerHTML = `
+                <strong>${lobby.name}</strong> (ГМ: ${lobby.gm_id}, участников: ${lobby.participants_count})
+                <button onclick="joinLobby(${lobby.id})">Войти</button>
+            `;
+            list.appendChild(li);
+        });
+    } catch (error) {
+        console.error('Ошибка загрузки лобби', error);
+    }
+}
+
+async function joinLobby(lobbyId) {
+    const token = localStorage.getItem('access_token');
+    if (!token) return;
+
+    try {
+        const response = await fetch(`/lobbies/${lobbyId}/join`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+            window.location.href = `/lobbies/${lobbyId}/page`; // перенаправляем на страницу лобби
+        } else {
+            const err = await response.json();
+            alert(err.error || 'Ошибка присоединения');
         }
     } catch (error) {
         alert('Ошибка сети');
