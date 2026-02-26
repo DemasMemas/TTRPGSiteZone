@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTRPG Site</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 800px; margin: auto; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; }
+        input, textarea { width: 100%; padding: 8px; box-sizing: border-box; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .error { color: red; margin-top: 5px; }
+        .success { color: green; margin-top: 5px; }
+        .hidden { display: none; }
+        #auth-section, #app-section { margin-top: 30px; border-top: 2px solid #ccc; padding-top: 20px; }
+        #characters-list { list-style: none; padding: 0; }
+        #characters-list li { background: #f4f4f4; margin-bottom: 10px; padding: 10px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TTRPG Site</h1>
+
+        <!-- Формы регистрации и логина (видны, если не авторизован) -->
+        <div id="auth-section">
+            <h2>Регистрация</h2>
+            <div class="form-group">
+                <label>Имя пользователя</label>
+                <input type="text" id="reg-username">
+            </div>
+            <div class="form-group">
+                <label>Email</label>
+                <input type="email" id="reg-email">
+            </div>
+            <div class="form-group">
+                <label>Пароль</label>
+                <input type="password" id="reg-password">
+            </div>
+            <button onclick="register()">Зарегистрироваться</button>
+
+            <h2>Вход</h2>
+            <div class="form-group">
+                <label>Имя пользователя</label>
+                <input type="text" id="login-username">
+            </div>
+            <div class="form-group">
+                <label>Пароль</label>
+                <input type="password" id="login-password">
+            </div>
+            <button onclick="login()">Войти</button>
+
+            <div id="auth-message" class="error"></div>
+        </div>
+
+        <!-- Основной интерфейс (виден только после авторизации) -->
+        <div id="app-section" class="hidden">
+            <h2>Добро пожаловать, <span id="username"></span>!</h2>
+            <button onclick="logout()">Выйти</button>
+
+            <h3>Создать персонажа</h3>
+            <div class="form-group">
+                <label>Имя персонажа</label>
+                <input type="text" id="char-name">
+            </div>
+            <div class="form-group">
+                <label>Данные (JSON)</label>
+                <textarea id="char-data" rows="5">{ "class": "warrior", "level": 1 }</textarea>
+            </div>
+            <button onclick="createCharacter()">Создать</button>
+
+            <h3>Мои персонажи</h3>
+            <ul id="characters-list"></ul>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
