@@ -36,6 +36,7 @@ class Lobby(db.Model):
     gm_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = db.Column(db.Boolean, default=True)
+    invite_code = db.Column(db.String(10), unique=True, nullable=False)
 
     # связи
     gm = db.relationship('User', foreign_keys=[gm_id])

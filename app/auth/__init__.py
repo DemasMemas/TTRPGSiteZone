@@ -1,6 +1,6 @@
 # app/auth/__init__.py
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
 from app import db
 from app.models import User
 
@@ -37,11 +37,11 @@ def login():
     if not user or not user.check_password(data['password']):
         return jsonify({'error': 'Invalid credentials'}), 401
 
-    # Генерируем JWT токен
-    from flask_jwt_extended import create_access_token
     access_token = create_access_token(identity=str(user.id))
-
-    return jsonify({'access_token': access_token}), 200
+    return jsonify({
+        'access_token': access_token,
+        'user_id': user.id          # <-- добавили
+    }), 200
 
 @auth_bp.route('/profile', methods=['GET'])
 @jwt_required()

@@ -1,4 +1,3 @@
-// static/lobby.js (модуль)
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { addMarker, moveMarker, removeMarker, loadMarkers } from './lobby3d.js';
@@ -69,7 +68,6 @@ socket.on('marker_deleted', (data) => {
     removeMarker(data.id);
 });
 
-// ----- Основные функции интерфейса (чат, список участников и т.д.) -----
 async function loadLobbyInfo() {
     try {
         const response = await fetch(`/lobbies/${currentLobbyId}`, {
@@ -79,6 +77,18 @@ async function loadLobbyInfo() {
         const lobby = await response.json();
         document.getElementById('lobby-name').textContent = lobby.name;
         updateParticipantsList(lobby.participants, lobby.gm_id);
+
+        // Показываем код приглашения, если текущий пользователь - ГМ
+        const userId = localStorage.getItem('user_id');
+        if (lobby.gm_id == userId) {
+            const codeElement = document.getElementById('gm-invite-code');
+            const codeSpan = document.getElementById('invite-code-value');
+            if (codeElement && codeSpan) {
+                codeSpan.textContent = lobby.invite_code;
+                codeElement.style.display = 'inline-block';
+            }
+        }
+
     } catch (error) {
         console.error('loadLobbyInfo error:', error);
     }

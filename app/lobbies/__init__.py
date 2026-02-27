@@ -1,7 +1,9 @@
-from flask import Blueprint, request, jsonify, render_template
+from flask import Blueprint, request, jsonify, render_template, redirect
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.models import Lobby, LobbyParticipant, User, Character, GameState
+import random
+import string
 
 lobbies_bp = Blueprint('lobbies', __name__)
 
@@ -13,20 +15,25 @@ def create_lobby():
     if not data or not data.get('name'):
         return jsonify({'error': 'Lobby name is required'}), 400
 
-    lobby = Lobby(name=data['name'], gm_id=user_id)
+    # Генерируем уникальный код
+    code = generate_invite_code()
+    # Проверяем на уникальность (на случай коллизии)
+    while Lobby.query.filter_by(invite_code=code).first():
+        code = generate_invite_code()
+
+    lobby = Lobby(name=data['name'], gm_id=user_id, invite_code=code)
     db.session.add(lobby)
-    db.session.flush()  # <-- добавляем эту строку
+    db.session.flush()
 
     participant = LobbyParticipant(lobby_id=lobby.id, user_id=user_id)
     db.session.add(participant)
     db.session.commit()
 
-    print(f"DEBUG: Created lobby {lobby.id}, added participant user_id={user_id}")
-
     return jsonify({
         'id': lobby.id,
         'name': lobby.name,
         'gm_id': lobby.gm_id,
+        'invite_code': lobby.invite_code,
         'created_at': lobby.created_at
     }), 201
 
@@ -47,9 +54,15 @@ def list_lobbies():
 @lobbies_bp.route('/<int:lobby_id>', methods=['GET'])
 @jwt_required()
 def get_lobby(lobby_id):
+    user_id = get_jwt_identity()
     lobby = Lobby.query.get(lobby_id)
     if not lobby or not lobby.is_active:
         return jsonify({'error': 'Lobby not found'}), 404
+
+    # Проверим, что пользователь является участником (опционально, но лучше оставить)
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'You are not in this lobby'}), 403
 
     participants = [{'user_id': p.user_id, 'username': p.user.username} for p in lobby.participants]
     return jsonify({
@@ -57,6 +70,7 @@ def get_lobby(lobby_id):
         'name': lobby.name,
         'gm_id': lobby.gm_id,
         'gm_username': lobby.gm.username,
+        'invite_code': lobby.invite_code,  # <-- добавили
         'participants': participants,
         'created_at': lobby.created_at
     }), 200
@@ -104,6 +118,12 @@ def leave_lobby(lobby_id):
 @jwt_required()
 def delete_lobby(lobby_id):
     user_id = get_jwt_identity()
+
+    try:
+        user_id = int(user_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid user id'}), 400
+
     lobby = Lobby.query.get(lobby_id)
     if not lobby or not lobby.is_active:
         return jsonify({'error': 'Lobby not found'}), 404
@@ -115,7 +135,7 @@ def delete_lobby(lobby_id):
     db.session.commit()
     return jsonify({'message': 'Lobby deleted'}), 200
 
-@lobbies_bp.route('/<int:lobby_id>/page', methods=['GET'])
+@lobbies_bp.route('/<int:lobby_id>/page')
 def lobby_page(lobby_id):
     return render_template('lobby.html')
 
@@ -212,3 +232,47 @@ def get_map(lobby_id):
         db.session.commit()
 
     return jsonify(game_state.map_data), 200
+
+def generate_invite_code():
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+@lobbies_bp.route('/join_by_code', methods=['POST'])
+@jwt_required()
+def join_by_code():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    code = data.get('code')
+    if not code:
+        return jsonify({'error': 'Code is required'}), 400
+
+    lobby = Lobby.query.filter_by(invite_code=code, is_active=True).first()
+    if not lobby:
+        return jsonify({'error': 'Invalid or inactive code'}), 404
+
+    # Проверяем, не участник ли уже
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby.id, user_id=user_id).first()
+    if participant:
+        return jsonify({'message': 'Already in lobby', 'lobby_id': lobby.id}), 200
+
+    participant = LobbyParticipant(lobby_id=lobby.id, user_id=user_id)
+    db.session.add(participant)
+    db.session.commit()
+    return jsonify({'message': 'Joined lobby', 'lobby_id': lobby.id}), 200
+
+@lobbies_bp.route('/my', methods=['GET'])
+@jwt_required()
+def get_my_lobbies():
+    user_id = get_jwt_identity()
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    lobbies = Lobby.query.filter_by(gm_id=user_id, is_active=True).all()
+    result = [{
+        'id': l.id,
+        'name': l.name,
+        'created_at': l.created_at,
+        'invite_code': l.invite_code
+    } for l in lobbies]
+    return jsonify(result), 200

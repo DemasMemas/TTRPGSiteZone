@@ -26,7 +26,12 @@
         <!-- Верхняя панель -->
         <div class="top-bar">
             <h1 id="lobby-name">Загрузка...</h1>
-            <button class="btn btn-secondary" onclick="leaveLobby()">Покинуть лобби</button>
+            <div id="gm-invite-code" style="display: none; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 20px;">
+                Код: <span id="invite-code-value"></span>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn btn-secondary" onclick="leaveLobby()">Покинуть лобби</button>
+            </div>
         </div>
 
         <!-- Левая панель: чат -->

@@ -312,3 +312,10 @@ body {
 .message.system .username {
   color: gold;
 }
+
+.btn-danger {
+    background: #dc3545;
+}
+.btn-danger:hover {
+    background: #c82333;
+}

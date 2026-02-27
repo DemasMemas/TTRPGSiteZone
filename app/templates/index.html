@@ -18,6 +18,30 @@
         #auth-section, #app-section { margin-top: 30px; border-top: 2px solid #ccc; padding-top: 20px; }
         #characters-list { list-style: none; padding: 0; }
         #characters-list li { background: #f4f4f4; margin-bottom: 10px; padding: 10px; border-radius: 5px; }
+        .lobby-item {
+            background: #f4f4f4;
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .lobby-item button {
+            padding: 5px 15px;
+        }
+        .delete-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .delete-btn:hover {
+            background: #c82333;
+        }
     </style>
 </head>
 <body>
@@ -81,8 +105,15 @@
             </div>
             <button onclick="createLobby()">Создать лобби</button>
 
-            <h3>Доступные лобби</h3>
-            <ul id="lobbies-list"></ul>
+            <h3>Мои лобби</h3>
+            <div id="my-lobbies-list"></div>
+
+            <h3>Присоединиться по коду</h3>
+            <div class="form-group">
+                <label>Код приглашения</label>
+                <input type="text" id="invite-code" placeholder="Например: A1B2C3">
+            </div>
+            <button onclick="joinByCode()">Присоединиться</button>
         </div>
     </div>
 
