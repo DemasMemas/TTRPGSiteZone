@@ -1,9 +1,11 @@
-from flask import Blueprint, request, jsonify, render_template, redirect
+from flask import Blueprint, request, jsonify, render_template
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db, socketio
-from app.models import Lobby, LobbyParticipant, User, GameState, LobbyCharacter
+from app.models import Lobby, LobbyParticipant, User, GameState, LobbyCharacter, MapChunk
 import random
 import string
+
+CHUNK_SIZE = 32
 
 lobbies_bp = Blueprint('lobbies', __name__)
 
@@ -532,3 +534,60 @@ def set_character_visibility(character_id):
     }, room=f"lobby_{character.lobby_id}")
 
     return jsonify({'message': 'Visibility updated'}), 200
+
+@lobbies_bp.route('/<int:lobby_id>/chunks/<int:chunk_x>/<int:chunk_y>/tile/<int:tile_x>/<int:tile_y>', methods=['PATCH'])
+@jwt_required()
+def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
+    user_id = get_jwt_identity()
+    try:
+        user_id = int(user_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    if lobby.gm_id != user_id:
+        print(f"403: GM required. lobby.gm_id={lobby.gm_id}, user_id={user_id}")
+        return jsonify({'error': 'Only GM can edit tiles'}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    if not (0 <= tile_x < CHUNK_SIZE and 0 <= tile_y < CHUNK_SIZE):
+        return jsonify({'error': f'Tile coordinates must be between 0 and {CHUNK_SIZE-1}'}), 400
+
+    # Ищем чанк, если нет – создаём
+    chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y).first()
+    if not chunk:
+        print(f"Creating new chunk for ({chunk_x},{chunk_y})")
+        chunk = MapChunk(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y, data=default_chunk_data())
+        db.session.add(chunk)
+        # Не делаем commit сейчас, потому что дальше обновляем data
+
+    # Проверяем структуру данных (на случай пустого или повреждённого)
+    if not chunk.data or len(chunk.data) != CHUNK_SIZE or len(chunk.data[0]) != CHUNK_SIZE:
+        print(f"Chunk ({chunk_x},{chunk_y}) data invalid, resetting")
+        chunk.data = default_chunk_data()
+
+    # Обновляем нужный тайл
+    for key, value in data.items():
+        chunk.data[tile_y][tile_x][key] = value
+
+    db.session.commit()
+    print(f"Tile ({tile_x},{tile_y}) in chunk ({chunk_x},{chunk_y}) updated")
+
+    socketio.emit('tile_updated', {
+        'chunk_x': chunk_x,
+        'chunk_y': chunk_y,
+        'tile_x': tile_x,
+        'tile_y': tile_y,
+        'updates': data
+    }, room=f"lobby_{lobby_id}")
+
+    return jsonify({'message': 'Tile updated'}), 200
+
+def default_chunk_data():
+    return [[{'type': 'grass', 'color': '#3a5f0b', 'height': 1.0} for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]

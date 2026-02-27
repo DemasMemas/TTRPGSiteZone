@@ -77,3 +77,13 @@ class LobbyCharacter(db.Model):
 
     lobby = db.relationship('Lobby', backref='characters')
     owner = db.relationship('User', foreign_keys=[owner_id])
+
+class MapChunk(db.Model):
+    __tablename__ = 'map_chunks'
+    lobby_id = db.Column(db.Integer, db.ForeignKey('lobbies.id'), primary_key=True)
+    chunk_x = db.Column(db.Integer, primary_key=True)
+    chunk_y = db.Column(db.Integer, primary_key=True)
+    data = db.Column(db.JSON, nullable=False, default=list)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    lobby = db.relationship('Lobby', backref=db.backref('chunks', lazy='dynamic'))
