@@ -35,7 +35,7 @@ body {
 }
 
 /* Все панели должны получать pointer-events: auto, чтобы с ними можно было взаимодействовать */
-.top-bar, .chat-panel, .right-panel, .map-tools {
+.top-bar, .chat-panel, .right-panel, .map-tools, .participants-panel, .lobby-menu {
   pointer-events: auto;
 }
 
@@ -317,5 +317,109 @@ body {
     background: #dc3545;
 }
 .btn-danger:hover {
+    background: #c82333;
+}
+
+/* Панель участников (слева сверху) */
+.participants-panel {
+    position: absolute;
+    top: 15px;
+    left: 15px;
+    width: 250px;
+    background: rgba(20,20,30,0.85);
+    backdrop-filter: blur(5px);
+    border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.1);
+    overflow: hidden;
+    transition: width 0.3s;
+    z-index: 3;
+}
+.participants-panel.collapsed {
+    width: 50px;
+}
+.participants-panel.collapsed .participants-content {
+    display: none;
+}
+.panel-header {
+    padding: 10px 15px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(40,40,50,0.9);
+}
+.participants-content {
+    padding: 10px;
+}
+.online-section h4, .offline-section h4 {
+    font-size: 0.9rem;
+    margin: 5px 0;
+    color: #aaa;
+}
+#online-participants, #offline-participants {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+#online-participants li, #offline-participants li {
+    padding: 5px 10px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 20px;
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+#online-participants li {
+    color: #8f8;
+}
+#offline-participants li {
+    color: #888;
+    opacity: 0.7;
+}
+.ban-btn {
+    background: none;
+    border: none;
+    color: #f66;
+    cursor: pointer;
+    font-size: 1.2rem;
+    padding: 0 5px;
+}
+.ban-btn:hover {
+    color: #f00;
+}
+
+/* Правое меню лобби */
+.lobby-menu {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    background: rgba(20,20,30,0.85);
+    backdrop-filter: blur(5px);
+    border-radius: 40px;
+    border: 1px solid rgba(255,255,255,0.1);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    z-index: 3;
+}
+.lobby-menu .menu-item {
+    color: white;
+}
+.lobby-menu .exit-btn {
+    background: #dc3545;
+    border: none;
+    color: white;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 1.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.lobby-menu .exit-btn:hover {
     background: #c82333;
 }

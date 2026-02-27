@@ -48,6 +48,7 @@ class LobbyParticipant(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)
     joined_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     character_id = db.Column(db.Integer, db.ForeignKey('characters.id', name='fk_lobby_participant_character'), nullable=True)
+    is_banned = db.Column(db.Boolean, default=False)
     user = db.relationship('User')
     character = db.relationship('Character')
 

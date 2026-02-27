@@ -8,6 +8,8 @@ from flask_jwt_extended import decode_token
 from app import socketio, db
 from app.models import User, Lobby, LobbyParticipant, Character, GameState, ChatMessage
 
+sid_to_user = {}
+user_lobby = {}
 
 # Вспомогательная функция для получения пользователя по токену
 def get_user_from_token(token):
@@ -36,23 +38,36 @@ def handle_authenticate(data):
         emit('error', {'message': 'Invalid token'})
         return
 
+    # Проверяем, не забанен ли пользователь
     participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user.id).first()
     if not participant:
         emit('error', {'message': 'You are not in this lobby'})
         return
+    if participant.is_banned:
+        emit('error', {'message': 'You are banned from this lobby'})
+        return
+
+    # Сохраняем информацию о подключении
+    sid_to_user[request.sid] = user.id
+    user_lobby[user.id] = lobby_id
 
     join_room(f"lobby_{lobby_id}")
-    emit('authenticated', {'username': user.username}, room=request.sid)
-    emit('user_joined', {'username': user.username}, room=f"lobby_{lobby_id}")
+    join_room(f"user_{user.id}")  # личная комната для кика
 
-    # Загружаем последние 50 сообщений (можно настроить)
+    emit('authenticated', {'username': user.username}, room=request.sid)
+
+    # Оповещаем всех в лобби о новом участнике
+    emit('user_joined', {'user_id': user.id, 'username': user.username}, room=f"lobby_{lobby_id}")
+
+    # Отправляем новому участнику список текущих онлайн-пользователей
+    online_users = [uid for uid, lid in user_lobby.items() if lid == lobby_id]
+    emit('online_users', online_users, room=request.sid)
+
+    # Загружаем историю чата (как и раньше)
     messages = ChatMessage.query.filter_by(lobby_id=lobby_id).order_by(ChatMessage.timestamp.desc()).limit(50).all()
-    messages.reverse()  # чтобы шли от старых к новым
-    history = [{
-        'username': msg.username,
-        'message': msg.message,
-        'timestamp': msg.timestamp.isoformat()
-    } for msg in messages]
+    messages.reverse()
+    history = [{'username': msg.username, 'message': msg.message, 'timestamp': msg.timestamp.isoformat()} for msg in
+               messages]
     emit('chat_history', history, room=request.sid)
 
 
@@ -116,6 +131,11 @@ def handle_message(data):
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    user_id = sid_to_user.pop(request.sid, None)
+    if user_id:
+        lobby_id = user_lobby.pop(user_id, None)
+        if lobby_id:
+            emit('user_left', {'user_id': user_id}, room=f"lobby_{lobby_id}")
     print('Client disconnected')
 
 
@@ -292,3 +312,6 @@ def handle_delete_marker(data):
     db.session.commit()
 
     emit('marker_deleted', {'id': marker_id}, room=f"lobby_{lobby_id}")
+
+def kick_user(user_id, lobby_id):
+    socketio.emit('kicked', {'reason': 'banned'}, room=f"user_{user_id}")

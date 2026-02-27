@@ -7,6 +7,11 @@ let currentLobbyId = null;
 let token = localStorage.getItem('access_token');
 let username = localStorage.getItem('username');
 
+let lobbyParticipants = [];          // полный список участников из HTTP
+let gmId = null;                     // ID ГМ
+let isGM = false;                    // флаг, является ли текущий пользователь ГМ
+let onlineUserIds = new Set();       // множество ID онлайн-участников
+
 console.log('Token exists:', !!token);
 console.log('Current URL:', window.location.href);
 
@@ -37,14 +42,7 @@ socket.on('authenticated', (data) => {
     console.log('Authenticated as', data.username);
     addMessage('system', `Вы вошли как ${data.username}`);
     loadLobbyInfo();
-    loadMyCharacters();
-    loadParticipantsCharacters();
     loadMap(); // загружаем карту
-});
-
-socket.on('user_joined', (data) => {
-    addMessage('system', `${data.username} присоединился к лобби`);
-    loadParticipantsCharacters();
 });
 
 socket.on('new_message', (data) => {
@@ -74,6 +72,33 @@ socket.on('chat_history', (messages) => {
     });
 });
 
+socket.on('online_users', (userIds) => {
+    console.log('Received online_users:', userIds);
+    onlineUserIds = new Set(userIds);
+    updateParticipantsList();
+});
+
+socket.on('user_joined', (data) => {
+    console.log('user_joined:', data);
+    addMessage('system', `${data.username} присоединился к лобби`);
+    const exists = lobbyParticipants.some(p => p.user_id === data.user_id);
+    if (!exists) {
+        lobbyParticipants.push({ user_id: data.user_id, username: data.username });
+    }
+    onlineUserIds.add(data.user_id);
+    updateParticipantsList();
+});
+
+socket.on('user_left', (data) => {
+    onlineUserIds.delete(data.user_id);
+    updateParticipantsList();
+});
+
+socket.on('kicked', (data) => {
+    alert('Вы были заблокированы в этом лобби');
+    window.location.href = '/';
+});
+
 async function loadLobbyInfo() {
     try {
         const response = await fetch(`/lobbies/${currentLobbyId}`, {
@@ -81,12 +106,19 @@ async function loadLobbyInfo() {
         });
         if (!response.ok) throw new Error('Ошибка загрузки лобби');
         const lobby = await response.json();
-        document.getElementById('lobby-name').textContent = lobby.name;
-        updateParticipantsList(lobby.participants, lobby.gm_id);
 
-        // Показываем код приглашения, если текущий пользователь - ГМ
-        const userId = localStorage.getItem('user_id');
-        if (lobby.gm_id == userId) {
+        document.getElementById('lobby-name').textContent = lobby.name;
+        gmId = lobby.gm_id;
+        isGM = (gmId == localStorage.getItem('user_id')); // сравниваем как числа
+
+        console.log('gmId:', gmId, 'currentUserId:', localStorage.getItem('user_id'), 'isGM:', isGM);
+
+        lobbyParticipants = lobby.participants; // массив объектов { user_id, username }
+        console.log('loadLobbyInfo response:', lobby);
+        console.log('lobbyParticipants:', lobbyParticipants);
+
+        // Показываем код приглашения, если пользователь - ГМ
+        if (isGM) {
             const codeElement = document.getElementById('gm-invite-code');
             const codeSpan = document.getElementById('invite-code-value');
             if (codeElement && codeSpan) {
@@ -95,20 +127,48 @@ async function loadLobbyInfo() {
             }
         }
 
+        // Первоначальное отображение списка участников (пока без онлайн-статуса)
+        updateParticipantsList();
+
     } catch (error) {
         console.error('loadLobbyInfo error:', error);
     }
 }
 
-function updateParticipantsList(participants, gmId) {
-    const list = document.getElementById('participants-list');
-    if (!list) return;
-    list.innerHTML = '';
-    participants.forEach(p => {
+function updateParticipantsList() {
+    console.log('updateParticipantsList called with participants:', lobbyParticipants, 'online:', onlineUserIds);
+    const onlineList = document.getElementById('online-participants');
+    const offlineList = document.getElementById('offline-participants');
+    if (!onlineList || !offlineList) return;
+
+    onlineList.innerHTML = '';
+    offlineList.innerHTML = '';
+
+    lobbyParticipants.forEach(p => {
         const li = document.createElement('li');
-        li.textContent = p.username;
-        if (p.user_id === gmId) li.textContent += ' (ГМ)';
-        list.appendChild(li);
+        li.setAttribute('data-user-id', p.user_id);
+        li.innerHTML = `${p.username} ${p.user_id === gmId ? '(ГМ)' : ''}`;
+
+        console.log('Checking ban button for user', p.user_id, 'isGM:', isGM, 'gmId:', gmId);
+        // Добавляем кнопку бана, если текущий пользователь ГМ и это не ГМ
+        if (isGM && p.user_id !== gmId) {
+            const banBtn = document.createElement('button');
+            banBtn.className = 'ban-btn';
+            banBtn.innerHTML = '⛔';
+            banBtn.title = 'Заблокировать';
+            banBtn.onclick = (e) => {
+                e.stopPropagation();
+                banUser(p.user_id);
+            };
+            li.appendChild(banBtn);
+        }
+
+        // Определяем, онлайн ли пользователь
+        if (onlineUserIds.has(p.user_id)) {
+            onlineList.appendChild(li);
+        } else {
+            offlineList.appendChild(li);
+        }
     });
 }
 
@@ -150,6 +210,29 @@ async function leaveLobby() {
         } else {
             const err = await response.json();
             alert(err.error || 'Ошибка');
+        }
+    } catch (error) {
+        alert('Ошибка сети');
+    }
+}
+
+async function banUser(userId) {
+    console.log('banUser called for userId:', userId);
+    if (!confirm('Заблокировать этого участника? Он будет удалён из лобби и не сможет вернуться.')) return;
+    try {
+        const response = await fetch(`/lobbies/${currentLobbyId}/ban/${userId}`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+            // Удаляем забаненного из локальных списков
+            lobbyParticipants = lobbyParticipants.filter(p => p.user_id !== userId);
+            onlineUserIds.delete(userId);
+            updateParticipantsList();
+            alert('Участник заблокирован');
+        } else {
+            const err = await response.json();
+            alert(err.error || 'Ошибка при блокировке');
         }
     } catch (error) {
         alert('Ошибка сети');
@@ -307,8 +390,6 @@ async function loadMap() {
 // Экспортируем функции, которые нужны для глобального доступа (если есть inline-обработчики)
 window.sendMessage = sendMessage;
 window.leaveLobby = leaveLobby;
-window.selectCharacter = selectCharacter;
-window.rollSkill = rollSkill;
 
 let currentMarkerType = 'default';
 window.setMarkerType = (type) => {
@@ -327,3 +408,14 @@ window.addMarkerAtCenter = () => {
         type: currentMarkerType
     });
 };
+
+window.toggleParticipants = function() {
+    const panel = document.getElementById('participants-panel');
+    panel.classList.toggle('collapsed');
+    const icon = panel.querySelector('.toggle-icon');
+    if (icon) {
+        icon.textContent = panel.classList.contains('collapsed') ? '▶' : '▼';
+    }
+};
+
+document.querySelector('.panel-header').addEventListener('click', toggleParticipants);

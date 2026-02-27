@@ -276,3 +276,36 @@ def get_my_lobbies():
         'invite_code': l.invite_code
     } for l in lobbies]
     return jsonify(result), 200
+
+@lobbies_bp.route('/<int:lobby_id>/ban/<int:user_id>', methods=['POST'])
+@jwt_required()
+def ban_participant(lobby_id, user_id):
+    current_user_id = get_jwt_identity()
+    try:
+        current_user_id = int(current_user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby or not lobby.is_active:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    # Только ГМ может банить
+    if lobby.gm_id != current_user_id:
+        return jsonify({'error': 'Only GM can ban participants'}), 403
+
+    # Нельзя забанить самого ГМа
+    if user_id == current_user_id:
+        return jsonify({'error': 'Cannot ban yourself'}), 400
+
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'User is not in this lobby'}), 404
+
+    participant.is_banned = True
+    db.session.commit()
+
+    from app.socket_events import kick_user
+    kick_user(user_id, lobby_id)
+
+    return jsonify({'message': 'User banned'}), 200

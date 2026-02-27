@@ -23,15 +23,29 @@
 
     <!-- Интерфейс поверх 3D -->
     <div class="ui-overlay">
-        <!-- Верхняя панель -->
-        <div class="top-bar">
-            <h1 id="lobby-name">Загрузка...</h1>
-            <div id="gm-invite-code" style="display: none; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 20px;">
-                Код: <span id="invite-code-value"></span>
+         <!-- Левая верхняя панель: список участников (сворачиваемый) -->
+        <div class="participants-panel" id="participants-panel">
+            <div class="panel-header">
+                <span>Участники</span>
+                <span class="toggle-icon">▼</span>
             </div>
-            <div style="display: flex; gap: 10px;">
-                <button class="btn btn-secondary" onclick="leaveLobby()">Покинуть лобби</button>
+            <div class="participants-content">
+                <div class="online-section">
+                    <h4>В сети</h4>
+                    <ul id="online-participants"></ul>
+                </div>
+                <div class="offline-section">
+                    <h4>Не в сети</h4>
+                    <ul id="offline-participants"></ul>
+                </div>
             </div>
+        </div>
+
+        <!-- Правая верхняя панель: меню лобби -->
+        <div class="lobby-menu">
+            <div class="menu-item lobby-name">Лобби: <span id="lobby-name">Загрузка...</span></div>
+            <div class="menu-item invite-code" id="gm-invite-code" style="display:none;">Код: <span id="invite-code-value"></span></div>
+            <button class="menu-item exit-btn" onclick="leaveLobby()" title="Покинуть лобби">✕</button>
         </div>
 
         <!-- Левая панель: чат -->
@@ -44,21 +58,10 @@
             </div>
         </div>
 
-        <!-- Правая панель: участники и персонажи -->
+        <!-- Правая панель (для будущих фич, пока пустая) -->
         <div class="right-panel">
-            <div class="panel-header">Участники</div>
-            <ul id="participants-list" class="participants-list"></ul>
-
-            <div class="panel-header" style="margin-top: 15px;">Ваши персонажи</div>
-            <div class="character-selector">
-                <select id="character-select" class="character-select">
-                    <option value="">-- выберите --</option>
-                </select>
-                <button class="btn btn-primary btn-sm" onclick="selectCharacter()">Выбрать</button>
-            </div>
-
-            <div class="panel-header" style="margin-top: 15px;">Персонажи в лобби</div>
-            <div id="characters-list" class="characters-list"></div>
+            <div class="panel-header">Информация</div>
+            <p>Здесь будут персонажи и пр.</p>
         </div>
 
         <!-- Нижняя панель управления картой -->
