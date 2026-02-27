@@ -68,6 +68,12 @@ socket.on('marker_deleted', (data) => {
     removeMarker(data.id);
 });
 
+socket.on('chat_history', (messages) => {
+    messages.forEach(msg => {
+        addMessage(msg.username, msg.message, msg.timestamp);
+    });
+});
+
 async function loadLobbyInfo() {
     try {
         const response = await fetch(`/lobbies/${currentLobbyId}`, {

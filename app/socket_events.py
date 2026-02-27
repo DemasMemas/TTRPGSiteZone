@@ -6,7 +6,7 @@ from flask import request
 from flask_socketio import join_room, leave_room, emit
 from flask_jwt_extended import decode_token
 from app import socketio, db
-from app.models import User, Lobby, LobbyParticipant, Character, GameState
+from app.models import User, Lobby, LobbyParticipant, Character, GameState, ChatMessage
 
 
 # Вспомогательная функция для получения пользователя по токену
@@ -36,7 +36,6 @@ def handle_authenticate(data):
         emit('error', {'message': 'Invalid token'})
         return
 
-    from app.models import LobbyParticipant
     participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user.id).first()
     if not participant:
         emit('error', {'message': 'You are not in this lobby'})
@@ -46,13 +45,23 @@ def handle_authenticate(data):
     emit('authenticated', {'username': user.username}, room=request.sid)
     emit('user_joined', {'username': user.username}, room=f"lobby_{lobby_id}")
 
+    # Загружаем последние 50 сообщений (можно настроить)
+    messages = ChatMessage.query.filter_by(lobby_id=lobby_id).order_by(ChatMessage.timestamp.desc()).limit(50).all()
+    messages.reverse()  # чтобы шли от старых к новым
+    history = [{
+        'username': msg.username,
+        'message': msg.message,
+        'timestamp': msg.timestamp.isoformat()
+    } for msg in messages]
+    emit('chat_history', history, room=request.sid)
+
 
 @socketio.on('send_message')
 def handle_message(data):
     token = data.get('token')
     lobby_id = data.get('lobby_id')
-    message = data.get('message')
-    if not token or not lobby_id or not message:
+    raw_message = data.get('message')
+    if not token or not lobby_id or not raw_message:
         return
 
     user = get_user_from_token(token)
@@ -60,12 +69,15 @@ def handle_message(data):
         emit('error', {'message': 'Invalid token'})
         return
 
-    if message.startswith('/roll'):
-        parts = message.split(' ', 1)
+    # Проверяем, является ли сообщение командой
+    final_text = raw_message
+    if raw_message.startswith('/roll'):
+        parts = raw_message.split(' ', 1)
         if len(parts) == 2:
             expression = parts[1]
             result, description = roll_dice(expression)
             if result is None:
+                # Ошибка в выражении — показываем только отправителю
                 emit('new_message', {
                     'username': 'System',
                     'message': description,
@@ -73,13 +85,10 @@ def handle_message(data):
                 }, room=request.sid)
                 return
             else:
-                emit('new_message', {
-                    'username': user.username,
-                    'message': f"/roll {expression}: {description}",
-                    'timestamp': datetime.now(timezone.utc).isoformat()
-                }, room=f"lobby_{lobby_id}")
-                return
+                # Формируем текст для сохранения и рассылки
+                final_text = f"/roll {expression}: {description}"
         else:
+            # Неправильный формат команды
             emit('new_message', {
                 'username': 'System',
                 'message': "Использование: /roll 2d6+3",
@@ -87,10 +96,21 @@ def handle_message(data):
             }, room=request.sid)
             return
 
+    # Сохраняем сообщение в БД
+    msg = ChatMessage(
+        lobby_id=lobby_id,
+        user_id=user.id,
+        username=user.username,
+        message=final_text
+    )
+    db.session.add(msg)
+    db.session.commit()
+
+    # Рассылаем всем в комнате
     emit('new_message', {
         'username': user.username,
-        'message': message,
-        'timestamp': datetime.now(timezone.utc).isoformat()
+        'message': final_text,
+        'timestamp': msg.timestamp.isoformat()
     }, room=f"lobby_{lobby_id}")
 
 
