@@ -17,13 +17,15 @@ def create_lobby():
     if not data or not data.get('name'):
         return jsonify({'error': 'Lobby name is required'}), 400
 
-    # Генерируем уникальный код
+    map_type = data.get('map_type', 'empty')  # по умолчанию 'empty'
+    if map_type not in ['empty', 'random', 'predefined']:
+        return jsonify({'error': 'Invalid map type'}), 400
+
     code = generate_invite_code()
-    # Проверяем на уникальность (на случай коллизии)
     while Lobby.query.filter_by(invite_code=code).first():
         code = generate_invite_code()
 
-    lobby = Lobby(name=data['name'], gm_id=user_id, invite_code=code)
+    lobby = Lobby(name=data['name'], gm_id=user_id, invite_code=code, map_type=map_type)
     db.session.add(lobby)
     db.session.flush()
 
@@ -591,3 +593,108 @@ def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
 
 def default_chunk_data():
     return [[{'type': 'grass', 'color': '#3a5f0b', 'height': 1.0} for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+
+@lobbies_bp.route('/<int:lobby_id>/chunks', methods=['GET'])
+@jwt_required()
+def get_chunks(lobby_id):
+    user_id = get_jwt_identity()
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'Not in lobby'}), 403
+
+    min_x = request.args.get('min_chunk_x', type=int)
+    max_x = request.args.get('max_chunk_x', type=int)
+    min_y = request.args.get('min_chunk_y', type=int)
+    max_y = request.args.get('max_chunk_y', type=int)
+    if None in (min_x, max_x, min_y, max_y):
+        return jsonify({'error': 'Missing bounds'}), 400
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    result = []
+    for cx in range(min_x, max_x + 1):
+        for cy in range(min_y, max_y + 1):
+            chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).first()
+            if not chunk:
+                # создаём новый чанк
+                data = generate_chunk_data(lobby_id, cx, cy, lobby.map_type)
+                chunk = MapChunk(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy, data=data)
+                db.session.add(chunk)
+                db.session.commit()  # можно закоммитить сразу, но лучше после цикла
+            result.append({
+                'chunk_x': chunk.chunk_x,
+                'chunk_y': chunk.chunk_y,
+                'data': chunk.data
+            })
+    # если добавляли много чанков, можно сделать один commit в конце
+    db.session.commit()
+    return jsonify(result), 200
+
+def generate_chunk_data(lobby_id, chunk_x, chunk_y, map_type):
+    CHUNK_SIZE = 32
+    MAX_CHUNK = 15
+    data = []
+    for y in range(CHUNK_SIZE):
+        row = []
+        for x in range(CHUNK_SIZE):
+            global_x = chunk_x * CHUNK_SIZE + x
+            global_y = chunk_y * CHUNK_SIZE + y
+
+            # базовая высота
+            base_height = 1.0
+            # небольшая вариация для микрорельефа (кроме воды)
+            height_variation = random.uniform(-0.05, 0.05)
+
+            if map_type == 'empty':
+                tile_type = 'grass'
+                color = '#3a5f0b'
+                height = base_height + height_variation
+
+            elif map_type == 'random':
+                r = random.random()
+                if r < 0.1:
+                    tile_type = 'forest'
+                    color = '#2d5a27'
+                elif r < 0.12:
+                    tile_type = 'house'
+                    color = '#8B4513'
+                else:
+                    tile_type = 'grass'
+                    color = '#3a5f0b'
+                height = base_height + height_variation
+
+            elif map_type == 'predefined':
+                # края мира: например, отступ 2 тайла от границы
+                margin = 2
+                max_global = (MAX_CHUNK + 1) * CHUNK_SIZE - 1
+                if (global_x < margin or global_x > max_global - margin or
+                    global_y < margin or global_y > max_global - margin):
+                    tile_type = 'water'
+                    color = '#1E90FF'
+                    height = 0.8  # вода чуть ниже, без вариации
+                else:
+                    r = random.random()
+                    if r < 0.15:
+                        tile_type = 'forest'
+                        color = '#2d5a27'
+                    elif r < 0.18:
+                        tile_type = 'house'
+                        color = '#8B4513'
+                    else:
+                        tile_type = 'grass'
+                        color = '#3a5f0b'
+                    height = base_height + height_variation
+            else:
+                tile_type = 'grass'
+                color = '#3a5f0b'
+                height = base_height
+
+            row.append({
+                'type': tile_type,
+                'color': color,
+                'height': round(height, 3)  # округлим для читаемости
+            })
+        data.append(row)
+    return data

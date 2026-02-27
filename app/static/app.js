@@ -98,6 +98,7 @@ async function createLobby() {
     if (!token) return;
 
     const name = document.getElementById('lobby-name').value;
+    const mapType = document.getElementById('map-type').value;
     if (!name) {
         alert('Введите название лобби');
         return;
@@ -110,12 +111,12 @@ async function createLobby() {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${token}`
             },
-            body: JSON.stringify({ name })
+            body: JSON.stringify({ name, map_type: mapType })
         });
         if (response.ok) {
             const lobby = await response.json();
             console.log('Lobby created:', lobby);
-            window.location.href = `/lobbies/${lobby.id}/page`; // Должно сработать
+            window.location.href = `/lobbies/${lobby.id}/page`;
         } else {
             const err = await response.json();
             alert(err.error || 'Ошибка создания лобби');

@@ -88,6 +88,12 @@
             <div class="form-group">
                 <label>Название лобби</label>
                 <input type="text" id="lobby-name">
+                <label>Тип карты:</label>
+                <select id="map-type">
+                    <option value="empty">Пустая (вся трава)</option>
+                    <option value="random">Случайное заполнение</option>
+                    <option value="predefined">Готовая карта (вода по краям, лес/дома)</option>
+                </select>
             </div>
             <button onclick="createLobby()">Создать лобби</button>
 

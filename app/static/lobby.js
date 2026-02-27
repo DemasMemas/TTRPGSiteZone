@@ -8,7 +8,7 @@ import {
 
 const CHUNK_SIZE = 32;
 const MIN_CHUNK = 0;
-const MAX_CHUNK = 31;
+const MAX_CHUNK = 15;
 
 let loadedChunks = new Map();
 let editMode = false;
@@ -297,8 +297,19 @@ function generateDefaultChunkData(size) {
     for (let y = 0; y < size; y++) {
         const row = [];
         for (let x = 0; x < size; x++) {
-            // Высота по умолчанию 1.0 для лучшей видимости
-            row.push({ type: 'grass', color: '#3a5f0b', height: 1.0 });
+            let type = 'grass';
+            // случайно расставляем лес и дома
+            if (Math.random() < 0.1) type = 'forest';
+            else if (Math.random() < 0.02) type = 'house';
+            // для воды можно проверить, например, края карты
+            if (x === 0 || y === 0 || x === size-1 || y === size-1) type = 'water';
+
+            const heightVar = Math.random() * 0.1 - 0.05;
+            row.push({
+                type: type,
+                color: type === 'grass' ? '#3a5f0b' : (type === 'water' ? '#1E90FF' : '#8B4513'),
+                height: 1.0 + heightVar
+            });
         }
         data.push(row);
     }
