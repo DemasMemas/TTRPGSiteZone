@@ -43,7 +43,8 @@ socket.on('authenticated', (data) => {
     console.log('Authenticated as', data.username);
     addMessage('system', `Вы вошли как ${data.username}`);
     loadLobbyInfo();
-    loadMap(); // загружаем карту
+    loadMap();
+    loadLobbyCharacters();
 });
 
 socket.on('new_message', (data) => {
@@ -88,11 +89,13 @@ socket.on('user_joined', (data) => {
     }
     onlineUserIds.add(data.user_id);
     updateParticipantsList();
+    loadLobbyCharacters();
 });
 
 socket.on('user_left', (data) => {
     onlineUserIds.delete(data.user_id);
     updateParticipantsList();
+    loadLobbyCharacters();
 });
 
 socket.on('kicked', (data) => {
@@ -244,27 +247,14 @@ async function banUser(userId) {
     }
 }
 
-// ----- Работа с персонажами (полные реализации) -----
-async function loadMyCharacters() {
+async function loadLobbyCharacters() {
     try {
-        const response = await fetch('/characters/', {
+        const response = await fetch(`/lobbies/${currentLobbyId}/characters`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
             const characters = await response.json();
-            console.log('My characters:', characters);
-            const select = document.getElementById('character-select');
-            if (!select) {
-                console.error('Element #character-select not found');
-                return;
-            }
-            select.innerHTML = '<option value="">-- выберите --</option>';
-            characters.forEach(c => {
-                const option = document.createElement('option');
-                option.value = c.id;
-                option.textContent = c.name;
-                select.appendChild(option);
-            });
+            displayLobbyCharacters(characters);
         } else {
             console.error('Failed to load characters:', response.status);
         }
@@ -273,93 +263,39 @@ async function loadMyCharacters() {
     }
 }
 
-async function selectCharacter() {
-    const select = document.getElementById('character-select');
-    const characterId = select.value;
-    if (!characterId) {
-        alert('Выберите персонажа');
-        return;
-    }
-    try {
-        const response = await fetch(`/lobbies/${currentLobbyId}/select_character`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({ character_id: characterId })
-        });
-        if (response.ok) {
-            alert('Персонаж выбран');
-            loadParticipantsCharacters(); // обновляем панель персонажей
-        } else {
-            const err = await response.json();
-            alert(err.error || 'Ошибка');
-        }
-    } catch (error) {
-        alert('Ошибка сети');
-    }
-}
-
-async function loadParticipantsCharacters() {
-    console.log('loadParticipantsCharacters started');
-    try {
-        const response = await fetch(`/lobbies/${currentLobbyId}/participants_characters`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        console.log('Participants characters response status:', response.status);
-        if (response.ok) {
-            const participants = await response.json();
-            console.log('Participants characters data:', participants);
-            displayCharacters(participants);
-        } else {
-            console.error('Failed to load participants characters:', response.status);
-        }
-    } catch (error) {
-        console.error('Error loading participants characters', error);
-    }
-}
-
-function displayCharacters(participants) {
-    console.log('displayCharacters called with', participants);
-    const container = document.getElementById('characters-list');
-    if (!container) {
-        console.error('Element #characters-list not found');
-        return;
-    }
+function displayLobbyCharacters(characters) {
+    const container = document.getElementById('lobby-characters-list');
+    if (!container) return;
     container.innerHTML = '';
-    participants.forEach(p => {
-        console.log('Processing participant:', p);
-        if (p.character) {
-            const charDiv = document.createElement('div');
-            charDiv.className = 'character-card';
-            charDiv.innerHTML = `<h4>${p.character.name} (${p.username})</h4>`;
-            // Проверяем наличие навыков
-            const skills = p.character.data?.skills || {};
-            console.log('Skills for', p.character.name, skills);
-            if (Object.keys(skills).length === 0) {
-                // Если навыков нет, показываем заглушку
-                const noSkills = document.createElement('p');
-                noSkills.textContent = 'Нет навыков';
-                charDiv.appendChild(noSkills);
-            } else {
-                const skillsDiv = document.createElement('div');
-                skillsDiv.className = 'skills-list';
-                for (const [skill, bonus] of Object.entries(skills)) {
-                    const btn = document.createElement('button');
-                    btn.className = 'skill-button';
-                    btn.textContent = `${skill} (${bonus})`;
-                    btn.onclick = () => rollSkill(p.character.id, skill);
-                    skillsDiv.appendChild(btn);
-                }
-                charDiv.appendChild(skillsDiv);
-            }
-            container.appendChild(charDiv);
-        } else {
-            const div = document.createElement('div');
-            div.textContent = `${p.username}: не выбран персонаж`;
-            container.appendChild(div);
+
+    if (characters.length === 0) {
+        container.innerHTML = '<p>В лобби пока нет персонажей</p>';
+        return;
+    }
+
+    characters.forEach(char => {
+        const charDiv = document.createElement('div');
+        charDiv.className = 'character-card';
+        charDiv.innerHTML = `
+            <h4>${char.name}</h4>
+            <p>Владелец: ${char.owner_username}</p>
+            <button class="btn btn-sm" onclick="viewCharacter(${char.id})">Открыть</button>
+        `;
+        // Если пользователь - владелец или ГМ, добавить кнопки редактирования/удаления
+        if (char.owner_id == localStorage.getItem('user_id') || isGM) {
+            const editBtn = document.createElement('button');
+            editBtn.className = 'btn btn-sm';
+            editBtn.textContent = '✏️';
+            editBtn.onclick = (e) => { e.stopPropagation(); editCharacter(char.id); };
+            charDiv.appendChild(editBtn);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'btn btn-sm btn-danger';
+            deleteBtn.textContent = '🗑️';
+            deleteBtn.onclick = (e) => { e.stopPropagation(); deleteCharacter(char.id); };
+            charDiv.appendChild(deleteBtn);
         }
+        container.appendChild(charDiv);
     });
 }
 
@@ -504,3 +440,87 @@ window.unbanUser = async function(userId) {
         alert('Ошибка сети');
     }
 };
+
+window.viewCharacter = (id) => {
+    // Временно покажем в консоли, позже сделаем модальное окно
+    fetch(`/lobbies/characters/${id}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+    })
+    .then(res => res.json())
+    .then(char => {
+        console.log('Character data:', char);
+        alert(JSON.stringify(char.data, null, 2));
+    })
+    .catch(err => alert('Ошибка загрузки'));
+};
+
+window.editCharacter = (id) => {
+    alert('Редактирование пока не реализовано');
+};
+
+window.deleteCharacter = async (id) => {
+    console.log('Deleting character', id);
+    if (!confirm('Удалить персонажа?')) return;
+    try {
+        const response = await fetch(`/lobbies/characters/${id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        console.log('Delete response status:', response.status);
+        if (response.ok) {
+            alert('Персонаж удалён');
+            loadLobbyCharacters();
+        } else {
+            const err = await response.json();
+            console.error('Delete error:', err);
+            alert(err.error || 'Ошибка удаления');
+        }
+    } catch (error) {
+        console.error('Network error:', error);
+        alert('Ошибка сети');
+    }
+};
+
+window.showCreateCharacterForm = () => {
+    const name = prompt('Введите имя персонажа:');
+    if (!name) return;
+    const data = prompt('Введите JSON данные (можно оставить пустым):', '{}');
+    try {
+        const parsed = JSON.parse(data || '{}');
+        createCharacter(name, parsed);
+    } catch (e) {
+        alert('Некорректный JSON');
+    }
+};
+
+async function createCharacter(name, data) {
+    try {
+        const response = await fetch(`/lobbies/${currentLobbyId}/characters`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ name, data })
+        });
+        if (response.ok) {
+            alert('Персонаж создан');
+            loadLobbyCharacters();
+        } else {
+            const err = await response.json();
+            alert(err.error || 'Ошибка создания');
+        }
+    } catch (error) {
+        alert('Ошибка сети');
+    }
+}
+
+socket.on('character_created', (character) => {
+    console.log('New character:', character);
+    loadLobbyCharacters();
+});
+
+socket.on('character_deleted', (data) => {
+    console.log('Character deleted:', data.id);
+    loadLobbyCharacters();
+});

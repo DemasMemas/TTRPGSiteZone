@@ -26,9 +26,6 @@ def create_app():
     from app.auth import auth_bp
     app.register_blueprint(auth_bp, url_prefix='/auth')
 
-    from app.characters import characters_bp
-    app.register_blueprint(characters_bp, url_prefix='/characters')
-
     from app.lobbies import lobbies_bp
     app.register_blueprint(lobbies_bp, url_prefix='/lobbies')
 

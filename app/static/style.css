@@ -494,3 +494,8 @@ body {
 .unban-btn:hover {
     color: #6f8bbf;
 }
+
+.character-card.empty {
+    opacity: 0.6;
+    font-style: italic;
+}

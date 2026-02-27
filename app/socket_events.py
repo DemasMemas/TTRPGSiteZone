@@ -6,7 +6,7 @@ from flask import request
 from flask_socketio import join_room, leave_room, emit
 from flask_jwt_extended import decode_token
 from app import socketio, db
-from app.models import User, Lobby, LobbyParticipant, Character, GameState, ChatMessage
+from app.models import User, Lobby, LobbyParticipant, GameState, ChatMessage, LobbyCharacter
 
 sid_to_user = {}
 user_lobby = {}
@@ -161,7 +161,7 @@ def handle_roll_skill(data):
         emit('error', {'message': 'You are not in this lobby'}, room=request.sid)
         return
 
-    character = Character.query.get(character_id)
+    character = LobbyCharacter.query.get(character_id)
     if not character:
         emit('error', {'message': 'Character not found'}, room=request.sid)
         return

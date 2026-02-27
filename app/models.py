@@ -16,19 +16,6 @@ class User(db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-class Character(db.Model):
-    __tablename__ = 'characters'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    data = db.Column(db.JSON, nullable=False, default={})  # здесь будет храниться вся инфа о персонаже
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
-                           onupdate=lambda: datetime.now(timezone.utc))
-
-    # связь с пользователем (backref уже есть в модели User, но можно добавить явно)
-    user = db.relationship('User', backref='characters')
-
 class Lobby(db.Model):
     __tablename__ = 'lobbies'
     id = db.Column(db.Integer, primary_key=True)
@@ -47,10 +34,8 @@ class LobbyParticipant(db.Model):
     lobby_id = db.Column(db.Integer, db.ForeignKey('lobbies.id'), primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)
     joined_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    character_id = db.Column(db.Integer, db.ForeignKey('characters.id', name='fk_lobby_participant_character'), nullable=True)
     is_banned = db.Column(db.Boolean, default=False)
     user = db.relationship('User')
-    character = db.relationship('Character')
 
 class GameState(db.Model):
     __tablename__ = 'game_states'
@@ -77,3 +62,17 @@ class ChatMessage(db.Model):
 
     lobby = db.relationship('Lobby', backref='chat_messages')
     user = db.relationship('User')
+
+
+class LobbyCharacter(db.Model):
+    __tablename__ = 'lobby_characters'
+    id = db.Column(db.Integer, primary_key=True)
+    lobby_id = db.Column(db.Integer, db.ForeignKey('lobbies.id'), nullable=False)
+    owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # кто создал
+    name = db.Column(db.String(100), nullable=False)
+    data = db.Column(db.JSON, nullable=False, default={})
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now(timezone.utc))
+
+    lobby = db.relationship('Lobby', backref='characters')
+    owner = db.relationship('User')

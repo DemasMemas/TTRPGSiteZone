@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, render_template, redirect
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app import db
-from app.models import Lobby, LobbyParticipant, User, Character, GameState
+from app import db, socketio
+from app.models import Lobby, LobbyParticipant, User, GameState, LobbyCharacter
 import random
 import string
 
@@ -148,7 +148,7 @@ def select_character(lobby_id):
     if not character_id:
         return jsonify({'error': 'character_id required'}), 400
 
-    character = Character.query.filter_by(id=character_id, user_id=user_id).first()
+    character = LobbyCharacter.query.filter_by(id=character_id, user_id=user_id).first()
     if not character:
         return jsonify({'error': 'Character not found or not yours'}), 404
 
@@ -195,7 +195,7 @@ def get_participants_characters(lobby_id):
             'username': p.user.username
         }
         if p.character_id:
-            char = Character.query.get(p.character_id)
+            char = LobbyCharacter.query.get(p.character_id)
             if char:
                 user_data['character'] = {
                     'id': char.id,
@@ -360,3 +360,127 @@ def unban_participant(lobby_id, user_id):
     participant.is_banned = False
     db.session.commit()
     return jsonify({'message': 'User unbanned'}), 200
+
+@lobbies_bp.route('/<int:lobby_id>/characters', methods=['GET'])
+@jwt_required()
+def get_lobby_characters(lobby_id):
+    user_id = get_jwt_identity()
+    # Проверяем, что пользователь участник лобби
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'You are not in this lobby'}), 403
+
+    characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).all()
+    result = [{
+        'id': c.id,
+        'name': c.name,
+        'owner_id': c.owner_id,
+        'owner_username': c.owner.username,
+        'data': c.data,
+        'created_at': c.created_at,
+        'updated_at': c.updated_at
+    } for c in characters]
+    return jsonify(result), 200
+
+@lobbies_bp.route('/<int:lobby_id>/characters', methods=['POST'])
+@jwt_required()
+def create_lobby_character(lobby_id):
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    if not data or not data.get('name'):
+        return jsonify({'error': 'Name is required'}), 400
+
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'You are not in this lobby'}), 403
+
+    character = LobbyCharacter(
+        lobby_id=lobby_id,
+        owner_id=user_id,
+        name=data['name'],
+        data=data.get('data', {})
+    )
+    db.session.add(character)
+    db.session.commit()
+
+    socketio.emit('character_created', {
+        'id': character.id,
+        'name': character.name,
+        'owner_id': character.owner_id,
+        'owner_username': character.owner.username,
+        'data': character.data
+    }, room=f"lobby_{lobby_id}")
+
+    return jsonify({
+        'id': character.id,
+        'name': character.name,
+        'owner_id': character.owner_id,
+        'data': character.data
+    }), 201
+
+@lobbies_bp.route('/characters/<int:character_id>', methods=['GET'])
+@jwt_required()
+def get_character(character_id):
+    user_id = get_jwt_identity()
+    character = LobbyCharacter.query.get(character_id)
+    if not character:
+        return jsonify({'error': 'Character not found'}), 404
+
+    # Проверяем, что пользователь в том же лобби
+    participant = LobbyParticipant.query.filter_by(lobby_id=character.lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'Access denied'}), 403
+
+    return jsonify({
+        'id': character.id,
+        'name': character.name,
+        'owner_id': character.owner_id,
+        'owner_username': character.owner.username,
+        'data': character.data,
+        'created_at': character.created_at,
+        'updated_at': character.updated_at
+    }), 200
+
+@lobbies_bp.route('/characters/<int:character_id>', methods=['PUT'])
+@jwt_required()
+def update_character(character_id):
+    user_id = get_jwt_identity()
+    character = LobbyCharacter.query.get(character_id)
+    if not character:
+        return jsonify({'error': 'Character not found'}), 404
+
+    # Проверяем права: владелец или ГМ
+    lobby = Lobby.query.get(character.lobby_id)
+    if character.owner_id != user_id and lobby.gm_id != user_id:
+        return jsonify({'error': 'Permission denied'}), 403
+
+    data = request.get_json()
+    if 'name' in data:
+        character.name = data['name']
+    if 'data' in data:
+        character.data = data['data']
+    db.session.commit()
+    return jsonify({'message': 'Character updated'}), 200
+
+@lobbies_bp.route('/characters/<int:character_id>', methods=['DELETE'])
+@jwt_required()
+def delete_character(character_id):
+    user_id = get_jwt_identity()
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    character = LobbyCharacter.query.get(character_id)
+    if not character:
+        return jsonify({'error': 'Character not found'}), 404
+
+    lobby = Lobby.query.get(character.lobby_id)
+    if character.owner_id != user_id and lobby.gm_id != user_id:
+        return jsonify({'error': 'Permission denied'}), 403
+
+    db.session.delete(character)
+    db.session.commit()
+    socketio.emit('character_deleted', {'id': character_id}, room=f"lobby_{character.lobby_id}")
+
+    return jsonify({'message': 'Character deleted'}), 200

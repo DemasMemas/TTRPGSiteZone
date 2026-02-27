@@ -90,75 +90,7 @@ async function loadApp() {
     document.getElementById('app-section').classList.remove('hidden');
     document.getElementById('username').textContent = localStorage.getItem('username') || '';
 
-    await loadCharacters();
     await loadMyLobbies();
-}
-
-// Загрузить список персонажей
-async function loadCharacters() {
-    const token = localStorage.getItem('access_token');
-    if (!token) return;
-
-    try {
-        const response = await fetch('/characters/', {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (response.status === 401) {
-            logout();
-            return;
-        }
-        const characters = await response.json();
-        const list = document.getElementById('characters-list');
-        list.innerHTML = '';
-        characters.forEach(char => {
-            const li = document.createElement('li');
-            li.innerHTML = `<strong>${char.name}</strong> (ID: ${char.id})<br>Данные: <pre>${JSON.stringify(char.data, null, 2)}</pre>`;
-            list.appendChild(li);
-        });
-    } catch (error) {
-        console.error('Ошибка загрузки персонажей', error);
-    }
-}
-
-// Создать персонажа
-async function createCharacter() {
-    const token = localStorage.getItem('access_token');
-    if (!token) return;
-
-    const name = document.getElementById('char-name').value;
-    let data = {};
-    try {
-        data = JSON.parse(document.getElementById('char-data').value);
-    } catch (e) {
-        alert('Некорректный JSON в поле данных');
-        return;
-    }
-
-    if (!name) {
-        alert('Введите имя персонажа');
-        return;
-    }
-
-    try {
-        const response = await fetch('/characters/', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({ name, data })
-        });
-        if (response.ok) {
-            document.getElementById('char-name').value = '';
-            document.getElementById('char-data').value = '{ "class": "warrior", "level": 1 }';
-            await loadCharacters();
-        } else {
-            const err = await response.json();
-            alert(err.error || 'Ошибка создания');
-        }
-    } catch (error) {
-        alert('Ошибка сети');
-    }
 }
 
 async function createLobby() {
