@@ -45,7 +45,21 @@
         <div class="lobby-menu">
             <div class="menu-item lobby-name">Лобби: <span id="lobby-name">Загрузка...</span></div>
             <div class="menu-item invite-code" id="gm-invite-code" style="display:none;">Код: <span id="invite-code-value"></span></div>
+            <button class="menu-item settings-btn" id="settings-btn" style="display:none;" onclick="toggleSettings()" title="Настройки лобби">⚙️</button>
             <button class="menu-item exit-btn" onclick="leaveLobby()" title="Покинуть лобби">✕</button>
+        </div>
+        <div id="settings-panel" class="settings-panel" style="display:none;">
+            <div class="settings-header">
+                <span>Настройки лобби</span>
+                <button onclick="closeSettings()" style="background:none; border:none; color:white; font-size:1.2rem; cursor:pointer;">✕</button>
+            </div>
+            <div class="settings-tabs">
+                <button class="tab-btn active" onclick="showSettingsTab('banned')">Забаненные</button>
+                <!-- Здесь позже можно добавить другие вкладки -->
+            </div>
+            <div id="settings-content">
+                <!-- Контент будет подгружаться динамически -->
+            </div>
         </div>
 
         <!-- Левая панель: чат -->

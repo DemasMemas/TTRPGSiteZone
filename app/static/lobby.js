@@ -6,6 +6,7 @@ const socket = io();
 let currentLobbyId = null;
 let token = localStorage.getItem('access_token');
 let username = localStorage.getItem('username');
+let settingsVisible = false;
 
 let lobbyParticipants = [];          // полный список участников из HTTP
 let gmId = null;                     // ID ГМ
@@ -110,6 +111,10 @@ async function loadLobbyInfo() {
         document.getElementById('lobby-name').textContent = lobby.name;
         gmId = lobby.gm_id;
         isGM = (gmId == localStorage.getItem('user_id')); // сравниваем как числа
+
+        if (isGM) {
+            document.getElementById('settings-btn').style.display = 'inline-block';
+        }
 
         console.log('gmId:', gmId, 'currentUserId:', localStorage.getItem('user_id'), 'isGM:', isGM);
 
@@ -419,3 +424,83 @@ window.toggleParticipants = function() {
 };
 
 document.querySelector('.panel-header').addEventListener('click', toggleParticipants);
+
+window.toggleSettings = function() {
+    if (settingsVisible) {
+        closeSettings();
+    } else {
+        openSettings();
+    }
+};
+
+window.openSettings = function() {
+    document.getElementById('settings-panel').style.display = 'block';
+    settingsVisible = true;
+    loadBannedList(); // загружаем список забаненных при открытии
+};
+
+window.closeSettings = function() {
+    document.getElementById('settings-panel').style.display = 'none';
+    settingsVisible = false;
+};
+
+window.showSettingsTab = function(tab) {
+    // Обновляем активную вкладку
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    event.target.classList.add('active');
+
+    if (tab === 'banned') {
+        loadBannedList();
+    }
+};
+
+async function loadBannedList() {
+    try {
+        const response = await fetch(`/lobbies/${currentLobbyId}/banned`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+            const banned = await response.json();
+            const content = document.getElementById('settings-content');
+            if (banned.length === 0) {
+                content.innerHTML = '<p>Нет забаненных пользователей</p>';
+                return;
+            }
+            let html = '';
+            banned.forEach(user => {
+                html += `
+                    <div class="banned-user">
+                        <span>${user.username}</span>
+                        <button class="unban-btn" onclick="unbanUser(${user.user_id})">Разбанить</button>
+                    </div>
+                `;
+            });
+            content.innerHTML = html;
+        } else {
+            const err = await response.json();
+            content.innerHTML = `<p class="error">Ошибка: ${err.error || 'Не удалось загрузить'}</p>`;
+        }
+    } catch (error) {
+        document.getElementById('settings-content').innerHTML = '<p class="error">Ошибка сети</p>';
+    }
+}
+
+window.unbanUser = async function(userId) {
+    if (!confirm('Разбанить этого пользователя?')) return;
+    try {
+        const response = await fetch(`/lobbies/${currentLobbyId}/unban/${userId}`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+            alert('Пользователь разбанен');
+            // Обновляем список
+            loadBannedList();
+        } else {
+            const err = await response.json();
+            alert(err.error || 'Ошибка при разбане');
+        }
+    } catch (error) {
+        alert('Ошибка сети');
+    }
+};

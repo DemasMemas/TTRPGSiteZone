@@ -309,3 +309,54 @@ def ban_participant(lobby_id, user_id):
     kick_user(user_id, lobby_id)
 
     return jsonify({'message': 'User banned'}), 200
+
+@lobbies_bp.route('/<int:lobby_id>/banned', methods=['GET'])
+@jwt_required()
+def get_banned_participants(lobby_id):
+    current_user_id = get_jwt_identity()
+    try:
+        current_user_id = int(current_user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby or not lobby.is_active:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    if lobby.gm_id != current_user_id:
+        return jsonify({'error': 'Only GM can view banned list'}), 403
+
+    banned = LobbyParticipant.query.filter_by(lobby_id=lobby_id, is_banned=True).all()
+    result = [{
+        'user_id': p.user_id,
+        'username': p.user.username
+    } for p in banned]
+    return jsonify(result), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/unban/<int:user_id>', methods=['POST'])
+@jwt_required()
+def unban_participant(lobby_id, user_id):
+    current_user_id = get_jwt_identity()
+    try:
+        current_user_id = int(current_user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby or not lobby.is_active:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    if lobby.gm_id != current_user_id:
+        return jsonify({'error': 'Only GM can unban participants'}), 403
+
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'User not found in lobby'}), 404
+
+    if not participant.is_banned:
+        return jsonify({'error': 'User is not banned'}), 400
+
+    participant.is_banned = False
+    db.session.commit()
+    return jsonify({'message': 'User unbanned'}), 200
