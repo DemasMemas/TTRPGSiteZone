@@ -365,21 +365,34 @@ def unban_participant(lobby_id, user_id):
 @jwt_required()
 def get_lobby_characters(lobby_id):
     user_id = get_jwt_identity()
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
     # Проверяем, что пользователь участник лобби
     participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
     if not participant:
         return jsonify({'error': 'You are not in this lobby'}), 403
 
+    lobby = Lobby.query.get(lobby_id)
+    is_gm = (lobby.gm_id == user_id)
+
     characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).all()
-    result = [{
-        'id': c.id,
-        'name': c.name,
-        'owner_id': c.owner_id,
-        'owner_username': c.owner.username,
-        'data': c.data,
-        'created_at': c.created_at,
-        'updated_at': c.updated_at
-    } for c in characters]
+    result = []
+    for c in characters:
+        if c.owner_id == user_id or is_gm or user_id in c.visible_to:
+            result.append({
+                'id': c.id,
+                'name': c.name,
+                'owner_id': c.owner_id,
+                'owner_username': c.owner.username,
+                'data': c.data,
+                'visible_to': c.visible_to,
+                'created_at': c.created_at,
+                'updated_at': c.updated_at
+            })
+
     return jsonify(result), 200
 
 @lobbies_bp.route('/<int:lobby_id>/characters', methods=['POST'])
@@ -398,7 +411,8 @@ def create_lobby_character(lobby_id):
         lobby_id=lobby_id,
         owner_id=user_id,
         name=data['name'],
-        data=data.get('data', {})
+        data=data.get('data', {}),
+        visible_to=[]
     )
     db.session.add(character)
     db.session.commit()
@@ -484,3 +498,37 @@ def delete_character(character_id):
     socketio.emit('character_deleted', {'id': character_id}, room=f"lobby_{character.lobby_id}")
 
     return jsonify({'message': 'Character deleted'}), 200
+
+@lobbies_bp.route('/characters/<int:character_id>/visibility', methods=['PUT'])
+@jwt_required()
+def set_character_visibility(character_id):
+    user_id = get_jwt_identity()
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    character = LobbyCharacter.query.get(character_id)
+    if not character:
+        return jsonify({'error': 'Character not found'}), 404
+
+    lobby = Lobby.query.get(character.lobby_id)
+    # Только ГМ может менять видимость
+    if lobby.gm_id != user_id:
+        return jsonify({'error': 'Only GM can change visibility'}), 403
+
+    data = request.get_json()
+    if 'visible_to' not in data or not isinstance(data['visible_to'], list):
+        return jsonify({'error': 'visible_to must be a list of user_ids'}), 400
+
+    character.visible_to = data['visible_to']
+    db.session.commit()
+
+    # Оповещаем всех в лобби об изменении (чтобы обновили список)
+    from app import socketio
+    socketio.emit('character_updated', {
+        'id': character.id,
+        'visible_to': character.visible_to
+    }, room=f"lobby_{character.lobby_id}")
+
+    return jsonify({'message': 'Visibility updated'}), 200

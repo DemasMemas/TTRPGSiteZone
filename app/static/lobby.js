@@ -7,6 +7,7 @@ let currentLobbyId = null;
 let token = localStorage.getItem('access_token');
 let username = localStorage.getItem('username');
 let settingsVisible = false;
+let currentVisibilityCharacterId = null;
 
 let lobbyParticipants = [];          // полный список участников из HTTP
 let gmId = null;                     // ID ГМ
@@ -295,6 +296,19 @@ function displayLobbyCharacters(characters) {
             deleteBtn.onclick = (e) => { e.stopPropagation(); deleteCharacter(char.id); };
             charDiv.appendChild(deleteBtn);
         }
+
+        if (isGM) {
+            const visibilityBtn = document.createElement('button');
+            visibilityBtn.className = 'btn btn-sm';
+            visibilityBtn.textContent = '👁️';
+            visibilityBtn.title = 'Настроить видимость';
+            visibilityBtn.onclick = (e) => {
+                e.stopPropagation();
+                openVisibilityModal(char.id, char.name, char.visible_to || []);
+            };
+            charDiv.appendChild(visibilityBtn);
+        }
+
         container.appendChild(charDiv);
     });
 }
@@ -524,3 +538,62 @@ socket.on('character_deleted', (data) => {
     console.log('Character deleted:', data.id);
     loadLobbyCharacters();
 });
+
+socket.on('character_updated', (data) => {
+    console.log('Character updated:', data);
+    loadLobbyCharacters();
+});
+
+window.openVisibilityModal = (characterId, characterName, currentVisibleTo) => {
+    currentVisibilityCharacterId = characterId;
+    document.getElementById('visibility-character-name').textContent = `Персонаж: ${characterName}`;
+
+    // Заполняем список участников с чекбоксами
+    const container = document.getElementById('visibility-participants-list');
+    container.innerHTML = '';
+    lobbyParticipants.forEach(p => {
+        // Не включаем самого ГМ? Он и так всё видит. Но можно включить для полноты.
+        const div = document.createElement('div');
+        div.className = 'visibility-participant';
+        div.innerHTML = `
+            <input type="checkbox" value="${p.user_id}" ${currentVisibleTo.includes(p.user_id) ? 'checked' : ''}>
+            <label>${p.username}</label>
+        `;
+        container.appendChild(div);
+    });
+
+    document.getElementById('visibility-modal').style.display = 'flex';
+};
+
+window.closeVisibilityModal = () => {
+    document.getElementById('visibility-modal').style.display = 'none';
+    currentVisibilityCharacterId = null;
+};
+
+window.saveVisibility = async () => {
+    if (!currentVisibilityCharacterId) return;
+
+    const checkboxes = document.querySelectorAll('#visibility-participants-list input:checked');
+    const visibleTo = Array.from(checkboxes).map(cb => parseInt(cb.value, 10));
+
+    try {
+        const response = await fetch(`/lobbies/characters/${currentVisibilityCharacterId}/visibility`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ visible_to: visibleTo })
+        });
+        if (response.ok) {
+            alert('Видимость обновлена');
+            closeVisibilityModal();
+            loadLobbyCharacters(); // обновим список
+        } else {
+            const err = await response.json();
+            alert(err.error || 'Ошибка');
+        }
+    } catch (error) {
+        alert('Ошибка сети');
+    }
+};
