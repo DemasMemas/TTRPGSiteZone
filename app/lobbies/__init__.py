@@ -564,10 +564,10 @@ def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
 
     chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y).first()
     if not chunk:
-        chunk = MapChunk(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y, data=default_chunk_data())
+        chunk = MapChunk(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y,
+                         data=generate_chunk_data(lobby_id, chunk_x, chunk_y, lobby.map_type))
         db.session.add(chunk)
 
-    # Проверка структуры (опционально)
     if not chunk.data or len(chunk.data) != CHUNK_SIZE or len(chunk.data[0]) != CHUNK_SIZE:
         chunk.data = default_chunk_data()
 
@@ -585,7 +585,7 @@ def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
         print(f"Error committing: {e}")
         return jsonify({'error': 'Database error'}), 500
 
-    allowed_fields = ['type', 'color', 'height']
+    allowed_fields = ['terrain', 'height', 'objects']
     safe_updates = {k: v for k, v in data.items() if k in allowed_fields}
     socketio.emit('tile_updated', {
         'chunk_x': chunk_x,
@@ -640,8 +640,6 @@ def get_chunks(lobby_id):
     return jsonify(result), 200
 
 def generate_chunk_data(lobby_id, chunk_x, chunk_y, map_type):
-    CHUNK_SIZE = 32
-    MAX_CHUNK = 15
     data = []
     for y in range(CHUNK_SIZE):
         row = []
@@ -649,59 +647,79 @@ def generate_chunk_data(lobby_id, chunk_x, chunk_y, map_type):
             global_x = chunk_x * CHUNK_SIZE + x
             global_y = chunk_y * CHUNK_SIZE + y
 
-            # базовая высота
-            base_height = 1.0
-            # небольшая вариация для микрорельефа (кроме воды)
-            height_variation = random.uniform(-0.05, 0.05)
-
+            # Определяем terrain по map_type (как раньше)
             if map_type == 'empty':
-                tile_type = 'grass'
-                color = '#3a5f0b'
-                height = base_height + height_variation
-
+                terrain = 'grass'
             elif map_type == 'random':
                 r = random.random()
-                if r < 0.1:
-                    tile_type = 'forest'
-                    color = '#2d5a27'
-                elif r < 0.12:
-                    tile_type = 'house'
-                    color = '#8B4513'
-                else:
-                    tile_type = 'grass'
-                    color = '#3a5f0b'
-                height = base_height + height_variation
-
+                if r < 0.4: terrain = 'grass'
+                elif r < 0.6: terrain = 'sand'
+                elif r < 0.8: terrain = 'rock'
+                else: terrain = 'swamp'
             elif map_type == 'predefined':
-                # края мира: например, отступ 2 тайла от границы
-                margin = 2
-                max_global = (MAX_CHUNK + 1) * CHUNK_SIZE - 1
-                if (global_x < margin or global_x > max_global - margin or
-                    global_y < margin or global_y > max_global - margin):
-                    tile_type = 'water'
-                    color = '#1E90FF'
-                    height = 0.8  # вода чуть ниже, без вариации
+                if global_x < 2 or global_x > 511-2 or global_y < 2 or global_y > 511-2:
+                    terrain = 'water'
                 else:
                     r = random.random()
-                    if r < 0.15:
-                        tile_type = 'forest'
-                        color = '#2d5a27'
-                    elif r < 0.18:
-                        tile_type = 'house'
-                        color = '#8B4513'
-                    else:
-                        tile_type = 'grass'
-                        color = '#3a5f0b'
-                    height = base_height + height_variation
+                    if r < 0.4: terrain = 'grass'
+                    elif r < 0.6: terrain = 'sand'
+                    elif r < 0.8: terrain = 'rock'
+                    else: terrain = 'swamp'
             else:
-                tile_type = 'grass'
-                color = '#3a5f0b'
-                height = base_height
+                terrain = 'grass'
+
+            height = 1.0 + random.uniform(-0.1, 0.1)
+
+            objects = []
+            if terrain != 'water' and random.random() < 0.2:
+                # Дерево со случайным зелёным оттенком
+                color = random.choice(['#2d5a27', '#3c6e47', '#1e4d2b'])
+                objects.append({
+                    'type': 'tree',
+                    'x': round(random.uniform(-0.4, 0.4), 2),
+                    'z': round(random.uniform(-0.4, 0.4), 2),
+                    'scale': round(random.uniform(0.8, 1.2), 2),
+                    'rotation': random.randint(0, 360),
+                    'color': color
+                })
+            if terrain != 'water' and random.random() < 0.05:
+                # Дом со случайным цветом стен
+                color = random.choice(['#8B4513', '#A0522D', '#CD853F', '#D2691E'])
+                objects.append({
+                    'type': 'house',
+                    'x': round(random.uniform(-0.4, 0.4), 2),
+                    'z': round(random.uniform(-0.4, 0.4), 2),
+                    'scale': 1.0,
+                    'rotation': random.choice([0, 90, 180, 270]),
+                    'color': color
+                })
+            if terrain != 'water' and random.random() < 0.02:
+                # Забор (пока как длинный куб)
+                color = random.choice(['#8B5A2B', '#A67B5B', '#6B4F3C'])
+                objects.append({
+                    'type': 'fence',
+                    'x': round(random.uniform(-0.4, 0.4), 2),
+                    'z': round(random.uniform(-0.4, 0.4), 2),
+                    'scale': 1.0,
+                    'rotation': random.choice([0, 90]),
+                    'color': color
+                })
+            if terrain != 'water' and random.random() < 0.01:
+                # Аномалия (светящаяся сфера)
+                color = random.choice(['#00FFFF', '#FF69B4', '#FFD700'])
+                objects.append({
+                    'type': 'anomaly',
+                    'x': round(random.uniform(-0.4, 0.4), 2),
+                    'z': round(random.uniform(-0.4, 0.4), 2),
+                    'scale': round(random.uniform(0.5, 1.0), 2),
+                    'rotation': 0,
+                    'color': color
+                })
 
             row.append({
-                'type': tile_type,
-                'color': color,
-                'height': round(height, 3)  # округлим для читаемости
+                'terrain': terrain,
+                'height': round(height, 3),
+                'objects': objects
             })
         data.append(row)
     return data

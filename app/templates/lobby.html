@@ -89,30 +89,43 @@
                 <span>Тип: <span id="current-marker-type">default</span></span>
             </div>
             <button class="btn btn-primary" onclick="addMarkerAtCenter()">➕ Добавить метку</button>
-                 <div class="tile-palette" style="display: inline-block; margin-left: 15px; border-left: 1px solid #444; padding-left: 15px;">
-                    <span>Тип тайла:</span>
-                    <select id="tile-type-select" class="character-select" style="width: auto;">
-                        <option value="grass">🌿 Трава</option>
-                        <option value="forest">🌲 Лес</option>
-                        <option value="house">🏠 Дом</option>
-                        <option value="water">💧 Вода</option>
-                        <option value="rock">🪨 Скала</option>
-                        <option value="sand">🏜️ Песок</option>
-                        <option value="swamp">🟤 Болото</option>
-                    </select>
+            <div id="gm-only-controls" style="display: none; flex-direction: column; gap: 8px;">
+                <!-- Строка контролов (без переноса) -->
+                <div style="display: flex; gap: 15px; flex-wrap: nowrap; align-items: center;">
+                    <!-- Радиус кисти -->
+                    <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                        <span>Радиус кисти:</span>
+                        <input type="range" id="brush-radius" min="0" max="5" value="0" style="width: 80px;">
+                        <span id="brush-radius-value">0</span>
+                    </div>
+
+                    <!-- Тип тайла -->
+                    <div class="tile-palette" style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                        <span>Тип тайла:</span>
+                        <select id="tile-type-select" class="character-select" style="width: auto;">
+                            <option value="grass">🌿 Трава</option>
+                            <option value="sand">🏜️ Песок</option>
+                            <option value="rock">🪨 Камень</option>
+                            <option value="swamp">🟤 Болото</option>
+                            <option value="water">💧 Вода</option>
+                        </select>
+                    </div>
+
+                    <!-- Высота -->
+                    <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                        <span>Высота:</span>
+                        <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" style="width: 100px;">
+                        <span id="tile-height-value">1.0</span>
+                    </div>
                 </div>
 
-                <div style="display: inline-block; margin-left: 15px;">
-                    <span>Радиус кисти:</span>
-                    <input type="range" id="brush-radius" min="0" max="5" value="0" style="width: 80px; vertical-align: middle;">
-                    <span id="brush-radius-value">0</span>
+                <!-- Строка подсказок (может переноситься) -->
+                <div style="display: flex; gap: 15px; flex-wrap: wrap; color: #aaa; font-size: 0.8rem;">
+                    <span>Alt+клик: ландшафт</span>
+                    <span>Shift+клик: высота</span>
+                    <span>Двойной клик: настройка тайла</span>
                 </div>
-
-                <div style="display: inline-block; margin-left: 15px;">
-                    <span>Высота:</span>
-                    <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" style="width: 100px;">
-                    <span id="tile-height-value">1.0</span>
-                </div>
+            </div>
         </div>
 
         <div id="visibility-modal" class="modal" style="display:none;">
@@ -122,6 +135,44 @@
                 <p id="visibility-character-name"></p>
                 <div id="visibility-participants-list"></div>
                 <button onclick="saveVisibility()">Сохранить</button>
+            </div>
+        </div>
+
+        <div id="tile-edit-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <span class="close" onclick="closeTileEditModal()">&times;</span>
+                <h3>Редактирование тайла</h3>
+                <div id="tile-edit-info"></div>
+                <div class="tile-edit-controls">
+                    <label>Ландшафт:</label>
+                    <select id="tile-edit-terrain">
+                        <option value="grass">🌿 Трава</option>
+                        <option value="sand">🏜️ Песок</option>
+                        <option value="rock">🪨 Камень</option>
+                        <option value="swamp">🟤 Болото</option>
+                        <option value="water">💧 Вода</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="applyTerrainChange()">Применить</button>
+                    <br><br>
+                    <label>Высота:</label>
+                    <input type="range" id="tile-edit-height" min="0.5" max="3.0" step="0.1" value="1.0">
+                    <span id="tile-edit-height-value">1.0</span>
+                    <button class="btn btn-primary" onclick="applyHeightChange()">Применить</button>
+                    <br><br>
+
+                    <label>Тип объекта:</label>
+                    <select id="object-type-select">
+                        <option value="tree">🌲 Дерево</option>
+                        <option value="house">🏠 Дом</option>
+                        <option value="fence">🚧 Забор</option>
+                        <option value="anomaly">✨ Аномалия</option>
+                    </select>
+                    <label>Цвет:</label>
+                    <input type="color" id="object-color" value="#2d5a27">
+                    <button class="btn btn-primary" onclick="addObjectToTile()">➕ Добавить объект</button>
+                    <br><br>
+                    <button class="btn btn-danger" onclick="clearObjectsFromTile()">🗑️ Удалить все объекты</button>
+                </div>
             </div>
         </div>
 

@@ -3,7 +3,7 @@ import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/cont
 import {
     addMarker, moveMarker, removeMarker, loadMarkers,
     addChunk, removeChunk, setTileClickCallback, updateTileInChunk,
-    setEditMode, setBrushRadius
+    setEditMode, setBrushRadius, getHoveredTile, chunksMap
 } from './lobby3d.js';
 
 const CHUNK_SIZE = 32;
@@ -13,8 +13,11 @@ const MAX_CHUNK = 15;
 let loadedChunks = new Map();
 let editMode = false;
 let currentTileType = 'grass';
+let currentEditTile = null;
 let brushRadius = 0;
 let tileHeight = 1.0;
+
+const gmControls = document.getElementById('gm-only-controls');
 
 const socket = io();
 let currentLobbyId = null;
@@ -108,21 +111,9 @@ function getTileUpdates(shiftKey) {
     if (shiftKey) {
         return { height: tileHeight };
     } else {
-        let color, height;
-        switch (currentTileType) {
-            case 'grass': color = '#3a5f0b'; height = 1.0; break;
-            case 'forest': color = '#2d5a27'; height = 1.2; break;
-            case 'house': color = '#8B4513'; height = 1.0; break;
-            case 'water': color = '#1E90FF'; height = 0.8; break;
-            case 'rock': color = '#808080'; height = 1.5; break;
-            case 'sand': color = '#C2B280'; height = 1.0; break;
-            case 'swamp': color = '#4B3B2A'; height = 0.9; break;
-            default: color = '#3a5f0b'; height = 1.0;
-        }
         return {
-            type: currentTileType,
-            color: color,
-            height: height
+            terrain: currentTileType,
+            height: tileHeight
         };
     }
 }
@@ -139,38 +130,29 @@ async function loadLobbyInfo() {
         gmId = lobby.gm_id;
         isGM = (gmId == localStorage.getItem('user_id'));
 
-        setTileClickCallback((tile, event) => {
+        const gmControls = document.getElementById('gm-only-controls');
+        if (gmControls) {
+            gmControls.style.display = isGM ? 'inline-block' : 'none';
+        }
+
+        updateGMControlsVisibility();
+
+        setTileClickCallback((tile, event, isDoubleClick) => {
             if (!isGM) {
                 alert('Только ГМ может редактировать тайлы');
                 return;
             }
-
-            const updates = getTileUpdates(event.shiftKey);
-            const radius = brushRadius;
-
-            // Глобальные координаты центра
-            const centerGlobalX = tile.chunkX * CHUNK_SIZE + tile.tileX;
-            const centerGlobalY = tile.chunkY * CHUNK_SIZE + tile.tileY;
-
-            for (let dx = -radius; dx <= radius; dx++) {
-                for (let dy = -radius; dy <= radius; dy++) {
-                    const targetGlobalX = centerGlobalX + dx;
-                    const targetGlobalY = centerGlobalY + dy;
-
-                    // Проверка границ карты
-                    if (targetGlobalX < 0 || targetGlobalX >= (MAX_CHUNK + 1) * CHUNK_SIZE ||
-                        targetGlobalY < 0 || targetGlobalY >= (MAX_CHUNK + 1) * CHUNK_SIZE) {
-                        continue;
-                    }
-
-                    const targetChunkX = Math.floor(targetGlobalX / CHUNK_SIZE);
-                    const targetChunkY = Math.floor(targetGlobalY / CHUNK_SIZE);
-                    const targetTileX = targetGlobalX % CHUNK_SIZE;
-                    const targetTileY = targetGlobalY % CHUNK_SIZE;
-
-                    updateTile(targetChunkX, targetChunkY, targetTileX, targetTileY, updates);
-                }
+            if (isDoubleClick) {
+                // двойной клик – открыть окно
+                openTileEditModal(tile);
+            } else if (event.altKey) {
+                // Alt+клик – применить кисть ландшафта
+                applyBrush(tile, { terrain: currentTileType }, brushRadius);
+            } else if (event.shiftKey) {
+                // Shift+клик – применить кисть высоты
+                applyBrush(tile, { height: tileHeight }, brushRadius);
             }
+            // иначе обычный клик – ничего не делаем, только подсветка
         });
 
         if (isGM) {
@@ -191,7 +173,7 @@ async function loadLobbyInfo() {
     }
 }
 
-async function updateTile(chunkX, chunkY, tileX, tileY, updates) {
+async function updateTile(chunkX, chunkY, tileX, tileY, updates, callback) {
     const url = `/lobbies/${currentLobbyId}/chunks/${chunkX}/${chunkY}/tile/${tileX}/${tileY}`;
     console.log(`PATCH ${url}`, updates);
     try {
@@ -205,12 +187,33 @@ async function updateTile(chunkX, chunkY, tileX, tileY, updates) {
         });
         if (response.ok) {
             updateTileInChunk(chunkX, chunkY, tileX, tileY, updates);
+            if (callback) callback(); // вызываем колбэк после успешного локального обновления
         } else {
             const err = await response.json();
             alert(err.error || 'Ошибка обновления');
         }
     } catch (error) {
         alert('Ошибка сети');
+    }
+}
+
+function applyBrush(centerTile, updates, radius) {
+    const centerGlobalX = centerTile.chunkX * CHUNK_SIZE + centerTile.tileX;
+    const centerGlobalY = centerTile.chunkY * CHUNK_SIZE + centerTile.tileY;
+    for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+            const targetGlobalX = centerGlobalX + dx;
+            const targetGlobalY = centerGlobalY + dy;
+            if (targetGlobalX < 0 || targetGlobalX >= (MAX_CHUNK + 1) * CHUNK_SIZE ||
+                targetGlobalY < 0 || targetGlobalY >= (MAX_CHUNK + 1) * CHUNK_SIZE) {
+                continue;
+            }
+            const targetChunkX = Math.floor(targetGlobalX / CHUNK_SIZE);
+            const targetChunkY = Math.floor(targetGlobalY / CHUNK_SIZE);
+            const targetTileX = targetGlobalX % CHUNK_SIZE;
+            const targetTileY = targetGlobalY % CHUNK_SIZE;
+            updateTile(targetChunkX, targetChunkY, targetTileX, targetTileY, updates);
+        }
     }
 }
 
@@ -569,7 +572,8 @@ window.showSettingsTab = function(tab) {
 
 window.toggleEditMode = function() {
     editMode = !editMode;
-    setEditMode(editMode); // напрямую, без динамического импорта
+    setEditMode(editMode);
+    updateGMControlsVisibility();
     const btn = document.getElementById('edit-toggle');
     if (btn) {
         btn.style.background = editMode ? '#4a6fa5' : '';
@@ -652,3 +656,196 @@ document.getElementById('tile-height')?.addEventListener('input', (e) => {
     tileHeight = parseFloat(e.target.value);
     document.getElementById('tile-height-value').textContent = tileHeight.toFixed(1);
 });
+
+window.addRandomObject = async function() {
+    const tileInfo = getHoveredTile(); // получаем текущий выделенный тайл
+    if (!isGM || !tileInfo) {
+        alert('Выберите тайл');
+        return;
+    }
+    const tile = tileInfo.tileData;
+    const newObject = {
+        type: 'tree',
+        x: Math.random() * 0.8 - 0.4,
+        z: Math.random() * 0.8 - 0.4,
+        scale: 0.8 + Math.random() * 0.4,
+        rotation: Math.floor(Math.random() * 360)
+    };
+    const objects = tile.objects ? [...tile.objects, newObject] : [newObject];
+    await updateTile(tileInfo.chunk.chunkX, tileInfo.chunk.chunkY,
+                     tileInfo.tileX, tileInfo.tileY, { objects: objects });
+};
+
+window.clearObjects = async function() {
+    const tileInfo = getHoveredTile();
+    if (!isGM || !tileInfo) {
+        alert('Выберите тайл');
+        return;
+    }
+    await updateTile(tileInfo.chunk.chunkX, tileInfo.chunk.chunkY,
+                     tileInfo.tileX, tileInfo.tileY, { objects: [] });
+};
+
+window.openTileEditModal = function(tile) {
+    currentEditTile = tile;
+    const tileData = tile.tileData;
+    document.getElementById('tile-edit-info').innerHTML = `
+        <p>Координаты: (${tile.chunkX * CHUNK_SIZE + tile.tileX}, ${tile.chunkY * CHUNK_SIZE + tile.tileY})</p>
+        <p>Ландшафт: ${tileData.terrain}</p>
+        <p>Высота: ${tileData.height}</p>
+        <p>Объектов: ${tileData.objects ? tileData.objects.length : 0}</p>
+    `;
+    document.getElementById('tile-edit-terrain').value = tileData.terrain;
+    document.getElementById('tile-edit-height').value = tileData.height;
+    document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
+    document.getElementById('tile-edit-modal').style.display = 'flex';
+};
+
+window.closeTileEditModal = function() {
+    document.getElementById('tile-edit-modal').style.display = 'none';
+    currentEditTile = null;
+};
+
+window.applyTerrainChange = async function() {
+    if (!currentEditTile) return;
+    const newTerrain = document.getElementById('tile-edit-terrain').value;
+    await updateTile(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { terrain: newTerrain },
+        () => {
+            const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+            const chunkEntry = chunksMap.get(chunkKey);
+            if (chunkEntry) {
+                const newTileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+                currentEditTile.tileData = newTileData;
+                updateTileEditModal();
+            }
+        }
+    );
+};
+
+window.applyHeightChange = async function() {
+    if (!currentEditTile) return;
+    const newHeight = parseFloat(document.getElementById('tile-edit-height').value);
+    await updateTile(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { height: newHeight },
+        () => {
+            const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+            const chunkEntry = chunksMap.get(chunkKey);
+            if (chunkEntry) {
+                const newTileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+                currentEditTile.tileData = newTileData;
+                updateTileEditModal();
+            }
+        }
+    );
+};
+
+window.addObjectToTile = async function() {
+    if (!currentEditTile) return;
+    const tile = currentEditTile.tileData;
+    const type = document.getElementById('object-type-select').value;
+    const color = document.getElementById('object-color').value;
+
+    const newObject = {
+        type: type,
+        x: Math.random() * 0.8 - 0.4,
+        z: Math.random() * 0.8 - 0.4,
+        scale: type === 'tree' ? 0.8 + Math.random() * 0.4 : 1.0,
+        rotation: Math.floor(Math.random() * 360),
+        color: color
+    };
+
+    const objects = tile.objects ? [...tile.objects, newObject] : [newObject];
+    await updateTile(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { objects: objects },
+        () => {
+            const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+            const chunkEntry = chunksMap.get(chunkKey);
+            if (chunkEntry) {
+                const newTileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+                currentEditTile.tileData = newTileData;
+                updateTileEditModal();
+            }
+        }
+    );
+};
+
+window.clearObjectsFromTile = async function() {
+    if (!currentEditTile) return;
+    await updateTile(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { objects: [] },
+        () => {
+            const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+            const chunkEntry = chunksMap.get(chunkKey);
+            if (chunkEntry) {
+                const newTileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+                currentEditTile.tileData = newTileData;
+                updateTileEditModal();
+            }
+        }
+    );
+};
+
+// Обработчик изменения ползунка высоты в модалке
+document.getElementById('tile-edit-height')?.addEventListener('input', (e) => {
+    document.getElementById('tile-edit-height-value').textContent = parseFloat(e.target.value).toFixed(1);
+});
+
+function updateTileEditModal() {
+    if (!currentEditTile) return;
+    const tileData = currentEditTile.tileData;
+    let objectsHtml = '';
+    if (tileData.objects && tileData.objects.length > 0) {
+        objectsHtml = '<ul style="max-height:100px; overflow-y:auto;">';
+        tileData.objects.forEach((obj, idx) => {
+            objectsHtml += `<li>${obj.type} (${obj.color})</li>`;
+        });
+        objectsHtml += '</ul>';
+    } else {
+        objectsHtml = '<p>Нет объектов</p>';
+    }
+
+    document.getElementById('tile-edit-info').innerHTML = `
+        <p>Координаты: (${currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX}, ${currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY})</p>
+        <p>Ландшафт: ${tileData.terrain}</p>
+        <p>Высота: ${tileData.height}</p>
+        <p>Объектов: ${tileData.objects ? tileData.objects.length : 0}</p>
+        ${objectsHtml}
+    `;
+    document.getElementById('tile-edit-terrain').value = tileData.terrain;
+    document.getElementById('tile-edit-height').value = tileData.height;
+    document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
+}
+
+function updateGMControlsVisibility() {
+    const gmControls = document.getElementById('gm-only-controls');
+    if (gmControls) {
+        gmControls.style.display = (isGM && editMode) ? 'flex' : 'none';
+    }
+}
+
+function getDefaultColorForType(type) {
+    switch(type) {
+        case 'tree': return '#2d5a27';
+        case 'house': return '#8B4513';
+        case 'fence': return '#8B5A2B';
+        case 'anomaly': return '#00FFFF';
+        default: return '#ffffff';
+    }
+}

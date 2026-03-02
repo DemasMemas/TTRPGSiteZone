@@ -267,6 +267,10 @@ body {
   display: flex;
   gap: 15px;
   align-items: center;
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: nowrap;
+  justify-content: flex-start;
 }
 
 .marker-types {
@@ -567,4 +571,41 @@ input[type=range]::-webkit-slider-thumb {
     border-radius: 50%;
     background: #4a6fa5;
     cursor: pointer;
+}
+
+#tile-edit-modal {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    width: 300px;
+    z-index: 100;
+    pointer-events: auto;
+}
+
+#gm-only-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+/* Выравнивание внутренних блоков */
+#gm-only-controls > div {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+/* Убираем лишние отступы у вложенных элементов */
+.tile-palette {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+    border-left: none !important;
+}
+
+/* Подсказки отдельно */
+#gm-only-controls .hint-box {
+    color: #aaa;
+    font-size: 0.8rem;
+    line-height: 1.2;
 }

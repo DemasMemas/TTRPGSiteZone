@@ -8,6 +8,27 @@ const MIN_CHUNK = 0;
 const MAX_CHUNK = 15;
 const chunkBounds = [];
 
+// Цвета ландшафта
+const terrainColors = {
+    grass: 0x3a5f0b,
+    sand: 0xC2B280,
+    rock: 0x808080,
+    swamp: 0x4B3B2A,
+    water: 0x1E90FF
+};
+
+// Геометрия объектов
+const treeGeo = new THREE.ConeGeometry(0.3, 1, 8);
+const houseGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+const fenceGeo = new THREE.BoxGeometry(0.2, 0.5, 0.8);
+const anomalyGeo = new THREE.SphereGeometry(0.3, 16, 16);
+
+// Материалы с поддержкой вершинных цветов
+const treeMat = new THREE.MeshStandardMaterial();
+const houseMat = new THREE.MeshStandardMaterial();
+const fenceMat = new THREE.MeshStandardMaterial();
+const anomalyMat = new THREE.MeshStandardMaterial({ emissive: 0x333333 });
+
 // --- Сцена ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111122);
@@ -29,7 +50,7 @@ controls.dampingFactor = 0.05;
 controls.maxPolarAngle = Math.PI / 2;
 controls.target.set(256, 0, 256);
 
-// Освещение (яркое)
+// Освещение
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
 scene.add(ambientLight);
 const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
@@ -57,6 +78,27 @@ highlightBox.visible = false;
 const tileInfoDiv = document.getElementById('tile-info');
 const tileInfoContent = document.getElementById('tile-info-content');
 
+// --- Вспомогательные функции ---
+function getObjectHeightOffset(type) {
+    switch(type) {
+        case 'tree': return 0.5;
+        case 'house': return 0.3;
+        case 'fence': return 0.25;
+        case 'anomaly': return 0.3;
+        default: return 0.3;
+    }
+}
+
+function getDefaultColorForType(type) {
+    switch(type) {
+        case 'tree': return '#2d5a27';
+        case 'house': return '#8B4513';
+        case 'fence': return '#8B5A2B';
+        case 'anomaly': return '#00FFFF';
+        default: return '#ffffff';
+    }
+}
+
 // --- Функции для чанков ---
 export function addChunk(cx, cy, tilesData) {
     if (cx < MIN_CHUNK || cx > MAX_CHUNK || cy < MIN_CHUNK || cy > MAX_CHUNK) return;
@@ -67,31 +109,75 @@ export function addChunk(cx, cy, tilesData) {
     const size = tilesData.length;
     const totalTiles = size * size;
 
-    // Геометрия
-    const groundGeo = new THREE.BoxGeometry(1, 1, 1); // куб для земли
+    // Геометрия для ландшафта
+    const groundGeo = new THREE.BoxGeometry(1, 1, 1);
     const planeGeo = new THREE.PlaneGeometry(0.95, 0.95);
     planeGeo.rotateX(-Math.PI / 2);
-    const objectGeo = new THREE.BoxGeometry(0.5, 1, 0.5);
 
     // Материалы
-    const groundMat = new THREE.MeshStandardMaterial({ vertexColors: true });
+    const groundMat = new THREE.MeshStandardMaterial();
     const waterMat = new THREE.MeshStandardMaterial({ color: 0x1E90FF, transparent: true, opacity: 0.8 });
-    const objectMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
 
-    // Инстанс-меши
+    // Инстанс-меш для земли (все типы, кроме воды)
     const groundInstances = new THREE.InstancedMesh(groundGeo, groundMat, totalTiles);
     groundInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalTiles * 3), 3);
-    groundInstances.geometry.setAttribute('color', groundInstances.instanceColor);
 
+    // Инстанс-меш для воды
     const waterInstances = new THREE.InstancedMesh(planeGeo, waterMat, totalTiles);
-    const objectInstances = new THREE.InstancedMesh(objectGeo, objectMat, totalTiles);
 
     groundInstances.castShadow = false; groundInstances.receiveShadow = false;
     waterInstances.castShadow = false; waterInstances.receiveShadow = false;
-    objectInstances.castShadow = true; objectInstances.receiveShadow = true;
+
+    // Подсчёт количества каждого типа объектов
+    let treeCount = 0, houseCount = 0, fenceCount = 0, anomalyCount = 0;
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            const tile = tilesData[y][x];
+            if (tile.objects) {
+                tile.objects.forEach(obj => {
+                    if (obj.type === 'tree') treeCount++;
+                    else if (obj.type === 'house') houseCount++;
+                    else if (obj.type === 'fence') fenceCount++;
+                    else if (obj.type === 'anomaly') anomalyCount++;
+                });
+            }
+        }
+    }
+
+    // Создание инстанс-мешей для объектов
+    const treeInstances = treeCount > 0 ? new THREE.InstancedMesh(treeGeo, treeMat, treeCount) : null;
+    if (treeInstances) {
+        treeInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(treeCount * 3), 3);
+        treeInstances.castShadow = true;
+        treeInstances.receiveShadow = false;
+    }
+
+    const houseInstances = houseCount > 0 ? new THREE.InstancedMesh(houseGeo, houseMat, houseCount) : null;
+    if (houseInstances) {
+        houseInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(houseCount * 3), 3);
+        houseInstances.castShadow = true;
+        houseInstances.receiveShadow = false;
+    }
+
+    const fenceInstances = fenceCount > 0 ? new THREE.InstancedMesh(fenceGeo, fenceMat, fenceCount) : null;
+    if (fenceInstances) {
+        fenceInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(fenceCount * 3), 3);
+        fenceInstances.castShadow = true;
+        fenceInstances.receiveShadow = false;
+    }
+
+    const anomalyInstances = anomalyCount > 0 ? new THREE.InstancedMesh(anomalyGeo, anomalyMat, anomalyCount) : null;
+    if (anomalyInstances) {
+        anomalyInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(anomalyCount * 3), 3);
+        anomalyInstances.castShadow = true;
+        anomalyInstances.receiveShadow = false;
+    }
 
     const dummy = new THREE.Object3D();
     let minX = Infinity, maxX = -Infinity, minY = 0, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+
+    let groundIdx = 0, waterIdx = 0;
+    let treeIdx = 0, houseIdx = 0, fenceIdx = 0, anomalyIdx = 0;
 
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
@@ -104,64 +190,120 @@ export function addChunk(cx, cy, tilesData) {
             // Обновляем границы чанка
             minX = Math.min(minX, worldX - 0.5);
             maxX = Math.max(maxX, worldX + 0.5);
-            maxY = Math.max(maxY, height + (tile.type === 'forest' || tile.type === 'house' ? 1.0 : 0));
+            maxY = Math.max(maxY, height + 0.5);
             minZ = Math.min(minZ, worldZ - 0.5);
             maxZ = Math.max(maxZ, worldZ + 0.5);
 
-            // Земля (куб)
+            // ---- Земля ----
+            dummy.rotation.set(0, 0, 0);
             dummy.position.set(worldX, height / 2, worldZ);
-            if (tile.type === 'water') {
-                dummy.scale.set(0, 0, 0); // невидим
+            if (tile.terrain === 'water') {
+                dummy.scale.set(0, 0, 0);
             } else {
-                dummy.scale.set(1, height, 1); // масштаб по Y = высота
+                dummy.scale.set(1, height, 1);
             }
             dummy.updateMatrix();
-            groundInstances.setMatrixAt(index, dummy.matrix);
+            groundInstances.setMatrixAt(groundIdx, dummy.matrix);
+            groundIdx++;
 
-            // Цвет для земли
-            const color = new THREE.Color(tile.color);
+            // Цвет земли
+            const color = new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b);
             groundInstances.setColorAt(index, color);
 
-            // Вода (плоскость)
-            if (tile.type === 'water') {
+            // ---- Вода ----
+            dummy.rotation.set(0, 0, 0);
+            dummy.position.set(worldX, height / 2, worldZ);
+            if (tile.terrain === 'water') {
                 dummy.scale.set(1, 1, 1);
             } else {
                 dummy.scale.set(0, 0, 0);
             }
-            dummy.position.set(worldX, height / 2, worldZ);
             dummy.updateMatrix();
-            waterInstances.setMatrixAt(index, dummy.matrix);
+            waterInstances.setMatrixAt(waterIdx++, dummy.matrix);
 
-            // Объекты (лес, дом)
-            if (tile.type === 'forest' || tile.type === 'house') {
-                dummy.position.set(worldX, height + 0.5, worldZ);
-                dummy.scale.set(tile.type === 'forest' ? 0.3 : 0.8, 1, tile.type === 'forest' ? 0.3 : 0.8);
-                dummy.updateMatrix();
-                objectInstances.setMatrixAt(index, dummy.matrix);
-            } else {
-                dummy.scale.set(0, 0, 0);
-                dummy.updateMatrix();
-                objectInstances.setMatrixAt(index, dummy.matrix);
+            // ---- Объекты ----
+            if (tile.objects) {
+                tile.objects.forEach(obj => {
+                    dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
+                    dummy.position.set(
+                        worldX + (obj.x || 0),
+                        height + getObjectHeightOffset(obj.type),
+                        worldZ + (obj.z || 0)
+                    );
+                    dummy.scale.set(obj.scale || 1, 1, obj.scale || 1);
+                    dummy.updateMatrix();
+
+                    const objColor = new THREE.Color(obj.color || getDefaultColorForType(obj.type));
+
+                    if (obj.type === 'tree' && treeInstances) {
+                        treeInstances.setMatrixAt(treeIdx, dummy.matrix);
+                        treeInstances.setColorAt(treeIdx, objColor);
+                        treeIdx++;
+                    } else if (obj.type === 'house' && houseInstances) {
+                        houseInstances.setMatrixAt(houseIdx, dummy.matrix);
+                        houseInstances.setColorAt(houseIdx, objColor);
+                        houseIdx++;
+                    } else if (obj.type === 'fence' && fenceInstances) {
+                        fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
+                        fenceInstances.setColorAt(fenceIdx, objColor);
+                        fenceIdx++;
+                    } else if (obj.type === 'anomaly' && anomalyInstances) {
+                        anomalyInstances.setMatrixAt(anomalyIdx, dummy.matrix);
+                        anomalyInstances.setColorAt(anomalyIdx, objColor);
+                        anomalyIdx++;
+                    }
+                });
             }
         }
     }
 
+    // Обновление матриц и цветов
     groundInstances.instanceMatrix.needsUpdate = true;
     groundInstances.instanceColor.needsUpdate = true;
     waterInstances.instanceMatrix.needsUpdate = true;
-    objectInstances.instanceMatrix.needsUpdate = true;
 
+    if (treeInstances) {
+        treeInstances.instanceMatrix.needsUpdate = true;
+        treeInstances.instanceColor.needsUpdate = true;
+    }
+    if (houseInstances) {
+        houseInstances.instanceMatrix.needsUpdate = true;
+        houseInstances.instanceColor.needsUpdate = true;
+    }
+    if (fenceInstances) {
+        fenceInstances.instanceMatrix.needsUpdate = true;
+        fenceInstances.instanceColor.needsUpdate = true;
+    }
+    if (anomalyInstances) {
+        anomalyInstances.instanceMatrix.needsUpdate = true;
+        anomalyInstances.instanceColor.needsUpdate = true;
+    }
+
+    // Добавление в сцену
     scene.add(groundInstances);
     scene.add(waterInstances);
-    scene.add(objectInstances);
+    if (treeInstances) scene.add(treeInstances);
+    if (houseInstances) scene.add(houseInstances);
+    if (fenceInstances) scene.add(fenceInstances);
+    if (anomalyInstances) scene.add(anomalyInstances);
 
+    // Bounding box для рейкаста
     const box = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ));
     chunkBounds.push({ box, mesh: groundInstances, key });
+    if (waterInstances) chunkBounds.push({ box, mesh: waterInstances, key });
+    if (treeInstances) chunkBounds.push({ box, mesh: treeInstances, key });
+    if (houseInstances) chunkBounds.push({ box, mesh: houseInstances, key });
+    if (fenceInstances) chunkBounds.push({ box, mesh: fenceInstances, key });
+    if (anomalyInstances) chunkBounds.push({ box, mesh: anomalyInstances, key });
 
+    // Сохраняем в карту
     chunksMap.set(key, {
         ground: groundInstances,
         water: waterInstances,
-        objects: objectInstances,
+        trees: treeInstances,
+        houses: houseInstances,
+        fences: fenceInstances,
+        anomalies: anomalyInstances,
         tilesData: tilesData,
         chunkX: cx,
         chunkY: cy
@@ -179,14 +321,20 @@ export function removeChunk(cx, cy) {
 
     scene.remove(entry.ground);
     scene.remove(entry.water);
-    scene.remove(entry.objects);
+    if (entry.trees) scene.remove(entry.trees);
+    if (entry.houses) scene.remove(entry.houses);
+    if (entry.fences) scene.remove(entry.fences);
+    if (entry.anomalies) scene.remove(entry.anomalies);
 
+    // Удаляем только уникальные для чанка ресурсы (земля и вода)
     entry.ground.geometry.dispose();
     entry.ground.material.dispose();
     entry.water.geometry.dispose();
     entry.water.material.dispose();
-    entry.objects.geometry.dispose();
-    entry.objects.material.dispose();
+
+    // Для общих объектов не вызываем dispose, так как они используются другими чанками
+    // if (entry.trees) { entry.trees.geometry.dispose(); entry.trees.material.dispose(); }
+    // и т.д.
 
     chunksMap.delete(key);
 }
@@ -230,7 +378,9 @@ function onMouseMove(event) {
         if (instanceId !== undefined) {
             let chunkEntry = null;
             for (let entry of chunksMap.values()) {
-                if (entry.ground === mesh || entry.water === mesh || entry.objects === mesh) {
+                if (entry.ground === mesh || entry.water === mesh ||
+                    entry.trees === mesh || entry.houses === mesh ||
+                    entry.fences === mesh || entry.anomalies === mesh) {
                     chunkEntry = entry;
                     break;
                 }
@@ -253,9 +403,9 @@ function onMouseMove(event) {
                 if (tileInfoDiv && tileInfoContent) {
                     tileInfoContent.innerHTML = `
                         <b>Тайл (${chunkEntry.chunkX * CHUNK_SIZE + tileX}, ${chunkEntry.chunkY * CHUNK_SIZE + tileY})</b><br>
-                        Тип: ${tileData.type}<br>
-                        Цвет: ${tileData.color}<br>
-                        Высота: ${tileData.height}
+                        Ландшафт: ${tileData.terrain}<br>
+                        Высота: ${tileData.height}<br>
+                        Объектов: ${tileData.objects ? tileData.objects.length : 0}
                     `;
                     tileInfoDiv.style.display = 'block';
                 }
@@ -281,6 +431,19 @@ window.addEventListener('click', (event) => {
     }
 });
 
+window.addEventListener('dblclick', (event) => {
+    if (event.target.closest('.ui-overlay')) return;
+    if (editMode && hoveredTile && window.tileClickCallback) {
+        window.tileClickCallback({
+            chunkX: hoveredTile.chunk.chunkX,
+            chunkY: hoveredTile.chunk.chunkY,
+            tileX: hoveredTile.tileX,
+            tileY: hoveredTile.tileY,
+            tileData: hoveredTile.tileData
+        }, event, true);
+    }
+});
+
 function animate() {
     requestAnimationFrame(animate);
     controls.update();
@@ -293,6 +456,10 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+export function getHoveredTile() {
+    return hoveredTile;
+}
 
 // Заглушки для маркеров
 export function addMarker(marker) { console.warn('addMarker not implemented'); }
