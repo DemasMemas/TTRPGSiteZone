@@ -553,3 +553,18 @@ body {
     padding: 4px 10px;
     margin-left: 5px;
 }
+
+input[type=range] {
+    background: rgba(255,255,255,0.2);
+    border-radius: 10px;
+    height: 6px;
+    -webkit-appearance: none;
+}
+input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #4a6fa5;
+    cursor: pointer;
+}

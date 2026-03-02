@@ -11,7 +11,7 @@ const chunkBounds = [];
 // --- Сцена ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111122);
-scene.fog = new THREE.Fog(0x111122, 500, 1500); // для сглаживания дальних планов
+scene.fog = new THREE.Fog(0x111122, 500, 1500);
 
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 5000);
 camera.position.set(256, 300, 256);
@@ -29,9 +29,10 @@ controls.dampingFactor = 0.05;
 controls.maxPolarAngle = Math.PI / 2;
 controls.target.set(256, 0, 256);
 
-const ambientLight = new THREE.AmbientLight(0x404060);
+// --- Усиленное освещение ---
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.8); // яркий белый свет
 scene.add(ambientLight);
-const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
 directionalLight.position.set(5, 10, 7);
 directionalLight.castShadow = false;
 scene.add(directionalLight);
@@ -41,6 +42,8 @@ const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 let hoveredTile = null;
 let editMode = false;
+let currentBrushRadius = 0;
+
 let lastRaycast = 0;
 const RAYCAST_INTERVAL = 10;
 
@@ -70,12 +73,16 @@ export function addChunk(cx, cy, tilesData) {
     const objectGeo = new THREE.BoxGeometry(0.5, 1, 0.5);
 
     // Материалы
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0x7cb342 }); // зелёный
+    const groundMat = new THREE.MeshStandardMaterial({ vertexColors: true });
     const waterMat = new THREE.MeshStandardMaterial({ color: 0x1E90FF, transparent: true, opacity: 0.8 });
     const objectMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
 
     // Инстанс-меши
     const groundInstances = new THREE.InstancedMesh(planeGeo, groundMat, totalTiles);
+    groundInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalTiles * 3), 3);
+    // Явно связываем атрибут цвета с геометрией
+    groundInstances.geometry.setAttribute('color', groundInstances.instanceColor);
+
     const waterInstances = new THREE.InstancedMesh(planeGeo, waterMat, totalTiles);
     const objectInstances = new THREE.InstancedMesh(objectGeo, objectMat, totalTiles);
 
@@ -84,68 +91,82 @@ export function addChunk(cx, cy, tilesData) {
     objectInstances.castShadow = true; objectInstances.receiveShadow = true;
 
     const dummy = new THREE.Object3D();
-    let groundIndex = 0, waterIndex = 0, objectIndex = 0;
-
     let minX = Infinity, maxX = -Infinity, minY = 0, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
 
+    // Проходим по всем тайлам
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
             const tile = tilesData[y][x];
             const worldX = cx * size + x + 0.5;
             const worldZ = cy * size + y + 0.5;
             const height = tile.height || 1.0;
+            const index = y * size + x;
 
-            // Обновляем границы
+            // Обновляем границы чанка
             minX = Math.min(minX, worldX - 0.5);
             maxX = Math.max(maxX, worldX + 0.5);
             maxY = Math.max(maxY, height + (tile.type === 'forest' || tile.type === 'house' ? 1.0 : 0));
             minZ = Math.min(minZ, worldZ - 0.5);
             maxZ = Math.max(maxZ, worldZ + 0.5);
 
-            // Всегда добавляем матрицу для земли и воды, даже если тип не совпадает (с масштабом 0)
-            // Это сохраняет соответствие instanceId → тайл для рейкаста
+            // Земля (для всех типов, кроме воды, ставим масштаб 1, для воды - 0)
             dummy.position.set(worldX, height / 2, worldZ);
-            dummy.scale.set(tile.type === 'water' ? 0 : 1, 1, tile.type === 'water' ? 0 : 1);
+            if (tile.type === 'water') {
+                dummy.scale.set(0, 1, 0);
+            } else {
+                dummy.scale.set(1, 1, 1);
+            }
             dummy.updateMatrix();
-            groundInstances.setMatrixAt(groundIndex++, dummy.matrix);
+            groundInstances.setMatrixAt(index, dummy.matrix);
 
-            dummy.scale.set(tile.type === 'water' ? 1 : 0, 1, tile.type === 'water' ? 1 : 0);
+            // Устанавливаем цвет для земли
+            const color = new THREE.Color(tile.color);
+            groundInstances.setColorAt(index, color);
+
+            // Вода
+            if (tile.type === 'water') {
+                dummy.scale.set(1, 1, 1);
+            } else {
+                dummy.scale.set(0, 1, 0);
+            }
             dummy.updateMatrix();
-            waterInstances.setMatrixAt(waterIndex++, dummy.matrix);
+            waterInstances.setMatrixAt(index, dummy.matrix);
 
             // Объекты
             if (tile.type === 'forest' || tile.type === 'house') {
                 dummy.position.set(worldX, height + 0.5, worldZ);
                 dummy.scale.set(tile.type === 'forest' ? 0.3 : 0.8, 1, tile.type === 'forest' ? 0.3 : 0.8);
                 dummy.updateMatrix();
-                objectInstances.setMatrixAt(objectIndex++, dummy.matrix);
+                objectInstances.setMatrixAt(index, dummy.matrix);
+            } else {
+                // Для не-объектов ставим масштаб 0
+                dummy.scale.set(0, 0, 0);
+                dummy.updateMatrix();
+                objectInstances.setMatrixAt(index, dummy.matrix);
             }
         }
     }
 
-    // Обновляем матрицы
+    // Обновляем матрицы и цвета
     groundInstances.instanceMatrix.needsUpdate = true;
+    groundInstances.instanceColor.needsUpdate = true;
     waterInstances.instanceMatrix.needsUpdate = true;
-    if (objectIndex > 0) objectInstances.instanceMatrix.needsUpdate = true;
+    objectInstances.instanceMatrix.needsUpdate = true;
 
     // Добавляем в сцену
     scene.add(groundInstances);
     scene.add(waterInstances);
-    if (objectIndex > 0) scene.add(objectInstances);
+    scene.add(objectInstances);
 
-    // Bounding box для рейкаста (используем любой меш, главное чтобы box был общим)
+    // Bounding box для рейкаста
     const box = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ));
     chunkBounds.push({ box, mesh: groundInstances, key });
-    chunkBounds.push({ box, mesh: waterInstances, key });
-    if (objectInstances) {
-        chunkBounds.push({ box, mesh: objectInstances, key });
-    }
 
     // Сохраняем в карту
     chunksMap.set(key, {
         ground: groundInstances,
         water: waterInstances,
-        objects: objectIndex > 0 ? objectInstances : null,
+        objects: objectInstances,
         tilesData: tilesData,
         chunkX: cx,
         chunkY: cy
@@ -158,26 +179,19 @@ export function removeChunk(cx, cy) {
     if (!entry) return;
 
     for (let i = chunkBounds.length - 1; i >= 0; i--) {
-        if (chunkBounds[i].key === key) {
-            chunkBounds.splice(i, 1);
-        }
+        if (chunkBounds[i].key === key) chunkBounds.splice(i, 1);
     }
-
-    const index = chunkBounds.findIndex(e => e.key === key);
-    if (index !== -1) chunkBounds.splice(index, 1);
 
     scene.remove(entry.ground);
     scene.remove(entry.water);
-    if (entry.objects) scene.remove(entry.objects);
+    scene.remove(entry.objects);
 
     entry.ground.geometry.dispose();
     entry.ground.material.dispose();
     entry.water.geometry.dispose();
     entry.water.material.dispose();
-    if (entry.objects) {
-        entry.objects.geometry.dispose();
-        entry.objects.material.dispose();
-    }
+    entry.objects.geometry.dispose();
+    entry.objects.material.dispose();
 
     chunksMap.delete(key);
 }
@@ -190,6 +204,11 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     Object.assign(tile, updates);
     removeChunk(chunkX, chunkY);
     addChunk(chunkX, chunkY, entry.tilesData);
+}
+
+// --- Управление радиусом кисти ---
+export function setBrushRadius(radius) {
+    currentBrushRadius = radius;
 }
 
 // --- Обработка наведения ---
@@ -232,6 +251,10 @@ function onMouseMove(event) {
                 const worldX = chunkEntry.chunkX * CHUNK_SIZE + tileX + 0.5;
                 const worldZ = chunkEntry.chunkY * CHUNK_SIZE + tileY + 0.5;
                 const height = tileData.height || 1.0;
+
+                // Масштабируем подсветку под радиус кисти
+                const areaSize = 2 * currentBrushRadius + 1;
+                highlightBox.scale.set(areaSize, 0.1, areaSize);
                 highlightBox.position.set(worldX, height + 0.1, worldZ);
                 highlightBox.visible = true;
 
@@ -262,11 +285,10 @@ window.addEventListener('click', (event) => {
             tileX: hoveredTile.tileX,
             tileY: hoveredTile.tileY,
             tileData: hoveredTile.tileData
-        });
+        }, event);
     }
 });
 
-// --- Анимация ---
 function animate() {
     requestAnimationFrame(animate);
     controls.update();
@@ -280,7 +302,7 @@ window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// --- Заглушки для маркеров ---
+// Заглушки для маркеров
 export function addMarker(marker) { console.warn('addMarker not implemented'); }
 export function moveMarker(markerId, x, y) { console.warn('moveMarker not implemented'); }
 export function removeMarker(markerId) { console.warn('removeMarker not implemented'); }
