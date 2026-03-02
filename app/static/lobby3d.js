@@ -7,6 +7,7 @@ export const chunksMap = new Map();
 const MIN_CHUNK = 0;
 const MAX_CHUNK = 15;
 const chunkBounds = [];
+const ANOMALY_TYPES = ['electric', 'fire', 'acid', 'void'];
 
 // Цвета ландшафта
 const terrainColors = {
@@ -17,17 +18,15 @@ const terrainColors = {
     water: 0x1E90FF
 };
 
-// Геометрия объектов
+// Геометрия объектов (для инстансинга)
 const treeGeo = new THREE.ConeGeometry(0.3, 1, 8);
 const houseGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
 const fenceGeo = new THREE.BoxGeometry(0.2, 0.5, 0.8);
-const anomalyGeo = new THREE.SphereGeometry(0.3, 16, 16);
 
-// Материалы с поддержкой вершинных цветов
+// Материалы для инстанс-мешей
 const treeMat = new THREE.MeshStandardMaterial();
 const houseMat = new THREE.MeshStandardMaterial();
 const fenceMat = new THREE.MeshStandardMaterial();
-const anomalyMat = new THREE.MeshStandardMaterial({ emissive: 0x333333 });
 
 // --- Сцена ---
 const scene = new THREE.Scene();
@@ -79,12 +78,21 @@ const tileInfoDiv = document.getElementById('tile-info');
 const tileInfoContent = document.getElementById('tile-info-content');
 
 // --- Вспомогательные функции ---
-function getObjectHeightOffset(type) {
+export function getObjectHeightOffset(type, anomalyType) {
+    if (type === 'anomaly') {
+        switch(anomalyType) {
+            case 'acid': return 0.01;
+            case 'fire': return 0.2;
+            case 'electric': return 0.3;
+            case 'void': return 0.3;
+            default: return 0.2;
+        }
+    }
+    // для обычных объектов
     switch(type) {
         case 'tree': return 0.5;
         case 'house': return 0.3;
         case 'fence': return 0.25;
-        case 'anomaly': return 0.3;
         default: return 0.3;
     }
 }
@@ -97,6 +105,300 @@ function getDefaultColorForType(type) {
         case 'anomaly': return '#00FFFF';
         default: return '#ffffff';
     }
+}
+
+// --- Текстуры для аномалий ---
+function createSparkTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 8;
+    canvas.height = 8;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.beginPath();
+    ctx.arc(4, 4, 2, 0, Math.PI * 2);
+    ctx.fill();
+    return new THREE.CanvasTexture(canvas);
+}
+
+function createFireTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext('2d');
+    const gradient = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.4, 'rgba(255,200,0,0.8)');
+    gradient.addColorStop(0.8, 'rgba(255,0,0,0.3)');
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 16, 16);
+    return new THREE.CanvasTexture(canvas);
+}
+
+function createNoiseTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    const imageData = ctx.createImageData(canvas.width, canvas.height);
+    for (let i = 0; i < imageData.data.length; i += 4) {
+        const val = Math.random() * 255;
+        imageData.data[i] = val;
+        imageData.data[i+1] = val;
+        imageData.data[i+2] = val;
+        imageData.data[i+3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return new THREE.CanvasTexture(canvas);
+}
+
+// --- Типы аномалий ---
+function createElectricAnomaly(color) {
+    const group = new THREE.Group();
+    const col = new THREE.Color(color);
+
+    // Ядро
+    const coreGeo = new THREE.SphereGeometry(0.2, 8);
+    const coreMat = new THREE.MeshStandardMaterial({
+        color: col,
+        emissive: col,
+        transparent: true,
+        opacity: 0.7
+    });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    group.add(core);
+
+    // Искры-частицы
+    const particleCount = 15;
+    const positions = new Float32Array(particleCount * 3);
+    const colors = new Float32Array(particleCount * 3);
+    for (let i = 0; i < particleCount; i++) {
+        const r = 0.3 + Math.random() * 0.3;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.random() * Math.PI * 2;
+        positions[i*3] = Math.sin(theta) * Math.cos(phi) * r;
+        positions[i*3+1] = Math.sin(theta) * Math.sin(phi) * r;
+        positions[i*3+2] = Math.cos(theta) * r;
+
+        const c = col.clone().lerp(new THREE.Color(0xffffff), Math.random() * 0.5);
+        colors[i*3] = c.r;
+        colors[i*3+1] = c.g;
+        colors[i*3+2] = c.b;
+    }
+    const particleGeo = new THREE.BufferGeometry();
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    particleGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const particleMat = new THREE.PointsMaterial({
+        size: 0.05,
+        vertexColors: true,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        map: createSparkTexture()
+    });
+    const particles = new THREE.Points(particleGeo, particleMat);
+    group.add(particles);
+
+    // Молнии
+    const lightningCount = 3;
+    for (let j = 0; j < lightningCount; j++) {
+        const points = [];
+        const start = new THREE.Vector3(0, 0, 0);
+        const end = new THREE.Vector3(
+            (Math.random() - 0.5) * 0.6,
+            (Math.random() - 0.5) * 0.6,
+            (Math.random() - 0.5) * 0.6
+        ).normalize().multiplyScalar(0.5);
+        const segments = 4;
+        points.push(start);
+        for (let i = 1; i < segments; i++) {
+            const t = i / segments;
+            const p = start.clone().lerp(end, t);
+            p.x += (Math.random() - 0.5) * 0.1;
+            p.y += (Math.random() - 0.5) * 0.1;
+            p.z += (Math.random() - 0.5) * 0.1;
+            points.push(p);
+        }
+        points.push(end);
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+        const line = new THREE.Line(lineGeo, lineMat);
+        group.add(line);
+    }
+
+    return group;
+}
+
+function createFireAnomaly(color) {
+    const group = new THREE.Group();
+
+    // Ядро (огненное)
+    const coreGeo = new THREE.SphereGeometry(0.2, 6);
+    const coreMat = new THREE.MeshStandardMaterial({
+        color: 0xff5500,
+        emissive: 0xff2200,
+        transparent: true,
+        opacity: 0.8
+    });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    group.add(core);
+
+    // Частицы огня (поднимающиеся)
+    const particleCount = 20;
+    const positions = new Float32Array(particleCount * 3);
+    for (let i = 0; i < particleCount; i++) {
+        const r = 0.2 + Math.random() * 0.3;
+        const angle = Math.random() * Math.PI * 2;
+        const height = Math.random() * 0.8;
+        positions[i*3] = Math.cos(angle) * r;
+        positions[i*3+1] = height;
+        positions[i*3+2] = Math.sin(angle) * r;
+    }
+    const particleGeo = new THREE.BufferGeometry();
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const particleMat = new THREE.PointsMaterial({
+        size: 0.1,
+        color: 0xffaa00,
+        blending: THREE.AdditiveBlending,
+        map: createFireTexture()
+    });
+    const particles = new THREE.Points(particleGeo, particleMat);
+    group.add(particles);
+
+    return group;
+}
+
+function createAcidAnomaly(color) {
+    const group = new THREE.Group();
+    const col = new THREE.Color(color);
+
+    // Лужа (диск)
+    const puddleGeo = new THREE.CircleGeometry(0.5, 8);
+    const puddleMat = new THREE.MeshStandardMaterial({
+        color: col,
+        emissive: col.clone().multiplyScalar(0.3),
+        transparent: true,
+        opacity: 0.6,
+        side: THREE.DoubleSide
+    });
+    const puddle = new THREE.Mesh(puddleGeo, puddleMat);
+    puddle.rotation.x = -Math.PI / 2;
+    puddle.position.y = 0.05;
+    group.add(puddle);
+
+    // Пузырьки
+    const bubbleCount = 5;
+    for (let i = 0; i < bubbleCount; i++) {
+        const bubbleGeo = new THREE.SphereGeometry(0.05, 4);
+        const bubbleMat = new THREE.MeshStandardMaterial({
+            color: 0x88ff88,
+            emissive: 0x224422,
+            transparent: true,
+            opacity: 0.5
+        });
+        const bubble = new THREE.Mesh(bubbleGeo, bubbleMat);
+        bubble.position.set(
+            (Math.random() - 0.5) * 0.4,
+            0.1 + Math.random() * 0.1,
+            (Math.random() - 0.5) * 0.4
+        );
+        group.add(bubble);
+    }
+
+    return group;
+}
+
+function createVoidAnomaly(color) {
+    const group = new THREE.Group();
+    const col = new THREE.Color(color);
+
+    // Сфера с шумом
+    const geo = new THREE.SphereGeometry(0.3, 16);
+    const noiseTex = createNoiseTexture();
+    const mat = new THREE.MeshPhongMaterial({
+        map: noiseTex,
+        color: col,
+        emissive: col.clone().multiplyScalar(0.5),
+        transparent: true,
+        opacity: 0.4,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide
+    });
+    const sphere = new THREE.Mesh(geo, mat);
+    group.add(sphere);
+
+    // Внутренние точки
+    const pointCount = 8;
+    const pointPositions = [];
+    for (let i = 0; i < pointCount; i++) {
+        const r = 0.2;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        pointPositions.push(
+            Math.sin(phi) * Math.cos(theta) * r,
+            Math.sin(phi) * Math.sin(theta) * r,
+            Math.cos(phi) * r
+        );
+    }
+    const pointGeo = new THREE.BufferGeometry();
+    pointGeo.setAttribute('position', new THREE.Float32BufferAttribute(pointPositions, 3));
+    const pointMat = new THREE.PointsMaterial({
+        size: 0.05,
+        color: 0xffffff,
+        blending: THREE.AdditiveBlending
+    });
+    const points = new THREE.Points(pointGeo, pointMat);
+    group.add(points);
+
+    return group;
+}
+
+// --- Создание LOD для аномалии ---
+function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff') {
+    const lod = new THREE.LOD();
+    const color = new THREE.Color(baseColor);
+
+    // Ближний уровень (полный)
+    let nearGroup;
+    switch(type) {
+        case 'fire':
+            nearGroup = createFireAnomaly(color);
+            break;
+        case 'electric':
+            nearGroup = createElectricAnomaly(color);
+            break;
+        case 'acid':
+            nearGroup = createAcidAnomaly(color);
+            break;
+        case 'void':
+        default:
+            nearGroup = createVoidAnomaly(color);
+            break;
+    }
+    nearGroup.position.set(0, 0, 0);
+    lod.addLevel(nearGroup, 0);
+
+    // Средний уровень (упрощённый: только ядро)
+    const midGroup = new THREE.Group();
+    const coreGeo = new THREE.SphereGeometry(0.25, 8);
+    const coreMat = new THREE.MeshStandardMaterial({
+        color: color,
+        emissive: color.clone().multiplyScalar(0.5),
+        transparent: true,
+        opacity: 0.8
+    });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    midGroup.add(core);
+    lod.addLevel(midGroup, 80);
+
+    // Дальний уровень (простой спрайт/сфера)
+    const farGeo = new THREE.SphereGeometry(0.2, 4);
+    const farMat = new THREE.MeshStandardMaterial({ color: color, emissive: color.clone().multiplyScalar(0.3) });
+    const farMesh = new THREE.Mesh(farGeo, farMat);
+    farMesh.position.set(0, 0, 0);
+    lod.addLevel(farMesh, 200);
+
+    lod.position.set(x, y, z);
+    return lod;
 }
 
 // --- Функции для чанков ---
@@ -128,8 +430,8 @@ export function addChunk(cx, cy, tilesData) {
     groundInstances.castShadow = false; groundInstances.receiveShadow = false;
     waterInstances.castShadow = false; waterInstances.receiveShadow = false;
 
-    // Подсчёт количества каждого типа объектов
-    let treeCount = 0, houseCount = 0, fenceCount = 0, anomalyCount = 0;
+    // Подсчёт количества каждого типа объектов (кроме аномалий)
+    let treeCount = 0, houseCount = 0, fenceCount = 0;
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
             const tile = tilesData[y][x];
@@ -138,13 +440,12 @@ export function addChunk(cx, cy, tilesData) {
                     if (obj.type === 'tree') treeCount++;
                     else if (obj.type === 'house') houseCount++;
                     else if (obj.type === 'fence') fenceCount++;
-                    else if (obj.type === 'anomaly') anomalyCount++;
                 });
             }
         }
     }
 
-    // Создание инстанс-мешей для объектов
+    // Создание инстанс-мешей для объектов (деревья, дома, заборы)
     const treeInstances = treeCount > 0 ? new THREE.InstancedMesh(treeGeo, treeMat, treeCount) : null;
     if (treeInstances) {
         treeInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(treeCount * 3), 3);
@@ -166,18 +467,12 @@ export function addChunk(cx, cy, tilesData) {
         fenceInstances.receiveShadow = false;
     }
 
-    const anomalyInstances = anomalyCount > 0 ? new THREE.InstancedMesh(anomalyGeo, anomalyMat, anomalyCount) : null;
-    if (anomalyInstances) {
-        anomalyInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(anomalyCount * 3), 3);
-        anomalyInstances.castShadow = true;
-        anomalyInstances.receiveShadow = false;
-    }
-
     const dummy = new THREE.Object3D();
     let minX = Infinity, maxX = -Infinity, minY = 0, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
 
     let groundIdx = 0, waterIdx = 0;
-    let treeIdx = 0, houseIdx = 0, fenceIdx = 0, anomalyIdx = 0;
+    let treeIdx = 0, houseIdx = 0, fenceIdx = 0;
+    const anomalyLODs = [];
 
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
@@ -224,33 +519,47 @@ export function addChunk(cx, cy, tilesData) {
             // ---- Объекты ----
             if (tile.objects) {
                 tile.objects.forEach(obj => {
-                    dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
-                    dummy.position.set(
-                        worldX + (obj.x || 0),
-                        height + getObjectHeightOffset(obj.type),
-                        worldZ + (obj.z || 0)
-                    );
-                    dummy.scale.set(obj.scale || 1, 1, obj.scale || 1);
-                    dummy.updateMatrix();
+                    if (obj.type === 'anomaly') {
+                        let anomalyType = obj.anomalyType;
+                        if (!anomalyType) {
+                            anomalyType = ANOMALY_TYPES[Math.floor(Math.random() * ANOMALY_TYPES.length)];
+                            obj.anomalyType = anomalyType;
+                        }
+                        const yOffset = getObjectHeightOffset('anomaly', anomalyType);
+                        const lod = createAnomalyLOD(
+                            worldX + (obj.x || 0),
+                            height + yOffset,
+                            worldZ + (obj.z || 0),
+                            anomalyType,
+                            obj.color || getDefaultColorForType('anomaly')
+                        );
+                        scene.add(lod);
+                        anomalyLODs.push(lod);
+                    } else {
+                        dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
+                        dummy.position.set(
+                            worldX + (obj.x || 0),
+                            height + getObjectHeightOffset(obj.type),
+                            worldZ + (obj.z || 0)
+                        );
+                        dummy.scale.set(obj.scale || 1, 1, obj.scale || 1);
+                        dummy.updateMatrix();
 
-                    const objColor = new THREE.Color(obj.color || getDefaultColorForType(obj.type));
+                        const objColor = new THREE.Color(obj.color || getDefaultColorForType(obj.type));
 
-                    if (obj.type === 'tree' && treeInstances) {
-                        treeInstances.setMatrixAt(treeIdx, dummy.matrix);
-                        treeInstances.setColorAt(treeIdx, objColor);
-                        treeIdx++;
-                    } else if (obj.type === 'house' && houseInstances) {
-                        houseInstances.setMatrixAt(houseIdx, dummy.matrix);
-                        houseInstances.setColorAt(houseIdx, objColor);
-                        houseIdx++;
-                    } else if (obj.type === 'fence' && fenceInstances) {
-                        fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
-                        fenceInstances.setColorAt(fenceIdx, objColor);
-                        fenceIdx++;
-                    } else if (obj.type === 'anomaly' && anomalyInstances) {
-                        anomalyInstances.setMatrixAt(anomalyIdx, dummy.matrix);
-                        anomalyInstances.setColorAt(anomalyIdx, objColor);
-                        anomalyIdx++;
+                        if (obj.type === 'tree' && treeInstances) {
+                            treeInstances.setMatrixAt(treeIdx, dummy.matrix);
+                            treeInstances.setColorAt(treeIdx, objColor);
+                            treeIdx++;
+                        } else if (obj.type === 'house' && houseInstances) {
+                            houseInstances.setMatrixAt(houseIdx, dummy.matrix);
+                            houseInstances.setColorAt(houseIdx, objColor);
+                            houseIdx++;
+                        } else if (obj.type === 'fence' && fenceInstances) {
+                            fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
+                            fenceInstances.setColorAt(fenceIdx, objColor);
+                            fenceIdx++;
+                        }
                     }
                 });
             }
@@ -274,10 +583,6 @@ export function addChunk(cx, cy, tilesData) {
         fenceInstances.instanceMatrix.needsUpdate = true;
         fenceInstances.instanceColor.needsUpdate = true;
     }
-    if (anomalyInstances) {
-        anomalyInstances.instanceMatrix.needsUpdate = true;
-        anomalyInstances.instanceColor.needsUpdate = true;
-    }
 
     // Добавление в сцену
     scene.add(groundInstances);
@@ -285,16 +590,14 @@ export function addChunk(cx, cy, tilesData) {
     if (treeInstances) scene.add(treeInstances);
     if (houseInstances) scene.add(houseInstances);
     if (fenceInstances) scene.add(fenceInstances);
-    if (anomalyInstances) scene.add(anomalyInstances);
 
-    // Bounding box для рейкаста
+    // Bounding box для рейкаста и видимости
     const box = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ));
     chunkBounds.push({ box, mesh: groundInstances, key });
     if (waterInstances) chunkBounds.push({ box, mesh: waterInstances, key });
     if (treeInstances) chunkBounds.push({ box, mesh: treeInstances, key });
     if (houseInstances) chunkBounds.push({ box, mesh: houseInstances, key });
     if (fenceInstances) chunkBounds.push({ box, mesh: fenceInstances, key });
-    if (anomalyInstances) chunkBounds.push({ box, mesh: anomalyInstances, key });
 
     // Сохраняем в карту
     chunksMap.set(key, {
@@ -303,10 +606,11 @@ export function addChunk(cx, cy, tilesData) {
         trees: treeInstances,
         houses: houseInstances,
         fences: fenceInstances,
-        anomalies: anomalyInstances,
+        anomalyLODs: anomalyLODs,
         tilesData: tilesData,
         chunkX: cx,
-        chunkY: cy
+        chunkY: cy,
+        bounds: box.clone()
     });
 }
 
@@ -324,17 +628,15 @@ export function removeChunk(cx, cy) {
     if (entry.trees) scene.remove(entry.trees);
     if (entry.houses) scene.remove(entry.houses);
     if (entry.fences) scene.remove(entry.fences);
-    if (entry.anomalies) scene.remove(entry.anomalies);
 
-    // Удаляем только уникальные для чанка ресурсы (земля и вода)
+    if (entry.anomalyLODs) {
+        entry.anomalyLODs.forEach(lod => scene.remove(lod));
+    }
+
     entry.ground.geometry.dispose();
     entry.ground.material.dispose();
     entry.water.geometry.dispose();
     entry.water.material.dispose();
-
-    // Для общих объектов не вызываем dispose, так как они используются другими чанками
-    // if (entry.trees) { entry.trees.geometry.dispose(); entry.trees.material.dispose(); }
-    // и т.д.
 
     chunksMap.delete(key);
 }
@@ -351,6 +653,43 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
 
 export function setBrushRadius(radius) {
     currentBrushRadius = radius;
+}
+
+// --- Оптимизация видимости чанков на основе фрустума камеры + дальность ---
+const MAX_RENDER_DISTANCE = 800; // максимальная дистанция отрисовки
+
+function updateChunkVisibility() {
+    camera.updateMatrixWorld();
+    const frustum = new THREE.Frustum();
+    frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+
+    chunksMap.forEach((chunk) => {
+        if (!chunk.bounds) return;
+
+        // Проверка дистанции
+        const center = chunk.bounds.getCenter(new THREE.Vector3());
+        const dist = camera.position.distanceTo(center);
+        if (dist > MAX_RENDER_DISTANCE) {
+            // Слишком далеко – скрыть
+            setVisible(chunk, false);
+            return;
+        }
+
+        // Проверка пересечения с фрустумом
+        const visible = frustum.intersectsBox(chunk.bounds);
+        setVisible(chunk, visible);
+    });
+}
+
+function setVisible(chunk, visible) {
+    if (chunk.ground) chunk.ground.visible = visible;
+    if (chunk.water) chunk.water.visible = visible;
+    if (chunk.trees) chunk.trees.visible = visible;
+    if (chunk.houses) chunk.houses.visible = visible;
+    if (chunk.fences) chunk.fences.visible = visible;
+    if (chunk.anomalyLODs) {
+        chunk.anomalyLODs.forEach(lod => lod.visible = visible);
+    }
 }
 
 function onMouseMove(event) {
@@ -380,7 +719,7 @@ function onMouseMove(event) {
             for (let entry of chunksMap.values()) {
                 if (entry.ground === mesh || entry.water === mesh ||
                     entry.trees === mesh || entry.houses === mesh ||
-                    entry.fences === mesh || entry.anomalies === mesh) {
+                    entry.fences === mesh) {
                     chunkEntry = entry;
                     break;
                 }
@@ -447,6 +786,7 @@ window.addEventListener('dblclick', (event) => {
 function animate() {
     requestAnimationFrame(animate);
     controls.update();
+    updateChunkVisibility();
     renderer.render(scene, camera);
 }
 animate();
@@ -456,6 +796,21 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+const highlightObjectGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+const highlightObjectMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+const highlightObject = new THREE.Mesh(highlightObjectGeo, highlightObjectMat);
+scene.add(highlightObject);
+highlightObject.visible = false;
+
+export function showObjectHighlight(x, y, z) {
+    highlightObject.position.set(x, y, z);
+    highlightObject.visible = true;
+}
+
+export function hideObjectHighlight() {
+    highlightObject.visible = false;
+}
 
 export function getHoveredTile() {
     return hoveredTile;

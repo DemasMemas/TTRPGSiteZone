@@ -143,6 +143,7 @@
                 <span class="close" onclick="closeTileEditModal()">&times;</span>
                 <h3>Редактирование тайла</h3>
                 <div id="tile-edit-info"></div>
+                <div id="tile-objects-list" style="max-height: 150px; overflow-y: auto; margin: 10px 0; border-top: 1px solid #444; padding-top: 5px;"></div>
                 <div class="tile-edit-controls">
                     <label>Ландшафт:</label>
                     <select id="tile-edit-terrain">
@@ -165,7 +166,10 @@
                         <option value="tree">🌲 Дерево</option>
                         <option value="house">🏠 Дом</option>
                         <option value="fence">🚧 Забор</option>
-                        <option value="anomaly">✨ Аномалия</option>
+                        <option value="anomaly_electric">⚡ Электрическая аномалия</option>
+                        <option value="anomaly_fire">🔥 Огненная аномалия</option>
+                        <option value="anomaly_acid">🧪 Кислотная лужа</option>
+                        <option value="anomaly_void">🌀 Искажение</option>
                     </select>
                     <label>Цвет:</label>
                     <input type="color" id="object-color" value="#2d5a27">

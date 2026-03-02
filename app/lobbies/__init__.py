@@ -705,10 +705,12 @@ def generate_chunk_data(lobby_id, chunk_x, chunk_y, map_type):
                     'color': color
                 })
             if terrain != 'water' and random.random() < 0.01:
-                # Аномалия (светящаяся сфера)
+                anomaly_types = ['electric', 'fire', 'acid', 'void']
+                chosen_type = random.choice(anomaly_types)
                 color = random.choice(['#00FFFF', '#FF69B4', '#FFD700'])
                 objects.append({
                     'type': 'anomaly',
+                    'anomalyType': chosen_type,
                     'x': round(random.uniform(-0.4, 0.4), 2),
                     'z': round(random.uniform(-0.4, 0.4), 2),
                     'scale': round(random.uniform(0.5, 1.0), 2),

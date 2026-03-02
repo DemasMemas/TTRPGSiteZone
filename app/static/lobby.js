@@ -3,7 +3,8 @@ import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/cont
 import {
     addMarker, moveMarker, removeMarker, loadMarkers,
     addChunk, removeChunk, setTileClickCallback, updateTileInChunk,
-    setEditMode, setBrushRadius, getHoveredTile, chunksMap
+    setEditMode, setBrushRadius, getHoveredTile, chunksMap,
+    getObjectHeightOffset, showObjectHighlight, hideObjectHighlight
 } from './lobby3d.js';
 
 const CHUNK_SIZE = 32;
@@ -18,6 +19,7 @@ let brushRadius = 0;
 let tileHeight = 1.0;
 
 const gmControls = document.getElementById('gm-only-controls');
+const ANOMALY_TYPES = ['electric', 'fire', 'acid', 'void'];
 
 const socket = io();
 let currentLobbyId = null;
@@ -54,7 +56,6 @@ socket.on('authenticated', (data) => {
     addMessage('system', `Вы вошли как ${data.username}`);
     loadLobbyInfo();
     loadLobbyCharacters();
-
     loadAllChunks();
 });
 
@@ -143,16 +144,12 @@ async function loadLobbyInfo() {
                 return;
             }
             if (isDoubleClick) {
-                // двойной клик – открыть окно
                 openTileEditModal(tile);
             } else if (event.altKey) {
-                // Alt+клик – применить кисть ландшафта
                 applyBrush(tile, { terrain: currentTileType }, brushRadius);
             } else if (event.shiftKey) {
-                // Shift+клик – применить кисть высоты
                 applyBrush(tile, { height: tileHeight }, brushRadius);
             }
-            // иначе обычный клик – ничего не делаем, только подсветка
         });
 
         if (isGM) {
@@ -187,7 +184,7 @@ async function updateTile(chunkX, chunkY, tileX, tileY, updates, callback) {
         });
         if (response.ok) {
             updateTileInChunk(chunkX, chunkY, tileX, tileY, updates);
-            if (callback) callback(); // вызываем колбэк после успешного локального обновления
+            if (callback) callback();
         } else {
             const err = await response.json();
             alert(err.error || 'Ошибка обновления');
@@ -217,7 +214,6 @@ function applyBrush(centerTile, updates, radius) {
     }
 }
 
-// --- Участники ---
 function updateParticipantsList() {
     const onlineList = document.getElementById('online-participants');
     const offlineList = document.getElementById('offline-participants');
@@ -235,7 +231,6 @@ function updateParticipantsList() {
             const banBtn = document.createElement('button');
             banBtn.className = 'ban-btn';
             banBtn.innerHTML = '⛔';
-            banBtn.title = 'Заблокировать';
             banBtn.onclick = (e) => {
                 e.stopPropagation();
                 banUser(p.user_id);
@@ -272,7 +267,6 @@ async function banUser(userId) {
     }
 }
 
-// --- Чат ---
 function addMessage(username, text, timestamp) {
     const chat = document.getElementById('chat');
     if (!chat) return;
@@ -349,30 +343,6 @@ async function fetchChunk(cx, cy) {
     }
 }
 
-function generateDefaultChunkData(size) {
-    const data = [];
-    for (let y = 0; y < size; y++) {
-        const row = [];
-        for (let x = 0; x < size; x++) {
-            let type = 'grass';
-            // случайно расставляем лес и дома
-            if (Math.random() < 0.1) type = 'forest';
-            else if (Math.random() < 0.02) type = 'house';
-            // для воды можно проверить, например, края карты
-            if (x === 0 || y === 0 || x === size-1 || y === size-1) type = 'water';
-
-            const heightVar = Math.random() * 0.1 - 0.05;
-            row.push({
-                type: type,
-                color: type === 'grass' ? '#3a5f0b' : (type === 'water' ? '#1E90FF' : '#8B4513'),
-                height: 1.0 + heightVar
-            });
-        }
-        data.push(row);
-    }
-    return data;
-}
-
 // --- Управление персонажами ---
 async function loadLobbyCharacters() {
     try {
@@ -421,7 +391,6 @@ function displayLobbyCharacters(characters) {
             const visibilityBtn = document.createElement('button');
             visibilityBtn.className = 'btn btn-sm';
             visibilityBtn.textContent = '👁️';
-            visibilityBtn.title = 'Настроить видимость';
             visibilityBtn.onclick = (e) => {
                 e.stopPropagation();
                 openVisibilityModal(char.id, char.name, char.visible_to || []);
@@ -494,7 +463,7 @@ async function createCharacter(name, data) {
     }
 }
 
-// --- Модальные окна (видимость, настройки) ---
+// --- Модальные окна ---
 window.openVisibilityModal = (characterId, characterName, currentVisibleTo) => {
     currentVisibilityCharacterId = characterId;
     document.getElementById('visibility-character-name').textContent = `Персонаж: ${characterName}`;
@@ -658,7 +627,7 @@ document.getElementById('tile-height')?.addEventListener('input', (e) => {
 });
 
 window.addRandomObject = async function() {
-    const tileInfo = getHoveredTile(); // получаем текущий выделенный тайл
+    const tileInfo = getHoveredTile();
     if (!isGM || !tileInfo) {
         alert('Выберите тайл');
         return;
@@ -688,21 +657,13 @@ window.clearObjects = async function() {
 
 window.openTileEditModal = function(tile) {
     currentEditTile = tile;
-    const tileData = tile.tileData;
-    document.getElementById('tile-edit-info').innerHTML = `
-        <p>Координаты: (${tile.chunkX * CHUNK_SIZE + tile.tileX}, ${tile.chunkY * CHUNK_SIZE + tile.tileY})</p>
-        <p>Ландшафт: ${tileData.terrain}</p>
-        <p>Высота: ${tileData.height}</p>
-        <p>Объектов: ${tileData.objects ? tileData.objects.length : 0}</p>
-    `;
-    document.getElementById('tile-edit-terrain').value = tileData.terrain;
-    document.getElementById('tile-edit-height').value = tileData.height;
-    document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
+    updateTileEditModal();
     document.getElementById('tile-edit-modal').style.display = 'flex';
 };
 
 window.closeTileEditModal = function() {
     document.getElementById('tile-edit-modal').style.display = 'none';
+    hideObjectHighlight();
     currentEditTile = null;
 };
 
@@ -751,17 +712,31 @@ window.applyHeightChange = async function() {
 window.addObjectToTile = async function() {
     if (!currentEditTile) return;
     const tile = currentEditTile.tileData;
-    const type = document.getElementById('object-type-select').value;
+    const selectValue = document.getElementById('object-type-select').value;
     const color = document.getElementById('object-color').value;
 
-    const newObject = {
-        type: type,
-        x: Math.random() * 0.8 - 0.4,
-        z: Math.random() * 0.8 - 0.4,
-        scale: type === 'tree' ? 0.8 + Math.random() * 0.4 : 1.0,
-        rotation: Math.floor(Math.random() * 360),
-        color: color
-    };
+    let newObject;
+    const anomalyType = getAnomalyTypeFromSelect(selectValue);
+    if (anomalyType) {
+        newObject = {
+            type: 'anomaly',
+            anomalyType: anomalyType,
+            x: Math.random() * 0.8 - 0.4,
+            z: Math.random() * 0.8 - 0.4,
+            scale: 1.0,
+            rotation: Math.floor(Math.random() * 360),
+            color: color
+        };
+    } else {
+        newObject = {
+            type: selectValue,
+            x: Math.random() * 0.8 - 0.4,
+            z: Math.random() * 0.8 - 0.4,
+            scale: selectValue === 'tree' ? 0.8 + Math.random() * 0.4 : 1.0,
+            rotation: Math.floor(Math.random() * 360),
+            color: color
+        };
+    }
 
     const objects = tile.objects ? [...tile.objects, newObject] : [newObject];
     await updateTile(
@@ -802,32 +777,89 @@ window.clearObjectsFromTile = async function() {
     );
 };
 
-// Обработчик изменения ползунка высоты в модалке
-document.getElementById('tile-edit-height')?.addEventListener('input', (e) => {
-    document.getElementById('tile-edit-height-value').textContent = parseFloat(e.target.value).toFixed(1);
-});
+// --- Удаление конкретного объекта ---
+async function removeObjectFromTile(index) {
+    if (!currentEditTile) return;
+    const objects = currentEditTile.tileData.objects ? [...currentEditTile.tileData.objects] : [];
+    if (index < 0 || index >= objects.length) return;
+    objects.splice(index, 1);
+    await updateTile(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { objects: objects },
+        () => {
+            const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+            const chunkEntry = chunksMap.get(chunkKey);
+            if (chunkEntry) {
+                const newTileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+                currentEditTile.tileData = newTileData;
+                updateTileEditModal();
+            }
+        }
+    );
+}
+window.removeObjectFromTile = removeObjectFromTile;
 
+// --- Подсветка объекта при наведении в списке ---
+function highlightObject(index) {
+    if (!currentEditTile) return;
+    const tileData = currentEditTile.tileData;
+    const obj = tileData.objects[index];
+    if (!obj) return;
+
+    const worldX = currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX + 0.5 + (obj.x || 0);
+    const worldZ = currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY + 0.5 + (obj.z || 0);
+    const height = tileData.height || 1.0;
+    const yOffset = getObjectHeightOffset(obj.type, obj.anomalyType);
+    const worldY = height + yOffset;
+
+    showObjectHighlight(worldX, worldY, worldZ);
+}
+window.highlightObject = highlightObject;
+
+// --- Обновление модального окна ---
 function updateTileEditModal() {
     if (!currentEditTile) return;
     const tileData = currentEditTile.tileData;
-    let objectsHtml = '';
-    if (tileData.objects && tileData.objects.length > 0) {
-        objectsHtml = '<ul style="max-height:100px; overflow-y:auto;">';
-        tileData.objects.forEach((obj, idx) => {
-            objectsHtml += `<li>${obj.type} (${obj.color})</li>`;
-        });
-        objectsHtml += '</ul>';
-    } else {
-        objectsHtml = '<p>Нет объектов</p>';
-    }
 
-    document.getElementById('tile-edit-info').innerHTML = `
+    // Информация о тайле
+    let infoHtml = `
         <p>Координаты: (${currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX}, ${currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY})</p>
         <p>Ландшафт: ${tileData.terrain}</p>
         <p>Высота: ${tileData.height}</p>
         <p>Объектов: ${tileData.objects ? tileData.objects.length : 0}</p>
-        ${objectsHtml}
     `;
+    document.getElementById('tile-edit-info').innerHTML = infoHtml;
+
+    // Список объектов
+    const objectsListDiv = document.getElementById('tile-objects-list');
+    if (!objectsListDiv) return;
+
+    if (!tileData.objects || tileData.objects.length === 0) {
+        objectsListDiv.innerHTML = '<p>Нет объектов</p>';
+    } else {
+        let listHtml = '<ul style="list-style: none; padding: 0; margin: 0;">';
+        tileData.objects.forEach((obj, index) => {
+            let typeDisplay = obj.type;
+            if (obj.type === 'anomaly' && obj.anomalyType) {
+                typeDisplay = `аномалия (${obj.anomalyType})`;
+            }
+            listHtml += `
+                <li style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; padding: 3px; background: rgba(255,255,255,0.1); border-radius: 4px;"
+                    onmouseenter="highlightObject(${index})"
+                    onmouseleave="hideObjectHighlight()">
+                    <span>${typeDisplay} (${obj.color})</span>
+                    <button class="btn btn-sm btn-danger" onclick="removeObjectFromTile(${index})" style="padding: 2px 8px;">✕</button>
+                </li>
+            `;
+        });
+        listHtml += '</ul>';
+        objectsListDiv.innerHTML = listHtml;
+    }
+
+    // Обновляем поля редактирования
     document.getElementById('tile-edit-terrain').value = tileData.terrain;
     document.getElementById('tile-edit-height').value = tileData.height;
     document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
@@ -849,3 +881,18 @@ function getDefaultColorForType(type) {
         default: return '#ffffff';
     }
 }
+
+function getAnomalyTypeFromSelect(value) {
+    const map = {
+        'anomaly_electric': 'electric',
+        'anomaly_fire': 'fire',
+        'anomaly_acid': 'acid',
+        'anomaly_void': 'void'
+    };
+    return map[value] || null;
+}
+
+// Обработчики для ползунков
+document.getElementById('tile-edit-height')?.addEventListener('input', (e) => {
+    document.getElementById('tile-edit-height-value').textContent = parseFloat(e.target.value).toFixed(1);
+});
