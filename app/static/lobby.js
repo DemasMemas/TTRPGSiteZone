@@ -4,7 +4,8 @@ import {
     addMarker, moveMarker, removeMarker, loadMarkers,
     addChunk, removeChunk, setTileClickCallback, updateTileInChunk,
     setEditMode, setBrushRadius, getHoveredTile, chunksMap,
-    getObjectHeightOffset, showObjectHighlight, hideObjectHighlight
+    getObjectHeightOffset, showObjectHighlight, hideObjectHighlight,
+    getObjectDimensions
 } from './lobby3d.js';
 
 const CHUNK_SIZE = 32;
@@ -715,28 +716,36 @@ window.addObjectToTile = async function() {
     const selectValue = document.getElementById('object-type-select').value;
     const color = document.getElementById('object-color').value;
 
+    // Считываем значения из полей
+    const offsetX = parseFloat(document.getElementById('object-offset-x').value) || 0;
+    const offsetZ = parseFloat(document.getElementById('object-offset-z').value) || 0;
+    const scale = parseFloat(document.getElementById('object-scale').value) || 1.0;
+    const rotation = parseInt(document.getElementById('object-rotation').value) || 0;
+
     let newObject;
     const anomalyType = getAnomalyTypeFromSelect(selectValue);
     if (anomalyType) {
         newObject = {
             type: 'anomaly',
             anomalyType: anomalyType,
-            x: Math.random() * 0.8 - 0.4,
-            z: Math.random() * 0.8 - 0.4,
-            scale: 1.0,
-            rotation: Math.floor(Math.random() * 360),
+            x: offsetX,
+            z: offsetZ,
+            scale: scale,
+            rotation: rotation,
             color: color
         };
     } else {
         newObject = {
             type: selectValue,
-            x: Math.random() * 0.8 - 0.4,
-            z: Math.random() * 0.8 - 0.4,
-            scale: selectValue === 'tree' ? 0.8 + Math.random() * 0.4 : 1.0,
-            rotation: Math.floor(Math.random() * 360),
+            x: offsetX,
+            z: offsetZ,
+            scale: scale,
+            rotation: rotation,
             color: color
         };
     }
+
+    console.log('Adding object:', newObject);
 
     const objects = tile.objects ? [...tile.objects, newObject] : [newObject];
     await updateTile(
@@ -802,7 +811,6 @@ async function removeObjectFromTile(index) {
 }
 window.removeObjectFromTile = removeObjectFromTile;
 
-// --- Подсветка объекта при наведении в списке ---
 function highlightObject(index) {
     if (!currentEditTile) return;
     const tileData = currentEditTile.tileData;
@@ -812,16 +820,19 @@ function highlightObject(index) {
     const worldX = currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX + 0.5 + (obj.x || 0);
     const worldZ = currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY + 0.5 + (obj.z || 0);
     const height = tileData.height || 1.0;
-    const yOffset = getObjectHeightOffset(obj.type, obj.anomalyType);
-    const worldY = height + yOffset;
+    const yOffset = getObjectHeightOffset(obj.type, obj.anomalyType); // половина базовой высоты
+    const worldY = height + yOffset * (obj.scale || 1.0);
 
-    showObjectHighlight(worldX, worldY, worldZ);
+    const dimensions = getObjectDimensions(obj.type, obj.anomalyType, obj.scale || 1.0);
+
+    showObjectHighlight(worldX, worldY, worldZ, dimensions);
 }
 window.highlightObject = highlightObject;
 
 // --- Обновление модального окна ---
 function updateTileEditModal() {
     if (!currentEditTile) return;
+    hideObjectHighlight();
     const tileData = currentEditTile.tileData;
 
     // Информация о тайле
@@ -896,3 +907,19 @@ function getAnomalyTypeFromSelect(value) {
 document.getElementById('tile-edit-height')?.addEventListener('input', (e) => {
     document.getElementById('tile-edit-height-value').textContent = parseFloat(e.target.value).toFixed(1);
 });
+
+document.getElementById('object-offset-x')?.addEventListener('input', (e) => {
+    document.getElementById('object-offset-x-value').textContent = parseFloat(e.target.value).toFixed(2);
+});
+document.getElementById('object-offset-z')?.addEventListener('input', (e) => {
+    document.getElementById('object-offset-z-value').textContent = parseFloat(e.target.value).toFixed(2);
+});
+document.getElementById('object-scale')?.addEventListener('input', (e) => {
+    document.getElementById('object-scale-value').textContent = parseFloat(e.target.value).toFixed(2);
+});
+document.getElementById('object-rotation')?.addEventListener('input', (e) => {
+    document.getElementById('object-rotation-value').textContent = e.target.value + '°';
+});
+
+window.highlightObject = highlightObject;
+window.hideObjectHighlight = hideObjectHighlight;

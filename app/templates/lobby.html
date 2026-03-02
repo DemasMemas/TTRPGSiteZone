@@ -173,6 +173,25 @@
                     </select>
                     <label>Цвет:</label>
                     <input type="color" id="object-color" value="#2d5a27">
+
+                    <div style="display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 8px; margin-top: 10px; align-items: center;">
+                        <label>X:</label>
+                        <input type="range" id="object-offset-x" min="-0.5" max="0.5" step="0.01" value="0.0" style="width: 100%;">
+                        <span id="object-offset-x-value" style="text-align: right;">0.00</span>
+
+                        <label>Z:</label>
+                        <input type="range" id="object-offset-z" min="-0.5" max="0.5" step="0.01" value="0.0" style="width: 100%;">
+                        <span id="object-offset-z-value" style="text-align: right;">0.00</span>
+
+                        <label>Масштаб:</label>
+                        <input type="range" id="object-scale" min="0.2" max="2.0" step="0.05" value="1.0" style="width: 100%;">
+                        <span id="object-scale-value" style="text-align: right;">1.00</span>
+
+                        <label>Поворот:</label>
+                        <input type="range" id="object-rotation" min="0" max="359" step="1" value="0" style="width: 100%;">
+                        <span id="object-rotation-value" style="text-align: right;">0°</span>
+                    </div>
+
                     <button class="btn btn-primary" onclick="addObjectToTile()">➕ Добавить объект</button>
                     <br><br>
                     <button class="btn btn-danger" onclick="clearObjectsFromTile()">🗑️ Удалить все объекты</button>

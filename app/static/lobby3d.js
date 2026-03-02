@@ -77,24 +77,55 @@ highlightBox.visible = false;
 const tileInfoDiv = document.getElementById('tile-info');
 const tileInfoContent = document.getElementById('tile-info-content');
 
-// --- Вспомогательные функции ---
-export function getObjectHeightOffset(type, anomalyType) {
-    if (type === 'anomaly') {
+// --- Вспомогательные функции для определения базовых размеров ---
+function getBaseDimensions(type, anomalyType) {
+    const base = { width: 0.6, height: 0.6, depth: 0.6 }; // значения по умолчанию
+    if (type === 'tree') {
+        base.width = 0.6;  // диаметр
+        base.height = 1.0;  // высота конуса
+        base.depth = 0.6;
+    } else if (type === 'house') {
+        base.width = 0.6;
+        base.height = 0.6;
+        base.depth = 0.6;
+    } else if (type === 'fence') {
+        base.width = 0.2;
+        base.height = 0.5;
+        base.depth = 0.8;
+    } else if (type === 'anomaly') {
         switch(anomalyType) {
-            case 'acid': return 0.01;
-            case 'fire': return 0.2;
-            case 'electric': return 0.3;
-            case 'void': return 0.3;
-            default: return 0.2;
+            case 'acid':
+                base.width = 1.0;   // диаметр лужи
+                base.height = 0.1;   // толщина диска
+                base.depth = 1.0;
+                break;
+            case 'fire':
+            case 'electric':
+            case 'void':
+            default:
+                base.width = 0.6;    // диаметр сферы (радиус 0.3)
+                base.height = 0.6;
+                base.depth = 0.6;
+                break;
         }
     }
-    // для обычных объектов
-    switch(type) {
-        case 'tree': return 0.5;
-        case 'house': return 0.3;
-        case 'fence': return 0.25;
-        default: return 0.3;
-    }
+    return base;
+}
+
+// Возвращает половину базовой высоты (для позиционирования центра)
+function getBaseHalfHeight(type, anomalyType) {
+    const dims = getBaseDimensions(type, anomalyType);
+    return dims.height / 2;
+}
+
+// Экспортируем для использования в lobby.js
+export function getObjectHalfHeight(type, anomalyType) {
+    return getBaseHalfHeight(type, anomalyType);
+}
+
+// Для обратной совместимости
+export function getObjectHeightOffset(type, anomalyType) {
+    return getBaseHalfHeight(type, anomalyType);
 }
 
 function getDefaultColorForType(type) {
@@ -282,7 +313,7 @@ function createAcidAnomaly(color) {
     });
     const puddle = new THREE.Mesh(puddleGeo, puddleMat);
     puddle.rotation.x = -Math.PI / 2;
-    puddle.position.y = 0.05;
+    puddle.position.y = 0.05; // центр диска на высоте 0.05 (толщина 0.1, значит низ на 0)
     group.add(puddle);
 
     // Пузырьки
@@ -353,7 +384,7 @@ function createVoidAnomaly(color) {
 }
 
 // --- Создание LOD для аномалии ---
-function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff') {
+function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', scale = 1.0) {
     const lod = new THREE.LOD();
     const color = new THREE.Color(baseColor);
 
@@ -374,6 +405,7 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff') {
             nearGroup = createVoidAnomaly(color);
             break;
     }
+    nearGroup.scale.set(scale, scale, scale);
     nearGroup.position.set(0, 0, 0);
     lod.addLevel(nearGroup, 0);
 
@@ -387,13 +419,16 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff') {
         opacity: 0.8
     });
     const core = new THREE.Mesh(coreGeo, coreMat);
+    core.scale.set(scale, scale, scale);
     midGroup.add(core);
+    midGroup.position.set(0, 0, 0);
     lod.addLevel(midGroup, 80);
 
     // Дальний уровень (простой спрайт/сфера)
     const farGeo = new THREE.SphereGeometry(0.2, 4);
     const farMat = new THREE.MeshStandardMaterial({ color: color, emissive: color.clone().multiplyScalar(0.3) });
     const farMesh = new THREE.Mesh(farGeo, farMat);
+    farMesh.scale.set(scale, scale, scale);
     farMesh.position.set(0, 0, 0);
     lod.addLevel(farMesh, 200);
 
@@ -525,24 +560,28 @@ export function addChunk(cx, cy, tilesData) {
                             anomalyType = ANOMALY_TYPES[Math.floor(Math.random() * ANOMALY_TYPES.length)];
                             obj.anomalyType = anomalyType;
                         }
-                        const yOffset = getObjectHeightOffset('anomaly', anomalyType);
+                        const baseHalf = getBaseHalfHeight('anomaly', anomalyType);
+                        const yPos = height + baseHalf * (obj.scale || 1.0);
                         const lod = createAnomalyLOD(
                             worldX + (obj.x || 0),
-                            height + yOffset,
+                            yPos,
                             worldZ + (obj.z || 0),
                             anomalyType,
-                            obj.color || getDefaultColorForType('anomaly')
+                            obj.color || getDefaultColorForType('anomaly'),
+                            obj.scale || 1.0
                         );
                         scene.add(lod);
                         anomalyLODs.push(lod);
                     } else {
+                        const baseHalf = getBaseHalfHeight(obj.type);
+                        const yPos = height + baseHalf * (obj.scale || 1.0);
                         dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
                         dummy.position.set(
                             worldX + (obj.x || 0),
-                            height + getObjectHeightOffset(obj.type),
+                            yPos,
                             worldZ + (obj.z || 0)
                         );
-                        dummy.scale.set(obj.scale || 1, 1, obj.scale || 1);
+                        dummy.scale.set(obj.scale || 1, obj.scale || 1, obj.scale || 1);
                         dummy.updateMatrix();
 
                         const objColor = new THREE.Color(obj.color || getDefaultColorForType(obj.type));
@@ -797,19 +836,31 @@ window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-const highlightObjectGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
-const highlightObjectMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-const highlightObject = new THREE.Mesh(highlightObjectGeo, highlightObjectMat);
-scene.add(highlightObject);
-highlightObject.visible = false;
+// --- Функция для получения размеров объекта (для подсветки) ---
+export function getObjectDimensions(type, anomalyType, scale = 1.0) {
+    const base = getBaseDimensions(type, anomalyType);
+    return {
+        width: base.width * scale,
+        height: base.height * scale,
+        depth: base.depth * scale
+    };
+}
 
-export function showObjectHighlight(x, y, z) {
-    highlightObject.position.set(x, y, z);
-    highlightObject.visible = true;
+// --- Подсветка объекта (wireframe куб) ---
+const highlightWireframeMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.8 });
+const highlightWireframeGeometry = new THREE.BoxGeometry(1, 1, 1);
+const highlightWireframe = new THREE.Mesh(highlightWireframeGeometry, highlightWireframeMaterial);
+scene.add(highlightWireframe);
+highlightWireframe.visible = false;
+
+export function showObjectHighlight(x, y, z, dimensions) {
+    highlightWireframe.position.set(x, y, z);
+    highlightWireframe.scale.set(dimensions.width, dimensions.height, dimensions.depth);
+    highlightWireframe.visible = true;
 }
 
 export function hideObjectHighlight() {
-    highlightObject.visible = false;
+    highlightWireframe.visible = false;
 }
 
 export function getHoveredTile() {
