@@ -85,6 +85,6 @@ class MapChunk(db.Model):
     chunk_x = db.Column(db.Integer, primary_key=True)
     chunk_y = db.Column(db.Integer, primary_key=True)
     data = db.Column(db.JSON, nullable=False, default=list)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     lobby = db.relationship('Lobby', backref=db.backref('chunks', lazy='dynamic'))

@@ -1,3 +1,5 @@
+import copy
+
 from flask import Blueprint, request, jsonify, render_template
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db, socketio
@@ -551,7 +553,6 @@ def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
         return jsonify({'error': 'Lobby not found'}), 404
 
     if lobby.gm_id != user_id:
-        print(f"403: GM required. lobby.gm_id={lobby.gm_id}, user_id={user_id}")
         return jsonify({'error': 'Only GM can edit tiles'}), 403
 
     data = request.get_json()
@@ -561,32 +562,37 @@ def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
     if not (0 <= tile_x < CHUNK_SIZE and 0 <= tile_y < CHUNK_SIZE):
         return jsonify({'error': f'Tile coordinates must be between 0 and {CHUNK_SIZE-1}'}), 400
 
-    # Ищем чанк, если нет – создаём
     chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y).first()
     if not chunk:
-        print(f"Creating new chunk for ({chunk_x},{chunk_y})")
         chunk = MapChunk(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y, data=default_chunk_data())
         db.session.add(chunk)
-        # Не делаем commit сейчас, потому что дальше обновляем data
 
-    # Проверяем структуру данных (на случай пустого или повреждённого)
+    # Проверка структуры (опционально)
     if not chunk.data or len(chunk.data) != CHUNK_SIZE or len(chunk.data[0]) != CHUNK_SIZE:
-        print(f"Chunk ({chunk_x},{chunk_y}) data invalid, resetting")
         chunk.data = default_chunk_data()
 
-    # Обновляем нужный тайл
+    new_chunk_data = copy.deepcopy(chunk.data)
     for key, value in data.items():
-        chunk.data[tile_y][tile_x][key] = value
+        new_chunk_data[tile_y][tile_x][key] = value
+    chunk.data = new_chunk_data
 
-    db.session.commit()
-    print(f"Tile ({tile_x},{tile_y}) in chunk ({chunk_x},{chunk_y}) updated")
+    try:
+        db.session.commit()
+        print(f"✅ Tile ({tile_x},{tile_y}) in chunk ({chunk_x},{chunk_y}) updated and committed")
 
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error committing: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+    allowed_fields = ['type', 'color', 'height']
+    safe_updates = {k: v for k, v in data.items() if k in allowed_fields}
     socketio.emit('tile_updated', {
         'chunk_x': chunk_x,
         'chunk_y': chunk_y,
         'tile_x': tile_x,
         'tile_y': tile_y,
-        'updates': data
+        'updates': safe_updates
     }, room=f"lobby_{lobby_id}")
 
     return jsonify({'message': 'Tile updated'}), 200
@@ -617,18 +623,19 @@ def get_chunks(lobby_id):
     for cx in range(min_x, max_x + 1):
         for cy in range(min_y, max_y + 1):
             chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).first()
-            if not chunk:
-                # создаём новый чанк
+            if chunk:
+                print(
+                    f"📦 Returning existing chunk ({cx},{cy}) from DB, first tile: {chunk.data[0][0] if chunk.data else 'no data'}")
+            else:
+                print(f"🆕 Creating new chunk ({cx},{cy}) with map_type {lobby.map_type}")
                 data = generate_chunk_data(lobby_id, cx, cy, lobby.map_type)
                 chunk = MapChunk(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy, data=data)
                 db.session.add(chunk)
-                db.session.commit()  # можно закоммитить сразу, но лучше после цикла
             result.append({
                 'chunk_x': chunk.chunk_x,
                 'chunk_y': chunk.chunk_y,
                 'data': chunk.data
             })
-    # если добавляли много чанков, можно сделать один commit в конце
     db.session.commit()
     return jsonify(result), 200
 

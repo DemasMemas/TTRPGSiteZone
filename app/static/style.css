@@ -540,3 +540,16 @@ body {
 .visibility-participant input {
     margin-right: 10px;
 }
+
+.tile-palette {
+    color: white;
+    font-size: 0.9rem;
+}
+.tile-palette select {
+    background: rgba(0,0,0,0.5);
+    color: white;
+    border: 1px solid #666;
+    border-radius: 20px;
+    padding: 4px 10px;
+    margin-left: 5px;
+}

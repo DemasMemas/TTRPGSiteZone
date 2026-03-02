@@ -89,6 +89,15 @@
                 <span>Тип: <span id="current-marker-type">default</span></span>
             </div>
             <button class="btn btn-primary" onclick="addMarkerAtCenter()">➕ Добавить метку</button>
+                <div class="tile-palette" style="display: inline-block; margin-left: 15px; border-left: 1px solid #444; padding-left: 15px;">
+                    <span>Тип тайла:</span>
+                    <select id="tile-type-select" class="character-select" style="width: auto;">
+                        <option value="grass">🌿 Трава</option>
+                        <option value="forest">🌲 Лес</option>
+                        <option value="house">🏠 Дом</option>
+                        <option value="water">💧 Вода</option>
+                    </select>
+                </div>
         </div>
 
         <div id="visibility-modal" class="modal" style="display:none;">

@@ -12,6 +12,7 @@ const MAX_CHUNK = 15;
 
 let loadedChunks = new Map();
 let editMode = false;
+let currentTileType = 'grass';
 
 const socket = io();
 let currentLobbyId = null;
@@ -97,6 +98,9 @@ socket.on('kicked', () => {
 socket.on('character_created', () => loadLobbyCharacters());
 socket.on('character_deleted', () => loadLobbyCharacters());
 socket.on('character_updated', () => loadLobbyCharacters());
+socket.on('tile_updated', (data) => {
+    updateTileInChunk(data.chunk_x, data.chunk_y, data.tile_x, data.tile_y, data.updates);
+});
 
 // --- Загрузка информации о лобби ---
 async function loadLobbyInfo() {
@@ -116,8 +120,19 @@ async function loadLobbyInfo() {
                 alert('Только ГМ может редактировать тайлы');
                 return;
             }
-            const newColor = '#' + Math.floor(Math.random() * 16777215).toString(16);
-            updateTile(tile.chunkX, tile.chunkY, tile.tileX, tile.tileY, { color: newColor });
+            // Определяем цвет в зависимости от типа
+            let color = '#3a5f0b'; // grass
+            if (currentTileType === 'forest') color = '#2d5a27';
+            else if (currentTileType === 'house') color = '#8B4513';
+            else if (currentTileType === 'water') color = '#1E90FF';
+
+            // Обновляем тайл: меняем тип и цвет, высоту оставляем прежней (или можно задать умолчания)
+            const updates = {
+                type: currentTileType,
+                color: color,
+                height: currentTileType === 'water' ? 0.8 : 1.0 // для воды чуть ниже
+            };
+            updateTile(tile.chunkX, tile.chunkY, tile.tileX, tile.tileY, updates);
         });
 
         if (isGM) {
@@ -150,7 +165,10 @@ async function updateTile(chunkX, chunkY, tileX, tileY, updates) {
             },
             body: JSON.stringify(updates)
         });
-        if (!response.ok) {
+        if (response.ok) {
+            // Немедленно обновляем чанк на клиенте
+            updateTileInChunk(chunkX, chunkY, tileX, tileY, updates);
+        } else {
             const err = await response.json();
             alert(err.error || 'Ошибка обновления');
         }
@@ -270,19 +288,18 @@ async function loadAllChunks() {
 async function fetchChunk(cx, cy) {
     const url = `/lobbies/${currentLobbyId}/chunks?min_chunk_x=${cx}&max_chunk_x=${cx}&min_chunk_y=${cy}&max_chunk_y=${cy}`;
     try {
-        const response = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
-        if (response.status === 404) {
-            console.log(`Chunk (${cx},${cy}) not found on server, creating default`);
-            // Чанк не найден на сервере – создаём дефолтный на клиенте
-            const defaultData = generateDefaultChunkData(CHUNK_SIZE);
-            addChunk(cx, cy, defaultData);
-        } else if (response.ok) {
+        const response = await fetch(url, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Cache-Control': 'no-cache'
+            }
+        });
+        if (response.ok) {
             const chunks = await response.json();
             if (chunks.length > 0) {
                 addChunk(chunks[0].chunk_x, chunks[0].chunk_y, chunks[0].data);
             } else {
-                const defaultData = generateDefaultChunkData(CHUNK_SIZE);
-                addChunk(cx, cy, defaultData);
+                console.error('Server returned empty chunks for existing request');
             }
         } else {
             console.error('Failed to fetch chunk', response.status);
@@ -515,9 +532,7 @@ window.showSettingsTab = function(tab) {
 
 window.toggleEditMode = function() {
     editMode = !editMode;
-    import('./lobby3d.js').then(module => {
-        module.setEditMode(editMode);
-    });
+    setEditMode(editMode); // напрямую, без динамического импорта
     const btn = document.getElementById('edit-toggle');
     if (btn) {
         btn.style.background = editMode ? '#4a6fa5' : '';
@@ -585,3 +600,7 @@ window.addMarkerAtCenter = () => {
     const y = Math.floor(Math.random() * 10) - 5;
     socket.emit('add_marker', { token, lobby_id: currentLobbyId, x, y, type: currentMarkerType });
 };
+
+document.getElementById('tile-type-select')?.addEventListener('change', (e) => {
+    currentTileType = e.target.value;
+});
