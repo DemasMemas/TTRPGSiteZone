@@ -1,6 +1,9 @@
 import copy
+import gzip
+import io
+import json
 
-from flask import Blueprint, request, jsonify, render_template
+from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db, socketio
 from app.models import Lobby, LobbyParticipant, User, GameState, LobbyCharacter, MapChunk
@@ -15,51 +18,146 @@ lobbies_bp = Blueprint('lobbies', __name__)
 @jwt_required()
 def create_lobby():
     user_id = get_jwt_identity()
-    data = request.get_json()
-    if not data or not data.get('name'):
-        return jsonify({'error': 'Lobby name is required'}), 400
 
-    map_type = data.get('map_type', 'empty')
-    if map_type not in ['empty', 'random', 'predefined', 'imported']:
-        return jsonify({'error': 'Invalid map type'}), 400
+    # Отладка: печатаем тип контента
+    print("Content-Type:", request.content_type)
+    print("Is multipart:", 'multipart/form-data' in request.content_type if request.content_type else False)
 
-    # Получаем размеры карты (в чанках)
-    chunks_width = data.get('chunks_width', 16)
-    chunks_height = data.get('chunks_height', 16)
-    # Валидация (например, от 1 до 32 чанков)
-    if not isinstance(chunks_width, int) or chunks_width < 1 or chunks_width > 32:
-        return jsonify({'error': 'chunks_width must be an integer between 1 and 32'}), 400
-    if not isinstance(chunks_height, int) or chunks_height < 1 or chunks_height > 32:
-        return jsonify({'error': 'chunks_height must be an integer between 1 and 32'}), 400
+    # Обработка multipart/form-data (импорт из файла)
+    if request.content_type and 'multipart/form-data' in request.content_type:
+        print("Processing multipart form data")
+        print("Form data:", request.form)
+        print("Files:", request.files)
 
-    code = generate_invite_code()
-    while Lobby.query.filter_by(invite_code=code).first():
+        name = request.form.get('name')
+        map_type = request.form.get('map_type')
+        if not name or not map_type:
+            return jsonify({'error': 'Missing fields'}), 400
+        if map_type != 'imported':
+            return jsonify({'error': 'Invalid map type for file upload'}), 400
+
+        file = request.files.get('map_file')
+        if not file:
+            return jsonify({'error': 'No file uploaded'}), 400
+
+        # Проверка расширения (необязательно)
+        if not (file.filename.endswith('.json') or file.filename.endswith('.json.gz')):
+            return jsonify({'error': 'File must be JSON or JSON.GZ'}), 400
+
+        try:
+            file_content = file.read().decode('utf-8')
+            import_data = json.loads(file_content)
+        except Exception as e:
+            print("Error reading/parsing file:", e)
+            return jsonify({'error': 'Invalid JSON file'}), 400
+
+        # Валидация структуры
+        required_fields = ['lobby_name', 'map_type', 'chunks_width', 'chunks_height', 'chunks']
+        for field in required_fields:
+            if field not in import_data:
+                return jsonify({'error': f'Missing field in import file: {field}'}), 400
+
+        chunks_width = import_data['chunks_width']
+        chunks_height = import_data['chunks_height']
+        # Проверка границ
+        if not isinstance(chunks_width, int) or chunks_width < 1 or chunks_width > 32:
+            return jsonify({'error': 'Invalid chunks_width in file'}), 400
+        if not isinstance(chunks_height, int) or chunks_height < 1 or chunks_height > 32:
+            return jsonify({'error': 'Invalid chunks_height in file'}), 400
+
+        # Генерация кода приглашения
         code = generate_invite_code()
+        while Lobby.query.filter_by(invite_code=code).first():
+            code = generate_invite_code()
 
-    lobby = Lobby(
-        name=data['name'],
-        gm_id=user_id,
-        invite_code=code,
-        map_type=map_type,
-        chunks_width=chunks_width,
-        chunks_height=chunks_height
-    )
-    db.session.add(lobby)
-    db.session.flush()
+        lobby = Lobby(
+            name=name,
+            gm_id=user_id,
+            invite_code=code,
+            map_type='imported',
+            chunks_width=chunks_width,
+            chunks_height=chunks_height
+        )
+        db.session.add(lobby)
+        db.session.flush()
 
-    participant = LobbyParticipant(lobby_id=lobby.id, user_id=user_id)
-    db.session.add(participant)
-    db.session.commit()
+        participant = LobbyParticipant(lobby_id=lobby.id, user_id=user_id)
+        db.session.add(participant)
 
-    return jsonify({
-        'id': lobby.id,
-        'name': lobby.name,
-        'gm_id': lobby.gm_id,
-        'invite_code': lobby.invite_code,
-        'created_at': lobby.created_at,
-        'chunks_width': lobby.chunks_width,
-        'chunks_height': lobby.chunks_height
-    }), 201
+        # Импорт чанков
+        for chunk_item in import_data['chunks']:
+            chunk_x = chunk_item.get('chunk_x')
+            chunk_y = chunk_item.get('chunk_y')
+            data = chunk_item.get('data')
+            if None in (chunk_x, chunk_y, data):
+                return jsonify({'error': 'Invalid chunk data in file'}), 400
+            if chunk_x < 0 or chunk_x >= chunks_width or chunk_y < 0 or chunk_y >= chunks_height:
+                # Можно пропустить или вернуть ошибку – лучше пропустить
+                continue
+            chunk = MapChunk(
+                lobby_id=lobby.id,
+                chunk_x=chunk_x,
+                chunk_y=chunk_y,
+                data=data
+            )
+            db.session.add(chunk)
+
+        db.session.commit()
+        return jsonify({
+            'id': lobby.id,
+            'name': lobby.name,
+            'gm_id': lobby.gm_id,
+            'invite_code': lobby.invite_code,
+            'created_at': lobby.created_at,
+            'chunks_width': lobby.chunks_width,
+            'chunks_height': lobby.chunks_height
+        }), 201
+
+    else:
+        # Обработка JSON (обычное создание лобби)
+        data = request.get_json()
+        if not data or not data.get('name'):
+            return jsonify({'error': 'Lobby name is required'}), 400
+
+        map_type = data.get('map_type', 'empty')
+        if map_type not in ['empty', 'random', 'predefined', 'imported']:
+            return jsonify({'error': 'Invalid map type'}), 400
+
+        chunks_width = data.get('chunks_width', 16)
+        chunks_height = data.get('chunks_height', 16)
+        if not isinstance(chunks_width, int) or chunks_width < 1 or chunks_width > 32:
+            return jsonify({'error': 'chunks_width must be an integer between 1 and 32'}), 400
+        if not isinstance(chunks_height, int) or chunks_height < 1 or chunks_height > 32:
+            return jsonify({'error': 'chunks_height must be an integer between 1 and 32'}), 400
+
+        code = generate_invite_code()
+        while Lobby.query.filter_by(invite_code=code).first():
+            code = generate_invite_code()
+
+        lobby = Lobby(
+            name=data['name'],
+            gm_id=user_id,
+            invite_code=code,
+            map_type=map_type,
+            chunks_width=chunks_width,
+            chunks_height=chunks_height
+        )
+        db.session.add(lobby)
+        db.session.flush()
+
+        participant = LobbyParticipant(lobby_id=lobby.id, user_id=user_id)
+        db.session.add(participant)
+        db.session.commit()
+
+        return jsonify({
+            'id': lobby.id,
+            'name': lobby.name,
+            'gm_id': lobby.gm_id,
+            'invite_code': lobby.invite_code,
+            'created_at': lobby.created_at,
+            'chunks_width': lobby.chunks_width,
+            'chunks_height': lobby.chunks_height
+        }), 201
 
 @lobbies_bp.route('/', methods=['GET'])
 @jwt_required()
@@ -819,3 +917,55 @@ def batch_update_tiles(lobby_id):
     socketio.emit('tiles_updated', data, room=f"lobby_{lobby_id}")
 
     return jsonify({'message': 'Tiles updated successfully'}), 200
+
+@lobbies_bp.route('/<int:lobby_id>/export', methods=['GET'])
+@jwt_required()
+def export_lobby(lobby_id):
+    user_id = get_jwt_identity()
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby or not lobby.is_active:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    # Только ГМ может экспортировать
+    if lobby.gm_id != user_id:
+        return jsonify({'error': 'Only GM can export the map'}), 403
+
+    # Получаем все чанки лобби
+    chunks = MapChunk.query.filter_by(lobby_id=lobby_id).all()
+    chunks_data = []
+    for c in chunks:
+        chunks_data.append({
+            'chunk_x': c.chunk_x,
+            'chunk_y': c.chunk_y,
+            'data': c.data
+        })
+
+    export_data = {
+        'lobby_name': lobby.name,
+        'map_type': lobby.map_type,
+        'chunks_width': lobby.chunks_width,
+        'chunks_height': lobby.chunks_height,
+        'chunks': chunks_data
+    }
+
+    # Преобразуем в JSON
+    json_str = json.dumps(export_data, ensure_ascii=False, separators=(',', ':'))
+    json_bytes = json_str.encode('utf-8')
+
+    # Сжимаем gzip
+    gzip_buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=gzip_buffer, mode='wb') as f:
+        f.write(json_bytes)
+    gzip_buffer.seek(0)
+
+    return send_file(
+        gzip_buffer,
+        as_attachment=True,
+        download_name=f'lobby_{lobby_id}_map.json.gz',
+        mimetype='application/gzip'
+    )

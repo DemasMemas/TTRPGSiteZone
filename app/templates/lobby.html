@@ -56,7 +56,12 @@
             </div>
             <div class="settings-tabs">
                 <button class="tab-btn active" onclick="showSettingsTab('banned')">Забаненные</button>
-                <!-- Здесь позже можно добавить другие вкладки -->
+                <button class="tab-btn" onclick="showSettingsTab('export')">Экспорт</button>
+            </div>
+            <div id="export-settings" class="settings-tab-content" style="display:none;">
+                <h4>Экспорт карты</h4>
+                <p>Размер карты: <span id="map-size-info"></span> чанков</p>
+                <button class="btn btn-primary" onclick="exportMap()">Скачать JSON</button>
             </div>
             <div id="settings-content">
                 <!-- Контент будет подгружаться динамически -->

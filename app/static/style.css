@@ -609,3 +609,22 @@ input[type=range]::-webkit-slider-thumb {
     font-size: 0.8rem;
     line-height: 1.2;
 }
+
+.settings-tab-content {
+    padding: 10px 0;
+}
+
+#loading-indicator {
+    display: inline-block;
+    margin-left: 10px;
+    color: #007bff;
+    font-weight: bold;
+}
+#loading-indicator span {
+    animation: pulse 1s infinite;
+}
+@keyframes pulse {
+    0% { opacity: 0.5; }
+    50% { opacity: 1; }
+    100% { opacity: 0.5; }
+}

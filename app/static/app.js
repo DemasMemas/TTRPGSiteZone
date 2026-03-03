@@ -97,47 +97,117 @@ async function createLobby() {
     const token = localStorage.getItem('access_token');
     if (!token) return;
 
-    const name = document.getElementById('lobby-name').value;
-    const mapType = document.getElementById('map-type').value;
+    // Элементы для индикатора
+    const createBtn = document.querySelector('button[onclick="createLobby()"]');
+    const loadingDiv = document.getElementById('loading-indicator');
 
-    let chunksWidth = 16, chunksHeight = 16;
-    if (mapType !== 'predefined') {
-        chunksWidth = parseInt(document.getElementById('chunks-width').value) || 16;
-        chunksHeight = parseInt(document.getElementById('chunks-height').value) || 16;
-
-        // Принудительно ограничиваем диапазон
-        if (chunksWidth < 1) chunksWidth = 1;
-        if (chunksWidth > 32) chunksWidth = 32;
-        if (chunksHeight < 1) chunksHeight = 1;
-        if (chunksHeight > 32) chunksHeight = 32;
-    }
-
-    const body = {
-        name,
-        map_type: mapType,
-        chunks_width: chunksWidth,
-        chunks_height: chunksHeight
-    };
+    // Блокируем кнопку и показываем индикатор
+    if (createBtn) createBtn.disabled = true;
+    if (loadingDiv) loadingDiv.style.display = 'block';
 
     try {
-        const response = await fetch('/lobbies/', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify(body)
-        });
-        if (response.ok) {
-            const lobby = await response.json();
-            console.log('Lobby created:', lobby);
-            window.location.href = `/lobbies/${lobby.id}/page`;
+        const name = document.getElementById('lobby-name').value;
+        const mapType = document.getElementById('map-type').value;
+
+        // Импорт из файла
+        if (mapType === 'imported') {
+            const fileInput = document.getElementById('map-file');
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('Выберите файл карты');
+                return;
+            }
+            const file = fileInput.files[0];
+            console.log('Selected file:', file.name, 'size:', file.size);
+
+            const reader = new FileReader();
+            // Используем Promise, чтобы дождаться чтения файла
+            const jsonStr = await new Promise((resolve, reject) => {
+                reader.onload = (e) => {
+                    const arrayBuffer = e.target.result;
+                    if (file.name.endsWith('.gz')) {
+                        console.log('File is gzipped, decompressing...');
+                        if (typeof pako === 'undefined') {
+                            reject('Библиотека pako не загружена');
+                            return;
+                        }
+                        try {
+                            const uint8Array = new Uint8Array(arrayBuffer);
+                            const decompressed = pako.ungzip(uint8Array, { to: 'string' });
+                            resolve(decompressed);
+                        } catch (err) {
+                            reject('Ошибка распаковки gzip');
+                        }
+                    } else {
+                        const text = new TextDecoder('utf-8').decode(arrayBuffer);
+                        resolve(text);
+                    }
+                };
+                reader.onerror = () => reject('Ошибка чтения файла');
+                reader.readAsArrayBuffer(file);
+            });
+
+            // Проверка JSON
+            if (!jsonStr || jsonStr.trim().length === 0) throw new Error('Файл пуст');
+            if (!jsonStr.trim().startsWith('{')) throw new Error('Файл не является JSON');
+
+            // Отправка
+            const formData = new FormData();
+            formData.append('name', name);
+            formData.append('map_type', mapType);
+            const blob = new Blob([jsonStr], { type: 'application/json' });
+            const fileName = file.name.replace(/\.gz$/, '') + '.json';
+            formData.append('map_file', blob, fileName);
+
+            const response = await fetch('/lobbies/', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` },
+                body: formData
+            });
+
+            if (response.ok) {
+                const lobby = await response.json();
+                window.location.href = `/lobbies/${lobby.id}/page`;
+            } else {
+                const err = await response.json();
+                throw new Error(err.error || 'Ошибка создания лобби');
+            }
         } else {
-            const err = await response.json();
-            alert(err.error || 'Ошибка создания лобби');
+            // Обычное создание (без файла)
+            let chunksWidth = 16, chunksHeight = 16;
+            if (mapType !== 'predefined') {
+                chunksWidth = parseInt(document.getElementById('chunks-width').value) || 16;
+                chunksHeight = parseInt(document.getElementById('chunks-height').value) || 16;
+                if (chunksWidth < 1) chunksWidth = 1;
+                if (chunksWidth > 32) chunksWidth = 32;
+                if (chunksHeight < 1) chunksHeight = 1;
+                if (chunksHeight > 32) chunksHeight = 32;
+            }
+
+            const body = { name, map_type: mapType, chunks_width: chunksWidth, chunks_height: chunksHeight };
+            const response = await fetch('/lobbies/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (response.ok) {
+                const lobby = await response.json();
+                window.location.href = `/lobbies/${lobby.id}/page`;
+            } else {
+                const err = await response.json();
+                throw new Error(err.error || 'Ошибка создания лобби');
+            }
         }
     } catch (error) {
-        alert('Ошибка сети');
+        alert(error.message || 'Ошибка');
+        console.error(error);
+    } finally {
+        // Разблокируем кнопку и скрываем индикатор
+        if (createBtn) createBtn.disabled = false;
+        if (loadingDiv) loadingDiv.style.display = 'none';
     }
 }
 

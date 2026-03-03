@@ -174,11 +174,14 @@ async function loadLobbyInfo() {
             }
         }
 
-        // Сохраняем размеры карты
         window.MAP_CHUNKS_WIDTH = lobby.chunks_width;
         window.MAP_CHUNKS_HEIGHT = lobby.chunks_height;
-        // Передаём размеры в 3D модуль
         setMapDimensions(lobby.chunks_width, lobby.chunks_height);
+
+        const mapSizeSpan = document.getElementById('map-size-info');
+        if (mapSizeSpan) {
+            mapSizeSpan.textContent = `${lobby.chunks_width} x ${lobby.chunks_height}`;
+        }
 
         lobbyParticipants = lobby.participants;
         updateParticipantsList();
@@ -533,7 +536,15 @@ window.closeSettings = function() {
 window.showSettingsTab = function(tab) {
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
     event.target.classList.add('active');
-    if (tab === 'banned') loadBannedList();
+
+    document.querySelectorAll('.settings-tab-content').forEach(el => el.style.display = 'none');
+
+    if (tab === 'banned') {
+        document.getElementById('settings-content').style.display = 'block';
+        loadBannedList();
+    } else if (tab === 'export') {
+        document.getElementById('export-settings').style.display = 'block';
+    }
 };
 
 window.toggleEditMode = function() {
@@ -1033,3 +1044,27 @@ socket.on('tiles_updated', (updates) => {
         updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates);
     });
 });
+
+window.exportMap = async function() {
+    if (!isGM) return;
+    try {
+        const response = await fetch(`/lobbies/${currentLobbyId}/export`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!response.ok) {
+            const err = await response.json();
+            alert(err.error || 'Ошибка экспорта');
+            return;
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+    } catch (error) {
+        alert('Ошибка сети');
+    }
+};

@@ -93,10 +93,10 @@
                     <option value="empty">Пустая (вся трава)</option>
                     <option value="random">Случайное заполнение</option>
                     <option value="predefined">Готовая карта (вода по краям, лес/дома)</option>
+                    <option value="imported">Загрузить из файла</option>
                 </select>
             </div>
 
-            <!-- Поля для размера карты (скрываются для предопределённой карты) -->
             <div class="form-group" id="map-size-fields">
                 <label>Ширина карты (в чанках, 1 чанк = 32 тайла):</label>
                 <input type="number" id="chunks-width" min="1" max="32" value="16">
@@ -104,7 +104,16 @@
                 <input type="number" id="chunks-height" min="1" max="32" value="16">
             </div>
 
+            <div class="form-group" id="map-import-file" style="display:none;">
+                <label>Файл карты (.gz):</label>
+                <input type="file" id="map-file" accept=".gz">
+            </div>
+
             <button onclick="createLobby()">Создать лобби</button>
+
+            <div id="loading-indicator" style="display:none; margin-top:10px;">
+                <span>Загрузка... ⏳</span>
+            </div>
 
             <h3>Мои лобби</h3>
             <div id="my-lobbies-list"></div>
@@ -119,16 +128,22 @@
     </div>
 
     <script>
-        // Добавляем обработчик на изменение типа карты для показа/скрытия полей размера
         document.getElementById('map-type')?.addEventListener('change', function(e) {
             const sizeFields = document.getElementById('map-size-fields');
+            const importFile = document.getElementById('map-import-file');
             if (e.target.value === 'predefined') {
                 sizeFields.style.display = 'none';
+                importFile.style.display = 'none';
+            } else if (e.target.value === 'imported') {
+                sizeFields.style.display = 'none';
+                importFile.style.display = 'block';
             } else {
                 sizeFields.style.display = 'block';
+                importFile.style.display = 'none';
             }
         });
     </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>
