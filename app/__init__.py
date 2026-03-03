@@ -1,27 +1,16 @@
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
-from flask_jwt_extended import JWTManager
-from flask import render_template
-from flask_socketio import SocketIO
+from flask import Flask, render_template
+from app.extensions import db, migrate, jwt, socketio
+from app.config import config_by_name
 
-db = SQLAlchemy()
-migrate = Migrate()
-jwt = JWTManager()
-socketio = SocketIO()
 
-def create_app():
+def create_app(config_name='default'):
     app = Flask(__name__)
-    app.config['JSON_AS_ASCII'] = False
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://ttrpg_user:2563214dD@localhost/ttrpg'
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    app.config['JWT_SECRET_KEY'] = 'super-secret-key'
-    app.config['SECRET_KEY'] = 'super-secret-key'  # нужен для работы сессий SocketIO
+    app.config.from_object(config_by_name[config_name])
 
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
-    socketio.init_app(app, cors_allowed_origins="*")  # для разработки разрешим все источники
+    socketio.init_app(app, cors_allowed_origins="*")
 
     from app.auth import auth_bp
     app.register_blueprint(auth_bp, url_prefix='/auth')
@@ -29,8 +18,7 @@ def create_app():
     from app.lobbies import lobbies_bp
     app.register_blueprint(lobbies_bp, url_prefix='/lobbies')
 
-    # Позже подключим обработчики сокетов
-    from app import socket_events  # создадим этот модуль
+    from app import socket_events
 
     @app.route('/')
     def index():

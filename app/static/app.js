@@ -1,4 +1,5 @@
 // static/app.js
+console.log('app.js loaded');
 
 const API_BASE = ''; // пусто, так как API и фронтенд на одном сервере
 

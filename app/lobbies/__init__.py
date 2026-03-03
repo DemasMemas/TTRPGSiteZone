@@ -7,10 +7,9 @@ from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db, socketio
 from app.models import Lobby, LobbyParticipant, User, GameState, LobbyCharacter, MapChunk
+from app.constants import CHUNK_SIZE, MAX_CHUNKS_WIDTH, MAX_CHUNKS_HEIGHT, ANOMALY_TYPES
 import random
 import string
-
-CHUNK_SIZE = 32
 
 lobbies_bp = Blueprint('lobbies', __name__)
 
@@ -60,10 +59,10 @@ def create_lobby():
         chunks_width = import_data['chunks_width']
         chunks_height = import_data['chunks_height']
         # Проверка границ
-        if not isinstance(chunks_width, int) or chunks_width < 1 or chunks_width > 32:
-            return jsonify({'error': 'Invalid chunks_width in file'}), 400
-        if not isinstance(chunks_height, int) or chunks_height < 1 or chunks_height > 32:
-            return jsonify({'error': 'Invalid chunks_height in file'}), 400
+        if not isinstance(chunks_width, int) or chunks_width < 1 or chunks_width > MAX_CHUNKS_WIDTH:
+            return jsonify({'error': f'chunks_width must be an integer between 1 and {MAX_CHUNKS_WIDTH}'}), 400
+        if not isinstance(chunks_height, int) or chunks_height < 1 or chunks_height > MAX_CHUNKS_HEIGHT:
+            return jsonify({'error': f'chunks_height must be an integer between 1 and {MAX_CHUNKS_HEIGHT}'}), 400
 
         # Генерация кода приглашения
         code = generate_invite_code()
