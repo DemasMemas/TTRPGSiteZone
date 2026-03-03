@@ -19,15 +19,31 @@ def create_lobby():
     if not data or not data.get('name'):
         return jsonify({'error': 'Lobby name is required'}), 400
 
-    map_type = data.get('map_type', 'empty')  # по умолчанию 'empty'
-    if map_type not in ['empty', 'random', 'predefined']:
+    map_type = data.get('map_type', 'empty')
+    if map_type not in ['empty', 'random', 'predefined', 'imported']:
         return jsonify({'error': 'Invalid map type'}), 400
+
+    # Получаем размеры карты (в чанках)
+    chunks_width = data.get('chunks_width', 16)
+    chunks_height = data.get('chunks_height', 16)
+    # Валидация (например, от 1 до 32 чанков)
+    if not isinstance(chunks_width, int) or chunks_width < 1 or chunks_width > 32:
+        return jsonify({'error': 'chunks_width must be an integer between 1 and 32'}), 400
+    if not isinstance(chunks_height, int) or chunks_height < 1 or chunks_height > 32:
+        return jsonify({'error': 'chunks_height must be an integer between 1 and 32'}), 400
 
     code = generate_invite_code()
     while Lobby.query.filter_by(invite_code=code).first():
         code = generate_invite_code()
 
-    lobby = Lobby(name=data['name'], gm_id=user_id, invite_code=code, map_type=map_type)
+    lobby = Lobby(
+        name=data['name'],
+        gm_id=user_id,
+        invite_code=code,
+        map_type=map_type,
+        chunks_width=chunks_width,
+        chunks_height=chunks_height
+    )
     db.session.add(lobby)
     db.session.flush()
 
@@ -40,7 +56,9 @@ def create_lobby():
         'name': lobby.name,
         'gm_id': lobby.gm_id,
         'invite_code': lobby.invite_code,
-        'created_at': lobby.created_at
+        'created_at': lobby.created_at,
+        'chunks_width': lobby.chunks_width,
+        'chunks_height': lobby.chunks_height
     }), 201
 
 @lobbies_bp.route('/', methods=['GET'])
@@ -76,9 +94,11 @@ def get_lobby(lobby_id):
         'name': lobby.name,
         'gm_id': lobby.gm_id,
         'gm_username': lobby.gm.username,
-        'invite_code': lobby.invite_code,  # <-- добавили
+        'invite_code': lobby.invite_code,
         'participants': participants,
-        'created_at': lobby.created_at
+        'created_at': lobby.created_at,
+        'chunks_width': lobby.chunks_width,
+        'chunks_height': lobby.chunks_height
     }), 200
 
 @lobbies_bp.route('/<int:lobby_id>/join', methods=['POST'])

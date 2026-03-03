@@ -8,7 +8,10 @@ let lastMouseX = 0, lastMouseY = 0;
 let lastModifiers = { alt: false, shift: false };
 
 const MIN_CHUNK = 0;
-const MAX_CHUNK = 15;
+// Переменные для максимальных границ карты (устанавливаются через setMapDimensions)
+let MAX_CHUNK_X = 15;
+let MAX_CHUNK_Y = 15;
+
 const chunkBounds = [];
 const ANOMALY_TYPES = ['electric', 'fire', 'acid', 'void'];
 
@@ -83,6 +86,13 @@ highlightBox.visible = false;
 
 const tileInfoDiv = document.getElementById('tile-info');
 const tileInfoContent = document.getElementById('tile-info-content');
+
+// Функция для установки размеров карты (вызывается из lobby.js)
+export function setMapDimensions(widthChunks, heightChunks) {
+    MAX_CHUNK_X = widthChunks - 1;
+    MAX_CHUNK_Y = heightChunks - 1;
+    console.log(`Map dimensions set: ${widthChunks} x ${heightChunks} chunks`);
+}
 
 function getBaseDimensions(type, anomalyType) {
     const base = { width: 0.6, height: 0.6, depth: 0.6 };
@@ -367,7 +377,7 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
 }
 
 export function addChunk(cx, cy, tilesData) {
-    if (cx < MIN_CHUNK || cx > MAX_CHUNK || cy < MIN_CHUNK || cy > MAX_CHUNK) return;
+    if (cx < MIN_CHUNK || cx > MAX_CHUNK_X || cy < MIN_CHUNK || cy > MAX_CHUNK_Y) return;
 
     const key = `${cx},${cy}`;
     if (chunksMap.has(key)) return;
@@ -567,6 +577,34 @@ export function addChunk(cx, cy, tilesData) {
     });
 }
 
+export function removeChunk(cx, cy) {
+    const key = `${cx},${cy}`;
+    const entry = chunksMap.get(key);
+    if (!entry) return;
+
+    for (let i = chunkBounds.length - 1; i >= 0; i--) {
+        if (chunkBounds[i].key === key) chunkBounds.splice(i, 1);
+    }
+
+    scene.remove(entry.ground);
+    scene.remove(entry.water);
+    if (entry.trees) scene.remove(entry.trees);
+    if (entry.houses) scene.remove(entry.houses);
+    if (entry.fences) scene.remove(entry.fences);
+
+    if (entry.anomalyLODs) {
+        entry.anomalyLODs.forEach(lod => scene.remove(lod));
+    }
+
+    entry.ground.geometry.dispose();
+    entry.ground.material.dispose();
+    entry.water.geometry.dispose();
+    entry.water.material.dispose();
+
+    chunksMap.delete(key);
+}
+
+// Функция для перестройки объектов чанка (используется при изменении объектов)
 function rebuildChunkObjects(entry) {
     // Удаляем старые объектные меши из сцены
     if (entry.trees) scene.remove(entry.trees);
@@ -703,33 +741,6 @@ function rebuildChunkObjects(entry) {
     entry.anomalyLODs = anomalyLODs;
 }
 
-export function removeChunk(cx, cy) {
-    const key = `${cx},${cy}`;
-    const entry = chunksMap.get(key);
-    if (!entry) return;
-
-    for (let i = chunkBounds.length - 1; i >= 0; i--) {
-        if (chunkBounds[i].key === key) chunkBounds.splice(i, 1);
-    }
-
-    scene.remove(entry.ground);
-    scene.remove(entry.water);
-    if (entry.trees) scene.remove(entry.trees);
-    if (entry.houses) scene.remove(entry.houses);
-    if (entry.fences) scene.remove(entry.fences);
-
-    if (entry.anomalyLODs) {
-        entry.anomalyLODs.forEach(lod => scene.remove(lod));
-    }
-
-    entry.ground.geometry.dispose();
-    entry.ground.material.dispose();
-    entry.water.geometry.dispose();
-    entry.water.material.dispose();
-
-    chunksMap.delete(key);
-}
-
 export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     const key = `${chunkX},${chunkY}`;
     const entry = chunksMap.get(key);
@@ -848,7 +859,7 @@ function performRaycast(clientX, clientY) {
     if (tileInfoDiv) tileInfoDiv.style.display = 'none';
 
     if (intersects.length > 0) {
-        const intersect = intersects[0]; // ближайшее пересечение
+        const intersect = intersects[0];
         const point = intersect.point;
 
         // Вычисляем глобальные координаты тайла
@@ -861,8 +872,8 @@ function performRaycast(clientX, clientY) {
         const tileX = Math.floor(globalX % CHUNK_SIZE);
         const tileY = Math.floor(globalZ % CHUNK_SIZE);
 
-        // Проверяем границы (на всякий случай)
-        if (chunkX >= MIN_CHUNK && chunkX <= MAX_CHUNK && chunkY >= MIN_CHUNK && chunkY <= MAX_CHUNK &&
+        // Проверяем границы
+        if (chunkX >= MIN_CHUNK && chunkX <= MAX_CHUNK_X && chunkY >= MIN_CHUNK && chunkY <= MAX_CHUNK_Y &&
             tileX >= 0 && tileX < CHUNK_SIZE && tileY >= 0 && tileY < CHUNK_SIZE) {
 
             const key = `${chunkX},${chunkY}`;

@@ -54,7 +54,7 @@ async function login() {
             body: JSON.stringify({ username, password })
         });
         const data = await response.json();
-        console.log('login response:', response.status, data); // <-- добавить
+        console.log('login response:', response.status, data);
         if (response.ok) {
             localStorage.setItem('access_token', data.access_token);
             localStorage.setItem('user_id', data.user_id);
@@ -99,10 +99,25 @@ async function createLobby() {
 
     const name = document.getElementById('lobby-name').value;
     const mapType = document.getElementById('map-type').value;
-    if (!name) {
-        alert('Введите название лобби');
-        return;
+
+    let chunksWidth = 16, chunksHeight = 16;
+    if (mapType !== 'predefined') {
+        chunksWidth = parseInt(document.getElementById('chunks-width').value) || 16;
+        chunksHeight = parseInt(document.getElementById('chunks-height').value) || 16;
+
+        // Принудительно ограничиваем диапазон
+        if (chunksWidth < 1) chunksWidth = 1;
+        if (chunksWidth > 32) chunksWidth = 32;
+        if (chunksHeight < 1) chunksHeight = 1;
+        if (chunksHeight > 32) chunksHeight = 32;
     }
+
+    const body = {
+        name,
+        map_type: mapType,
+        chunks_width: chunksWidth,
+        chunks_height: chunksHeight
+    };
 
     try {
         const response = await fetch('/lobbies/', {
@@ -111,7 +126,7 @@ async function createLobby() {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${token}`
             },
-            body: JSON.stringify({ name, map_type: mapType })
+            body: JSON.stringify(body)
         });
         if (response.ok) {
             const lobby = await response.json();
@@ -206,7 +221,7 @@ async function deleteLobby(lobbyId) {
         });
         if (response.ok) {
             alert('Лобби удалено');
-            loadMyLobbies(); // обновляем список
+            loadMyLobbies();
         } else {
             const err = await response.json();
             alert(err.error || 'Ошибка при удалении');

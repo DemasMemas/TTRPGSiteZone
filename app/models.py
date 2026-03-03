@@ -25,6 +25,8 @@ class Lobby(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     invite_code = db.Column(db.String(10), unique=True, nullable=False)
     map_type = db.Column(db.String(20), nullable=False, default='empty')
+    chunks_width = db.Column(db.Integer, nullable=False, default=16)
+    chunks_height = db.Column(db.Integer, nullable=False, default=16)
 
     # связи
     gm = db.relationship('User', foreign_keys=[gm_id])

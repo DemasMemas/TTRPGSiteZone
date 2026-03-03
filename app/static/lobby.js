@@ -5,12 +5,16 @@ import {
     addChunk, removeChunk, setTileClickCallback, updateTileInChunk,
     setEditMode, setBrushRadius, getHoveredTile, chunksMap,
     getObjectHeightOffset, showObjectHighlight, hideObjectHighlight,
-    getObjectDimensions
+    getObjectDimensions,
+    setMapDimensions  // <-- импортируем функцию установки размеров
 } from './lobby3d.js';
 
 const CHUNK_SIZE = 32;
-const MIN_CHUNK = 0;
-const MAX_CHUNK = 15;
+const MIN_CHUNK = 0; // остаётся 0
+
+// Глобальные переменные для размеров карты (будут установлены из lobby)
+window.MAP_CHUNKS_WIDTH = 16;
+window.MAP_CHUNKS_HEIGHT = 16;
 
 let loadedChunks = new Map();
 let editMode = false;
@@ -170,6 +174,12 @@ async function loadLobbyInfo() {
             }
         }
 
+        // Сохраняем размеры карты
+        window.MAP_CHUNKS_WIDTH = lobby.chunks_width;
+        window.MAP_CHUNKS_HEIGHT = lobby.chunks_height;
+        // Передаём размеры в 3D модуль
+        setMapDimensions(lobby.chunks_width, lobby.chunks_height);
+
         lobbyParticipants = lobby.participants;
         updateParticipantsList();
     } catch (error) {
@@ -296,8 +306,10 @@ window.leaveLobby = leaveLobby;
 
 async function loadAllChunks() {
     const promises = [];
-    for (let cx = MIN_CHUNK; cx <= MAX_CHUNK; cx++) {
-        for (let cy = MIN_CHUNK; cy <= MAX_CHUNK; cy++) {
+    const maxChunkX = window.MAP_CHUNKS_WIDTH - 1;
+    const maxChunkY = window.MAP_CHUNKS_HEIGHT - 1;
+    for (let cx = MIN_CHUNK; cx <= maxChunkX; cx++) {
+        for (let cy = MIN_CHUNK; cy <= maxChunkY; cy++) {
             promises.push(fetchChunk(cx, cy));
         }
     }
@@ -982,12 +994,17 @@ function applyBrush(centerTile, updates, radius) {
     const centerGlobalX = chunkX * CHUNK_SIZE + tileX;
     const centerGlobalY = chunkY * CHUNK_SIZE + tileY;
 
+    const maxChunkX = window.MAP_CHUNKS_WIDTH - 1;
+    const maxChunkY = window.MAP_CHUNKS_HEIGHT - 1;
+    const maxGlobalX = (maxChunkX + 1) * CHUNK_SIZE;
+    const maxGlobalY = (maxChunkY + 1) * CHUNK_SIZE;
+
     for (let dx = -radius; dx <= radius; dx++) {
         for (let dy = -radius; dy <= radius; dy++) {
             const targetGlobalX = centerGlobalX + dx;
             const targetGlobalY = centerGlobalY + dy;
-            if (targetGlobalX < 0 || targetGlobalX >= (MAX_CHUNK + 1) * CHUNK_SIZE ||
-                targetGlobalY < 0 || targetGlobalY >= (MAX_CHUNK + 1) * CHUNK_SIZE) {
+            if (targetGlobalX < 0 || targetGlobalX >= maxGlobalX ||
+                targetGlobalY < 0 || targetGlobalY >= maxGlobalY) {
                 continue;
             }
             const targetChunkX = Math.floor(targetGlobalX / CHUNK_SIZE);
@@ -1004,6 +1021,7 @@ function applyBrush(centerTile, updates, radius) {
                 updates: updates
             });
 
+            // Немедленно обновляем локально для мгновенного отклика
             updateTileInChunk(targetChunkX, targetChunkY, targetTileX, targetTileY, updates);
         }
     }
