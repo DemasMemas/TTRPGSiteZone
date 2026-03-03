@@ -61,6 +61,8 @@ socket.on('connect', () => {
 
 socket.on('authenticated', (data) => {
     addMessage('system', `Вы вошли как ${data.username}`);
+    const myId = parseInt(localStorage.getItem('user_id'));
+    onlineUserIds.add(myId);
     loadLobbyInfo();
     loadLobbyCharacters();
     loadAllChunks();

@@ -37,9 +37,6 @@ class ParticipantService:
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 
-        if lobby.gm_id == user_id:
-            raise PermissionDenied("GM cannot leave lobby")
-
         participant = LobbyParticipant.query.filter_by(
             lobby_id=lobby_id, user_id=user_id
         ).first()

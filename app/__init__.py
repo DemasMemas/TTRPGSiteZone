@@ -18,7 +18,7 @@ def create_app(config_name='default'):
     from app.lobbies import lobbies_bp
     app.register_blueprint(lobbies_bp, url_prefix='/lobbies')
 
-    from app import socket_events
+    from app.sockets import auth, chat, dice, markers
 
     @app.route('/')
     def index():
