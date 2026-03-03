@@ -8,7 +8,6 @@ let lastMouseX = 0, lastMouseY = 0;
 let lastModifiers = { alt: false, shift: false };
 
 const MIN_CHUNK = 0;
-// Переменные для максимальных границ карты (устанавливаются через setMapDimensions)
 let MAX_CHUNK_X = 15;
 let MAX_CHUNK_Y = 15;
 
@@ -87,7 +86,6 @@ highlightBox.visible = false;
 const tileInfoDiv = document.getElementById('tile-info');
 const tileInfoContent = document.getElementById('tile-info-content');
 
-// Функция для установки размеров карты (вызывается из lobby.js)
 export function setMapDimensions(widthChunks, heightChunks) {
     MAX_CHUNK_X = widthChunks - 1;
     MAX_CHUNK_Y = heightChunks - 1;
@@ -151,6 +149,7 @@ function getDefaultColorForType(type) {
     }
 }
 
+// --- Текстуры для аномалий ---
 function createSparkTexture() {
     const canvas = document.createElement('canvas');
     canvas.width = 8;
@@ -376,6 +375,7 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
     return lod;
 }
 
+// --- Функции для чанков ---
 export function addChunk(cx, cy, tilesData) {
     if (cx < MIN_CHUNK || cx > MAX_CHUNK_X || cy < MIN_CHUNK || cy > MAX_CHUNK_Y) return;
 
@@ -442,13 +442,20 @@ export function addChunk(cx, cy, tilesData) {
     let treeIdx = 0, houseIdx = 0, fenceIdx = 0;
     const anomalyLODs = [];
 
+    // Структура для хранения индексов объектов каждого тайла
+    const objectIndices = {
+        trees: new Array(size * size).fill().map(() => []),
+        houses: new Array(size * size).fill().map(() => []),
+        fences: new Array(size * size).fill().map(() => [])
+    };
+
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
             const tile = tilesData[y][x];
             const worldX = cx * size + x + 0.5;
             const worldZ = cy * size + y + 0.5;
             const height = tile.height || 1.0;
-            const index = y * size + x;
+            const tileIndex = y * size + x;
 
             minX = Math.min(minX, worldX - 0.5);
             maxX = Math.max(maxX, worldX + 0.5);
@@ -468,7 +475,7 @@ export function addChunk(cx, cy, tilesData) {
             groundIdx++;
 
             const color = new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b);
-            groundInstances.setColorAt(index, color);
+            groundInstances.setColorAt(tileIndex, color);
 
             dummy.rotation.set(0, 0, 0);
             dummy.position.set(worldX, height / 2, worldZ);
@@ -517,14 +524,17 @@ export function addChunk(cx, cy, tilesData) {
                         if (obj.type === 'tree' && treeInstances) {
                             treeInstances.setMatrixAt(treeIdx, dummy.matrix);
                             treeInstances.setColorAt(treeIdx, objColor);
+                            objectIndices.trees[tileIndex].push(treeIdx);
                             treeIdx++;
                         } else if (obj.type === 'house' && houseInstances) {
                             houseInstances.setMatrixAt(houseIdx, dummy.matrix);
                             houseInstances.setColorAt(houseIdx, objColor);
+                            objectIndices.houses[tileIndex].push(houseIdx);
                             houseIdx++;
                         } else if (obj.type === 'fence' && fenceInstances) {
                             fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
                             fenceInstances.setColorAt(fenceIdx, objColor);
+                            objectIndices.fences[tileIndex].push(fenceIdx);
                             fenceIdx++;
                         }
                     }
@@ -573,7 +583,9 @@ export function addChunk(cx, cy, tilesData) {
         tilesData: tilesData,
         chunkX: cx,
         chunkY: cy,
-        bounds: box.clone()
+        bounds: box.clone(),
+        objectIndices: objectIndices,
+        pendingRebuild: null
     });
 }
 
@@ -604,7 +616,67 @@ export function removeChunk(cx, cy) {
     chunksMap.delete(key);
 }
 
-// Функция для перестройки объектов чанка (используется при изменении объектов)
+// --- Функция для обновления позиций объектов на тайле при изменении высоты ---
+function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
+    const size = CHUNK_SIZE;
+    const tileIndex = tileY * size + tileX;
+    const worldX = entry.chunkX * size + tileX + 0.5;
+    const worldZ = entry.chunkY * size + tileY + 0.5;
+
+    const dummy = new THREE.Object3D();
+
+    // Обновляем деревья
+    if (entry.objectIndices.trees[tileIndex]) {
+        entry.objectIndices.trees[tileIndex].forEach(objIndex => {
+            // Найти соответствующий объект в данных тайла (нужен доступ к tile.objects)
+            // Для простоты будем перебирать объекты тайла и сопоставлять по порядку
+            // Но это не совсем точно. Лучше хранить для каждого индекса ссылку на объект.
+            // Упростим: переберём все объекты тайла и обновим их, используя известный индекс.
+            // Так как у нас для каждого тайла может быть несколько деревьев, нужно знать,
+            // какому объекту соответствует какой индекс. Для этого при создании мы сохраняли
+            // индексы в том же порядке, в котором объекты лежат в tile.objects.
+            // Поэтому при обновлении мы можем пройти по tile.objects и использовать индексы по порядку.
+        });
+    }
+
+    // Более простой и надёжный способ: перебираем объекты тайла и для каждого находим индекс из objectIndices.
+    const tile = entry.tilesData[tileY][tileX];
+    if (!tile.objects) return;
+
+    let treeIdxPos = 0, houseIdxPos = 0, fenceIdxPos = 0;
+
+    tile.objects.forEach(obj => {
+        const baseHalf = getBaseHalfHeight(obj.type, obj.anomalyType);
+        const yPos = newHeight + baseHalf * (obj.scale || 1.0);
+
+        dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
+        dummy.position.set(
+            worldX + (obj.x || 0),
+            yPos,
+            worldZ + (obj.z || 0)
+        );
+        dummy.scale.set(obj.scale || 1, obj.scale || 1, obj.scale || 1);
+        dummy.updateMatrix();
+
+        if (obj.type === 'tree' && entry.trees) {
+            const idx = entry.objectIndices.trees[tileIndex][treeIdxPos++];
+            entry.trees.setMatrixAt(idx, dummy.matrix);
+            // цвет не меняем
+        } else if (obj.type === 'house' && entry.houses) {
+            const idx = entry.objectIndices.houses[tileIndex][houseIdxPos++];
+            entry.houses.setMatrixAt(idx, dummy.matrix);
+        } else if (obj.type === 'fence' && entry.fences) {
+            const idx = entry.objectIndices.fences[tileIndex][fenceIdxPos++];
+            entry.fences.setMatrixAt(idx, dummy.matrix);
+        }
+    });
+
+    if (entry.trees) entry.trees.instanceMatrix.needsUpdate = true;
+    if (entry.houses) entry.houses.instanceMatrix.needsUpdate = true;
+    if (entry.fences) entry.fences.instanceMatrix.needsUpdate = true;
+}
+
+// --- Функция для полного перестроения объектов чанка (при изменении объектов) ---
 function rebuildChunkObjects(entry) {
     // Удаляем старые объектные меши из сцены
     if (entry.trees) scene.remove(entry.trees);
@@ -658,12 +730,20 @@ function rebuildChunkObjects(entry) {
     let treeIdx = 0, houseIdx = 0, fenceIdx = 0;
     const anomalyLODs = [];
 
+    // Новая структура objectIndices
+    const objectIndices = {
+        trees: new Array(size * size).fill().map(() => []),
+        houses: new Array(size * size).fill().map(() => []),
+        fences: new Array(size * size).fill().map(() => [])
+    };
+
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
             const tile = tilesData[y][x];
             const worldX = entry.chunkX * size + x + 0.5;
             const worldZ = entry.chunkY * size + y + 0.5;
             const height = tile.height || 1.0;
+            const tileIndex = y * size + x;
 
             if (tile.objects) {
                 tile.objects.forEach(obj => {
@@ -702,14 +782,17 @@ function rebuildChunkObjects(entry) {
                         if (obj.type === 'tree' && treeInstances) {
                             treeInstances.setMatrixAt(treeIdx, dummy.matrix);
                             treeInstances.setColorAt(treeIdx, objColor);
+                            objectIndices.trees[tileIndex].push(treeIdx);
                             treeIdx++;
                         } else if (obj.type === 'house' && houseInstances) {
                             houseInstances.setMatrixAt(houseIdx, dummy.matrix);
                             houseInstances.setColorAt(houseIdx, objColor);
+                            objectIndices.houses[tileIndex].push(houseIdx);
                             houseIdx++;
                         } else if (obj.type === 'fence' && fenceInstances) {
                             fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
                             fenceInstances.setColorAt(fenceIdx, objColor);
+                            objectIndices.fences[tileIndex].push(fenceIdx);
                             fenceIdx++;
                         }
                     }
@@ -739,6 +822,7 @@ function rebuildChunkObjects(entry) {
     entry.houses = houseInstances;
     entry.fences = fenceInstances;
     entry.anomalyLODs = anomalyLODs;
+    entry.objectIndices = objectIndices;
 }
 
 export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
@@ -749,7 +833,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     const tile = entry.tilesData[tileY][tileX];
     Object.assign(tile, updates);
 
-    // Обновляем ground (основной блок)
+    // Обновляем ground
     if (entry.ground) {
         const index = tileY * CHUNK_SIZE + tileX;
         const dummy = new THREE.Object3D();
@@ -773,7 +857,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         entry.ground.instanceColor.needsUpdate = true;
     }
 
-    // Обновляем water (плоскость воды)
+    // Обновляем water
     if (entry.water) {
         const index = tileY * CHUNK_SIZE + tileX;
         const dummy = new THREE.Object3D();
@@ -792,9 +876,19 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         entry.water.instanceMatrix.needsUpdate = true;
     }
 
-    // Если обновления касаются объектов, перестраиваем объекты чанка
+    // Если изменилась высота – быстро обновляем позиции объектов на этом тайле
+    if (updates.height !== undefined) {
+        updateTileObjectsPositions(entry, tileX, tileY, tile.height);
+    }
+
     if (updates.objects !== undefined) {
-        rebuildChunkObjects(entry);
+        if (entry.pendingRebuild) {
+            cancelAnimationFrame(entry.pendingRebuild);
+        }
+        entry.pendingRebuild = requestAnimationFrame(() => {
+            rebuildChunkObjects(entry);
+            entry.pendingRebuild = null;
+        });
     }
 }
 
@@ -862,17 +956,14 @@ function performRaycast(clientX, clientY) {
         const intersect = intersects[0];
         const point = intersect.point;
 
-        // Вычисляем глобальные координаты тайла
         const globalX = point.x;
         const globalZ = point.z;
 
-        // Определяем чанк и тайл
         const chunkX = Math.floor(globalX / CHUNK_SIZE);
         const chunkY = Math.floor(globalZ / CHUNK_SIZE);
         const tileX = Math.floor(globalX % CHUNK_SIZE);
         const tileY = Math.floor(globalZ % CHUNK_SIZE);
 
-        // Проверяем границы
         if (chunkX >= MIN_CHUNK && chunkX <= MAX_CHUNK_X && chunkY >= MIN_CHUNK && chunkY <= MAX_CHUNK_Y &&
             tileX >= 0 && tileX < CHUNK_SIZE && tileY >= 0 && tileY < CHUNK_SIZE) {
 
@@ -1059,10 +1150,8 @@ window.addEventListener('pointermove', (event) => {
     lastModifiers.alt = event.altKey;
     lastModifiers.shift = event.shiftKey;
 
-    // Всегда обновляем выделение тайла
     performRaycast(event.clientX, event.clientY);
 
-    // Если левая кнопка зажата, режим редактирования включён, есть тайл и функция applyBrush
     if ((event.buttons === 1) && editMode && hoveredTile && window.applyBrush) {
         const updates = {};
         if (window.eraserMode) {
@@ -1072,7 +1161,6 @@ window.addEventListener('pointermove', (event) => {
         } else if (event.shiftKey) {
             updates.height = window.tileHeight;
         }
-        // Если есть что обновлять, вызываем applyBrush
         if (Object.keys(updates).length > 0) {
             window.applyBrush(hoveredTile, updates, window.brushRadius);
         }
