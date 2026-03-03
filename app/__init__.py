@@ -13,7 +13,7 @@ socketio = SocketIO()
 def create_app():
     app = Flask(__name__)
     app.config['JSON_AS_ASCII'] = False
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://ttrpg_user:2563214dD@localhost/ttrpg'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     app.config['JWT_SECRET_KEY'] = 'super-secret-key'
     app.config['SECRET_KEY'] = 'super-secret-key'  # нужен для работы сессий SocketIO
