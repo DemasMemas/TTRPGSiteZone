@@ -55,17 +55,15 @@
                 <button onclick="closeSettings()" style="background:none; border:none; color:white; font-size:1.2rem; cursor:pointer;">✕</button>
             </div>
             <div class="settings-tabs">
-                <button class="tab-btn active" onclick="showSettingsTab('banned')">Забаненные</button>
-                <button class="tab-btn" onclick="showSettingsTab('export')">Экспорт</button>
+                <button class="tab-btn active" onclick="showSettingsTab('banned', this)">Забаненные</button>
+                <button class="tab-btn" onclick="showSettingsTab('export', this)">Экспорт</button>
             </div>
             <div id="export-settings" class="settings-tab-content" style="display:none;">
                 <h4>Экспорт карты</h4>
                 <p>Размер карты: <span id="map-size-info"></span> чанков</p>
                 <button class="btn btn-primary" onclick="exportMap()">Скачать JSON</button>
             </div>
-            <div id="settings-content">
-                <!-- Контент будет подгружаться динамически -->
-            </div>
+            <div id="settings-content" class="settings-tab-content"> </div>
         </div>
 
         <!-- Левая панель: чат -->

@@ -527,15 +527,16 @@ window.toggleSettings = function() {
 window.openSettings = function() {
     document.getElementById('settings-panel').style.display = 'block';
     settingsVisible = true;
-    loadBannedList();
+    showSettingsTab('banned', document.querySelector('.tab-btn.active'));
 };
 window.closeSettings = function() {
     document.getElementById('settings-panel').style.display = 'none';
     settingsVisible = false;
 };
-window.showSettingsTab = function(tab) {
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    event.target.classList.add('active');
+
+window.showSettingsTab = function(tab, btn) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
 
     document.querySelectorAll('.settings-tab-content').forEach(el => el.style.display = 'none');
 
