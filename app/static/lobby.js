@@ -957,7 +957,7 @@ function scheduleBatchUpdate() {
             pendingTileUpdates = [];
             batchUpdateTiles(updatesCopy);
         }
-    }, 1000); // задержка 1000 мс
+    }, 500); // 500 мс
 }
 
 function applyBrush(centerTile, updates, radius) {
@@ -1003,6 +1003,8 @@ function applyBrush(centerTile, updates, radius) {
                 tile_y: targetTileY,
                 updates: updates
             });
+
+            updateTileInChunk(targetChunkX, targetChunkY, targetTileX, targetTileY, updates);
         }
     }
     scheduleBatchUpdate();

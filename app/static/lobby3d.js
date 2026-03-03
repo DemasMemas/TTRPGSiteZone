@@ -567,6 +567,142 @@ export function addChunk(cx, cy, tilesData) {
     });
 }
 
+function rebuildChunkObjects(entry) {
+    // Удаляем старые объектные меши из сцены
+    if (entry.trees) scene.remove(entry.trees);
+    if (entry.houses) scene.remove(entry.houses);
+    if (entry.fences) scene.remove(entry.fences);
+    if (entry.anomalyLODs) {
+        entry.anomalyLODs.forEach(lod => scene.remove(lod));
+    }
+
+    const tilesData = entry.tilesData;
+    const size = CHUNK_SIZE;
+    let treeCount = 0, houseCount = 0, fenceCount = 0;
+
+    // Подсчёт количества объектов каждого типа
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            const tile = tilesData[y][x];
+            if (tile.objects) {
+                tile.objects.forEach(obj => {
+                    if (obj.type === 'tree') treeCount++;
+                    else if (obj.type === 'house') houseCount++;
+                    else if (obj.type === 'fence') fenceCount++;
+                });
+            }
+        }
+    }
+
+    // Создаём новые инстанс-меши
+    const treeInstances = treeCount > 0 ? new THREE.InstancedMesh(treeGeo, treeMat, treeCount) : null;
+    if (treeInstances) {
+        treeInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(treeCount * 3), 3);
+        treeInstances.castShadow = true;
+        treeInstances.receiveShadow = false;
+    }
+
+    const houseInstances = houseCount > 0 ? new THREE.InstancedMesh(houseGeo, houseMat, houseCount) : null;
+    if (houseInstances) {
+        houseInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(houseCount * 3), 3);
+        houseInstances.castShadow = true;
+        houseInstances.receiveShadow = false;
+    }
+
+    const fenceInstances = fenceCount > 0 ? new THREE.InstancedMesh(fenceGeo, fenceMat, fenceCount) : null;
+    if (fenceInstances) {
+        fenceInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(fenceCount * 3), 3);
+        fenceInstances.castShadow = true;
+        fenceInstances.receiveShadow = false;
+    }
+
+    const dummy = new THREE.Object3D();
+    let treeIdx = 0, houseIdx = 0, fenceIdx = 0;
+    const anomalyLODs = [];
+
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            const tile = tilesData[y][x];
+            const worldX = entry.chunkX * size + x + 0.5;
+            const worldZ = entry.chunkY * size + y + 0.5;
+            const height = tile.height || 1.0;
+
+            if (tile.objects) {
+                tile.objects.forEach(obj => {
+                    if (obj.type === 'anomaly') {
+                        let anomalyType = obj.anomalyType;
+                        if (!anomalyType) {
+                            anomalyType = ANOMALY_TYPES[Math.floor(Math.random() * ANOMALY_TYPES.length)];
+                            obj.anomalyType = anomalyType;
+                        }
+                        const baseHalf = getBaseHalfHeight('anomaly', anomalyType);
+                        const yPos = height + baseHalf * (obj.scale || 1.0);
+                        const lod = createAnomalyLOD(
+                            worldX + (obj.x || 0),
+                            yPos,
+                            worldZ + (obj.z || 0),
+                            anomalyType,
+                            obj.color || getDefaultColorForType('anomaly'),
+                            obj.scale || 1.0
+                        );
+                        scene.add(lod);
+                        anomalyLODs.push(lod);
+                    } else {
+                        const baseHalf = getBaseHalfHeight(obj.type);
+                        const yPos = height + baseHalf * (obj.scale || 1.0);
+                        dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
+                        dummy.position.set(
+                            worldX + (obj.x || 0),
+                            yPos,
+                            worldZ + (obj.z || 0)
+                        );
+                        dummy.scale.set(obj.scale || 1, obj.scale || 1, obj.scale || 1);
+                        dummy.updateMatrix();
+
+                        const objColor = new THREE.Color(obj.color || getDefaultColorForType(obj.type));
+
+                        if (obj.type === 'tree' && treeInstances) {
+                            treeInstances.setMatrixAt(treeIdx, dummy.matrix);
+                            treeInstances.setColorAt(treeIdx, objColor);
+                            treeIdx++;
+                        } else if (obj.type === 'house' && houseInstances) {
+                            houseInstances.setMatrixAt(houseIdx, dummy.matrix);
+                            houseInstances.setColorAt(houseIdx, objColor);
+                            houseIdx++;
+                        } else if (obj.type === 'fence' && fenceInstances) {
+                            fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
+                            fenceInstances.setColorAt(fenceIdx, objColor);
+                            fenceIdx++;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    if (treeInstances) {
+        treeInstances.instanceMatrix.needsUpdate = true;
+        treeInstances.instanceColor.needsUpdate = true;
+        scene.add(treeInstances);
+    }
+    if (houseInstances) {
+        houseInstances.instanceMatrix.needsUpdate = true;
+        houseInstances.instanceColor.needsUpdate = true;
+        scene.add(houseInstances);
+    }
+    if (fenceInstances) {
+        fenceInstances.instanceMatrix.needsUpdate = true;
+        fenceInstances.instanceColor.needsUpdate = true;
+        scene.add(fenceInstances);
+    }
+
+    // Обновляем entry
+    entry.trees = treeInstances;
+    entry.houses = houseInstances;
+    entry.fences = fenceInstances;
+    entry.anomalyLODs = anomalyLODs;
+}
+
 export function removeChunk(cx, cy) {
     const key = `${cx},${cy}`;
     const entry = chunksMap.get(key);
@@ -598,10 +734,57 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     const key = `${chunkX},${chunkY}`;
     const entry = chunksMap.get(key);
     if (!entry) return;
+
     const tile = entry.tilesData[tileY][tileX];
     Object.assign(tile, updates);
-    removeChunk(chunkX, chunkY);
-    addChunk(chunkX, chunkY, entry.tilesData);
+
+    // Обновляем ground (основной блок)
+    if (entry.ground) {
+        const index = tileY * CHUNK_SIZE + tileX;
+        const dummy = new THREE.Object3D();
+        const worldX = chunkX * CHUNK_SIZE + tileX + 0.5;
+        const worldZ = chunkY * CHUNK_SIZE + tileY + 0.5;
+        const height = tile.height || 1.0;
+
+        dummy.position.set(worldX, height / 2, worldZ);
+        if (tile.terrain === 'water') {
+            dummy.scale.set(0, 0, 0);
+        } else {
+            dummy.scale.set(1, height, 1);
+        }
+        dummy.updateMatrix();
+        entry.ground.setMatrixAt(index, dummy.matrix);
+
+        const color = new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b);
+        entry.ground.setColorAt(index, color);
+
+        entry.ground.instanceMatrix.needsUpdate = true;
+        entry.ground.instanceColor.needsUpdate = true;
+    }
+
+    // Обновляем water (плоскость воды)
+    if (entry.water) {
+        const index = tileY * CHUNK_SIZE + tileX;
+        const dummy = new THREE.Object3D();
+        const worldX = chunkX * CHUNK_SIZE + tileX + 0.5;
+        const worldZ = chunkY * CHUNK_SIZE + tileY + 0.5;
+        const height = tile.height || 1.0;
+
+        dummy.position.set(worldX, height / 2, worldZ);
+        if (tile.terrain === 'water') {
+            dummy.scale.set(1, 1, 1);
+        } else {
+            dummy.scale.set(0, 0, 0);
+        }
+        dummy.updateMatrix();
+        entry.water.setMatrixAt(index, dummy.matrix);
+        entry.water.instanceMatrix.needsUpdate = true;
+    }
+
+    // Если обновления касаются объектов, перестраиваем объекты чанка
+    if (updates.objects !== undefined) {
+        rebuildChunkObjects(entry);
+    }
 }
 
 export function setBrushRadius(radius) {
