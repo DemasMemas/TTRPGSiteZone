@@ -725,3 +725,77 @@ def generate_chunk_data(lobby_id, chunk_x, chunk_y, map_type):
             })
         data.append(row)
     return data
+
+@lobbies_bp.route('/<int:lobby_id>/chunks/batch', methods=['POST'])
+@jwt_required()
+def batch_update_tiles(lobby_id):
+    user_id = get_jwt_identity()
+    try:
+        user_id = int(user_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid user id'}), 400
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    if lobby.gm_id != user_id:
+        return jsonify({'error': 'Only GM can edit tiles'}), 403
+
+    data = request.get_json()
+    if not data or not isinstance(data, list):
+        return jsonify({'error': 'Expected a list of updates'}), 400
+
+    # Группируем обновления по чанкам для эффективности
+    updates_by_chunk = {}
+    for item in data:
+        chunk_x = item.get('chunk_x')
+        chunk_y = item.get('chunk_y')
+        tile_x = item.get('tile_x')
+        tile_y = item.get('tile_y')
+        updates = item.get('updates')
+
+        if None in (chunk_x, chunk_y, tile_x, tile_y, updates):
+            return jsonify({'error': 'Missing fields in update item'}), 400
+
+        key = (chunk_x, chunk_y)
+        if key not in updates_by_chunk:
+            updates_by_chunk[key] = []
+        updates_by_chunk[key].append({
+            'tile_x': tile_x,
+            'tile_y': tile_y,
+            'updates': updates
+        })
+
+    # Применяем обновления по чанкам
+    for (chunk_x, chunk_y), items in updates_by_chunk.items():
+        chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y).first()
+        if not chunk:
+            # Если чанка нет, создаём его с данными по умолчанию
+            chunk = MapChunk(lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y,
+                             data=generate_chunk_data(lobby_id, chunk_x, chunk_y, lobby.map_type))
+            db.session.add(chunk)
+
+        # Создаём глубокую копию данных чанка
+        new_data = copy.deepcopy(chunk.data)
+
+        for item in items:
+            tile_x = item['tile_x']
+            tile_y = item['tile_y']
+            updates = item['updates']
+            if 0 <= tile_x < CHUNK_SIZE and 0 <= tile_y < CHUNK_SIZE:
+                for key, value in updates.items():
+                    new_data[tile_y][tile_x][key] = value
+
+        chunk.data = new_data
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Database error'}), 500
+
+    # Оповещаем всех в лобби через socketio
+    socketio.emit('tiles_updated', data, room=f"lobby_{lobby_id}")
+
+    return jsonify({'message': 'Tiles updated successfully'}), 200

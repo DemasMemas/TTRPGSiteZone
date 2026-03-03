@@ -14,6 +14,8 @@ const MAX_CHUNK = 15;
 
 let loadedChunks = new Map();
 let editMode = false;
+let eraserMode = false;
+window.eraserMode = eraserMode;
 let currentTileType = 'grass';
 let currentEditTile = null;
 let brushRadius = 0;
@@ -139,18 +141,22 @@ async function loadLobbyInfo() {
 
         updateGMControlsVisibility();
 
-        setTileClickCallback((tile, event, isDoubleClick) => {
+        setTileClickCallback((options) => {
+            const { tile, event, isDoubleClick, isDrag } = options;
             if (!isGM) {
                 alert('Только ГМ может редактировать тайлы');
                 return;
             }
             if (isDoubleClick) {
                 openTileEditModal(tile);
+            } else if (eraserMode) {
+                applyBrush(tile, { objects: [] }, brushRadius);
             } else if (event.altKey) {
                 applyBrush(tile, { terrain: currentTileType }, brushRadius);
             } else if (event.shiftKey) {
                 applyBrush(tile, { height: tileHeight }, brushRadius);
             }
+            console.log('callback', { isDoubleClick, eraserMode, altKey: event.altKey, shiftKey: event.shiftKey });
         });
 
         if (isGM) {
@@ -195,26 +201,6 @@ async function updateTile(chunkX, chunkY, tileX, tileY, updates, callback) {
     }
 }
 
-function applyBrush(centerTile, updates, radius) {
-    const centerGlobalX = centerTile.chunkX * CHUNK_SIZE + centerTile.tileX;
-    const centerGlobalY = centerTile.chunkY * CHUNK_SIZE + centerTile.tileY;
-    for (let dx = -radius; dx <= radius; dx++) {
-        for (let dy = -radius; dy <= radius; dy++) {
-            const targetGlobalX = centerGlobalX + dx;
-            const targetGlobalY = centerGlobalY + dy;
-            if (targetGlobalX < 0 || targetGlobalX >= (MAX_CHUNK + 1) * CHUNK_SIZE ||
-                targetGlobalY < 0 || targetGlobalY >= (MAX_CHUNK + 1) * CHUNK_SIZE) {
-                continue;
-            }
-            const targetChunkX = Math.floor(targetGlobalX / CHUNK_SIZE);
-            const targetChunkY = Math.floor(targetGlobalY / CHUNK_SIZE);
-            const targetTileX = targetGlobalX % CHUNK_SIZE;
-            const targetTileY = targetGlobalY % CHUNK_SIZE;
-            updateTile(targetChunkX, targetChunkY, targetTileX, targetTileY, updates);
-        }
-    }
-}
-
 function updateParticipantsList() {
     const onlineList = document.getElementById('online-participants');
     const offlineList = document.getElementById('offline-participants');
@@ -233,7 +219,6 @@ function updateParticipantsList() {
             banBtn.className = 'ban-btn';
             banBtn.innerHTML = '⛔';
             banBtn.onclick = (e) => {
-                e.stopPropagation();
                 banUser(p.user_id);
             };
             li.appendChild(banBtn);
@@ -379,13 +364,13 @@ function displayLobbyCharacters(characters) {
             const editBtn = document.createElement('button');
             editBtn.className = 'btn btn-sm';
             editBtn.textContent = '✏️';
-            editBtn.onclick = (e) => { e.stopPropagation(); editCharacter(char.id); };
+            editBtn.onclick = (e) => { editCharacter(char.id); };
             charDiv.appendChild(editBtn);
 
             const deleteBtn = document.createElement('button');
             deleteBtn.className = 'btn btn-sm btn-danger';
             deleteBtn.textContent = '🗑️';
-            deleteBtn.onclick = (e) => { e.stopPropagation(); deleteCharacter(char.id); };
+            deleteBtn.onclick = (e) => { deleteCharacter(char.id); };
             charDiv.appendChild(deleteBtn);
         }
         if (isGM) {
@@ -393,7 +378,6 @@ function displayLobbyCharacters(characters) {
             visibilityBtn.className = 'btn btn-sm';
             visibilityBtn.textContent = '👁️';
             visibilityBtn.onclick = (e) => {
-                e.stopPropagation();
                 openVisibilityModal(char.id, char.name, char.visible_to || []);
             };
             charDiv.appendChild(visibilityBtn);
@@ -614,17 +598,23 @@ window.addMarkerAtCenter = () => {
 
 document.getElementById('tile-type-select')?.addEventListener('change', (e) => {
     currentTileType = e.target.value;
+    window.currentTileType = currentTileType;
 });
 
 document.getElementById('brush-radius')?.addEventListener('input', (e) => {
-    brushRadius = parseInt(e.target.value);
+    let val = parseInt(e.target.value);
+    const maxRadius = 3;
+    if (val > maxRadius) val = maxRadius;
+    brushRadius = val;
     document.getElementById('brush-radius-value').textContent = brushRadius;
     setBrushRadius(brushRadius);
+    window.brushRadius = brushRadius;
 });
 
 document.getElementById('tile-height')?.addEventListener('input', (e) => {
     tileHeight = parseFloat(e.target.value);
     document.getElementById('tile-height-value').textContent = tileHeight.toFixed(1);
+    window.tileHeight = tileHeight;
 });
 
 window.addRandomObject = async function() {
@@ -716,7 +706,6 @@ window.addObjectToTile = async function() {
     const selectValue = document.getElementById('object-type-select').value;
     const color = document.getElementById('object-color').value;
 
-    // Считываем значения из полей
     const offsetX = parseFloat(document.getElementById('object-offset-x').value) || 0;
     const offsetZ = parseFloat(document.getElementById('object-offset-z').value) || 0;
     const scale = parseFloat(document.getElementById('object-scale').value) || 1.0;
@@ -820,7 +809,7 @@ function highlightObject(index) {
     const worldX = currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX + 0.5 + (obj.x || 0);
     const worldZ = currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY + 0.5 + (obj.z || 0);
     const height = tileData.height || 1.0;
-    const yOffset = getObjectHeightOffset(obj.type, obj.anomalyType); // половина базовой высоты
+    const yOffset = getObjectHeightOffset(obj.type, obj.anomalyType);
     const worldY = height + yOffset * (obj.scale || 1.0);
 
     const dimensions = getObjectDimensions(obj.type, obj.anomalyType, obj.scale || 1.0);
@@ -829,13 +818,11 @@ function highlightObject(index) {
 }
 window.highlightObject = highlightObject;
 
-// --- Обновление модального окна ---
 function updateTileEditModal() {
     if (!currentEditTile) return;
     hideObjectHighlight();
     const tileData = currentEditTile.tileData;
 
-    // Информация о тайле
     let infoHtml = `
         <p>Координаты: (${currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX}, ${currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY})</p>
         <p>Ландшафт: ${tileData.terrain}</p>
@@ -844,7 +831,6 @@ function updateTileEditModal() {
     `;
     document.getElementById('tile-edit-info').innerHTML = infoHtml;
 
-    // Список объектов
     const objectsListDiv = document.getElementById('tile-objects-list');
     if (!objectsListDiv) return;
 
@@ -870,7 +856,6 @@ function updateTileEditModal() {
         objectsListDiv.innerHTML = listHtml;
     }
 
-    // Обновляем поля редактирования
     document.getElementById('tile-edit-terrain').value = tileData.terrain;
     document.getElementById('tile-edit-height').value = tileData.height;
     document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
@@ -903,7 +888,6 @@ function getAnomalyTypeFromSelect(value) {
     return map[value] || null;
 }
 
-// Обработчики для ползунков
 document.getElementById('tile-edit-height')?.addEventListener('input', (e) => {
     document.getElementById('tile-edit-height-value').textContent = parseFloat(e.target.value).toFixed(1);
 });
@@ -923,3 +907,109 @@ document.getElementById('object-rotation')?.addEventListener('input', (e) => {
 
 window.highlightObject = highlightObject;
 window.hideObjectHighlight = hideObjectHighlight;
+
+document.getElementById('eraser-checkbox')?.addEventListener('change', (e) => {
+    eraserMode = e.target.checked;
+    window.eraserMode = eraserMode;
+});
+
+// Экспортируем всё необходимое в window для доступа из lobby3d.js
+window.currentTileType = currentTileType;
+window.tileHeight = tileHeight;
+window.brushRadius = brushRadius;
+window.applyBrush = applyBrush;
+window.updateTile = updateTile;
+
+let pendingTileUpdates = [];
+let batchUpdateTimeout = null;
+
+async function batchUpdateTiles(updates) {
+    if (updates.length === 0) return;
+    const url = `/lobbies/${currentLobbyId}/chunks/batch`;
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify(updates)
+        });
+        if (response.ok) {
+            // Обновляем локальные чанки для всех изменённых тайлов
+            updates.forEach(item => {
+                updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates);
+            });
+        } else {
+            const err = await response.json();
+            console.error('Batch update error:', err);
+        }
+    } catch (error) {
+        console.error('Network error in batch update:', error);
+    }
+}
+
+function scheduleBatchUpdate() {
+    if (batchUpdateTimeout) clearTimeout(batchUpdateTimeout);
+    batchUpdateTimeout = setTimeout(() => {
+        if (pendingTileUpdates.length > 0) {
+            const updatesCopy = pendingTileUpdates.slice();
+            pendingTileUpdates = [];
+            batchUpdateTiles(updatesCopy);
+        }
+    }, 1000); // задержка 1000 мс
+}
+
+function applyBrush(centerTile, updates, radius) {
+    console.log('applyBrush called', centerTile, updates, radius);
+
+    // Определяем координаты в зависимости от формата входного объекта
+    let chunkX, chunkY, tileX, tileY;
+    if (centerTile.chunk) {
+        // формат из hoveredTile (используется в рисовании)
+        chunkX = centerTile.chunk.chunkX;
+        chunkY = centerTile.chunk.chunkY;
+        tileX = centerTile.tileX;
+        tileY = centerTile.tileY;
+    } else {
+        // формат из клика (используется в setTileClickCallback)
+        chunkX = centerTile.chunkX;
+        chunkY = centerTile.chunkY;
+        tileX = centerTile.tileX;
+        tileY = centerTile.tileY;
+    }
+
+    const centerGlobalX = chunkX * CHUNK_SIZE + tileX;
+    const centerGlobalY = chunkY * CHUNK_SIZE + tileY;
+
+    for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+            const targetGlobalX = centerGlobalX + dx;
+            const targetGlobalY = centerGlobalY + dy;
+            if (targetGlobalX < 0 || targetGlobalX >= (MAX_CHUNK + 1) * CHUNK_SIZE ||
+                targetGlobalY < 0 || targetGlobalY >= (MAX_CHUNK + 1) * CHUNK_SIZE) {
+                continue;
+            }
+            const targetChunkX = Math.floor(targetGlobalX / CHUNK_SIZE);
+            const targetChunkY = Math.floor(targetGlobalY / CHUNK_SIZE);
+            const targetTileX = targetGlobalX % CHUNK_SIZE;
+            const targetTileY = targetGlobalY % CHUNK_SIZE;
+
+            // Добавляем обновление в очередь
+            pendingTileUpdates.push({
+                chunk_x: targetChunkX,
+                chunk_y: targetChunkY,
+                tile_x: targetTileX,
+                tile_y: targetTileY,
+                updates: updates
+            });
+        }
+    }
+    scheduleBatchUpdate();
+}
+
+socket.on('tiles_updated', (updates) => {
+    updates.forEach(item => {
+        updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates);
+    });
+});

@@ -95,7 +95,7 @@
                     <!-- Радиус кисти -->
                     <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
                         <span>Радиус кисти:</span>
-                        <input type="range" id="brush-radius" min="0" max="5" value="0" style="width: 80px;">
+                        <input type="range" id="brush-radius" min="0" max="3" value="0" style="width: 80px;">
                         <span id="brush-radius-value">0</span>
                     </div>
 
@@ -116,6 +116,12 @@
                         <span>Высота:</span>
                         <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" style="width: 100px;">
                         <span id="tile-height-value">1.0</span>
+                    </div>
+
+                    <!-- Ластик -->
+                    <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                        <label>Ластик</label>
+                        <input type="checkbox" id="eraser-checkbox">
                     </div>
                 </div>
 
