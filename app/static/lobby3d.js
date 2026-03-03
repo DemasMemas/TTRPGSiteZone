@@ -848,27 +848,31 @@ function performRaycast(clientX, clientY) {
     if (tileInfoDiv) tileInfoDiv.style.display = 'none';
 
     if (intersects.length > 0) {
-        const intersect = intersects[0];
-        const mesh = intersect.object;
-        const instanceId = intersect.instanceId;
-        if (instanceId !== undefined) {
-            let chunkEntry = null;
-            for (let entry of chunksMap.values()) {
-                if (entry.ground === mesh || entry.water === mesh ||
-                    entry.trees === mesh || entry.houses === mesh ||
-                    entry.fences === mesh) {
-                    chunkEntry = entry;
-                    break;
-                }
-            }
-            if (chunkEntry) {
-                const tileX = instanceId % CHUNK_SIZE;
-                const tileY = Math.floor(instanceId / CHUNK_SIZE);
-                const tileData = chunkEntry.tilesData[tileY][tileX];
-                hoveredTile = { chunk: chunkEntry, instanceId, tileX, tileY, tileData };
+        const intersect = intersects[0]; // ближайшее пересечение
+        const point = intersect.point;
 
-                const worldX = chunkEntry.chunkX * CHUNK_SIZE + tileX + 0.5;
-                const worldZ = chunkEntry.chunkY * CHUNK_SIZE + tileY + 0.5;
+        // Вычисляем глобальные координаты тайла
+        const globalX = point.x;
+        const globalZ = point.z;
+
+        // Определяем чанк и тайл
+        const chunkX = Math.floor(globalX / CHUNK_SIZE);
+        const chunkY = Math.floor(globalZ / CHUNK_SIZE);
+        const tileX = Math.floor(globalX % CHUNK_SIZE);
+        const tileY = Math.floor(globalZ % CHUNK_SIZE);
+
+        // Проверяем границы (на всякий случай)
+        if (chunkX >= MIN_CHUNK && chunkX <= MAX_CHUNK && chunkY >= MIN_CHUNK && chunkY <= MAX_CHUNK &&
+            tileX >= 0 && tileX < CHUNK_SIZE && tileY >= 0 && tileY < CHUNK_SIZE) {
+
+            const key = `${chunkX},${chunkY}`;
+            const chunkEntry = chunksMap.get(key);
+            if (chunkEntry) {
+                const tileData = chunkEntry.tilesData[tileY][tileX];
+                hoveredTile = { chunk: chunkEntry, tileX, tileY, tileData };
+
+                const worldX = chunkX * CHUNK_SIZE + tileX + 0.5;
+                const worldZ = chunkY * CHUNK_SIZE + tileY + 0.5;
                 const height = tileData.height || 1.0;
 
                 const areaSize = 2 * currentBrushRadius + 1;
@@ -878,7 +882,7 @@ function performRaycast(clientX, clientY) {
 
                 if (tileInfoDiv && tileInfoContent) {
                     tileInfoContent.innerHTML = `
-                        <b>Тайл (${chunkEntry.chunkX * CHUNK_SIZE + tileX}, ${chunkEntry.chunkY * CHUNK_SIZE + tileY})</b><br>
+                        <b>Тайл (${chunkX * CHUNK_SIZE + tileX}, ${chunkY * CHUNK_SIZE + tileY})</b><br>
                         Ландшафт: ${tileData.terrain}<br>
                         Высота: ${tileData.height}<br>
                         Объектов: ${tileData.objects ? tileData.objects.length : 0}
