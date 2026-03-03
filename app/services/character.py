@@ -1,4 +1,6 @@
 # app/services/character.py
+from sqlalchemy.orm import joinedload
+
 from app.extensions import db
 from app.models import LobbyCharacter, Lobby, LobbyParticipant
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
@@ -7,8 +9,6 @@ from app.services.exceptions import NotFoundError, PermissionDenied, ValidationE
 class CharacterService:
     @staticmethod
     def create_character(lobby_id, owner_id, name, data=None):
-        """Создаёт нового персонажа в лобби."""
-        # Проверяем, что пользователь участник лобби
         participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=owner_id).first()
         if not participant:
             raise PermissionDenied("You are not in this lobby")
@@ -22,6 +22,7 @@ class CharacterService:
         )
         db.session.add(character)
         db.session.commit()
+        db.session.refresh(character, attribute_names=['owner'])
         return character
 
     @staticmethod
@@ -75,7 +76,6 @@ class CharacterService:
     @staticmethod
     def get_lobby_characters(lobby_id, user_id):
         """Возвращает список персонажей в лобби, видимых пользователю."""
-        # Проверяем участие
         participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
         if not participant:
             raise PermissionDenied("You are not in this lobby")
@@ -83,20 +83,15 @@ class CharacterService:
         lobby = Lobby.query.get(lobby_id)
         is_gm = (lobby.gm_id == user_id)
 
-        characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).all()
+        # Явно загружаем связанного владельца
+        characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).options(
+            joinedload(LobbyCharacter.owner)
+        ).all()
+
         result = []
         for c in characters:
             if c.owner_id == user_id or is_gm or user_id in c.visible_to:
-                result.append({
-                    'id': c.id,
-                    'name': c.name,
-                    'owner_id': c.owner_id,
-                    'owner_username': c.owner.username,
-                    'data': c.data,
-                    'visible_to': c.visible_to,
-                    'created_at': c.created_at,
-                    'updated_at': c.updated_at
-                })
+                result.append(c)
         return result
 
     @staticmethod

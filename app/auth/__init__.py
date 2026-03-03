@@ -1,24 +1,25 @@
 # app/auth/__init__.py
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
-from app import db
+from marshmallow import ValidationError as MarshmallowValidationError
+from app.extensions import db
 from app.models import User
+from app.schemas.user import UserSchema, UserLoginSchema, UserProfileSchema
 
 auth_bp = Blueprint('auth', __name__)
 
-
 @auth_bp.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
-    if not data or not data.get('username') or not data.get('email') or not data.get('password'):
-        return jsonify({'error': 'Missing fields'}), 400
+    schema = UserSchema()
+    try:
+        data = schema.load(request.get_json())
+    except MarshmallowValidationError as err:
+        error_messages = []
+        for field, messages in err.messages.items():
+            error_messages.append(f"{field}: {', '.join(messages)}")
+        return jsonify({'error': '; '.join(error_messages)}), 400
 
-    # Проверяем, не занят ли username/email
-    if User.query.filter_by(username=data['username']).first():
-        return jsonify({'error': 'Username already exists'}), 400
-    if User.query.filter_by(email=data['email']).first():
-        return jsonify({'error': 'Email already exists'}), 400
-
+    # Дополнительная проверка уже выполняется в валидаторах схемы
     user = User(username=data['username'], email=data['email'])
     user.set_password(data['password'])
     db.session.add(user)
@@ -26,12 +27,13 @@ def register():
 
     return jsonify({'message': 'User created successfully'}), 201
 
-
 @auth_bp.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    if not data or not data.get('username') or not data.get('password'):
-        return jsonify({'error': 'Missing fields'}), 400
+    schema = UserLoginSchema()
+    try:
+        data = schema.load(request.get_json())
+    except MarshmallowValidationError as err:
+        return jsonify({'error': err.messages}), 400
 
     user = User.query.filter_by(username=data['username']).first()
     if not user or not user.check_password(data['password']):
@@ -40,7 +42,7 @@ def login():
     access_token = create_access_token(identity=str(user.id))
     return jsonify({
         'access_token': access_token,
-        'user_id': user.id          # <-- добавили
+        'user_id': user.id
     }), 200
 
 @auth_bp.route('/profile', methods=['GET'])
@@ -48,8 +50,5 @@ def login():
 def profile():
     current_user_id = get_jwt_identity()
     user = User.query.get(current_user_id)
-    return jsonify({
-        'id': user.id,
-        'username': user.username,
-        'email': user.email
-    }), 200
+    schema = UserProfileSchema()
+    return jsonify(schema.dump(user)), 200

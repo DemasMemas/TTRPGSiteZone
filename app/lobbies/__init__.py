@@ -4,12 +4,18 @@ import gzip
 import io
 from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
+from marshmallow import ValidationError as MarshmallowValidationError
 from app.extensions import socketio, db
 from app.services.lobby import LobbyService
 from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
-from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError as ServiceValidationError
+from app.schemas.lobby import LobbyCreateSchema, LobbyDetailSchema, LobbyMySchema, LobbySchema
+from app.schemas.participant import ParticipantSchema, BannedUserSchema
+from app.schemas.character import CharacterSchema, CharacterCreateSchema
+from app.schemas.map import GameStateSchema, MapChunkSchema, TileUpdateSchema
+from app.models import LobbyParticipant, GameState, LobbyCharacter
 
 lobbies_bp = Blueprint('lobbies', __name__)
 
@@ -18,9 +24,8 @@ def handle_service_error(e):
         return jsonify({'error': str(e)}), 404
     if isinstance(e, PermissionDenied):
         return jsonify({'error': str(e)}), 403
-    if isinstance(e, ValidationError):
+    if isinstance(e, ServiceValidationError):
         return jsonify({'error': str(e)}), 400
-    # Неожиданная ошибка
     return jsonify({'error': 'Internal server error'}), 500
 
 @lobbies_bp.route('/', methods=['POST'])
@@ -38,14 +43,12 @@ def create_lobby():
             if not file:
                 return jsonify({'error': 'No file uploaded'}), 400
 
-            # Чтение и парсинг файла
             try:
                 content = file.read().decode('utf-8')
                 import_data = json.loads(content)
             except Exception as e:
                 return jsonify({'error': 'Invalid JSON file'}), 400
 
-            # Базовая проверка структуры
             required_fields = ['lobby_name', 'map_type', 'chunks_width', 'chunks_height', 'chunks']
             if not all(field in import_data for field in required_fields):
                 return jsonify({'error': 'Missing fields in import file'}), 400
@@ -57,27 +60,23 @@ def create_lobby():
                 import_data=import_data
             )
         else:
-            data = request.get_json()
-            if not data or not data.get('name'):
-                return jsonify({'error': 'Lobby name required'}), 400
-
+            schema = LobbyCreateSchema()
+            data = schema.load(request.get_json())
             lobby = LobbyService.create_lobby(
                 user_id=user_id,
                 name=data['name'],
-                map_type=data.get('map_type', 'empty'),
-                chunks_width=data.get('chunks_width', 16),
-                chunks_height=data.get('chunks_height', 16)
+                map_type=data['map_type'],
+                chunks_width=data['chunks_width'],
+                chunks_height=data['chunks_height']
             )
 
-        return jsonify({
-            'id': lobby.id,
-            'name': lobby.name,
-            'gm_id': lobby.gm_id,
-            'invite_code': lobby.invite_code,
-            'created_at': lobby.created_at,
-            'chunks_width': lobby.chunks_width,
-            'chunks_height': lobby.chunks_height
-        }), 201
+        response_schema = LobbySchema()
+        return jsonify(response_schema.dump(lobby)), 201
+    except MarshmallowValidationError as e:
+        error_messages = []
+        for field, messages in e.messages.items():
+            error_messages.append(f"{field}: {', '.join(messages)}")
+        return jsonify({'error': '; '.join(error_messages)}), 400
     except Exception as e:
         return handle_service_error(e)
 
@@ -86,7 +85,9 @@ def create_lobby():
 def list_lobbies():
     try:
         lobbies = LobbyService.list_active_lobbies()
-        return jsonify(lobbies), 200
+        # Используем LobbySchema (или можно создать отдельный список)
+        schema = LobbySchema(many=True)
+        return jsonify(schema.dump(lobbies)), 200
     except Exception as e:
         return handle_service_error(e)
 
@@ -96,18 +97,8 @@ def get_lobby(lobby_id):
     user_id = int(get_jwt_identity())
     try:
         lobby = LobbyService.get_lobby(lobby_id, user_id)
-        participants = [{'user_id': p.user_id, 'username': p.user.username} for p in lobby.participants]
-        return jsonify({
-            'id': lobby.id,
-            'name': lobby.name,
-            'gm_id': lobby.gm_id,
-            'gm_username': lobby.gm.username,
-            'invite_code': lobby.invite_code,
-            'participants': participants,
-            'created_at': lobby.created_at,
-            'chunks_width': lobby.chunks_width,
-            'chunks_height': lobby.chunks_height
-        }), 200
+        schema = LobbyDetailSchema()
+        return jsonify(schema.dump(lobby)), 200
     except Exception as e:
         return handle_service_error(e)
 
@@ -154,8 +145,6 @@ def select_character(lobby_id):
     if not character_id:
         return jsonify({'error': 'character_id required'}), 400
 
-    # Этот метод пока оставим здесь, так как он простой и специфичный
-    from app.models import LobbyCharacter, LobbyParticipant
     character = LobbyCharacter.query.filter_by(id=character_id, owner_id=user_id).first()
     if not character:
         return jsonify({'error': 'Character not found or not yours'}), 404
@@ -173,13 +162,11 @@ def select_character(lobby_id):
 def get_participants_characters(lobby_id):
     user_id = int(get_jwt_identity())
     try:
-        # Проверяем участие
-        from app.models import LobbyParticipant, LobbyCharacter
         participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
         if not participant:
             return jsonify({'error': 'You are not in this lobby'}), 403
 
-        lobby = LobbyService.get_lobby(lobby_id, user_id)  # используем сервис для проверки
+        lobby = LobbyService.get_lobby(lobby_id, user_id)
         is_gm = (lobby.gm_id == user_id)
 
         participants = LobbyParticipant.query.filter_by(lobby_id=lobby_id).all()
@@ -211,8 +198,6 @@ def get_participants_characters(lobby_id):
 def get_map(lobby_id):
     user_id = int(get_jwt_identity())
     try:
-        # Проверка участия
-        from app.models import LobbyParticipant, GameState
         participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
         if not participant:
             return jsonify({'error': 'Not in lobby'}), 403
@@ -222,7 +207,9 @@ def get_map(lobby_id):
             game_state = GameState(lobby_id=lobby_id)
             db.session.add(game_state)
             db.session.commit()
-        return jsonify(game_state.map_data), 200
+
+        schema = GameStateSchema()
+        return jsonify(schema.dump(game_state.map_data)), 200
     except Exception as e:
         return handle_service_error(e)
 
@@ -246,7 +233,8 @@ def get_my_lobbies():
     user_id = int(get_jwt_identity())
     try:
         lobbies = LobbyService.get_my_lobbies(user_id)
-        return jsonify(lobbies), 200
+        schema = LobbyMySchema(many=True)
+        return jsonify(schema.dump(lobbies)), 200
     except Exception as e:
         return handle_service_error(e)
 
@@ -266,7 +254,8 @@ def get_banned_participants(lobby_id):
     current_user_id = int(get_jwt_identity())
     try:
         banned = ParticipantService.get_banned_list(current_user_id, lobby_id)
-        return jsonify(banned), 200
+        schema = BannedUserSchema(many=True)
+        return jsonify(schema.dump(banned)), 200
     except Exception as e:
         return handle_service_error(e)
 
@@ -286,17 +275,25 @@ def get_lobby_characters(lobby_id):
     user_id = int(get_jwt_identity())
     try:
         characters = CharacterService.get_lobby_characters(lobby_id, user_id)
-        return jsonify(characters), 200
+        schema = CharacterSchema(many=True)
+        return jsonify(schema.dump(characters)), 200
     except Exception as e:
         return handle_service_error(e)
+
 
 @lobbies_bp.route('/<int:lobby_id>/characters', methods=['POST'])
 @jwt_required()
 def create_lobby_character(lobby_id):
     user_id = int(get_jwt_identity())
-    data = request.get_json()
-    if not data or not data.get('name'):
-        return jsonify({'error': 'Name is required'}), 400
+    schema = CharacterCreateSchema()
+    try:
+        data = schema.load(request.get_json())
+    except MarshmallowValidationError as e:
+        error_messages = []
+        for field, messages in e.messages.items():
+            error_messages.append(f"{field}: {', '.join(messages)}")
+        return jsonify({'error': '; '.join(error_messages)}), 400
+
     try:
         character = CharacterService.create_character(
             lobby_id=lobby_id,
@@ -304,20 +301,21 @@ def create_lobby_character(lobby_id):
             name=data['name'],
             data=data.get('data', {})
         )
+
         socketio.emit('character_created', {
             'id': character.id,
             'name': character.name,
             'owner_id': character.owner_id,
-            'owner_username': character.owner.username,
+            'owner_username': character.owner.username if character.owner else None,
             'data': character.data
         }, room=f"lobby_{lobby_id}")
-        return jsonify({
-            'id': character.id,
-            'name': character.name,
-            'owner_id': character.owner_id,
-            'data': character.data
-        }), 201
+
+        response_schema = CharacterSchema()
+        return jsonify(response_schema.dump(character)), 201
     except Exception as e:
+        print(f"Error creating character: {e}")
+        import traceback
+        traceback.print_exc()
         return handle_service_error(e)
 
 @lobbies_bp.route('/characters/<int:character_id>', methods=['GET'])
@@ -326,15 +324,8 @@ def get_character(character_id):
     user_id = int(get_jwt_identity())
     try:
         character = CharacterService.get_character(character_id, user_id)
-        return jsonify({
-            'id': character.id,
-            'name': character.name,
-            'owner_id': character.owner_id,
-            'owner_username': character.owner.username,
-            'data': character.data,
-            'created_at': character.created_at,
-            'updated_at': character.updated_at
-        }), 200
+        schema = CharacterSchema()
+        return jsonify(schema.dump(character)), 200
     except Exception as e:
         return handle_service_error(e)
 
@@ -354,7 +345,7 @@ def update_character(character_id):
 def delete_character(character_id):
     user_id = int(get_jwt_identity())
     try:
-        character = CharacterService.get_character(character_id, user_id)  # чтобы получить lobby_id для оповещения
+        character = CharacterService.get_character(character_id, user_id)
         CharacterService.delete_character(character_id, user_id)
         socketio.emit('character_deleted', {'id': character_id}, room=f"lobby_{character.lobby_id}")
         return jsonify({'message': 'Character deleted'}), 200
@@ -385,10 +376,20 @@ def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No data provided'}), 400
+
+    schema = TileUpdateSchema()
     try:
-        MapService.update_tile(lobby_id, user_id, chunk_x, chunk_y, tile_x, tile_y, data)
+        updates = schema.load(data)
+    except MarshmallowValidationError as e:
+        error_messages = []
+        for field, messages in e.messages.items():
+            error_messages.append(f"{field}: {', '.join(messages)}")
+        return jsonify({'error': '; '.join(error_messages)}), 400
+
+    try:
+        MapService.update_tile(lobby_id, user_id, chunk_x, chunk_y, tile_x, tile_y, updates)
         allowed_fields = ['terrain', 'height', 'objects']
-        safe_updates = {k: v for k, v in data.items() if k in allowed_fields}
+        safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
         socketio.emit('tile_updated', {
             'chunk_x': chunk_x,
             'chunk_y': chunk_y,
@@ -412,7 +413,8 @@ def get_chunks(lobby_id):
         return jsonify({'error': 'Missing bounds'}), 400
     try:
         chunks = MapService.get_chunks(lobby_id, user_id, (min_x, max_x, min_y, max_y))
-        return jsonify(chunks), 200
+        schema = MapChunkSchema(many=True)
+        return jsonify(schema.dump(chunks)), 200
     except Exception as e:
         return handle_service_error(e)
 
@@ -423,6 +425,8 @@ def batch_update_tiles(lobby_id):
     data = request.get_json()
     if not data or not isinstance(data, list):
         return jsonify({'error': 'Expected a list of updates'}), 400
+
+    # Можно добавить валидацию каждого элемента, но для краткости пропустим
     try:
         MapService.batch_update_tiles(lobby_id, user_id, data)
         socketio.emit('tiles_updated', data, room=f"lobby_{lobby_id}")
