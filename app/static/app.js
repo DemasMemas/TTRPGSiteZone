@@ -1,14 +1,38 @@
 // static/app.js
-const API_BASE = ''; // пусто, так как API и фронтенд на одном сервере
+const API_BASE = '';
 
-// Функция для показа сообщений
+function getErrorMessage(data) {
+    if (!data) return 'Неизвестная ошибка';
+    if (typeof data === 'string') return data;
+    if (data.error) {
+        if (typeof data.error === 'string') return data.error;
+        if (data.error.message) {
+            if (data.error.details) {
+                let detailsStr = '';
+                for (let field in data.error.details) {
+                    detailsStr += `${field}: ${data.error.details[field].join(', ')}; `;
+                }
+                return detailsStr ? `${data.error.message}: ${detailsStr}` : data.error.message;
+            }
+            return data.error.message;
+        }
+        if (data.error.details) {
+            let detailsStr = '';
+            for (let field in data.error.details) {
+                detailsStr += `${field}: ${data.error.details[field].join(', ')}; `;
+            }
+            return detailsStr || 'Ошибка валидации';
+        }
+    }
+    return 'Неизвестная ошибка';
+}
+
 function showMessage(text, isError = true) {
     const msgDiv = document.getElementById('auth-message');
     msgDiv.textContent = text;
     msgDiv.className = isError ? 'error' : 'success';
 }
 
-// Регистрация
 async function register() {
     const username = document.getElementById('reg-username').value;
     const email = document.getElementById('reg-email').value;
@@ -29,14 +53,13 @@ async function register() {
         if (response.ok) {
             showMessage('Регистрация успешна! Теперь войдите.', false);
         } else {
-            showMessage(data.error || 'Ошибка регистрации');
+            showMessage(getErrorMessage(data));
         }
     } catch (error) {
         showMessage('Ошибка сети');
     }
 }
 
-// Логин
 async function login() {
     const username = document.getElementById('login-username').value;
     const password = document.getElementById('login-password').value;
@@ -53,7 +76,6 @@ async function login() {
             body: JSON.stringify({ username, password })
         });
         const data = await response.json();
-        console.log('login response:', response.status, data);
         if (response.ok) {
             localStorage.setItem('access_token', data.access_token);
             localStorage.setItem('user_id', data.user_id);
@@ -61,14 +83,13 @@ async function login() {
             showMessage('Вход выполнен', false);
             loadApp();
         } else {
-            showMessage(data.error || 'Ошибка входа');
+            showMessage(getErrorMessage(data));
         }
     } catch (error) {
         showMessage('Ошибка сети');
     }
 }
 
-// Выход
 function logout() {
     localStorage.removeItem('access_token');
     localStorage.removeItem('username');
@@ -77,7 +98,6 @@ function logout() {
     showMessage('');
 }
 
-// Загрузить основное приложение после входа
 async function loadApp() {
     const token = localStorage.getItem('access_token');
     if (!token) {
@@ -92,39 +112,56 @@ async function loadApp() {
     await loadMyLobbies();
 }
 
+function showNotification(message, type = 'error') {
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.textContent = message;
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: ${type === 'error' ? '#f44336' : '#4caf50'};
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        z-index: 10000;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        animation: slideIn 0.3s ease;
+    `;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 5000);
+}
+
 async function createLobby() {
     const token = localStorage.getItem('access_token');
     if (!token) return;
 
-    // Элементы для индикатора
+    const name = document.getElementById('lobby-name').value;
+    if (!name) {
+        showNotification('Введите название лобби');
+        return;
+    }
+
     const createBtn = document.querySelector('button[onclick="createLobby()"]');
     const loadingDiv = document.getElementById('loading-indicator');
-
-    // Блокируем кнопку и показываем индикатор
     if (createBtn) createBtn.disabled = true;
     if (loadingDiv) loadingDiv.style.display = 'block';
 
     try {
-        const name = document.getElementById('lobby-name').value;
         const mapType = document.getElementById('map-type').value;
 
-        // Импорт из файла
         if (mapType === 'imported') {
             const fileInput = document.getElementById('map-file');
             if (!fileInput.files || fileInput.files.length === 0) {
-                alert('Выберите файл карты');
+                showNotification('Выберите файл карты');
                 return;
             }
             const file = fileInput.files[0];
-            console.log('Selected file:', file.name, 'size:', file.size);
-
             const reader = new FileReader();
-            // Используем Promise, чтобы дождаться чтения файла
             const jsonStr = await new Promise((resolve, reject) => {
                 reader.onload = (e) => {
                     const arrayBuffer = e.target.result;
                     if (file.name.endsWith('.gz')) {
-                        console.log('File is gzipped, decompressing...');
                         if (typeof pako === 'undefined') {
                             reject('Библиотека pako не загружена');
                             return;
@@ -145,11 +182,9 @@ async function createLobby() {
                 reader.readAsArrayBuffer(file);
             });
 
-            // Проверка JSON
             if (!jsonStr || jsonStr.trim().length === 0) throw new Error('Файл пуст');
             if (!jsonStr.trim().startsWith('{')) throw new Error('Файл не является JSON');
 
-            // Отправка
             const formData = new FormData();
             formData.append('name', name);
             formData.append('map_type', mapType);
@@ -168,18 +203,15 @@ async function createLobby() {
                 window.location.href = `/lobbies/${lobby.id}/page`;
             } else {
                 const err = await response.json();
-                throw new Error(err.error || 'Ошибка создания лобби');
+                throw new Error(getErrorMessage(err) || 'Ошибка создания лобби');
             }
         } else {
-            // Обычное создание (без файла)
             let chunksWidth = 16, chunksHeight = 16;
             if (mapType !== 'predefined') {
                 chunksWidth = parseInt(document.getElementById('chunks-width').value) || 16;
                 chunksHeight = parseInt(document.getElementById('chunks-height').value) || 16;
-                if (chunksWidth < 1) chunksWidth = 1;
-                if (chunksWidth > 32) chunksWidth = 32;
-                if (chunksHeight < 1) chunksHeight = 1;
-                if (chunksHeight > 32) chunksHeight = 32;
+                chunksWidth = Math.min(32, Math.max(1, chunksWidth));
+                chunksHeight = Math.min(32, Math.max(1, chunksHeight));
             }
 
             const body = { name, map_type: mapType, chunks_width: chunksWidth, chunks_height: chunksHeight };
@@ -197,14 +229,13 @@ async function createLobby() {
                 window.location.href = `/lobbies/${lobby.id}/page`;
             } else {
                 const err = await response.json();
-                throw new Error(err.error || 'Ошибка создания лобби');
+                throw new Error(getErrorMessage(err) || 'Ошибка создания лобби');
             }
         }
     } catch (error) {
-        alert(error.message || 'Ошибка');
+        showNotification(error.message || 'Ошибка создания лобби');
         console.error(error);
     } finally {
-        // Разблокируем кнопку и скрываем индикатор
         if (createBtn) createBtn.disabled = false;
         if (loadingDiv) loadingDiv.style.display = 'none';
     }
@@ -216,7 +247,7 @@ async function joinByCode() {
 
     const code = document.getElementById('invite-code').value.trim().toUpperCase();
     if (!code) {
-        alert('Введите код');
+        showNotification('Введите код');
         return;
     }
 
@@ -234,10 +265,10 @@ async function joinByCode() {
             window.location.href = `/lobbies/${data.lobby_id}/page`;
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка присоединения');
+            showNotification(getErrorMessage(err));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 }
 
@@ -289,14 +320,14 @@ async function deleteLobby(lobbyId) {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
-            alert('Лобби удалено');
+            showNotification('Лобби удалено', 'success');
             loadMyLobbies();
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка при удалении');
+            showNotification(getErrorMessage(err));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 }
 
@@ -313,14 +344,13 @@ async function joinLobby(lobbyId) {
             window.location.href = `/lobbies/${lobbyId}/page`;
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка присоединения');
+            showNotification(getErrorMessage(err));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 }
 
-// Проверим, есть ли уже токен при загрузке страницы
 window.onload = () => {
     if (localStorage.getItem('access_token')) {
         loadApp();

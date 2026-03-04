@@ -46,11 +46,11 @@ if (pathParts.length >= 2 && pathParts[0] === 'lobbies') {
 }
 
 if (!token) {
-    alert('Вы не авторизованы');
+    showNotification('Вы не авторизованы');
     window.location.href = '/';
 }
 if (!currentLobbyId) {
-    alert('Некорректный URL лобби');
+    showNotification('Некорректный URL лобби');
     window.location.href = '/';
 }
 
@@ -73,7 +73,7 @@ socket.on('new_message', (data) => {
 });
 
 socket.on('error', (data) => {
-    alert('Ошибка: ' + data.message);
+    showNotification('Ошибка: ' + data.message);
 });
 
 socket.on('marker_added', (marker) => addMarker(marker));
@@ -106,7 +106,7 @@ socket.on('user_left', (data) => {
 });
 
 socket.on('kicked', () => {
-    alert('Вы были заблокированы в этом лобби');
+    showNotification('Вы были заблокированы в этом лобби');
     window.location.href = '/';
 });
 
@@ -150,7 +150,7 @@ async function loadLobbyInfo() {
         setTileClickCallback((options) => {
             const { tile, event, isDoubleClick, isDrag } = options;
             if (!isGM) {
-                alert('Только ГМ может редактировать тайлы');
+                showNotification('Только ГМ может редактировать тайлы');
                 return;
             }
             if (isDoubleClick) {
@@ -209,10 +209,10 @@ async function updateTile(chunkX, chunkY, tileX, tileY, updates, callback) {
             if (callback) callback();
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка обновления');
+            showNotification(getErrorMessage(error));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 }
 
@@ -258,13 +258,13 @@ async function banUser(userId) {
             lobbyParticipants = lobbyParticipants.filter(p => p.user_id !== userId);
             onlineUserIds.delete(userId);
             updateParticipantsList();
-            alert('Участник заблокирован');
+            showNotification('Участник заблокирован');
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка при блокировке');
+            showNotification(getErrorMessage(err));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 }
 
@@ -301,10 +301,10 @@ async function leaveLobby() {
             window.location.href = '/';
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка');
+            showNotification(getErrorMessage(err));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 }
 window.leaveLobby = leaveLobby;
@@ -406,11 +406,11 @@ function displayLobbyCharacters(characters) {
 window.viewCharacter = (id) => {
     fetch(`/lobbies/characters/${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
         .then(res => res.json())
-        .then(char => alert(JSON.stringify(char.data, null, 2)))
-        .catch(err => alert('Ошибка загрузки'));
+        .then(char => showNotification(JSON.stringify(char.data, null, 2)))
+        .catch(err => showNotification('Ошибка загрузки'));
 };
 
-window.editCharacter = (id) => alert('Редактирование пока не реализовано');
+window.editCharacter = (id) => showNotification('Редактирование пока не реализовано');
 
 window.deleteCharacter = async (id) => {
     if (!confirm('Удалить персонажа?')) return;
@@ -420,14 +420,14 @@ window.deleteCharacter = async (id) => {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
-            alert('Персонаж удалён');
+            showNotification('Персонаж удалён');
             loadLobbyCharacters();
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка удаления');
+            showNotification(getErrorMessage(error));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 };
 
@@ -439,7 +439,7 @@ window.showCreateCharacterForm = () => {
         const parsed = JSON.parse(data || '{}');
         createCharacter(name, parsed);
     } catch (e) {
-        alert('Некорректный JSON');
+        showNotification('Некорректный JSON');
     }
 };
 
@@ -454,14 +454,14 @@ async function createCharacter(name, data) {
             body: JSON.stringify({ name, data })
         });
         if (response.ok) {
-            alert('Персонаж создан');
+            showNotification('Персонаж создан');
             loadLobbyCharacters();
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка создания');
+            showNotification(getErrorMessage(error));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 }
 
@@ -502,15 +502,15 @@ window.saveVisibility = async () => {
             body: JSON.stringify({ visible_to: visibleTo })
         });
         if (response.ok) {
-            alert('Видимость обновлена');
+            showNotification('Видимость обновлена');
             closeVisibilityModal();
             loadLobbyCharacters();
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка');
+            showNotification(getErrorMessage(error));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 };
 
@@ -584,7 +584,7 @@ async function loadBannedList() {
             content.innerHTML = html;
         } else {
             const err = await response.json();
-            content.innerHTML = `<p class="error">Ошибка: ${err.error || 'Не удалось загрузить'}</p>`;
+            content.innerHTML = `<p class="error">Ошибка: ${getErrorMessage(error)}</p>`;
         }
     } catch (error) {
         document.getElementById('settings-content').innerHTML = '<p class="error">Ошибка сети</p>';
@@ -599,14 +599,14 @@ window.unbanUser = async function(userId) {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
-            alert('Пользователь разбанен');
+            showNotification('Пользователь разбанен');
             loadBannedList();
         } else {
             const err = await response.json();
-            alert(err.error || 'Ошибка при разбане');
+            showNotification(getErrorMessage(err));
         }
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 };
 
@@ -646,7 +646,7 @@ document.getElementById('tile-height')?.addEventListener('input', (e) => {
 window.addRandomObject = async function() {
     const tileInfo = getHoveredTile();
     if (!isGM || !tileInfo) {
-        alert('Выберите тайл');
+        showNotification('Выберите тайл');
         return;
     }
     const tile = tileInfo.tileData;
@@ -665,7 +665,7 @@ window.addRandomObject = async function() {
 window.clearObjects = async function() {
     const tileInfo = getHoveredTile();
     if (!isGM || !tileInfo) {
-        alert('Выберите тайл');
+        showNotification('Выберите тайл');
         return;
     }
     await updateTile(tileInfo.chunk.chunkX, tileInfo.chunk.chunkY,
@@ -1056,7 +1056,7 @@ window.exportMap = async function() {
         });
         if (!response.ok) {
             const err = await response.json();
-            alert(err.error || 'Ошибка экспорта');
+            showNotification(getErrorMessage(error));
             return;
         }
         const blob = await response.blob();
@@ -1068,6 +1068,45 @@ window.exportMap = async function() {
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
     } catch (error) {
-        alert('Ошибка сети');
+        showNotification('Ошибка сети');
     }
 };
+
+function getErrorMessage(data) {
+    if (!data) return 'Неизвестная ошибка';
+    if (typeof data === 'string') return data;
+    if (data.error) {
+        if (typeof data.error === 'string') return data.error;
+        if (data.error.message) return data.error.message;
+        if (data.error.details) {
+            let detailsStr = '';
+            for (let field in data.error.details) {
+                detailsStr += `${field}: ${data.error.details[field].join(', ')}; `;
+            }
+            return detailsStr || 'Ошибка валидации';
+        }
+    }
+    return 'Неизвестная ошибка';
+}
+
+function showNotification(message, type = 'error') {
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.textContent = message;
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: ${type === 'error' ? '#f44336' : '#4caf50'};
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        z-index: 10000;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        animation: slideIn 0.3s ease;
+    `;
+    document.body.appendChild(notification);
+    setTimeout(() => {
+        notification.remove();
+    }, 5000);
+}
