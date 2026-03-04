@@ -1,19 +1,14 @@
 // static/js/mapEdit.js
+import AppState from './state.js';  // 1. Импортируем состояние
 import { getHoveredTile, updateTileInChunk, chunksMap, getObjectHeightOffset, getObjectDimensions, showObjectHighlight, hideObjectHighlight } from './lobby3d.js';
 import { updateTile, batchUpdateTiles } from './api.js';
 import { showNotification } from './utils.js';
-import { isGM } from './ui.js';
 
 const CHUNK_SIZE = 32;
 let currentLobbyId;
 let token;
 
 let currentEditTile = null;
-let editMode = false;
-let eraserMode = false;
-let currentTileType = 'grass';
-let brushRadius = 0;
-let tileHeight = 1.0;
 let pendingTileUpdates = [];
 let batchUpdateTimeout = null;
 
@@ -21,57 +16,52 @@ export function initMapEdit(lobbyId, authToken) {
     currentLobbyId = lobbyId;
     token = authToken;
 
-    // Инициализация глобальных переменных для lobby3d.js
-    window.currentTileType = currentTileType;
-    window.tileHeight = tileHeight;
-    window.brushRadius = brushRadius;
-    window.eraserMode = eraserMode;
-    window.applyBrush = applyBrush;
-    window.updateTile = handleTileUpdate;
+    // 2. Убираем присваивания в window, теперь они не нужны
+    // (applyBrush всё равно оставляем как функцию, она будет вызываться из window)
 
     // Слушатель для изменения типа тайла
     const typeSelect = document.getElementById('tile-type-select');
     if (typeSelect) {
         typeSelect.addEventListener('change', (e) => {
-            currentTileType = e.target.value;
-            window.currentTileType = currentTileType;
+            AppState.setCurrentTileType(e.target.value);  // 3. Используем метод состояния
         });
     }
 }
 
 export function setEditMode(enabled) {
-    editMode = enabled;
-    import('./lobby3d.js').then(module => module.setEditMode(enabled));
+    AppState.setEditMode(enabled);
+    import('./lobby3d.js').then(module => {
+        module.setEditMode(enabled);
+    });
     updateGMControlsVisibility();
-    // Обновляем кнопку
     const btn = document.getElementById('edit-toggle');
     if (btn) {
-        btn.style.background = editMode ? '#4a6fa5' : '';
+        btn.style.background = AppState.editMode ? '#4a6fa5' : '';
     }
 }
 
 export function getEditMode() {
-    return editMode;
+    return AppState.editMode;  // 6. Читаем из состояния
 }
 
 export function setBrushRadius(radius) {
-    brushRadius = radius;
+    AppState.setBrushRadius(radius);  // 7. Через состояние
     import('./lobby3d.js').then(module => module.setBrushRadius(radius));
 }
 
 export function toggleEraserMode(enabled) {
-    eraserMode = enabled;
-    window.eraserMode = eraserMode; // дополнительно для надёжности
+    AppState.setEraserMode(enabled);  // 8. Через состояние
 }
 
-export function getCurrentTileType() { return currentTileType; }
-export function getTileHeight() { return tileHeight; }
-export function getEraserMode() { return eraserMode; }
+// 9. Функции для получения текущих значений – больше не нужны, можно удалить, но пока оставим для обратной совместимости
+export function getCurrentTileType() { return AppState.currentTileType; }
+export function getTileHeight() { return AppState.tileHeight; }
+export function getEraserMode() { return AppState.eraserMode; }
 
 function updateGMControlsVisibility() {
     const gmControls = document.getElementById('gm-only-controls');
     if (gmControls) {
-        gmControls.style.display = (window.isGM && editMode) ? 'flex' : 'none';
+        gmControls.style.display = (AppState.isGM && AppState.editMode) ? 'flex' : 'none';  // 10. Используем состояние
     }
 }
 
@@ -89,11 +79,11 @@ function scheduleBatchUpdate() {
 }
 
 export function applyBrush(centerTile, updates, radius) {
-    if (!window.isGM) {
+    if (!AppState.isGM) {  // 11. Читаем из состояния
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-
+    // Фильтрация разрешённых полей
     const allowedFields = ['terrain', 'height', 'objects'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
@@ -150,11 +140,11 @@ export function applyBrush(centerTile, updates, radius) {
 }
 
 export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
-    if (!window.isGM) {
+    if (!AppState.isGM) {  // 12. Читаем из состояния
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-
+    // Фильтрация
     const allowedFields = ['terrain', 'height', 'objects'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
@@ -173,7 +163,7 @@ export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
 }
 
 export function openTileEditModal(tile) {
-    if (!window.isGM) {
+    if (!AppState.isGM) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
@@ -379,21 +369,18 @@ function getAnomalyTypeFromSelect(value) {
 }
 
 export function setBrushRadiusFromInput(value) {
-    brushRadius = parseInt(value);
-    document.getElementById('brush-radius-value').textContent = brushRadius;
-    setBrushRadius(brushRadius);
-    window.brushRadius = brushRadius;
+    AppState.setBrushRadius(parseInt(value));
+    document.getElementById('brush-radius-value').textContent = AppState.brushRadius;
+    setBrushRadius(AppState.brushRadius);
 }
 
 export function setTileHeightFromInput(value) {
-    tileHeight = parseFloat(value);
-    document.getElementById('tile-height-value').textContent = tileHeight.toFixed(1);
-    window.tileHeight = tileHeight;
+    AppState.setTileHeight(parseFloat(value));
+    document.getElementById('tile-height-value').textContent = AppState.tileHeight.toFixed(1);
 }
 
 export function setEraserModeFromInput(checked) {
-    eraserMode = checked;
-    window.eraserMode = eraserMode;
+    AppState.setEraserMode(checked);
 }
 
 export function updateTileEditHeight(value) {
@@ -416,10 +403,4 @@ export function updateObjectRotation(value) {
     document.getElementById('object-rotation-value').textContent = value + '°';
 }
 
-// Экспортируем в window для доступа из lobby3d.js (уже есть, но продублируем для надёжности)
-window.currentTileType = currentTileType;
-window.tileHeight = tileHeight;
-window.brushRadius = brushRadius;
-window.eraserMode = eraserMode;
 window.applyBrush = applyBrush;
-window.updateTile = handleTileUpdate;

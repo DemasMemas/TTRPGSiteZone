@@ -2,6 +2,7 @@
 import { getLobbyInfo, getChunks } from './api.js';
 import { setMapDimensions, setTileClickCallback } from './lobby3d.js';
 import { setLobbyData, updateParticipantsList } from './ui.js';
+import AppState from './state.js';
 
 let currentLobbyId;
 
@@ -18,6 +19,7 @@ export async function loadLobbyInfo() {
 
         // Устанавливаем глобальную переменную isGM (важно!)
         window.isGM = (lobby.gm_id == localStorage.getItem('user_id'));
+        AppState.setIsGM(window.isGM);
 
         window.MAP_CHUNKS_WIDTH = lobby.chunks_width;
         window.MAP_CHUNKS_HEIGHT = lobby.chunks_height;

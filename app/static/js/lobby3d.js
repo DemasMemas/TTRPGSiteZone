@@ -881,6 +881,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         updateTileObjectsPositions(entry, tileX, tileY, tile.height);
     }
 
+    // Если изменились объекты – откладываем перестройку чанка
     if (updates.objects !== undefined) {
         if (entry.pendingRebuild) {
             cancelAnimationFrame(entry.pendingRebuild);
