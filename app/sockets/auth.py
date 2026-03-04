@@ -72,8 +72,3 @@ def handle_authenticate(data):
     messages.reverse()
     history = [{'username': msg.username, 'message': msg.message, 'timestamp': msg.timestamp.isoformat()} for msg in messages]
     emit('chat_history', history, room=request.sid)
-
-# Функция для кика (вызывается из сервиса участников)
-def kick_user(user_id, lobby_id):
-    logger.info(f"Kicking user {user_id} from lobby {lobby_id}")
-    socketio.emit('kicked', {'reason': 'banned'}, room=f"user_{user_id}")

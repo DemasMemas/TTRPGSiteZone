@@ -112,7 +112,7 @@ class CharacterService:
         if not isinstance(visible_to, list):
             raise ValidationError("visible_to must be a list")
 
-        character.visible_to = visible_to
+        character.visible_to = list(visible_to)
         db.session.commit()
         logger.info(f"Visibility of character {character_id} set to {visible_to} by GM {gm_id}")
         return character

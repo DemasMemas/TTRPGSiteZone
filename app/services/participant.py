@@ -76,7 +76,7 @@ class ParticipantService:
         logger.warning(f"User {target_user_id} banned from lobby {lobby_id} by GM {gm_id}")
 
         # Импортируем функцию кика из сокетов
-        from app.sockets.auth import kick_user
+        from app.sockets.kick import kick_user
         kick_user(target_user_id, lobby_id)
 
         return participant

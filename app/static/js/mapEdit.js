@@ -93,6 +93,16 @@ export function applyBrush(centerTile, updates, radius) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
+
+    const allowedFields = ['terrain', 'height', 'objects'];
+    const filteredUpdates = {};
+    for (const key of allowedFields) {
+        if (updates[key] !== undefined) {
+            filteredUpdates[key] = updates[key];
+        }
+    }
+    if (Object.keys(filteredUpdates).length === 0) return;
+
     let chunkX, chunkY, tileX, tileY;
     if (centerTile.chunk) {
         chunkX = centerTile.chunk.chunkX;
@@ -131,9 +141,9 @@ export function applyBrush(centerTile, updates, radius) {
                 chunk_y: targetChunkY,
                 tile_x: targetTileX,
                 tile_y: targetTileY,
-                updates: updates
+                updates: filteredUpdates
             });
-            updateTileInChunk(targetChunkX, targetChunkY, targetTileX, targetTileY, updates);
+            updateTileInChunk(targetChunkX, targetChunkY, targetTileX, targetTileY, filteredUpdates);
         }
     }
     scheduleBatchUpdate();
@@ -144,9 +154,19 @@ export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
+
+    const allowedFields = ['terrain', 'height', 'objects'];
+    const filteredUpdates = {};
+    for (const key of allowedFields) {
+        if (updates[key] !== undefined) {
+            filteredUpdates[key] = updates[key];
+        }
+    }
+    if (Object.keys(filteredUpdates).length === 0) return;
+
     try {
-        await updateTile(currentLobbyId, chunkX, chunkY, tileX, tileY, updates);
-        updateTileInChunk(chunkX, chunkY, tileX, tileY, updates);
+        await updateTile(currentLobbyId, chunkX, chunkY, tileX, tileY, filteredUpdates);
+        updateTileInChunk(chunkX, chunkY, tileX, tileY, filteredUpdates);
     } catch (error) {
         showNotification(error.message);
     }
