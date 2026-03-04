@@ -1,0 +1,405 @@
+// static/js/mapEdit.js
+import { getHoveredTile, updateTileInChunk, chunksMap, getObjectHeightOffset, getObjectDimensions, showObjectHighlight, hideObjectHighlight } from './lobby3d.js';
+import { updateTile, batchUpdateTiles } from './api.js';
+import { showNotification } from './utils.js';
+import { isGM } from './ui.js';
+
+const CHUNK_SIZE = 32;
+let currentLobbyId;
+let token;
+
+let currentEditTile = null;
+let editMode = false;
+let eraserMode = false;
+let currentTileType = 'grass';
+let brushRadius = 0;
+let tileHeight = 1.0;
+let pendingTileUpdates = [];
+let batchUpdateTimeout = null;
+
+export function initMapEdit(lobbyId, authToken) {
+    currentLobbyId = lobbyId;
+    token = authToken;
+
+    // Инициализация глобальных переменных для lobby3d.js
+    window.currentTileType = currentTileType;
+    window.tileHeight = tileHeight;
+    window.brushRadius = brushRadius;
+    window.eraserMode = eraserMode;
+    window.applyBrush = applyBrush;
+    window.updateTile = handleTileUpdate;
+
+    // Слушатель для изменения типа тайла
+    const typeSelect = document.getElementById('tile-type-select');
+    if (typeSelect) {
+        typeSelect.addEventListener('change', (e) => {
+            currentTileType = e.target.value;
+            window.currentTileType = currentTileType;
+        });
+    }
+}
+
+export function setEditMode(enabled) {
+    editMode = enabled;
+    import('./lobby3d.js').then(module => module.setEditMode(enabled));
+    updateGMControlsVisibility();
+    // Обновляем кнопку
+    const btn = document.getElementById('edit-toggle');
+    if (btn) {
+        btn.style.background = editMode ? '#4a6fa5' : '';
+    }
+}
+
+export function getEditMode() {
+    return editMode;
+}
+
+export function setBrushRadius(radius) {
+    brushRadius = radius;
+    import('./lobby3d.js').then(module => module.setBrushRadius(radius));
+}
+
+export function toggleEraserMode(enabled) {
+    eraserMode = enabled;
+    window.eraserMode = eraserMode; // дополнительно для надёжности
+}
+
+export function getCurrentTileType() { return currentTileType; }
+export function getTileHeight() { return tileHeight; }
+export function getEraserMode() { return eraserMode; }
+
+function updateGMControlsVisibility() {
+    const gmControls = document.getElementById('gm-only-controls');
+    if (gmControls) {
+        gmControls.style.display = (window.isGM && editMode) ? 'flex' : 'none';
+    }
+}
+
+function scheduleBatchUpdate() {
+    if (batchUpdateTimeout) clearTimeout(batchUpdateTimeout);
+    batchUpdateTimeout = setTimeout(() => {
+        if (pendingTileUpdates.length > 0) {
+            const updatesCopy = pendingTileUpdates.slice();
+            pendingTileUpdates = [];
+            batchUpdateTiles(currentLobbyId, updatesCopy).catch(err => {
+                showNotification(err.message);
+            });
+        }
+    }, 500);
+}
+
+export function applyBrush(centerTile, updates, radius) {
+    if (!window.isGM) {
+        showNotification('Только ГМ может редактировать тайлы');
+        return;
+    }
+    let chunkX, chunkY, tileX, tileY;
+    if (centerTile.chunk) {
+        chunkX = centerTile.chunk.chunkX;
+        chunkY = centerTile.chunk.chunkY;
+        tileX = centerTile.tileX;
+        tileY = centerTile.tileY;
+    } else {
+        chunkX = centerTile.chunkX;
+        chunkY = centerTile.chunkY;
+        tileX = centerTile.tileX;
+        tileY = centerTile.tileY;
+    }
+
+    const centerGlobalX = chunkX * CHUNK_SIZE + tileX;
+    const centerGlobalY = chunkY * CHUNK_SIZE + tileY;
+    const maxChunkX = window.MAP_CHUNKS_WIDTH - 1;
+    const maxChunkY = window.MAP_CHUNKS_HEIGHT - 1;
+    const maxGlobalX = (maxChunkX + 1) * CHUNK_SIZE;
+    const maxGlobalY = (maxChunkY + 1) * CHUNK_SIZE;
+
+    for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+            const targetGlobalX = centerGlobalX + dx;
+            const targetGlobalY = centerGlobalY + dy;
+            if (targetGlobalX < 0 || targetGlobalX >= maxGlobalX ||
+                targetGlobalY < 0 || targetGlobalY >= maxGlobalY) {
+                continue;
+            }
+            const targetChunkX = Math.floor(targetGlobalX / CHUNK_SIZE);
+            const targetChunkY = Math.floor(targetGlobalY / CHUNK_SIZE);
+            const targetTileX = targetGlobalX % CHUNK_SIZE;
+            const targetTileY = targetGlobalY % CHUNK_SIZE;
+
+            pendingTileUpdates.push({
+                chunk_x: targetChunkX,
+                chunk_y: targetChunkY,
+                tile_x: targetTileX,
+                tile_y: targetTileY,
+                updates: updates
+            });
+            updateTileInChunk(targetChunkX, targetChunkY, targetTileX, targetTileY, updates);
+        }
+    }
+    scheduleBatchUpdate();
+}
+
+export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
+    if (!window.isGM) {
+        showNotification('Только ГМ может редактировать тайлы');
+        return;
+    }
+    try {
+        await updateTile(currentLobbyId, chunkX, chunkY, tileX, tileY, updates);
+        updateTileInChunk(chunkX, chunkY, tileX, tileY, updates);
+    } catch (error) {
+        showNotification(error.message);
+    }
+}
+
+export function openTileEditModal(tile) {
+    if (!window.isGM) {
+        showNotification('Только ГМ может редактировать тайлы');
+        return;
+    }
+    currentEditTile = tile;
+    updateTileEditModal();
+    document.getElementById('tile-edit-modal').style.display = 'flex';
+}
+
+export function closeTileEditModal() {
+    document.getElementById('tile-edit-modal').style.display = 'none';
+    hideObjectHighlight();
+    currentEditTile = null;
+}
+
+function updateTileEditModal() {
+    if (!currentEditTile) return;
+    hideObjectHighlight();
+    const tileData = currentEditTile.tileData;
+
+    let infoHtml = `
+        <p>Координаты: (${currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX}, ${currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY})</p>
+        <p>Ландшафт: ${tileData.terrain}</p>
+        <p>Высота: ${tileData.height}</p>
+        <p>Объектов: ${tileData.objects ? tileData.objects.length : 0}</p>
+    `;
+    document.getElementById('tile-edit-info').innerHTML = infoHtml;
+
+    const objectsListDiv = document.getElementById('tile-objects-list');
+    if (!objectsListDiv) return;
+
+    if (!tileData.objects || tileData.objects.length === 0) {
+        objectsListDiv.innerHTML = '<p>Нет объектов</p>';
+    } else {
+        let listHtml = '<ul style="list-style: none; padding: 0; margin: 0;">';
+        tileData.objects.forEach((obj, index) => {
+            let typeDisplay = obj.type;
+            if (obj.type === 'anomaly' && obj.anomalyType) {
+                typeDisplay = `аномалия (${obj.anomalyType})`;
+            }
+            listHtml += `
+                <li style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; padding: 3px; background: rgba(255,255,255,0.1); border-radius: 4px;"
+                    onmouseenter="window.highlightObject(${index})"
+                    onmouseleave="window.hideObjectHighlight()">
+                    <span>${typeDisplay} (${obj.color})</span>
+                    <button class="btn btn-sm btn-danger" onclick="window.removeObjectFromTile(${index})" style="padding: 2px 8px;">✕</button>
+                </li>
+            `;
+        });
+        listHtml += '</ul>';
+        objectsListDiv.innerHTML = listHtml;
+    }
+
+    document.getElementById('tile-edit-terrain').value = tileData.terrain;
+    document.getElementById('tile-edit-height').value = tileData.height;
+    document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
+}
+
+export async function applyTerrainChange() {
+    if (!currentEditTile) return;
+    const newTerrain = document.getElementById('tile-edit-terrain').value;
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { terrain: newTerrain }
+    );
+    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+    const chunkEntry = chunksMap.get(chunkKey);
+    if (chunkEntry) {
+        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+        updateTileEditModal();
+    }
+}
+
+export async function applyHeightChange() {
+    if (!currentEditTile) return;
+    const newHeight = parseFloat(document.getElementById('tile-edit-height').value);
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { height: newHeight }
+    );
+    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+    const chunkEntry = chunksMap.get(chunkKey);
+    if (chunkEntry) {
+        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+        updateTileEditModal();
+    }
+}
+
+export async function addObjectToTile() {
+    if (!currentEditTile) return;
+    const tile = currentEditTile.tileData;
+    const selectValue = document.getElementById('object-type-select').value;
+    const color = document.getElementById('object-color').value;
+    const offsetX = parseFloat(document.getElementById('object-offset-x').value) || 0;
+    const offsetZ = parseFloat(document.getElementById('object-offset-z').value) || 0;
+    const scale = parseFloat(document.getElementById('object-scale').value) || 1.0;
+    const rotation = parseInt(document.getElementById('object-rotation').value) || 0;
+
+    let newObject;
+    const anomalyType = getAnomalyTypeFromSelect(selectValue);
+    if (anomalyType) {
+        newObject = {
+            type: 'anomaly',
+            anomalyType: anomalyType,
+            x: offsetX,
+            z: offsetZ,
+            scale: scale,
+            rotation: rotation,
+            color: color
+        };
+    } else {
+        newObject = {
+            type: selectValue,
+            x: offsetX,
+            z: offsetZ,
+            scale: scale,
+            rotation: rotation,
+            color: color
+        };
+    }
+
+    const objects = tile.objects ? [...tile.objects, newObject] : [newObject];
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { objects: objects }
+    );
+    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+    const chunkEntry = chunksMap.get(chunkKey);
+    if (chunkEntry) {
+        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+        updateTileEditModal();
+    }
+}
+
+export async function clearObjectsFromTile() {
+    if (!currentEditTile) return;
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { objects: [] }
+    );
+    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+    const chunkEntry = chunksMap.get(chunkKey);
+    if (chunkEntry) {
+        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+        updateTileEditModal();
+    }
+}
+
+export async function removeObjectFromTile(index) {
+    if (!currentEditTile) return;
+    const objects = currentEditTile.tileData.objects ? [...currentEditTile.tileData.objects] : [];
+    if (index < 0 || index >= objects.length) return;
+    objects.splice(index, 1);
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { objects: objects }
+    );
+    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+    const chunkEntry = chunksMap.get(chunkKey);
+    if (chunkEntry) {
+        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+        updateTileEditModal();
+    }
+}
+
+export function highlightObject(index) {
+    if (!currentEditTile) return;
+    const tileData = currentEditTile.tileData;
+    const obj = tileData.objects[index];
+    if (!obj) return;
+
+    const worldX = currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX + 0.5 + (obj.x || 0);
+    const worldZ = currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY + 0.5 + (obj.z || 0);
+    const height = tileData.height || 1.0;
+    const yOffset = getObjectHeightOffset(obj.type, obj.anomalyType);
+    const worldY = height + yOffset * (obj.scale || 1.0);
+    const dimensions = getObjectDimensions(obj.type, obj.anomalyType, obj.scale || 1.0);
+    showObjectHighlight(worldX, worldY, worldZ, dimensions);
+}
+
+function getAnomalyTypeFromSelect(value) {
+    const map = {
+        'anomaly_electric': 'electric',
+        'anomaly_fire': 'fire',
+        'anomaly_acid': 'acid',
+        'anomaly_void': 'void'
+    };
+    return map[value] || null;
+}
+
+export function setBrushRadiusFromInput(value) {
+    brushRadius = parseInt(value);
+    document.getElementById('brush-radius-value').textContent = brushRadius;
+    setBrushRadius(brushRadius);
+    window.brushRadius = brushRadius;
+}
+
+export function setTileHeightFromInput(value) {
+    tileHeight = parseFloat(value);
+    document.getElementById('tile-height-value').textContent = tileHeight.toFixed(1);
+    window.tileHeight = tileHeight;
+}
+
+export function setEraserModeFromInput(checked) {
+    eraserMode = checked;
+    window.eraserMode = eraserMode;
+}
+
+export function updateTileEditHeight(value) {
+    document.getElementById('tile-edit-height-value').textContent = parseFloat(value).toFixed(1);
+}
+
+export function updateObjectOffsetX(value) {
+    document.getElementById('object-offset-x-value').textContent = parseFloat(value).toFixed(2);
+}
+
+export function updateObjectOffsetZ(value) {
+    document.getElementById('object-offset-z-value').textContent = parseFloat(value).toFixed(2);
+}
+
+export function updateObjectScale(value) {
+    document.getElementById('object-scale-value').textContent = parseFloat(value).toFixed(2);
+}
+
+export function updateObjectRotation(value) {
+    document.getElementById('object-rotation-value').textContent = value + '°';
+}
+
+// Экспортируем в window для доступа из lobby3d.js (уже есть, но продублируем для надёжности)
+window.currentTileType = currentTileType;
+window.tileHeight = tileHeight;
+window.brushRadius = brushRadius;
+window.eraserMode = eraserMode;
+window.applyBrush = applyBrush;
+window.updateTile = handleTileUpdate;

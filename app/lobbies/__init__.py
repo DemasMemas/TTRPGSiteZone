@@ -1,3 +1,4 @@
+# app/lobbies/__init__.py
 import json
 import gzip
 import io
@@ -13,6 +14,7 @@ from app.schemas.participant import BannedUserSchema
 from app.schemas.character import CharacterSchema, CharacterCreateSchema
 from app.schemas.map import GameStateSchema, MapChunkSchema, TileUpdateSchema
 from app.models import LobbyParticipant, GameState, LobbyCharacter
+from app.utils.decorators import requires_participant, requires_gm
 
 lobbies_bp = Blueprint('lobbies', __name__)
 
@@ -69,9 +71,8 @@ def list_lobbies():
 
 @lobbies_bp.route('/<int:lobby_id>', methods=['GET'])
 @jwt_required()
-def get_lobby(lobby_id):
-    user_id = int(get_jwt_identity())
-    lobby = LobbyService.get_lobby(lobby_id, user_id)
+@requires_participant
+def get_lobby(lobby_id, lobby, participant):
     schema = LobbyDetailSchema()
     return jsonify(schema.dump(lobby)), 200
 
@@ -91,9 +92,9 @@ def leave_lobby(lobby_id):
 
 @lobbies_bp.route('/<int:lobby_id>', methods=['DELETE'])
 @jwt_required()
-def delete_lobby(lobby_id):
-    user_id = int(get_jwt_identity())
-    LobbyService.delete_lobby(lobby_id, user_id)
+@requires_gm
+def delete_lobby(lobby_id, lobby):
+    LobbyService.delete_lobby(lobby_id, lobby.gm_id)  # gm_id берётся из lobby
     return jsonify({'message': 'Lobby deleted'}), 200
 
 @lobbies_bp.route('/<int:lobby_id>/page')
@@ -102,20 +103,16 @@ def lobby_page(lobby_id):
 
 @lobbies_bp.route('/<int:lobby_id>/select_character', methods=['POST'])
 @jwt_required()
-def select_character(lobby_id):
-    user_id = int(get_jwt_identity())
+@requires_participant
+def select_character(lobby_id, lobby, participant):
     data = request.get_json()
     character_id = data.get('character_id')
     if not character_id:
         return jsonify({'error': 'character_id required'}), 400
 
-    character = LobbyCharacter.query.filter_by(id=character_id, owner_id=user_id).first()
+    character = LobbyCharacter.query.filter_by(id=character_id, owner_id=participant.user_id).first()
     if not character:
         return jsonify({'error': 'Character not found or not yours'}), 404
-
-    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
-    if not participant:
-        return jsonify({'error': 'You are not in this lobby'}), 403
 
     participant.character_id = character_id
     db.session.commit()
@@ -123,14 +120,9 @@ def select_character(lobby_id):
 
 @lobbies_bp.route('/<int:lobby_id>/participants_characters', methods=['GET'])
 @jwt_required()
-def get_participants_characters(lobby_id):
-    user_id = int(get_jwt_identity())
-    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
-    if not participant:
-        return jsonify({'error': 'You are not in this lobby'}), 403
-
-    lobby = LobbyService.get_lobby(lobby_id, user_id)
-    is_gm = (lobby.gm_id == user_id)
+@requires_participant
+def get_participants_characters(lobby_id, lobby, participant):
+    is_gm = (lobby.gm_id == participant.user_id)
 
     participants = LobbyParticipant.query.filter_by(lobby_id=lobby_id).all()
     result = []
@@ -156,12 +148,8 @@ def get_participants_characters(lobby_id):
 
 @lobbies_bp.route('/<int:lobby_id>/map', methods=['GET'])
 @jwt_required()
-def get_map(lobby_id):
-    user_id = int(get_jwt_identity())
-    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
-    if not participant:
-        return jsonify({'error': 'Not in lobby'}), 403
-
+@requires_participant
+def get_map(lobby_id, lobby, participant):
     game_state = GameState.query.filter_by(lobby_id=lobby_id).first()
     if not game_state:
         game_state = GameState(lobby_id=lobby_id)
@@ -192,43 +180,43 @@ def get_my_lobbies():
 
 @lobbies_bp.route('/<int:lobby_id>/ban/<int:user_id>', methods=['POST'])
 @jwt_required()
-def ban_participant(lobby_id, user_id):
-    current_user_id = int(get_jwt_identity())
-    ParticipantService.ban_user(current_user_id, lobby_id, user_id)
+@requires_gm
+def ban_participant(lobby_id, lobby, user_id):
+    ParticipantService.ban_user(lobby.gm_id, lobby_id, user_id)
     return jsonify({'message': 'User banned'}), 200
 
 @lobbies_bp.route('/<int:lobby_id>/banned', methods=['GET'])
 @jwt_required()
-def get_banned_participants(lobby_id):
-    current_user_id = int(get_jwt_identity())
-    banned = ParticipantService.get_banned_list(current_user_id, lobby_id)
+@requires_gm
+def get_banned_participants(lobby_id, lobby):
+    banned = ParticipantService.get_banned_list(lobby.gm_id, lobby_id)
     schema = BannedUserSchema(many=True)
     return jsonify(schema.dump(banned)), 200
 
 @lobbies_bp.route('/<int:lobby_id>/unban/<int:user_id>', methods=['POST'])
 @jwt_required()
-def unban_participant(lobby_id, user_id):
-    current_user_id = int(get_jwt_identity())
-    ParticipantService.unban_user(current_user_id, lobby_id, user_id)
+@requires_gm
+def unban_participant(lobby_id, lobby, user_id):
+    ParticipantService.unban_user(lobby.gm_id, lobby_id, user_id)
     return jsonify({'message': 'User unbanned'}), 200
 
 @lobbies_bp.route('/<int:lobby_id>/characters', methods=['GET'])
 @jwt_required()
-def get_lobby_characters(lobby_id):
-    user_id = int(get_jwt_identity())
-    characters = CharacterService.get_lobby_characters(lobby_id, user_id)
+@requires_participant
+def get_lobby_characters(lobby_id, lobby, participant):
+    characters = CharacterService.get_lobby_characters(lobby_id, participant.user_id)
     schema = CharacterSchema(many=True)
     return jsonify(schema.dump(characters)), 200
 
 @lobbies_bp.route('/<int:lobby_id>/characters', methods=['POST'])
 @jwt_required()
-def create_lobby_character(lobby_id):
-    user_id = int(get_jwt_identity())
+@requires_participant
+def create_lobby_character(lobby_id, lobby, participant):
     schema = CharacterCreateSchema()
     data = schema.load(request.get_json())
     character = CharacterService.create_character(
         lobby_id=lobby_id,
-        owner_id=user_id,
+        owner_id=participant.user_id,
         name=data['name'],
         data=data.get('data', {})
     )
@@ -285,15 +273,15 @@ def set_character_visibility(character_id):
 
 @lobbies_bp.route('/<int:lobby_id>/chunks/<int:chunk_x>/<int:chunk_y>/tile/<int:tile_x>/<int:tile_y>', methods=['PATCH'])
 @jwt_required()
-def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
-    user_id = int(get_jwt_identity())
+@requires_gm
+def update_tile(lobby_id, lobby, chunk_x, chunk_y, tile_x, tile_y):
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
     schema = TileUpdateSchema()
     updates = schema.load(data)
-    MapService.update_tile(lobby_id, user_id, chunk_x, chunk_y, tile_x, tile_y, updates)
+    MapService.update_tile(lobby_id, lobby.gm_id, chunk_x, chunk_y, tile_x, tile_y, updates)
     allowed_fields = ['terrain', 'height', 'objects']
     safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
     socketio.emit('tile_updated', {
@@ -307,35 +295,35 @@ def update_tile(lobby_id, chunk_x, chunk_y, tile_x, tile_y):
 
 @lobbies_bp.route('/<int:lobby_id>/chunks', methods=['GET'])
 @jwt_required()
-def get_chunks(lobby_id):
-    user_id = int(get_jwt_identity())
+@requires_participant
+def get_chunks(lobby_id, lobby, participant):
     min_x = request.args.get('min_chunk_x', type=int)
     max_x = request.args.get('max_chunk_x', type=int)
     min_y = request.args.get('min_chunk_y', type=int)
     max_y = request.args.get('max_chunk_y', type=int)
     if None in (min_x, max_x, min_y, max_y):
         return jsonify({'error': 'Missing bounds'}), 400
-    chunks = MapService.get_chunks(lobby_id, user_id, (min_x, max_x, min_y, max_y))
+    chunks = MapService.get_chunks(lobby_id, participant.user_id, (min_x, max_x, min_y, max_y))
     schema = MapChunkSchema(many=True)
     return jsonify(schema.dump(chunks)), 200
 
 @lobbies_bp.route('/<int:lobby_id>/chunks/batch', methods=['POST'])
 @jwt_required()
-def batch_update_tiles(lobby_id):
-    user_id = int(get_jwt_identity())
+@requires_gm
+def batch_update_tiles(lobby_id, lobby):
     data = request.get_json()
     if not data or not isinstance(data, list):
         return jsonify({'error': 'Expected a list of updates'}), 400
 
-    MapService.batch_update_tiles(lobby_id, user_id, data)
+    MapService.batch_update_tiles(lobby_id, lobby.gm_id, data)
     socketio.emit('tiles_updated', data, room=f"lobby_{lobby_id}")
     return jsonify({'message': 'Tiles updated successfully'}), 200
 
 @lobbies_bp.route('/<int:lobby_id>/export', methods=['GET'])
 @jwt_required()
-def export_lobby(lobby_id):
-    user_id = int(get_jwt_identity())
-    export_data = MapService.export_map(lobby_id, user_id)
+@requires_gm
+def export_lobby(lobby_id, lobby):
+    export_data = MapService.export_map(lobby_id, lobby.gm_id)
     json_str = json.dumps(export_data, ensure_ascii=False, separators=(',', ':'))
     json_bytes = json_str.encode('utf-8')
     gzip_buffer = io.BytesIO()

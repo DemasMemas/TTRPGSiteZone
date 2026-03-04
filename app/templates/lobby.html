@@ -98,8 +98,7 @@
                     <!-- Радиус кисти -->
                     <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
                         <span>Радиус кисти:</span>
-                        <input type="range" id="brush-radius" min="0" max="3" value="0" style="width: 80px;">
-                        <span id="brush-radius-value">0</span>
+                        <input type="range" id="brush-radius" min="0" max="3" value="0" oninput="setBrushRadiusFromInput(this.value)">                        <span id="brush-radius-value">0</span>
                     </div>
 
                     <!-- Тип тайла -->
@@ -117,14 +116,13 @@
                     <!-- Высота -->
                     <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
                         <span>Высота:</span>
-                        <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" style="width: 100px;">
-                        <span id="tile-height-value">1.0</span>
+                        <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.value)">                        <span id="tile-height-value">1.0</span>
                     </div>
 
                     <!-- Ластик -->
                     <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
                         <label>Ластик</label>
-                        <input type="checkbox" id="eraser-checkbox">
+                        <input type="checkbox" id="eraser-checkbox" onchange="setEraserModeFromInput(this.checked)">
                     </div>
                 </div>
 
@@ -165,7 +163,7 @@
                     <button class="btn btn-primary" onclick="applyTerrainChange()">Применить</button>
                     <br><br>
                     <label>Высота:</label>
-                    <input type="range" id="tile-edit-height" min="0.5" max="3.0" step="0.1" value="1.0">
+                    <input type="range" id="tile-edit-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="updateTileEditHeight(this.value)">
                     <span id="tile-edit-height-value">1.0</span>
                     <button class="btn btn-primary" onclick="applyHeightChange()">Применить</button>
                     <br><br>
@@ -185,19 +183,19 @@
 
                     <div style="display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 8px; margin-top: 10px; align-items: center;">
                         <label>X:</label>
-                        <input type="range" id="object-offset-x" min="-0.5" max="0.5" step="0.01" value="0.0" style="width: 100%;">
+                        <input type="range" id="object-offset-x" min="-0.5" max="0.5" step="0.01" value="0.0" oninput="updateObjectOffsetX(this.value)">
                         <span id="object-offset-x-value" style="text-align: right;">0.00</span>
 
                         <label>Z:</label>
-                        <input type="range" id="object-offset-z" min="-0.5" max="0.5" step="0.01" value="0.0" style="width: 100%;">
+                        <input type="range" id="object-offset-z" min="-0.5" max="0.5" step="0.01" value="0.0" oninput="updateObjectOffsetZ(this.value)">
                         <span id="object-offset-z-value" style="text-align: right;">0.00</span>
 
                         <label>Масштаб:</label>
-                        <input type="range" id="object-scale" min="0.2" max="2.0" step="0.05" value="1.0" style="width: 100%;">
+                        <input type="range" id="object-scale" min="0.2" max="2.0" step="0.05" value="1.0" style="width: 100%;" oninput="updateObjectScale(this.value)">
                         <span id="object-scale-value" style="text-align: right;">1.00</span>
 
                         <label>Поворот:</label>
-                        <input type="range" id="object-rotation" min="0" max="359" step="1" value="0" style="width: 100%;">
+                        <input type="range" id="object-rotation" min="0" max="359" step="1" value="0" style="width: 100%;" oninput="updateObjectRotation(this.value)">
                         <span id="object-rotation-value" style="text-align: right;">0°</span>
                     </div>
 
@@ -216,6 +214,6 @@
     </div>
 
     <!-- Основной скрипт лобби (модуль) -->
-    <script type="module" src="/static/lobby.js"></script>
+    <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>
