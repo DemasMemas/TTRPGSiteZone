@@ -1,9 +1,12 @@
 # app/sockets/auth.py
+import logging
 from flask import request
 from flask_socketio import join_room, leave_room, emit
 from app.extensions import socketio, db
 from app.models import LobbyParticipant, ChatMessage
 from .utils import get_user_from_token
+
+logger = logging.getLogger(__name__)
 
 # Глобальные словари для отслеживания подключений
 sid_to_user = {}
@@ -11,7 +14,7 @@ user_lobby = {}
 
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected')
+    logger.info('Client connected')
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -20,7 +23,8 @@ def handle_disconnect():
         lobby_id = user_lobby.pop(user_id, None)
         if lobby_id:
             emit('user_left', {'user_id': user_id}, room=f"lobby_{lobby_id}")
-    print('Client disconnected')
+            logger.info(f"User {user_id} left lobby {lobby_id}")
+    logger.info('Client disconnected')
 
 @socketio.on('authenticate')
 def handle_authenticate(data):
@@ -31,15 +35,18 @@ def handle_authenticate(data):
 
     user = get_user_from_token(token)
     if not user:
+        logger.warning("Authentication failed: invalid token")
         emit('error', {'message': 'Invalid token'})
         return
 
     # Проверяем, не забанен ли пользователь
     participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user.id).first()
     if not participant:
+        logger.warning(f"User {user.id} tried to authenticate in lobby {lobby_id} but is not a participant")
         emit('error', {'message': 'You are not in this lobby'})
         return
     if participant.is_banned:
+        logger.warning(f"Banned user {user.id} tried to authenticate in lobby {lobby_id}")
         emit('error', {'message': 'You are banned from this lobby'})
         return
 
@@ -51,6 +58,7 @@ def handle_authenticate(data):
     join_room(f"user_{user.id}")  # личная комната для кика
 
     emit('authenticated', {'username': user.username}, room=request.sid)
+    logger.info(f"User {user.id} ({user.username}) authenticated in lobby {lobby_id}")
 
     # Оповещаем всех в лобби о новом участнике
     emit('user_joined', {'user_id': user.id, 'username': user.username}, room=f"lobby_{lobby_id}")
@@ -67,4 +75,5 @@ def handle_authenticate(data):
 
 # Функция для кика (вызывается из сервиса участников)
 def kick_user(user_id, lobby_id):
+    logger.info(f"Kicking user {user_id} from lobby {lobby_id}")
     socketio.emit('kicked', {'reason': 'banned'}, room=f"user_{user_id}")

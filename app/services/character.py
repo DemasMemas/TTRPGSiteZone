@@ -1,10 +1,11 @@
 # app/services/character.py
+import logging
 from sqlalchemy.orm import joinedload
-
 from app.extensions import db
 from app.models import LobbyCharacter, Lobby, LobbyParticipant
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 
+logger = logging.getLogger(__name__)
 
 class CharacterService:
     @staticmethod
@@ -23,6 +24,7 @@ class CharacterService:
         db.session.add(character)
         db.session.commit()
         db.session.refresh(character, attribute_names=['owner'])
+        logger.info(f"Character '{name}' (id={character.id}) created by user {owner_id} in lobby {lobby_id}")
         return character
 
     @staticmethod
@@ -57,6 +59,7 @@ class CharacterService:
         if 'data' in updates:
             character.data = updates['data']
         db.session.commit()
+        logger.info(f"Character {character_id} updated by user {user_id}")
         return character
 
     @staticmethod
@@ -72,6 +75,7 @@ class CharacterService:
 
         db.session.delete(character)
         db.session.commit()
+        logger.info(f"Character {character_id} deleted by user {user_id}")
 
     @staticmethod
     def get_lobby_characters(lobby_id, user_id):
@@ -110,4 +114,5 @@ class CharacterService:
 
         character.visible_to = visible_to
         db.session.commit()
+        logger.info(f"Visibility of character {character_id} set to {visible_to} by GM {gm_id}")
         return character

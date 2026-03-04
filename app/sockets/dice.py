@@ -1,13 +1,15 @@
 # app/sockets/dice.py
+import logging
 import random
 from datetime import datetime, timezone
-
 from flask import request
 from flask_socketio import emit
 from app.extensions import socketio, db
 from app.models import Lobby, LobbyParticipant, LobbyCharacter
 from app.utils.dice import roll_dice as roll_dice_util
 from .utils import get_user_from_token
+
+logger = logging.getLogger(__name__)
 
 @socketio.on('roll_skill')
 def handle_roll_skill(data):
@@ -64,6 +66,7 @@ def handle_roll_skill(data):
                     break
 
     if skill_bonus is None:
+        logger.warning(f"Skill {skill_name} not found for character {character_id}")
         emit('error', {'message': f'Skill {skill_name} not found'}, room=request.sid)
         return
 
@@ -71,6 +74,8 @@ def handle_roll_skill(data):
     total = d20 + skill_bonus + extra_modifier
     roll_description = f"1d20 ({d20}) + {skill_bonus} (навык) + {extra_modifier} (мод) = **{total}**"
     message = f"{character.name} ({user.username}) совершил бросок {skill_name}: {roll_description}"
+
+    logger.info(f"Skill roll: {user.username} rolled {skill_name} for {character.name}, result {total}")
 
     emit('new_message', {
         'username': 'System (Roll)',

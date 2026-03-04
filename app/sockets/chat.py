@@ -1,12 +1,14 @@
 # app/sockets/chat.py
+import logging
 from datetime import datetime, timezone
-
 from flask import request
 from flask_socketio import emit
 from app.extensions import socketio, db
 from app.models import ChatMessage
 from .utils import get_user_from_token
 from app.utils.dice import roll_dice as roll_dice_util
+
+logger = logging.getLogger(__name__)
 
 @socketio.on('send_message')
 def handle_message(data):
@@ -18,6 +20,7 @@ def handle_message(data):
 
     user = get_user_from_token(token)
     if not user:
+        logger.warning("Message send attempt with invalid token")
         emit('error', {'message': 'Invalid token'})
         return
 
@@ -35,6 +38,7 @@ def handle_message(data):
                     'message': description,
                     'timestamp': datetime.now(timezone.utc).isoformat()
                 }, room=request.sid)
+                logger.debug(f"Invalid dice expression: {expression}")
                 return
             else:
                 final_text = f"/roll {expression}: {description}"
@@ -55,6 +59,7 @@ def handle_message(data):
     )
     db.session.add(msg)
     db.session.commit()
+    logger.info(f"Message from {user.username} in lobby {lobby_id}: {final_text}")
 
     # Рассылаем всем в комнате
     emit('new_message', {

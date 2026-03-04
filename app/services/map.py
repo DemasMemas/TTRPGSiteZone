@@ -1,10 +1,13 @@
 # app/services/map.py
+import logging
 import copy
 import random
 from app.extensions import db
 from app.models import MapChunk, Lobby, LobbyParticipant
 from app.constants import CHUNK_SIZE, MAX_CHUNKS_WIDTH, MAX_CHUNKS_HEIGHT, ANOMALY_TYPES
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+
+logger = logging.getLogger(__name__)
 
 class MapService:
     @staticmethod
@@ -34,6 +37,7 @@ class MapService:
                     data = MapService._generate_chunk_data(lobby_id, cx, cy, lobby.map_type)
                     chunk = MapChunk(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy, data=data)
                     db.session.add(chunk)
+                    logger.debug(f"Generated new chunk ({cx},{cy}) for lobby {lobby_id}")
                 result.append({
                     'chunk_x': chunk.chunk_x,
                     'chunk_y': chunk.chunk_y,
@@ -65,6 +69,7 @@ class MapService:
                 data=MapService._generate_chunk_data(lobby_id, chunk_x, chunk_y, lobby.map_type)
             )
             db.session.add(chunk)
+            logger.debug(f"Created new chunk ({chunk_x},{chunk_y}) for tile update")
 
         # Глубокая копия данных
         new_data = copy.deepcopy(chunk.data)
@@ -72,6 +77,7 @@ class MapService:
             new_data[tile_y][tile_x][key] = value
         chunk.data = new_data
         db.session.commit()
+        logger.info(f"Tile ({tile_x},{tile_y}) in chunk ({chunk_x},{chunk_y}) updated by GM {gm_id}: {updates}")
         return chunk
 
     @staticmethod
@@ -113,6 +119,7 @@ class MapService:
             chunk.data = new_data
 
         db.session.commit()
+        logger.info(f"Batch updated {len(updates_list)} tiles in lobby {lobby_id} by GM {gm_id}")
 
     @staticmethod
     def export_map(lobby_id, gm_id):
@@ -137,6 +144,7 @@ class MapService:
             'chunks_height': lobby.chunks_height,
             'chunks': chunks_data
         }
+        logger.info(f"Map exported for lobby {lobby_id} by GM {gm_id}")
         return export_data
 
     @staticmethod

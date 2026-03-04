@@ -1,10 +1,13 @@
 # app/services/lobby.py
+import logging
 import random
 import string
 from app.extensions import db
 from app.models import Lobby, LobbyParticipant, MapChunk
 from app.constants import MAX_CHUNKS_WIDTH, MAX_CHUNKS_HEIGHT
 from app.services.exceptions import ValidationError, NotFoundError, PermissionDenied
+
+logger = logging.getLogger(__name__)
 
 def generate_invite_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -76,6 +79,7 @@ class LobbyService:
                 db.session.add(chunk)
 
         db.session.commit()
+        logger.info(f"Lobby created: '{name}' (id={lobby.id}) by user {user_id}, code={code}")
         return lobby
 
     @staticmethod
@@ -103,11 +107,13 @@ class LobbyService:
 
         lobby.is_active = False
         db.session.commit()
+        logger.info(f"Lobby {lobby_id} deactivated by GM {gm_id}")
 
     @staticmethod
     def get_my_lobbies(user_id):
         """Возвращает список лобби, созданных пользователем."""
         lobbies = Lobby.query.filter_by(gm_id=user_id, is_active=True).all()
+        logger.debug(f"User {user_id} has {len(lobbies)} lobbies")
         return [{
             'id': l.id,
             'name': l.name,
@@ -125,6 +131,7 @@ class LobbyService:
         # Используем ParticipantService для присоединения
         from app.services.participant import ParticipantService
         ParticipantService.join_lobby(user_id, lobby.id)
+        logger.info(f"User {user_id} joined lobby {lobby.id} via code {code}")
         return lobby
 
     @staticmethod

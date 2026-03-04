@@ -1,11 +1,13 @@
 # app/sockets/markers.py
+import logging
 from datetime import datetime, timezone
-
 from flask import request
 from flask_socketio import emit
 from app.extensions import socketio, db
 from app.models import LobbyParticipant, GameState
 from .utils import get_user_from_token
+
+logger = logging.getLogger(__name__)
 
 @socketio.on('add_marker')
 def handle_add_marker(data):
@@ -47,6 +49,7 @@ def handle_add_marker(data):
     game_state.map_data['markers'] = markers
     db.session.commit()
 
+    logger.info(f"Marker added by {user.username} in lobby {lobby_id}: {new_marker}")
     emit('marker_added', new_marker, room=f"lobby_{lobby_id}")
 
 @socketio.on('move_marker')
@@ -79,6 +82,7 @@ def handle_move_marker(data):
     game_state.map_data['markers'] = markers
     db.session.commit()
 
+    logger.info(f"Marker {marker_id} moved by {user.username} in lobby {lobby_id} to ({new_x}, {new_y})")
     emit('marker_moved', {'id': marker_id, 'x': new_x, 'y': new_y}, room=f"lobby_{lobby_id}")
 
 @socketio.on('delete_marker')
@@ -104,4 +108,5 @@ def handle_delete_marker(data):
     game_state.map_data['markers'] = markers
     db.session.commit()
 
+    logger.info(f"Marker {marker_id} deleted by {user.username} in lobby {lobby_id}")
     emit('marker_deleted', {'id': marker_id}, room=f"lobby_{lobby_id}")

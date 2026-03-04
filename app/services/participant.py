@@ -1,7 +1,10 @@
 # app/services/participant.py
+import logging
 from app.extensions import db
 from app.models import Lobby, LobbyParticipant
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+
+logger = logging.getLogger(__name__)
 
 class ParticipantService:
     @staticmethod
@@ -23,16 +26,18 @@ class ParticipantService:
         ).first()
         if participant:
             # Уже участник – считаем успехом
+            logger.info(f"User {user_id} already in lobby {lobby_id}")
             return participant
 
         participant = LobbyParticipant(lobby_id=lobby_id, user_id=user_id)
         db.session.add(participant)
         db.session.commit()
+        logger.info(f"User {user_id} joined lobby {lobby_id}")
         return participant
 
     @staticmethod
     def leave_lobby(user_id, lobby_id):
-        """Пользователь покидает лобби (GM не может покинуть)."""
+        """Пользователь покидает лобби."""
         lobby = Lobby.query.get(lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
@@ -45,6 +50,7 @@ class ParticipantService:
 
         db.session.delete(participant)
         db.session.commit()
+        logger.info(f"User {user_id} left lobby {lobby_id}")
 
     @staticmethod
     def ban_user(gm_id, lobby_id, target_user_id):
@@ -67,9 +73,10 @@ class ParticipantService:
 
         participant.is_banned = True
         db.session.commit()
+        logger.warning(f"User {target_user_id} banned from lobby {lobby_id} by GM {gm_id}")
 
-        # Импортируем функцию кика здесь, чтобы избежать циклического импорта
-        from app.socket_events import kick_user
+        # Импортируем функцию кика из сокетов
+        from app.sockets.auth import kick_user
         kick_user(target_user_id, lobby_id)
 
         return participant
@@ -95,6 +102,7 @@ class ParticipantService:
 
         participant.is_banned = False
         db.session.commit()
+        logger.info(f"User {target_user_id} unbanned from lobby {lobby_id} by GM {gm_id}")
 
     @staticmethod
     def get_banned_list(gm_id, lobby_id):
@@ -109,4 +117,5 @@ class ParticipantService:
         banned = LobbyParticipant.query.filter_by(
             lobby_id=lobby_id, is_banned=True
         ).all()
+        logger.debug(f"Banned list requested for lobby {lobby_id} by GM {gm_id}, count={len(banned)}")
         return [{'user_id': p.user_id, 'username': p.user.username} for p in banned]
