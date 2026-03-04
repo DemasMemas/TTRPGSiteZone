@@ -17,7 +17,7 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('authenticated', (data) => {
-        addMessage('system', `Вы вошли как ${data.username}`);
+        showNotification(`Вы вошли как ${data.username}`, 'system', 'bottom-left');
         const myId = parseInt(localStorage.getItem('user_id'));
         onlineUserIds.add(myId);
         loadLobbyInfo();
@@ -26,11 +26,16 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('new_message', (data) => {
-        addMessage(data.username, data.message, data.timestamp);
+        // Системные сообщения (броски кубиков и т.п.) показываем как уведомления
+        if (data.username.startsWith('System')) {
+            showNotification(data.message, 'system', 'bottom-left');
+        } else {
+            addMessage(data.username, data.message, data.timestamp);
+        }
     });
 
     socket.on('error', (data) => {
-        showNotification('Ошибка: ' + data.message);
+        showNotification('Ошибка: ' + data.message, 'error', 'top-right');
     });
 
     socket.on('marker_added', (marker) => {
@@ -44,7 +49,13 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('chat_history', (messages) => {
-        messages.forEach(msg => addMessage(msg.username, msg.message, msg.timestamp));
+        messages.forEach(msg => {
+            if (msg.username.startsWith('System')) {
+                showNotification(msg.message, 'system', 'bottom-left');
+            } else {
+                addMessage(msg.username, msg.message, msg.timestamp);
+            }
+        });
     });
 
     socket.on('online_users', (userIds) => {
@@ -54,7 +65,7 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('user_joined', (data) => {
-        addMessage('system', `${data.username} присоединился к лобби`);
+        showNotification(`${data.username} присоединился к лобби`, 'system', 'bottom-left');
         if (!lobbyParticipants.some(p => p.user_id === data.user_id)) {
             lobbyParticipants.push({ user_id: data.user_id, username: data.username });
         }
@@ -64,13 +75,14 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('user_left', (data) => {
+        showNotification(`${data.username} покинул лобби`, 'system', 'bottom-left');
         onlineUserIds.delete(data.user_id);
         updateParticipantsList();
         loadLobbyCharacters();
     });
 
     socket.on('kicked', () => {
-        showNotification('Вы были заблокированы в этом лобби');
+        showNotification('Вы были заблокированы в этом лобби', 'error', 'top-right');
         window.location.href = '/';
     });
 

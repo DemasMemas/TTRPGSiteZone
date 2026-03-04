@@ -26,22 +26,44 @@ export function getErrorMessage(data) {
     return 'Неизвестная ошибка';
 }
 
-export function showNotification(message, type = 'error') {
+export function showNotification(message, type = 'error', position = 'top-right') {
     const notification = document.createElement('div');
     notification.className = `notification ${type}`;
     notification.textContent = message;
+
+    let bgColor;
+    switch (type) {
+        case 'success': bgColor = '#4caf50'; break;
+        case 'system': bgColor = '#ffaa00'; break;
+        case 'error':
+        default: bgColor = '#f44336';
+    }
+
+    let positionStyles = '';
+    if (position === 'top-right') {
+        positionStyles = 'top: 20px; right: 20px;';
+    } else if (position === 'bottom-left') {
+        positionStyles = 'bottom: 20px; left: 20px;';
+    } else if (position === 'top-left') {
+        positionStyles = 'top: 20px; left: 20px;';
+    } else if (position === 'bottom-right') {
+        positionStyles = 'bottom: 20px; right: 20px;';
+    }
+
     notification.style.cssText = `
         position: fixed;
-        top: 20px;
-        right: 20px;
-        background: ${type === 'error' ? '#f44336' : '#4caf50'};
+        ${positionStyles}
+        background: ${bgColor};
         color: white;
         padding: 12px 20px;
         border-radius: 8px;
         z-index: 10000;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         animation: slideIn 0.3s ease;
+        max-width: 300px;
+        word-wrap: break-word;
     `;
+
     document.body.appendChild(notification);
     setTimeout(() => notification.remove(), 5000);
 }

@@ -70,7 +70,6 @@ export function addMessage(username, text, timestamp) {
     if (!chat) return;
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message';
-    if (username.startsWith('System')) msgDiv.classList.add('system');
     const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : '';
     msgDiv.innerHTML = `<span class="username">${username}:</span> ${text} <span class="timestamp">${timeStr}</span>`;
     chat.appendChild(msgDiv);
