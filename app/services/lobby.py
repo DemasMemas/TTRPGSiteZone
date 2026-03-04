@@ -55,7 +55,7 @@ class LobbyService:
         )
 
         lobby.weather_settings = {
-            'sun': {'enabled': True, 'intensity': 0.5},
+            'sun': {'enabled': True, 'intensity': 0.7},
             'fog': {'enabled': False, 'intensity': 0.5},
             'rain': {'enabled': False, 'intensity': 0.5},
             'emission': {'enabled': False, 'intensity': 0.5}

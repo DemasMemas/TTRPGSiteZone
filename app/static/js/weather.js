@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { scene, directionalLight, ambientLight, waterMat } from './lobby3d.js';
+import { scene, directionalLight, ambientLight, waterMat, setSkyMode } from './lobby3d.js';
 import { Howl } from 'howler';
 
 let rainParticles = null;
@@ -67,13 +67,20 @@ export function applyWeather(settings) {
         rainSound.pause();
     }
 
-    // Солнце (увеличенная яркость)
+    // Солнце + небо
     if (sun.enabled) {
         directionalLight.intensity = 2.0 * sun.intensity;
         ambientLight.intensity = 0.5 * sun.intensity;
+
+        if (sun.intensity >= 0.7) {
+            setSkyMode('day');
+        } else {
+            setSkyMode('night');
+        }
     } else {
         directionalLight.intensity = 0.2;
         ambientLight.intensity = 0.1;
+        setSkyMode('night');
     }
 
     // Выброс
@@ -114,13 +121,14 @@ function createRainParticles(intensity = 0.5) {
     }
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
+    // Маленькая текстура капли
     const canvas = document.createElement('canvas');
-    canvas.width = 8;
-    canvas.height = 16;
+    canvas.width = 4;
+    canvas.height = 8;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = 'white';
     ctx.beginPath();
-    ctx.ellipse(4, 8, 2, 5, 0, 0, Math.PI*2);
+    ctx.ellipse(2, 4, 1, 3, 0, 0, Math.PI*2);
     ctx.fill();
     const texture = new THREE.CanvasTexture(canvas);
 
@@ -139,7 +147,7 @@ function createRainParticles(intensity = 0.5) {
 
 function updateRainIntensity(intensity) {
     if (!rainParticles) return;
-    rainParticles.material.size = 0.4 + intensity;
+    rainParticles.material.size = 0.3 + intensity;
 }
 
 export function updateRain(deltaTime) {

@@ -32,8 +32,184 @@ const houseMat = new THREE.MeshStandardMaterial();
 const fenceMat = new THREE.MeshStandardMaterial();
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x111122);
-scene.fog = new THREE.Fog(0x111122, 500, 1500);
+scene.background = new THREE.Color(0x050510);
+scene.fog = new THREE.FogExp2(0x050510, 0.0015);
+
+function createCloudTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 2048;
+    canvas.height = 1024;
+    const ctx = canvas.getContext('2d');
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (let layer = 0; layer < 3; layer++) {
+        const count = 60 + layer * 30;
+        const baseAlpha = 0.1 + layer * 0.03;
+        const baseSize = 100 + layer * 50;
+
+        for (let i = 0; i < count; i++) {
+            // Облака от 5% до 95% ширины
+            const x = canvas.width * (0.05 + Math.random() * 0.9);
+            const y = Math.random() * canvas.height;
+            const radiusX = (baseSize + Math.random() * 100) * 0.85; // ширина уменьшена на 15%
+            const radiusY = baseSize * 0.3 + Math.random() * 30;
+            const alpha = baseAlpha + Math.random() * 0.1;
+
+            const gradient = ctx.createRadialGradient(x, y, 0, x, y, radiusX);
+            gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
+            gradient.addColorStop(0.3, `rgba(255,255,255,${alpha*0.5})`);
+            gradient.addColorStop(0.7, `rgba(255,255,255,0)`);
+
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.ellipse(x, y, radiusX, radiusY, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.repeat.set(3, 1); // небольшое повторение для сглаживания шва
+    return texture;
+}
+
+// Создаём текстуру один раз
+const cloudTexture = createCloudTexture();
+
+// Дневная сфера (светлое небо + облака)
+const daySkySphere = (() => {
+    const geometry = new THREE.SphereGeometry(980, 64, 40);
+    // Используем шейдер для градиента + текстура облаков
+    const material = new THREE.ShaderMaterial({
+        uniforms: {
+            cloudTexture: { value: cloudTexture },
+            topColor: { value: new THREE.Color(0x1a2b3c) },
+            bottomColor: { value: new THREE.Color(0x7ec8ff) }
+        },
+        vertexShader: `
+            varying vec2 vUv;
+            varying vec3 vPosition;
+            void main() {
+                vUv = uv;
+                vPosition = position;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: `
+            uniform sampler2D cloudTexture;
+            uniform vec3 topColor;
+            uniform vec3 bottomColor;
+            varying vec2 vUv;
+            varying vec3 vPosition;
+
+            void main() {
+                // Вертикальный градиент (по Y)
+                float h = normalize(vPosition).y * 0.5 + 0.5;
+                vec3 skyGradient = mix(bottomColor, topColor, h);
+
+                // Облака
+                vec4 clouds = texture2D(cloudTexture, vUv);
+                clouds.rgb *= 1.0; // можно регулировать яркость
+
+                // Смешиваем: облака поверх градиента
+                vec3 finalColor = mix(skyGradient, clouds.rgb, clouds.a);
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `,
+        side: THREE.BackSide
+    });
+    return new THREE.Mesh(geometry, material);
+})();
+
+// Ночная сфера (тёмное небо + тёмные облака)
+const nightSkySphere = (() => {
+    const geometry = new THREE.SphereGeometry(980, 64, 40);
+    const material = new THREE.ShaderMaterial({
+        uniforms: {
+            cloudTexture: { value: cloudTexture },
+            topColor: { value: new THREE.Color(0x050510) },
+            bottomColor: { value: new THREE.Color(0x1a1a2e) }
+        },
+        vertexShader: `
+            varying vec2 vUv;
+            varying vec3 vPosition;
+            void main() {
+                vUv = uv;
+                vPosition = position;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: `
+            uniform sampler2D cloudTexture;
+            uniform vec3 topColor;
+            uniform vec3 bottomColor;
+            varying vec2 vUv;
+            varying vec3 vPosition;
+
+            void main() {
+                float h = normalize(vPosition).y * 0.5 + 0.5;
+                vec3 skyGradient = mix(bottomColor, topColor, h);
+
+                vec4 clouds = texture2D(cloudTexture, vUv);
+                clouds.rgb *= 0.3; // затемняем облака
+                clouds.a *= 0.5;    // делаем полупрозрачнее
+
+                vec3 finalColor = mix(skyGradient, clouds.rgb, clouds.a);
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `,
+        side: THREE.BackSide
+    });
+    return new THREE.Mesh(geometry, material);
+})();
+
+// Звёзды (только для ночи)
+let stars = null;
+function createStars() {
+    const geometry = new THREE.BufferGeometry();
+    const vertices = [];
+    for (let i = 0; i < 3000; i++) {
+        const x = (Math.random() - 0.5) * 3000;
+        const y = (Math.random() - 0.5) * 3000;
+        const z = (Math.random() - 0.5) * 3000;
+        vertices.push(x, y, z);
+    }
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    const material = new THREE.PointsMaterial({ color: 0xffffff, size: 0.5 });
+    stars = new THREE.Points(geometry, material);
+    scene.add(stars);
+}
+
+// Добавляем сферы в сцену
+scene.add(daySkySphere);
+scene.add(nightSkySphere);
+createStars();
+
+// По умолчанию показываем ночную сферу
+daySkySphere.visible = false;
+nightSkySphere.visible = true;
+stars.visible = true;
+
+export function setSkyMode(mode) {
+    if (mode === 'day') {
+        daySkySphere.visible = true;
+        nightSkySphere.visible = false;
+        if (stars) stars.visible = false;
+    } else {
+        daySkySphere.visible = false;
+        nightSkySphere.visible = true;
+        if (stars) stars.visible = true;
+    }
+}
+
+export function setDaySkyIntensity(intensity) {
+    // Можно регулировать цвета градиента в зависимости от интенсивности, но пока оставим
+    // Если нужно, добавим позже
+}
+
+// ===== Конец неба =====
 
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 5000);
 camera.position.set(256, 300, 256);
@@ -448,8 +624,8 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
 const waterMat = new THREE.MeshStandardMaterial({
     color: 0x1E90FF,
     emissive: 0x0,
-    transparent: true,
-    opacity: 0.5
+    transparent: false,
+    opacity: 1.0
 });
 
 // --- Функции для чанков ---
