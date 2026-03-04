@@ -1,5 +1,6 @@
 # app/sockets/auth.py
 import logging
+import threading
 from flask import request
 from flask_socketio import join_room, leave_room, emit
 from app.extensions import socketio, db
@@ -8,16 +9,33 @@ from .utils import get_user_from_token
 
 logger = logging.getLogger(__name__)
 
-# Глобальные словари для отслеживания подключений
 sid_to_user = {}
 user_lobby = {}
+pending_auth = {}
+AUTH_TIMEOUT = 10
 
 @socketio.on('connect')
 def handle_connect():
     logger.info('Client connected')
 
+    def timeout_disconnect(sid):
+        if sid in pending_auth:
+            logger.warning(f"Client {sid} timed out waiting for authentication")
+            socketio.disconnect(sid)
+            pending_auth.pop(sid, None)
+
+    timer = threading.Timer(AUTH_TIMEOUT, timeout_disconnect, args=[request.sid])
+    timer.daemon = True
+    timer.start()
+    pending_auth[request.sid] = timer
+
 @socketio.on('disconnect')
 def handle_disconnect():
+    # Отменяем таймер аутентификации, если он ещё не сработал
+    if request.sid in pending_auth:
+        pending_auth[request.sid].cancel()
+        del pending_auth[request.sid]
+
     user_id = sid_to_user.pop(request.sid, None)
     if user_id:
         lobby_id = user_lobby.pop(user_id, None)
@@ -32,6 +50,11 @@ def handle_authenticate(data):
     lobby_id = data.get('lobby_id')
     if not token or not lobby_id:
         return
+
+    # Отменяем таймер аутентификации, если клиент успел прислать данные
+    if request.sid in pending_auth:
+        pending_auth[request.sid].cancel()
+        del pending_auth[request.sid]
 
     user = get_user_from_token(token)
     if not user:
