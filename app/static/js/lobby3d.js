@@ -1184,3 +1184,5 @@ window.addEventListener('keyup', (e) => {
         lastModifiers.shift = false;
     }
 }, { capture: true });
+
+export { controls };

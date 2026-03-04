@@ -3,8 +3,10 @@ import AppState from './state.js';
 import { setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, setEditMode, getEditMode } from './mapEdit.js';
 import { closeTileEditModal } from './mapEdit.js';
 import { closeVisibilityModal } from './ui.js';
+import { controls } from './lobby3d.js'; // импортируем controls
 
-let modalOpen = false; // флаг, открыто ли какое-либо модальное окно
+let modalOpen = false;
+let altPressed = false;
 
 export function initHotkeys() {
     // Наблюдаем за модальными окнами
@@ -25,11 +27,18 @@ export function initHotkeys() {
     }
 
     document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
     document.addEventListener('wheel', handleWheel, { passive: false });
+    window.addEventListener('blur', handleBlur); // на случай, если Alt зажат и окно теряет фокус
 }
 
 function handleKeyDown(e) {
-    // Игнорируем, если фокус в поле ввода (кроме Enter для отправки)
+    // Отслеживаем нажатие Alt
+    if (e.key === 'Alt') {
+        altPressed = true;
+        if (controls) controls.enableZoom = false;
+    }
+
     const target = e.target;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
 
@@ -50,20 +59,15 @@ function handleKeyDown(e) {
         return;
     }
 
-    // Если фокус в поле ввода, остальные комбинации игнорируем
     if (isInput) return;
 
-    // --- Глобальные комбинации ---
-
-    // Alt + = (клавиша + без Shift) - увеличение радиуса кисти
+    // Alt + = / - (радиус кисти)
     if (e.altKey && e.code === 'Equal') {
         e.preventDefault();
         const newRadius = Math.min(3, Math.max(0, AppState.brushRadius + 1));
         setBrushRadiusFromInput(newRadius);
         return;
     }
-
-    // Alt + - (клавиша минус) - уменьшение радиуса кисти
     if (e.altKey && e.code === 'Minus') {
         e.preventDefault();
         const newRadius = Math.min(3, Math.max(0, AppState.brushRadius - 1));
@@ -71,7 +75,7 @@ function handleKeyDown(e) {
         return;
     }
 
-    // [ - предыдущий тип тайла
+    // [ и ] - тип тайла
     if (e.code === 'BracketLeft') {
         e.preventDefault();
         const select = document.getElementById('tile-type-select');
@@ -83,8 +87,6 @@ function handleKeyDown(e) {
         select.dispatchEvent(new Event('change', { bubbles: true }));
         return;
     }
-
-    // ] - следующий тип тайла
     if (e.code === 'BracketRight') {
         e.preventDefault();
         const select = document.getElementById('tile-type-select');
@@ -97,15 +99,13 @@ function handleKeyDown(e) {
         return;
     }
 
-    // = (без Alt) - увеличение высоты
+    // = / - (без Alt) - высота
     if (!e.altKey && e.code === 'Equal') {
         e.preventDefault();
         const newHeight = Math.min(3.0, Math.max(0.5, AppState.tileHeight + 0.1));
         setTileHeightFromInput(newHeight);
         return;
     }
-
-    // - (без Alt) - уменьшение высоты
     if (!e.altKey && e.code === 'Minus') {
         e.preventDefault();
         const newHeight = Math.min(3.0, Math.max(0.5, AppState.tileHeight - 0.1));
@@ -113,7 +113,7 @@ function handleKeyDown(e) {
         return;
     }
 
-    // R - переключение ластика (раньше было Delete)
+    // R - ластик
     if (e.code === 'KeyR') {
         e.preventDefault();
         const eraserCheck = document.getElementById('eraser-checkbox');
@@ -125,7 +125,7 @@ function handleKeyDown(e) {
         return;
     }
 
-    // E - переключение Edit Mode (только для ГМ)
+    // E - Edit Mode
     if (e.code === 'KeyE') {
         e.preventDefault();
         if (AppState.isGM) {
@@ -133,15 +133,28 @@ function handleKeyDown(e) {
         }
         return;
     }
+}
 
-    // Цифры 1-5 можно будет добавить позже
+function handleKeyUp(e) {
+    if (e.key === 'Alt') {
+        altPressed = false;
+        if (controls) controls.enableZoom = true;
+    }
+}
+
+function handleBlur() {
+    // Если окно теряет фокус, сбрасываем Alt
+    if (altPressed) {
+        altPressed = false;
+        if (controls) controls.enableZoom = true;
+    }
 }
 
 function handleWheel(e) {
-    // Alt + колесо - радиус кисти (с блокировкой масштабирования камеры)
+    // Alt + колесо - радиус кисти
     if (e.altKey) {
         e.preventDefault();
-        e.stopPropagation(); // дополнительная защита от OrbitControls
+        e.stopPropagation();
         const delta = e.deltaY > 0 ? -1 : 1;
         const newRadius = Math.min(3, Math.max(0, AppState.brushRadius + delta));
         setBrushRadiusFromInput(newRadius);
@@ -159,6 +172,5 @@ function handleWheel(e) {
         tileSelect.selectedIndex = newIndex;
         AppState.setCurrentTileType(tileSelect.value);
         tileSelect.dispatchEvent(new Event('change', { bubbles: true }));
-        return;
     }
 }
