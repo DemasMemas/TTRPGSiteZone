@@ -7,9 +7,145 @@
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
+/* ===== Тёмная тема (по умолчанию) ===== */
+:root {
+  --bg-color: #111122;
+  --text-color: white;
+  --text-secondary: rgba(255,255,255,0.7);
+  --text-muted: rgba(255,255,255,0.5);
+  --text-soft: #aaa;
+  --text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+
+  --panel-bg: rgba(20, 20, 30, 0.85);
+  --panel-header-bg: rgba(40, 40, 50, 0.9);
+  --panel-border: rgba(255,255,255,0.1);
+  --panel-shadow: 0 4px 20px rgba(0,0,0,0.6);
+
+  --btn-bg: rgba(60, 60, 80, 0.9);
+  --btn-primary-bg: #4a6fa5;
+  --btn-primary-hover: #3a5a8c;
+  --btn-secondary-bg: rgba(100, 100, 120, 0.9);
+  --btn-secondary-hover: rgba(120, 120, 140, 0.9);
+  --btn-danger-bg: #dc3545;
+  --btn-danger-hover: #c82333;
+
+  --input-bg: rgba(0,0,0,0.3);
+  --input-border: rgba(255,255,255,0.2);
+  --input-placeholder: rgba(255,255,255,0.5);
+
+  --message-bg: rgba(255,255,255,0.1);
+  --message-system-bg: rgba(255,255,0,0.1);
+  --message-system-border: gold;
+  --username-color: #aaccff;
+
+  --online-color: #8f8;
+  --offline-color: #888;
+  --ban-btn-color: #f66;
+  --ban-btn-hover: #f00;
+
+  --tab-btn-color: rgba(255,255,255,0.7);
+  --tab-btn-active-bg: #4a6fa5;
+  --unban-btn-color: #4f6b99;
+  --unban-btn-hover: #6f8bbf;
+
+  --skill-btn-bg: #3a4a6f;
+  --skill-btn-hover: #4f6b99;
+
+  --scrollbar-track: rgba(0,0,0,0.1);
+  --scrollbar-thumb: rgba(255,255,255,0.3);
+
+  --marker-btn-red: #ff4d4d;
+  --marker-btn-blue: #4d4dff;
+  --marker-btn-green: #4dff4d;
+
+  --pin-menu-bg: rgba(30,30,40,0.95);
+  --pin-menu-border: #444;
+  --pin-menu-btn-bg: #3a4a6f;
+  --pin-menu-btn-hover: #5a7ab5;
+
+  --tile-palette-select-bg: rgba(0,0,0,0.5);
+  --tile-palette-select-border: #666;
+
+  --range-bg: rgba(255,255,255,0.2);
+  --range-thumb: #4a6fa5;
+
+  --hint-color: #aaa;
+
+  --loading-color: #007bff;
+}
+
+/* ===== Светлая тема ===== */
+body.light-theme {
+  --bg-color: #f0f0f0;
+  --text-color: #222;
+  --text-secondary: rgba(0,0,0,0.7);
+  --text-muted: rgba(0,0,0,0.5);
+  --text-soft: #555;
+  --text-shadow: none;
+
+  --panel-bg: rgba(255, 255, 255, 0.9);
+  --panel-header-bg: rgba(220, 220, 230, 0.9);
+  --panel-border: rgba(0,0,0,0.1);
+  --panel-shadow: 0 4px 20px rgba(0,0,0,0.2);
+
+  --btn-bg: rgba(200, 200, 220, 0.9);
+  --btn-primary-bg: #4a6fa5;
+  --btn-primary-hover: #3a5a8c;
+  --btn-secondary-bg: rgba(180, 180, 200, 0.9);
+  --btn-secondary-hover: rgba(160, 160, 180, 0.9);
+  --btn-danger-bg: #dc3545;
+  --btn-danger-hover: #c82333;
+
+  --input-bg: rgba(255,255,255,0.8);
+  --input-border: rgba(0,0,0,0.2);
+  --input-placeholder: rgba(0,0,0,0.5);
+
+  --message-bg: rgba(0,0,0,0.05);
+  --message-system-bg: rgba(255,215,0,0.1);
+  --message-system-border: darkgoldenrod;
+  --username-color: #2a4f8e;
+
+  --online-color: #2e7d32;
+  --offline-color: #757575;
+  --ban-btn-color: #d32f2f;
+  --ban-btn-hover: #b71c1c;
+
+  --tab-btn-color: rgba(0,0,0,0.7);
+  --tab-btn-active-bg: #4a6fa5;
+  --unban-btn-color: #2a4f8e;
+  --unban-btn-hover: #1e3a6b;
+
+  --skill-btn-bg: #5a7ab5;
+  --skill-btn-hover: #4f6b99;
+
+  --scrollbar-track: rgba(0,0,0,0.05);
+  --scrollbar-thumb: rgba(0,0,0,0.2);
+
+  --marker-btn-red: #ff4d4d;
+  --marker-btn-blue: #4d4dff;
+  --marker-btn-green: #4dff4d;
+
+  --pin-menu-bg: rgba(240,240,245,0.95);
+  --pin-menu-border: #ccc;
+  --pin-menu-btn-bg: #5a7ab5;
+  --pin-menu-btn-hover: #4f6b99;
+
+  --tile-palette-select-bg: white;
+  --tile-palette-select-border: #ccc;
+
+  --range-bg: rgba(0,0,0,0.1);
+  --range-thumb: #4a6fa5;
+
+  --hint-color: #666;
+
+  --loading-color: #0066cc;
+}
+
+/* ===== Базовые стили ===== */
 body {
+  background: var(--bg-color);
+  color: var(--text-color);
   overflow: hidden;
-  background: #111;
 }
 
 #canvas-container {
@@ -24,32 +160,33 @@ body {
 .ui-overlay {
   position: relative;
   z-index: 2;
-  pointer-events: none; /* чтобы клики проходили сквозь overlay, но не сквозь панели */
+  pointer-events: none;
   height: 100vh;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   padding: 15px;
-  color: white;
-  text-shadow: 1px 1px 2px black;
+  color: var(--text-color);
+  text-shadow: var(--text-shadow);
 }
 
-/* Все панели должны получать pointer-events: auto, чтобы с ними можно было взаимодействовать */
-.top-bar, .chat-panel, .right-panel, .map-tools, .participants-panel, .lobby-menu, .modal {
+/* Все панели должны получать pointer-events: auto */
+.top-bar, .chat-panel, .right-panel, .map-tools,
+.participants-panel, .lobby-menu, .modal {
   pointer-events: auto;
 }
 
-/* Верхняя панель */
+/* Верхняя панель (не используется, но оставим) */
 .top-bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: rgba(30, 30, 40, 0.8);
+  background: var(--panel-header-bg);
   backdrop-filter: blur(5px);
   padding: 10px 20px;
   border-radius: 40px;
   box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--panel-border);
   max-width: 500px;
   margin: 0 auto;
 }
@@ -57,37 +194,35 @@ body {
 .top-bar h1 {
   font-size: 1.3rem;
   font-weight: 400;
-  color: #fff;
+  color: var(--text-color);
 }
 
-/* Кнопки */
+/* ===== Кнопки ===== */
 .btn {
-  background: rgba(60, 60, 80, 0.9);
+  background: var(--btn-bg);
   border: none;
-  color: white;
+  color: white; /* текст кнопок всегда белый для контраста */
   padding: 8px 16px;
   border-radius: 20px;
   cursor: pointer;
   font-size: 0.9rem;
   transition: background 0.2s;
   backdrop-filter: blur(3px);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--panel-border);
 }
 
 .btn-primary {
-  background: #4a6fa5;
+  background: var(--btn-primary-bg);
 }
-
 .btn-primary:hover {
-  background: #3a5a8c;
+  background: var(--btn-primary-hover);
 }
 
 .btn-secondary {
-  background: rgba(100, 100, 120, 0.9);
+  background: var(--btn-secondary-bg);
 }
-
 .btn-secondary:hover {
-  background: rgba(120, 120, 140, 0.9);
+  background: var(--btn-secondary-hover);
 }
 
 .btn-sm {
@@ -95,27 +230,34 @@ body {
   font-size: 0.8rem;
 }
 
-/* Чат-панель (слева) */
+.btn-danger {
+  background: var(--btn-danger-bg);
+}
+.btn-danger:hover {
+  background: var(--btn-danger-hover);
+}
+
+/* ===== Чат-панель ===== */
 .chat-panel {
   position: absolute;
   left: 15px;
   bottom: 80px;
   width: 280px;
-  background: rgba(20, 20, 30, 0.85);
+  background: var(--panel-bg);
   backdrop-filter: blur(5px);
   border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.1);
-  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-shadow);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
 .panel-header {
-  background: rgba(40, 40, 50, 0.9);
+  background: var(--panel-header-bg);
   padding: 10px 15px;
   font-weight: 500;
-  border-bottom: 1px solid rgba(255,255,255,0.1);
+  border-bottom: 1px solid var(--panel-border);
 }
 
 .chat-messages {
@@ -128,7 +270,7 @@ body {
 }
 
 .message {
-  background: rgba(255,255,255,0.1);
+  background: var(--message-bg);
   padding: 6px 10px;
   border-radius: 12px;
   max-width: 90%;
@@ -137,13 +279,13 @@ body {
 
 .message .username {
   font-weight: bold;
-  color: #aaccff;
+  color: var(--username-color);
   margin-right: 5px;
 }
 
 .message .timestamp {
   font-size: 0.7rem;
-  color: rgba(255,255,255,0.5);
+  color: var(--text-muted);
   float: right;
   margin-left: 10px;
 }
@@ -152,34 +294,34 @@ body {
   display: flex;
   padding: 10px;
   gap: 8px;
-  border-top: 1px solid rgba(255,255,255,0.1);
+  border-top: 1px solid var(--panel-border);
 }
 
 .chat-input-area input {
   flex: 1;
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.2);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
   border-radius: 20px;
   padding: 8px 15px;
-  color: white;
+  color: var(--text-color);
   outline: none;
 }
 
 .chat-input-area input::placeholder {
-  color: rgba(255,255,255,0.5);
+  color: var(--input-placeholder);
 }
 
-/* Правая панель */
+/* ===== Правая панель (персонажи) ===== */
 .right-panel {
   position: absolute;
   right: 15px;
   top: 80px;
   width: 260px;
-  background: rgba(20, 20, 30, 0.85);
+  background: var(--panel-bg);
   backdrop-filter: blur(5px);
   border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.1);
-  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-shadow);
   padding: 10px;
   max-height: calc(100vh - 120px);
   overflow-y: auto;
@@ -205,11 +347,11 @@ body {
 
 .character-select {
   flex: 1;
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.2);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
   border-radius: 20px;
   padding: 5px 10px;
-  color: white;
+  color: var(--text-color);
 }
 
 .characters-list {
@@ -223,7 +365,7 @@ body {
   background: rgba(255,255,255,0.05);
   border-radius: 12px;
   padding: 10px;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--panel-border);
 }
 
 .character-card h4 {
@@ -239,7 +381,7 @@ body {
 }
 
 .skill-button {
-  background: #3a4a6f;
+  background: var(--skill-btn-bg);
   border: none;
   color: white;
   padding: 4px 10px;
@@ -250,19 +392,19 @@ body {
 }
 
 .skill-button:hover {
-  background: #4f6b99;
+  background: var(--skill-btn-hover);
 }
 
-/* Нижняя панель инструментов */
+/* ===== Нижняя панель инструментов ===== */
 .map-tools {
   position: absolute;
   bottom: 15px;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(20, 20, 30, 0.85);
+  background: var(--panel-bg);
   backdrop-filter: blur(5px);
   border-radius: 40px;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--panel-border);
   padding: 8px 16px;
   display: flex;
   gap: 15px;
@@ -293,431 +435,434 @@ body {
   transform: scale(1.1);
 }
 
-.marker-btn.red { background: #ff4d4d; }
-.marker-btn.blue { background: #4d4dff; }
-.marker-btn.green { background: #4dff4d; }
+.marker-btn.red { background: var(--marker-btn-red); }
+.marker-btn.blue { background: var(--marker-btn-blue); }
+.marker-btn.green { background: var(--marker-btn-green); }
 
-/* Скроллбары */
+/* ===== Скроллбары ===== */
 ::-webkit-scrollbar {
   width: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(0,0,0,0.1);
+  background: var(--scrollbar-track);
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.3);
+  background: var(--scrollbar-thumb);
   border-radius: 10px;
 }
 
+/* ===== Системные сообщения ===== */
 .message.system {
-  background: rgba(255, 255, 0, 0.1);
-  border-left: 3px solid gold;
+  background: var(--message-system-bg);
+  border-left: 3px solid var(--message-system-border);
 }
 .message.system .username {
-  color: gold;
+  color: var(--message-system-border);
 }
 
-.btn-danger {
-    background: #dc3545;
-}
-.btn-danger:hover {
-    background: #c82333;
-}
-
-/* Панель участников (слева сверху) */
+/* ===== Панель участников ===== */
 .participants-panel {
-    position: absolute;
-    top: 15px;
-    left: 15px;
-    width: 250px;
-    background: rgba(20,20,30,0.85);
-    backdrop-filter: blur(5px);
-    border-radius: 16px;
-    border: 1px solid rgba(255,255,255,0.1);
-    overflow: hidden;
-    transition: width 0.3s;
-    z-index: 3;
+  position: absolute;
+  top: 15px;
+  left: 15px;
+  width: 250px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(5px);
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  overflow: hidden;
+  transition: width 0.3s;
+  z-index: 3;
 }
+
 .participants-panel.collapsed {
-    width: 135px;
+  width: 135px;
 }
 .participants-panel.collapsed .participants-content {
-    display: none;
+  display: none;
 }
-.panel-header {
-    padding: 10px 15px;
-    cursor: pointer;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: rgba(40,40,50,0.9);
-}
+
 .participants-content {
-    padding: 10px;
+  padding: 10px;
 }
+
 .online-section h4, .offline-section h4 {
-    font-size: 0.9rem;
-    margin: 5px 0;
-    color: #aaa;
+  font-size: 0.9rem;
+  margin: 5px 0;
+  color: var(--text-soft);
 }
+
 #online-participants, #offline-participants {
-    list-style: none;
-    padding: 0;
-    margin: 0;
+  list-style: none;
+  padding: 0;
+  margin: 0;
 }
+
 #online-participants li, #offline-participants li {
-    padding: 5px 10px 5px 20px;
-    background: rgba(255,255,255,0.05);
-    border-radius: 20px;
-    margin-bottom: 4px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+  padding: 5px 10px 5px 20px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 20px;
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
+
 #online-participants li {
-    color: #8f8;
+  color: var(--online-color);
 }
 #offline-participants li {
-    color: #888;
-    opacity: 0.7;
+  color: var(--offline-color);
+  opacity: 0.7;
 }
+
 .ban-btn {
-    background: none;
-    border: none;
-    color: #f66;
-    cursor: pointer;
-    font-size: 1.2rem;
-    padding: 0 5px;
+  background: none;
+  border: none;
+  color: var(--ban-btn-color);
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 0 5px;
 }
 .ban-btn:hover {
-    color: #f00;
+  color: var(--ban-btn-hover);
 }
 
-/* Правое меню лобби */
+/* ===== Правое меню лобби ===== */
 .lobby-menu {
-    position: absolute;
-    top: 15px;
-    right: 15px;
-    background: rgba(20,20,30,0.85);
-    backdrop-filter: blur(5px);
-    border-radius: 40px;
-    border: 1px solid rgba(255,255,255,0.1);
-    padding: 8px 16px;
-    display: flex;
-    align-items: center;
-    gap: 15px;
-    z-index: 3;
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(5px);
+  border-radius: 40px;
+  border: 1px solid var(--panel-border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  z-index: 3;
 }
+
 .lobby-menu .menu-item {
-    color: white;
+  color: var(--text-color);
 }
+
 .lobby-menu .exit-btn {
-    background: #dc3545;
-    border: none;
-    color: white;
-    width: 30px;
-    height: 30px;
-    border-radius: 50%;
-    cursor: pointer;
-    font-size: 1.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  background: var(--btn-danger-bg);
+  border: none;
+  color: white;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .lobby-menu .exit-btn:hover {
-    background: #c82333;
+  background: var(--btn-danger-hover);
 }
 
-/* Панель настроек */
+/* ===== Панель настроек ===== */
 .settings-panel {
-    position: absolute;
-    top: 70px; /* чтобы была сразу под меню */
-    right: 15px;
-    width: 300px;
-    background: rgba(20,20,30,0.95);
-    backdrop-filter: blur(5px);
-    border-radius: 16px;
-    border: 1px solid rgba(255,255,255,0.1);
-    padding: 15px;
-    z-index: 4;
-    pointer-events: auto;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  position: absolute;
+  top: 70px;
+  right: 15px;
+  width: 300px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(5px);
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  padding: 15px;
+  z-index: 4;
+  pointer-events: auto;
+  box-shadow: var(--panel-shadow);
 }
+
 .settings-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 15px;
-    font-size: 1.1rem;
-    font-weight: 500;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+  font-size: 1.1rem;
+  font-weight: 500;
 }
+
 .settings-tabs {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 15px;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
-    padding-bottom: 10px;
+  display: flex;
+  gap: 10px;
+  margin-bottom: 15px;
+  border-bottom: 1px solid var(--panel-border);
+  padding-bottom: 10px;
 }
+
 .tab-btn {
-    background: transparent;
-    border: none;
-    color: rgba(255,255,255,0.7);
-    padding: 5px 10px;
-    cursor: pointer;
-    border-radius: 20px;
-    transition: background 0.2s;
+  background: transparent;
+  border: none;
+  color: var(--tab-btn-color);
+  padding: 5px 10px;
+  cursor: pointer;
+  border-radius: 20px;
+  transition: background 0.2s;
 }
 .tab-btn.active {
-    background: #4a6fa5;
-    color: white;
+  background: var(--tab-btn-active-bg);
+  color: white;
 }
 .tab-btn:hover {
-    background: rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.1);
 }
+
 #settings-content {
-    max-height: 300px;
-    overflow-y: auto;
+  max-height: 300px;
+  overflow-y: auto;
 }
+
 .banned-user {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 12px;
-    background: rgba(255,255,255,0.05);
-    border-radius: 20px;
-    margin-bottom: 5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 20px;
+  margin-bottom: 5px;
 }
+
 .unban-btn {
-    background: none;
-    border: none;
-    color: #4f6b99;
-    cursor: pointer;
-    font-size: 1rem;
-    padding: 2px 8px;
+  background: none;
+  border: none;
+  color: var(--unban-btn-color);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 2px 8px;
 }
 .unban-btn:hover {
-    color: #6f8bbf;
+  color: var(--unban-btn-hover);
 }
 
 .character-card.empty {
-    opacity: 0.6;
-    font-style: italic;
+  opacity: 0.6;
+  font-style: italic;
 }
 
+/* ===== Модальные окна ===== */
 .modal {
-    position: fixed;
-    z-index: 10;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    background-color: rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  position: fixed;
+  z-index: 10;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
+
 .modal-content {
-    background: rgba(30,30,40,0.95);
-    backdrop-filter: blur(5px);
-    padding: 20px;
-    border-radius: 16px;
-    border: 1px solid rgba(255,255,255,0.1);
-    width: 400px;
-    max-width: 90%;
-    color: white;
+  background: var(--panel-bg);
+  backdrop-filter: blur(5px);
+  padding: 20px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  width: 400px;
+  max-width: 90%;
+  color: var(--text-color);
 }
+
 .modal-content .close {
-    float: right;
-    cursor: pointer;
-    font-size: 1.5rem;
+  float: right;
+  cursor: pointer;
+  font-size: 1.5rem;
 }
+
 #visibility-participants-list {
-    margin: 15px 0;
-    max-height: 300px;
-    overflow-y: auto;
+  margin: 15px 0;
+  max-height: 300px;
+  overflow-y: auto;
 }
+
 .visibility-participant {
-    display: flex;
-    align-items: center;
-    margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+  margin-bottom: 5px;
 }
 .visibility-participant input {
-    margin-right: 10px;
+  margin-right: 10px;
 }
 
+/* ===== Палитра тайлов ===== */
 .tile-palette {
-    color: white;
-    font-size: 0.9rem;
-}
-.tile-palette select {
-    background: rgba(0,0,0,0.5);
-    color: white;
-    border: 1px solid #666;
-    border-radius: 20px;
-    padding: 4px 10px;
-    margin-left: 5px;
+  color: var(--text-color);
+  font-size: 0.9rem;
 }
 
+.tile-palette select {
+  background: var(--tile-palette-select-bg);
+  color: var(--text-color);
+  border: 1px solid var(--tile-palette-select-border);
+  border-radius: 20px;
+  padding: 4px 10px;
+  margin-left: 5px;
+}
+
+/* ===== Ползунки ===== */
 input[type=range] {
-    background: rgba(255,255,255,0.2);
-    border-radius: 10px;
-    height: 6px;
-    -webkit-appearance: none;
+  background: var(--range-bg);
+  border-radius: 10px;
+  height: 6px;
+  -webkit-appearance: none;
 }
 input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: #4a6fa5;
-    cursor: pointer;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--range-thumb);
+  cursor: pointer;
 }
 
+/* ===== Специфические ID ===== */
 #tile-edit-modal {
-    position: absolute;
-    bottom: 20px;
-    right: 20px;
-    width: 300px;
-    z-index: 100;
-    pointer-events: auto;
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  width: 300px;
+  z-index: 100;
+  pointer-events: auto;
 }
 
 #gm-only-controls {
-    display: inline-flex;
-    align-items: center;
-    gap: 15px;
-    flex-wrap: wrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 15px;
+  flex-wrap: wrap;
 }
 
-/* Выравнивание внутренних блоков */
 #gm-only-controls > div {
-    display: flex;
-    align-items: center;
-    gap: 5px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
-/* Убираем лишние отступы у вложенных элементов */
 .tile-palette {
-    margin-left: 0 !important;
-    padding-left: 0 !important;
-    border-left: none !important;
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+  border-left: none !important;
 }
 
-/* Подсказки отдельно */
 #gm-only-controls .hint-box {
-    color: #aaa;
-    font-size: 0.8rem;
-    line-height: 1.2;
+  color: var(--hint-color);
+  font-size: 0.8rem;
+  line-height: 1.2;
 }
 
 .settings-tab-content {
-    padding: 10px 0;
+  padding: 10px 0;
 }
 
 #loading-indicator {
-    display: inline-block;
-    margin-left: 10px;
-    color: #007bff;
-    font-weight: bold;
+  display: inline-block;
+  margin-left: 10px;
+  color: var(--loading-color);
+  font-weight: bold;
 }
 #loading-indicator span {
-    animation: pulse 1s infinite;
+  animation: pulse 1s infinite;
 }
 @keyframes pulse {
-    0% { opacity: 0.5; }
-    50% { opacity: 1; }
-    100% { opacity: 0.5; }
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
 }
 
 @keyframes slideIn {
-    from {
-        transform: translateX(100%);
-        opacity: 0;
-    }
-    to {
-        transform: translateX(0);
-        opacity: 1;
-    }
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }
 
-/* Draggable panels */
+/* ===== Draggable panels ===== */
 .draggable-panel {
-    position: absolute; /* чтобы можно было двигать */
-    transition: width 0.3s, height 0.3s;
-    z-index: 100;
+  position: absolute;
+  transition: width 0.3s, height 0.3s;
+  z-index: 100;
 }
 
 .draggable-panel .panel-header {
-    cursor: grab;
-    user-select: none;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: rgba(40,40,50,0.9);
-    border-radius: 12px 12px 0 0;
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel-header-bg);
+  border-radius: 12px 12px 0 0;
 }
 
 .draggable-panel .panel-header:active {
-    cursor: grabbing;
+  cursor: grabbing;
 }
 
 .draggable-panel.collapsed .panel-content {
-    display: none;
+  display: none;
 }
 
-/* Кнопки в заголовке */
 .toggle-btn, .pin-btn {
-    cursor: pointer;
-    font-size: 1.2rem;
-    line-height: 1;
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: rgba(255,255,255,0.1);
-    transition: background 0.2s;
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.1);
+  transition: background 0.2s;
 }
 
 .toggle-btn:hover, .pin-btn:hover {
-    background: rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.2);
 }
 
-/* Меню привязки */
 .pin-menu {
-    position: absolute;
-    background: rgba(30,30,40,0.95);
-    backdrop-filter: blur(5px);
-    border: 1px solid #444;
-    border-radius: 8px;
-    padding: 5px;
-    display: flex;
-    gap: 5px;
-    z-index: 10000;
+  position: absolute;
+  background: var(--pin-menu-bg);
+  backdrop-filter: blur(5px);
+  border: 1px solid var(--pin-menu-border);
+  border-radius: 8px;
+  padding: 5px;
+  display: flex;
+  gap: 5px;
+  z-index: 10000;
 }
 
 .pin-menu button {
-    background: #3a4a6f;
-    border: none;
-    color: white;
-    width: 32px;
-    height: 32px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 1.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.2s;
+  background: var(--pin-menu-btn-bg);
+  border: none;
+  color: white;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
 }
-
 .pin-menu button:hover {
-    background: #5a7ab5;
+  background: var(--pin-menu-btn-hover);
 }
 
-/* Коррекция для панели инструментов, чтобы её содержимое не ломалось */
 .map-tools .panel-content {
-    display: flex;
-    gap: 15px;
-    align-items: center;
-    flex-wrap: wrap;
-    padding: 8px 16px;
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 16px;
 }

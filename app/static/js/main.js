@@ -131,6 +131,21 @@ window.exportMap = async () => {
     }
 };
 
+window.toggleTheme = () => {
+    document.body.classList.toggle('light-theme');
+    const isLight = document.body.classList.contains('light-theme');
+    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = isLight ? '🌑' : '🌓';
+};
+
+const savedTheme = localStorage.getItem('theme');
+if (savedTheme === 'light') {
+    document.body.classList.add('light-theme');
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = '🌑';
+}
+
 // Загружаем данные при старте
 loadLobbyInfo();
 loadLobbyCharacters();
