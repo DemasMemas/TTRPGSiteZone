@@ -11,6 +11,8 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
 import { hideObjectHighlight } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
 import { exportMap } from './api.js';
+import { initDraggablePanels } from './draggable.js';
+import { initHotkeys } from './hotkeys.js';
 
 const token = localStorage.getItem('access_token');
 const pathParts = window.location.pathname.split('/').filter(p => p !== '');
@@ -133,3 +135,8 @@ window.exportMap = async () => {
 loadLobbyInfo();
 loadLobbyCharacters();
 loadAllChunks();
+initHotkeys();
+
+setTimeout(() => {
+    initDraggablePanels();
+}, 100);

@@ -371,12 +371,14 @@ function getAnomalyTypeFromSelect(value) {
 export function setBrushRadiusFromInput(value) {
     AppState.setBrushRadius(parseInt(value));
     document.getElementById('brush-radius-value').textContent = AppState.brushRadius;
+    document.getElementById('brush-radius').value = AppState.brushRadius;
     setBrushRadius(AppState.brushRadius);
 }
 
 export function setTileHeightFromInput(value) {
     AppState.setTileHeight(parseFloat(value));
     document.getElementById('tile-height-value').textContent = AppState.tileHeight.toFixed(1);
+    document.getElementById('tile-height').value = AppState.tileHeight;
 }
 
 export function setEraserModeFromInput(checked) {

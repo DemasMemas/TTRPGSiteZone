@@ -24,12 +24,12 @@
     <!-- Интерфейс поверх 3D -->
     <div class="ui-overlay">
          <!-- Левая верхняя панель: список участников (сворачиваемый) -->
-        <div class="participants-panel" id="participants-panel">
+        <div id="panel-participants" class="draggable-panel participants-panel">
             <div class="panel-header">
                 <span>Участники</span>
-                <span class="toggle-icon">▼</span>
+                <span class="toggle-btn">▼</span>
             </div>
-            <div class="participants-content">
+            <div class="panel-content">
                 <div class="online-section">
                     <h4>В сети</h4>
                     <ul id="online-participants"></ul>
@@ -67,70 +67,88 @@
         </div>
 
         <!-- Левая панель: чат -->
-        <div class="chat-panel">
-            <div class="panel-header">Чат</div>
-            <div id="chat" class="chat-messages"></div>
-            <div class="chat-input-area">
-                <input type="text" id="message-input" placeholder="Введите сообщение...">
-                <button class="btn btn-primary" onclick="sendMessage()">→</button>
+        <div id="panel-chat" class="draggable-panel chat-panel">
+            <div class="panel-header">
+                <span>Чат</span>
+                <span class="toggle-btn">▼</span>
+            </div>
+            <div class="panel-content">
+                <div id="chat" class="chat-messages"></div>
+                <div class="chat-input-area">
+                    <input type="text" id="message-input" placeholder="Введите сообщение...">
+                    <button class="btn btn-primary" onclick="sendMessage()">→</button>
+                </div>
             </div>
         </div>
 
-        <!-- Правая панель (для будущих фич, пока пустая) -->
-        <div class="right-panel">
-            <div class="panel-header">Персонажи</div>
-            <button class="btn btn-primary btn-sm" onclick="showCreateCharacterForm()" style="margin-bottom: 10px;">+ Создать персонажа</button>
-            <div id="lobby-characters-list" class="characters-list"></div>
+        <!-- Правая панель -->
+        <div id="panel-characters" class="draggable-panel right-panel">
+            <div class="panel-header">
+                <span>Персонажи</span>
+                <span class="toggle-btn">▼</span>
+            </div>
+            <div class="panel-content">
+                <button class="btn btn-primary btn-sm" onclick="showCreateCharacterForm()" style="margin-bottom: 10px;">+ Создать персонажа</button>
+                <div id="lobby-characters-list" class="characters-list"></div>
+            </div>
         </div>
 
         <!-- Нижняя панель управления картой -->
-        <div class="map-tools">
-            <div class="marker-types">
-                <button class="marker-btn red" onclick="setMarkerType('default')">🔴</button>
-                <button class="marker-btn blue" onclick="setMarkerType('blue')">🔵</button>
-                <button class="marker-btn green" onclick="setMarkerType('green')">🟢</button>
-                <span>Тип: <span id="current-marker-type">default</span></span>
+        <div id="panel-tools" class="draggable-panel map-tools">
+            <div class="panel-header">
+                <span>Инструменты</span>
+                <span class="toggle-btn">▼</span>
             </div>
-            <button class="btn btn-primary" onclick="addMarkerAtCenter()">➕ Добавить метку</button>
-            <div id="gm-only-controls" style="display: none; flex-direction: column; gap: 8px;">
-                <!-- Строка контролов (без переноса) -->
-                <div style="display: flex; gap: 15px; flex-wrap: nowrap; align-items: center;">
-                    <!-- Радиус кисти -->
-                    <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                        <span>Радиус кисти:</span>
-                        <input type="range" id="brush-radius" min="0" max="3" value="0" oninput="setBrushRadiusFromInput(this.value)">                        <span id="brush-radius-value">0</span>
-                    </div>
-
-                    <!-- Тип тайла -->
-                    <div class="tile-palette" style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                        <span>Тип тайла:</span>
-                        <select id="tile-type-select" class="character-select" style="width: auto;">
-                            <option value="grass">🌿 Трава</option>
-                            <option value="sand">🏜️ Песок</option>
-                            <option value="rock">🪨 Камень</option>
-                            <option value="swamp">🟤 Болото</option>
-                            <option value="water">💧 Вода</option>
-                        </select>
-                    </div>
-
-                    <!-- Высота -->
-                    <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                        <span>Высота:</span>
-                        <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.value)">                        <span id="tile-height-value">1.0</span>
-                    </div>
-
-                    <!-- Ластик -->
-                    <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                        <label>Ластик</label>
-                        <input type="checkbox" id="eraser-checkbox" onchange="setEraserModeFromInput(this.checked)">
-                    </div>
+            <div class="panel-content">
+                <div class="marker-types">
+                    <button class="marker-btn red" onclick="setMarkerType('default')">🔴</button>
+                    <button class="marker-btn blue" onclick="setMarkerType('blue')">🔵</button>
+                    <button class="marker-btn green" onclick="setMarkerType('green')">🟢</button>
+                    <span>Тип: <span id="current-marker-type">default</span></span>
                 </div>
+                <button class="btn btn-primary" onclick="addMarkerAtCenter()">➕ Добавить метку</button>
+                <div id="gm-only-controls" style="display: none; flex-direction: column; gap: 8px;">
+                    <!-- Строка контролов (без переноса) -->
+                    <div style="display: flex; gap: 15px; flex-wrap: nowrap; align-items: center;">
+                        <!-- Радиус кисти -->
+                        <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                            <span>Радиус кисти:</span>
+                            <input type="range" id="brush-radius" min="0" max="3" value="0" oninput="setBrushRadiusFromInput(this.value)">
+                            <span id="brush-radius-value">0</span>
+                        </div>
 
-                <!-- Строка подсказок (может переноситься) -->
-                <div style="display: flex; gap: 15px; flex-wrap: wrap; color: #aaa; font-size: 0.8rem;">
-                    <span>Alt+клик: ландшафт</span>
-                    <span>Shift+клик: высота</span>
-                    <span>Двойной клик: настройка тайла</span>
+                        <!-- Тип тайла -->
+                        <div class="tile-palette" style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                            <span>Тип тайла:</span>
+                            <select id="tile-type-select" class="character-select" style="width: auto;">
+                                <option value="grass">🌿 Трава</option>
+                                <option value="sand">🏜️ Песок</option>
+                                <option value="rock">🪨 Камень</option>
+                                <option value="swamp">🟤 Болото</option>
+                                <option value="water">💧 Вода</option>
+                            </select>
+                        </div>
+
+                        <!-- Высота -->
+                        <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                            <span>Высота:</span>
+                            <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.value)">
+                            <span id="tile-height-value">1.0</span>
+                        </div>
+
+                        <!-- Ластик -->
+                        <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                            <label>Ластик</label>
+                            <input type="checkbox" id="eraser-checkbox" onchange="setEraserModeFromInput(this.checked)">
+                        </div>
+                    </div>
+
+                    <!-- Строка подсказок (может переноситься) -->
+                    <div style="display: flex; gap: 15px; flex-wrap: wrap; color: #aaa; font-size: 0.8rem;">
+                        <span>Alt+клик: ландшафт</span>
+                        <span>Shift+клик: высота</span>
+                        <span>Двойной клик: настройка тайла</span>
+                    </div>
                 </div>
             </div>
         </div>
