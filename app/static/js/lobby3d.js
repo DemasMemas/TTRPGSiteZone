@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
+import { updateRain } from './weather.js';
 
 const CHUNK_SIZE = 32;
 export const chunksMap = new Map();
@@ -1152,10 +1153,16 @@ window.addEventListener('dblclick', (event) => {
     }
 });
 
+let lastTime = performance.now();
 function animate() {
+    const now = performance.now();
+    const delta = (now - lastTime) / 1000;
+    lastTime = now;
+
     requestAnimationFrame(animate);
     controls.update();
     updateChunkVisibility();
+    updateRain(delta);
 
     if (lastMouseX !== 0 || lastMouseY !== 0) {
         performRaycast(lastMouseX, lastMouseY);
@@ -1245,4 +1252,4 @@ window.addEventListener('keyup', (e) => {
     }
 }, { capture: true });
 
-export { controls };
+export { scene, camera, renderer, controls, directionalLight, ambientLight, waterMat };

@@ -4,6 +4,7 @@ import { loadLobbyCharacters } from './characters.js';
 import { loadLobbyInfo, loadAllChunks } from './lobbyData.js';
 import { addMessage, updateParticipantsList, onlineUserIds, lobbyParticipants } from './ui.js';
 import { updateTileInChunk } from './lobby3d.js';
+import { applyWeather } from './weather.js';
 
 let socket;
 let currentLobbyId;
@@ -98,6 +99,11 @@ export function initSocket(lobbyId, token) {
         updates.forEach(item => {
             updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates);
         });
+    });
+
+    socket.on('weather_updated', (settings) => {
+        applyWeather(settings);
+        window.weatherSettings = settings;
     });
 
     return socket;

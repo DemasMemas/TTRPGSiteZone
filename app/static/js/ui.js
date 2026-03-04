@@ -109,6 +109,11 @@ export function showSettingsTab(tab, btn) {
         loadBannedList();
     } else if (tab === 'export') {
         document.getElementById('export-settings').style.display = 'block';
+    } else if (tab === 'weather') {
+        document.getElementById('weather-settings').style.display = 'block';
+        if (window.loadWeatherSettings && window.weatherSettings) {
+            window.loadWeatherSettings(window.weatherSettings);
+        }
     }
 }
 

@@ -3,6 +3,7 @@ import { getLobbyInfo, getChunks } from './api.js';
 import { setMapDimensions, setTileClickCallback } from './lobby3d.js';
 import { setLobbyData, updateParticipantsList } from './ui.js';
 import AppState from './state.js';
+import { applyWeather } from './weather.js';
 
 let currentLobbyId;
 
@@ -17,6 +18,9 @@ export async function loadLobbyInfo() {
         setLobbyData(lobby.participants, lobby.gm_id);
         updateParticipantsList();
 
+        applyWeather(lobby.weather_settings || {});
+        window.weatherSettings = lobby.weather_settings || {};
+
         // Устанавливаем глобальную переменную isGM (важно!)
         window.isGM = (lobby.gm_id == localStorage.getItem('user_id'));
         AppState.setIsGM(window.isGM);
@@ -24,6 +28,11 @@ export async function loadLobbyInfo() {
         window.MAP_CHUNKS_WIDTH = lobby.chunks_width;
         window.MAP_CHUNKS_HEIGHT = lobby.chunks_height;
         setMapDimensions(lobby.chunks_width, lobby.chunks_height);
+
+        const weatherTab = document.getElementById('weather-tab-btn');
+        if (weatherTab) {
+            weatherTab.style.display = window.isGM ? 'inline-block' : 'none';
+        }
 
         const mapSizeSpan = document.getElementById('map-size-info');
         if (mapSizeSpan) {

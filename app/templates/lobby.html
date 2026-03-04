@@ -14,6 +14,14 @@
         }
       }
     </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.128.0/build/three.module.js",
+          "howler": "https://cdn.skypack.dev/howler@2.2.3"
+        }
+      }
+    </script>
     <!-- Socket.IO должен быть загружен ДО lobby.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 </head>
@@ -58,12 +66,37 @@
             <div class="settings-tabs">
                 <button class="tab-btn active" onclick="showSettingsTab('banned', this)">Забаненные</button>
                 <button class="tab-btn" onclick="showSettingsTab('export', this)">Экспорт</button>
+                <button class="tab-btn" id="weather-tab-btn" onclick="showSettingsTab('weather', this)">Погода</button>
             </div>
             <div id="export-settings" class="settings-tab-content" style="display:none;">
                 <h4>Экспорт карты</h4>
                 <p>Размер карты: <span id="map-size-info"></span> чанков</p>
                 <button class="btn btn-primary" onclick="exportMap()">Скачать JSON</button>
             </div>
+                <div id="weather-settings" class="settings-tab-content" style="display:none;">
+                    <h4>Погодные эффекты</h4>
+                    <div class="weather-control">
+                        <label><input type="checkbox" id="weather-fog"> Туман</label>
+                        <input type="range" id="weather-fog-intensity" min="0" max="1" step="0.1" value="0.5" oninput="updateWeatherValue('weather-fog', this.value)">
+                        <span id="weather-fog-value">0.5</span>
+                    </div>
+                    <div class="weather-control">
+                        <label><input type="checkbox" id="weather-rain"> Дождь</label>
+                        <input type="range" id="weather-rain-intensity" min="0" max="1" step="0.1" value="0.5" oninput="updateWeatherValue('weather-rain', this.value)">
+                        <span id="weather-rain-value">0.5</span>
+                    </div>
+                    <div class="weather-control">
+                        <label><input type="checkbox" id="weather-sun"> Солнце</label>
+                        <input type="range" id="weather-sun-intensity" min="0" max="1" step="0.1" value="0.5" oninput="updateWeatherValue('weather-sun', this.value)">
+                        <span id="weather-sun-value">0.5</span>
+                    </div>
+                    <div class="weather-control">
+                        <label><input type="checkbox" id="weather-emission"> Выброс</label>
+                        <input type="range" id="weather-emission-intensity" min="0" max="1" step="0.1" value="0.5" oninput="updateWeatherValue('weather-emission', this.value)">
+                        <span id="weather-emission-value">0.5</span>
+                    </div>
+                    <button class="btn btn-primary" onclick="applyWeatherSettings()">Применить</button>
+                </div>
             <div id="settings-content" class="settings-tab-content"> </div>
         </div>
 
@@ -244,6 +277,7 @@
     </div>
 
     <!-- Основной скрипт лобби (модуль) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.3/howler.min.js"></script>
     <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

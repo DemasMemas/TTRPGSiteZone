@@ -13,6 +13,7 @@ class Lobby(db.Model):
     map_type = db.Column(db.String(20), nullable=False, default='empty')
     chunks_width = db.Column(db.Integer, nullable=False, default=16)
     chunks_height = db.Column(db.Integer, nullable=False, default=16)
+    weather_settings = db.Column(db.JSON, default={})
 
     # связи
     gm = db.relationship('User', foreign_keys=[gm_id])

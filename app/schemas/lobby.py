@@ -32,6 +32,7 @@ class LobbyResponseSchema(LobbySchema):
 
 class LobbyDetailSchema(LobbyResponseSchema):
     participants = fields.Nested('ParticipantSchema', many=True, only=('user_id', 'username'))
+    weather_settings = fields.Dict()
 
 class LobbyMySchema(Schema):
     id = fields.Int()

@@ -345,3 +345,14 @@ def export_lobby(lobby_id, lobby):
         download_name=f'lobby_{lobby_id}_map.json.gz',
         mimetype='application/gzip'
     )
+
+@lobbies_bp.route('/<int:lobby_id>/weather', methods=['PATCH'])
+@jwt_required()
+@requires_gm
+def update_weather(lobby_id, lobby):
+    data = request.get_json()
+    lobby.weather_settings = data
+    db.session.commit()
+
+    socketio.emit('weather_updated', data, room=f"lobby_{lobby_id}")
+    return jsonify({'message': 'Weather updated'}), 200

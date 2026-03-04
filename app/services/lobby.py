@@ -53,6 +53,14 @@ class LobbyService:
             chunks_width=chunks_width,
             chunks_height=chunks_height
         )
+
+        lobby.weather_settings = {
+            'sun': {'enabled': True, 'intensity': 0.5},
+            'fog': {'enabled': False, 'intensity': 0.5},
+            'rain': {'enabled': False, 'intensity': 0.5},
+            'emission': {'enabled': False, 'intensity': 0.5}
+        }
+
         db.session.add(lobby)
         db.session.flush()  # чтобы получить id
 

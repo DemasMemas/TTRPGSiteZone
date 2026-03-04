@@ -14,6 +14,8 @@ import { showNotification, getErrorMessage } from './utils.js';
 import { exportMap } from './api.js';
 import { initDraggablePanels } from './draggable.js';
 import { initHotkeys } from './hotkeys.js';
+import { initWeather, applyWeather } from './weather.js';
+initWeather();
 
 const token = localStorage.getItem('access_token');
 const pathParts = window.location.pathname.split('/').filter(p => p !== '');
@@ -143,12 +145,94 @@ window.toggleTheme = () => {
     if (btn) btn.textContent = isLight ? '🌑' : '🌓';
 };
 
+window.applyWeatherSettings = () => {
+    const settings = {
+        fog: {
+            enabled: document.getElementById('weather-fog').checked,
+            intensity: parseFloat(document.getElementById('weather-fog-intensity').value)
+        },
+        rain: {
+            enabled: document.getElementById('weather-rain').checked,
+            intensity: parseFloat(document.getElementById('weather-rain-intensity').value)
+        },
+        sun: {
+            enabled: document.getElementById('weather-sun').checked,
+            intensity: parseFloat(document.getElementById('weather-sun-intensity').value)
+        },
+        emission: {
+            enabled: document.getElementById('weather-emission').checked,
+            intensity: parseFloat(document.getElementById('weather-emission-intensity').value)
+        }
+    };
+    fetch(`/lobbies/${currentLobbyId}/weather`, {
+        method: 'PATCH',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(settings)
+    }).then(res => {
+        if (!res.ok) throw new Error('Failed to update weather');
+        showNotification('Погода обновлена', 'success');
+    }).catch(err => showNotification(err.message));
+};
+
+document.querySelectorAll('#weather-settings input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+        const range = e.target.closest('.weather-control').querySelector('input[type="range"]');
+        if (range) range.disabled = !e.target.checked;
+    });
+});
+
+window.loadWeatherSettings = (settings) => {
+    const updateControl = (id, enabled, intensity) => {
+        const cb = document.getElementById(id);
+        const range = document.getElementById(id + '-intensity');
+        const valueSpan = document.getElementById(id + '-value');
+        if (cb) cb.checked = enabled;
+        if (range) {
+            range.value = intensity;
+            range.disabled = !enabled;
+        }
+        if (valueSpan) valueSpan.textContent = intensity.toFixed(1);
+    };
+    updateControl('weather-fog', settings.fog?.enabled || false, settings.fog?.intensity || 0.5);
+    updateControl('weather-rain', settings.rain?.enabled || false, settings.rain?.intensity || 0.5);
+    updateControl('weather-sun', settings.sun?.enabled || false, settings.sun?.intensity || 0.5);
+    updateControl('weather-emission', settings.emission?.enabled || false, settings.emission?.intensity || 0.5);
+};
+
+window.updateWeatherValue = (id, value) => {
+    const span = document.getElementById(id + '-value');
+    if (span) span.textContent = parseFloat(value).toFixed(1);
+};
+
+function bindWeatherSliders() {
+    const sliderIds = ['weather-fog-intensity', 'weather-rain-intensity', 'weather-sun-intensity', 'weather-emission-intensity'];
+    sliderIds.forEach(id => {
+        const slider = document.getElementById(id);
+        if (slider) {
+            slider.addEventListener('input', (e) => {
+                window.updateWeatherValue(id.replace('-intensity', ''), e.target.value);
+            });
+        }
+    });
+}
+bindWeatherSliders();
+
 const savedTheme = localStorage.getItem('theme');
 if (savedTheme === 'light') {
     document.body.classList.add('light-theme');
     const btn = document.getElementById('theme-toggle');
     if (btn) btn.textContent = '🌑';
 }
+
+document.addEventListener('click', function resumeAudio() {
+    if (Howler.ctx && Howler.ctx.state === 'suspended') {
+        Howler.ctx.resume();
+    }
+    document.removeEventListener('click', resumeAudio);
+}, { once: true });
 
 // Загружаем данные при старте
 loadLobbyInfo();
