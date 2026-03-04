@@ -1,6 +1,10 @@
 // static/app.js
 const API_BASE = '';
 
+let myLobbiesOffset = 0;
+const MY_LOBBIES_LIMIT = 5;
+let hasMoreMyLobbies = true;
+
 function getErrorMessage(data) {
     if (!data) return 'Неизвестная ошибка';
     if (typeof data === 'string') return data;
@@ -109,7 +113,7 @@ async function loadApp() {
     document.getElementById('app-section').classList.remove('hidden');
     document.getElementById('username').textContent = localStorage.getItem('username') || '';
 
-    await loadMyLobbies();
+    await loadMyLobbies(true);
 }
 
 function showNotification(message, type = 'error') {
@@ -272,12 +276,21 @@ async function joinByCode() {
     }
 }
 
-async function loadMyLobbies() {
+async function loadMyLobbies(reset = false) {
     const token = localStorage.getItem('access_token');
     if (!token) return;
 
+    if (reset) {
+        myLobbiesOffset = 0;
+        hasMoreMyLobbies = true;
+        document.getElementById('my-lobbies-list').innerHTML = '';
+    }
+
+    if (!hasMoreMyLobbies) return;
+
     try {
-        const response = await fetch('/lobbies/my', {
+        const url = `/lobbies/my?limit=${MY_LOBBIES_LIMIT}&offset=${myLobbiesOffset}`;
+        const response = await fetch(url, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.status === 401 || response.status === 422) {
@@ -286,27 +299,38 @@ async function loadMyLobbies() {
         }
         const lobbies = await response.json();
         const container = document.getElementById('my-lobbies-list');
-        container.innerHTML = '';
+
         if (lobbies.length === 0) {
-            container.innerHTML = '<p>У вас пока нет созданных лобби</p>';
-            return;
+            hasMoreMyLobbies = false;
+            if (myLobbiesOffset === 0) {
+                container.innerHTML = '<p>У вас пока нет созданных лобби</p>';
+            }
+        } else {
+            lobbies.forEach(lobby => {
+                const div = document.createElement('div');
+                div.className = 'lobby-item';
+                div.innerHTML = `
+                    <strong>${lobby.name}</strong> (код: ${lobby.invite_code})
+                    <div>
+                        <button onclick="joinLobby(${lobby.id})">Войти</button>
+                        <button class="delete-btn" onclick="deleteLobby(${lobby.id})">🗑️ Удалить</button>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+            myLobbiesOffset += lobbies.length;
+            if (lobbies.length < MY_LOBBIES_LIMIT) {
+                hasMoreMyLobbies = false;
+            }
         }
-        lobbies.forEach(lobby => {
-            const div = document.createElement('div');
-            div.className = 'lobby-item';
-            div.innerHTML = `
-                <strong>${lobby.name}</strong> (код: ${lobby.invite_code})
-                <div>
-                    <button onclick="joinLobby(${lobby.id})">Войти</button>
-                    <button class="delete-btn" onclick="deleteLobby(${lobby.id})">🗑️ Удалить</button>
-                </div>
-            `;
-            container.appendChild(div);
-        });
     } catch (error) {
         console.error('Ошибка загрузки моих лобби', error);
     }
 }
+
+window.loadMoreMyLobbies = function() {
+    loadMyLobbies(false);
+};
 
 async function deleteLobby(lobbyId) {
     if (!confirm('Вы уверены, что хотите удалить лобби? Это действие необратимо.')) return;

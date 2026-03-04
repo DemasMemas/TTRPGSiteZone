@@ -110,10 +110,13 @@ class LobbyService:
         logger.info(f"Lobby {lobby_id} deactivated by GM {gm_id}")
 
     @staticmethod
-    def get_my_lobbies(user_id):
-        """Возвращает список лобби, созданных пользователем."""
-        lobbies = Lobby.query.filter_by(gm_id=user_id, is_active=True).all()
-        logger.debug(f"User {user_id} has {len(lobbies)} lobbies")
+    def get_my_lobbies(user_id, limit=None, offset=0):
+        """Возвращает список лобби, созданных пользователем, с пагинацией."""
+        query = Lobby.query.filter_by(gm_id=user_id, is_active=True).order_by(Lobby.created_at.desc())
+        if limit is not None:
+            query = query.limit(limit).offset(offset)
+        lobbies = query.all()
+        logger.debug(f"User {user_id} has {len(lobbies)} lobbies (limit={limit}, offset={offset})")
         return [{
             'id': l.id,
             'name': l.name,

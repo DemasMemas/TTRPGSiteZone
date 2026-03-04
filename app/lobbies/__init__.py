@@ -174,7 +174,16 @@ def join_by_code():
 @jwt_required()
 def get_my_lobbies():
     user_id = int(get_jwt_identity())
-    lobbies = LobbyService.get_my_lobbies(user_id)
+    limit = request.args.get('limit', type=int)
+    offset = request.args.get('offset', default=0, type=int)
+
+    # Валидация
+    if limit is not None and (limit <= 0 or limit > 100):
+        return jsonify({'error': 'limit must be between 1 and 100'}), 400
+    if offset < 0:
+        return jsonify({'error': 'offset must be non-negative'}), 400
+
+    lobbies = LobbyService.get_my_lobbies(user_id, limit=limit, offset=offset)
     schema = LobbyMySchema(many=True)
     return jsonify(schema.dump(lobbies)), 200
 
