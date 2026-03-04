@@ -7,7 +7,8 @@ saveVisibility, unbanUserHandler, closeSettings, openSettings } from './ui.js';
 import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush, openTileEditModal, closeTileEditModal,
  applyTerrainChange, applyHeightChange, addObjectToTile, clearObjectsFromTile, removeObjectFromTile, highlightObject,
  getEditMode, setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, updateTileEditHeight,
- updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation  } from './mapEdit.js';
+ updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
+ applyNameChange, applyRadiationChange, updateTileEditRadiation} from './mapEdit.js';
 import { hideObjectHighlight } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
 import { exportMap } from './api.js';
@@ -95,6 +96,9 @@ window.showNotification = showNotification;
 window.setBrushRadiusFromInput = setBrushRadiusFromInput;
 window.setTileHeightFromInput = setTileHeightFromInput;
 window.setEraserModeFromInput = setEraserModeFromInput;
+window.applyNameChange = applyNameChange;
+window.applyRadiationChange = applyRadiationChange;
+window.updateTileEditRadiation = updateTileEditRadiation;
 
 // Функции для модального окна
 window.updateTileEditHeight = updateTileEditHeight;

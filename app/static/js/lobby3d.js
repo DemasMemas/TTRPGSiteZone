@@ -41,7 +41,8 @@ camera.lookAt(256, 0, 256);
 const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
-renderer.shadowMap.enabled = false;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('canvas-container').appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -63,12 +64,28 @@ let controlsDisabled = false;
 let brushActive = false;
 let globalMouseUpHandler = null;
 
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+// --- Освещение и тени ---
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
 scene.add(ambientLight);
+
 const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
-directionalLight.position.set(5, 10, 7);
-directionalLight.castShadow = false;
+directionalLight.position.set(256, 300, 256);
+directionalLight.castShadow = true;
+directionalLight.shadow.mapSize.width = 4096;
+directionalLight.shadow.mapSize.height = 4096;
+directionalLight.shadow.camera.near = 0.5;
+directionalLight.shadow.camera.far = 1000;
+directionalLight.shadow.camera.left = -400;
+directionalLight.shadow.camera.right = 400;
+directionalLight.shadow.camera.top = 400;
+directionalLight.shadow.camera.bottom = -400;
+directionalLight.shadow.bias = 0;
+directionalLight.shadow.normalBias = 0;
 scene.add(directionalLight);
+
+const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
+fillLight.position.set(-50, 50, -50);
+scene.add(fillLight);
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -85,6 +102,68 @@ highlightBox.visible = false;
 
 const tileInfoDiv = document.getElementById('tile-info');
 const tileInfoContent = document.getElementById('tile-info-content');
+
+// ---- Preview object ----
+let previewObject = null;
+
+function getGeometryForType(type) {
+    switch(type) {
+        case 'tree': return treeGeo;
+        case 'house': return houseGeo;
+        case 'fence': return fenceGeo;
+        default: return new THREE.BoxGeometry(0.5, 0.5, 0.5);
+    }
+}
+
+function createAnomalyPreview(x, y, z, type, color, scale) {
+    const geo = new THREE.SphereGeometry(0.3, 8);
+    const mat = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.5 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    mesh.scale.set(scale, scale, scale);
+    return mesh;
+}
+
+export function createPreviewObject(tile, params) {
+    if (previewObject) scene.remove(previewObject);
+
+    const { type, anomalyType, color, offsetX, offsetZ, scale, rotation } = params;
+    const worldX = tile.chunkX * CHUNK_SIZE + tile.tileX + 0.5 + offsetX;
+    const worldZ = tile.chunkY * CHUNK_SIZE + tile.tileY + 0.5 + offsetZ;
+    const height = tile.tileData.height || 1.0;
+    const baseHalf = getBaseHalfHeight(type, anomalyType);
+    const yPos = height + baseHalf * scale;
+
+    let obj;
+    if (type === 'anomaly') {
+        obj = createAnomalyPreview(worldX, yPos, worldZ, anomalyType, color, scale);
+    } else {
+        const geo = getGeometryForType(type);
+        const mat = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.5 });
+        obj = new THREE.Mesh(geo, mat);
+        obj.position.set(worldX, yPos, worldZ);
+        obj.scale.set(scale, scale, scale);
+        obj.rotation.y = THREE.MathUtils.degToRad(rotation);
+    }
+    scene.add(obj);
+    previewObject = obj;
+}
+
+export function updatePreviewObject(params) {
+    if (!previewObject) return;
+    const currentTile = window.currentEditTile;
+    if (currentTile) {
+        createPreviewObject(currentTile, params);
+    }
+}
+
+export function removePreviewObject() {
+    if (previewObject) {
+        scene.remove(previewObject);
+        previewObject = null;
+    }
+}
+// ---- End Preview object ----
 
 export function setMapDimensions(widthChunks, heightChunks) {
     MAX_CHUNK_X = widthChunks - 1;
@@ -113,9 +192,6 @@ function getBaseDimensions(type, anomalyType) {
                 base.height = 0.1;
                 base.depth = 1.0;
                 break;
-            case 'fire':
-            case 'electric':
-            case 'void':
             default:
                 base.width = 0.6;
                 base.height = 0.6;
@@ -194,10 +270,10 @@ function createNoiseTexture() {
     return new THREE.CanvasTexture(canvas);
 }
 
+// --- Аномалии ---
 function createElectricAnomaly(color) {
     const group = new THREE.Group();
     const col = new THREE.Color(color);
-
     const coreGeo = new THREE.SphereGeometry(0.2, 8);
     const coreMat = new THREE.MeshStandardMaterial({ color: col, emissive: col, transparent: true, opacity: 0.7 });
     const core = new THREE.Mesh(coreGeo, coreMat);
@@ -213,7 +289,6 @@ function createElectricAnomaly(color) {
         positions[i*3] = Math.sin(theta) * Math.cos(phi) * r;
         positions[i*3+1] = Math.sin(theta) * Math.sin(phi) * r;
         positions[i*3+2] = Math.cos(theta) * r;
-
         const c = col.clone().lerp(new THREE.Color(0xffffff), Math.random() * 0.5);
         colors[i*3] = c.r;
         colors[i*3+1] = c.g;
@@ -251,13 +326,11 @@ function createElectricAnomaly(color) {
         const line = new THREE.Line(lineGeo, lineMat);
         group.add(line);
     }
-
     return group;
 }
 
 function createFireAnomaly(color) {
     const group = new THREE.Group();
-
     const coreGeo = new THREE.SphereGeometry(0.2, 6);
     const coreMat = new THREE.MeshStandardMaterial({ color: 0xff5500, emissive: 0xff2200, transparent: true, opacity: 0.8 });
     const core = new THREE.Mesh(coreGeo, coreMat);
@@ -278,14 +351,12 @@ function createFireAnomaly(color) {
     const particleMat = new THREE.PointsMaterial({ size: 0.1, color: 0xffaa00, blending: THREE.AdditiveBlending, map: createFireTexture() });
     const particles = new THREE.Points(particleGeo, particleMat);
     group.add(particles);
-
     return group;
 }
 
 function createAcidAnomaly(color) {
     const group = new THREE.Group();
     const col = new THREE.Color(color);
-
     const puddleGeo = new THREE.CircleGeometry(0.5, 8);
     const puddleMat = new THREE.MeshStandardMaterial({ color: col, emissive: col.clone().multiplyScalar(0.3), transparent: true, opacity: 0.6, side: THREE.DoubleSide });
     const puddle = new THREE.Mesh(puddleGeo, puddleMat);
@@ -305,14 +376,12 @@ function createAcidAnomaly(color) {
         );
         group.add(bubble);
     }
-
     return group;
 }
 
 function createVoidAnomaly(color) {
     const group = new THREE.Group();
     const col = new THREE.Color(color);
-
     const geo = new THREE.SphereGeometry(0.3, 16);
     const noiseTex = createNoiseTexture();
     const mat = new THREE.MeshPhongMaterial({ map: noiseTex, color: col, emissive: col.clone().multiplyScalar(0.5), transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
@@ -336,7 +405,6 @@ function createVoidAnomaly(color) {
     const pointMat = new THREE.PointsMaterial({ size: 0.05, color: 0xffffff, blending: THREE.AdditiveBlending });
     const points = new THREE.Points(pointGeo, pointMat);
     group.add(points);
-
     return group;
 }
 
@@ -375,6 +443,14 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
     return lod;
 }
 
+// --- Вода: простой цветной материал (без текстуры) ---
+const waterMat = new THREE.MeshStandardMaterial({
+    color: 0x1E90FF,
+    emissive: 0x0,
+    transparent: true,
+    opacity: 0.5
+});
+
 // --- Функции для чанков ---
 export function addChunk(cx, cy, tilesData) {
     if (cx < MIN_CHUNK || cx > MAX_CHUNK_X || cy < MIN_CHUNK || cy > MAX_CHUNK_Y) return;
@@ -386,19 +462,20 @@ export function addChunk(cx, cy, tilesData) {
     const totalTiles = size * size;
 
     const groundGeo = new THREE.BoxGeometry(1, 1, 1);
-    const planeGeo = new THREE.PlaneGeometry(0.95, 0.95);
+    const planeGeo = new THREE.PlaneGeometry(0.99, 0.99);
     planeGeo.rotateX(-Math.PI / 2);
 
     const groundMat = new THREE.MeshStandardMaterial();
-    const waterMat = new THREE.MeshStandardMaterial({ color: 0x1E90FF, transparent: true, opacity: 0.8 });
 
     const groundInstances = new THREE.InstancedMesh(groundGeo, groundMat, totalTiles);
     groundInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalTiles * 3), 3);
 
     const waterInstances = new THREE.InstancedMesh(planeGeo, waterMat, totalTiles);
 
-    groundInstances.castShadow = false; groundInstances.receiveShadow = false;
-    waterInstances.castShadow = false; waterInstances.receiveShadow = false;
+    groundInstances.castShadow = false;
+    groundInstances.receiveShadow = true;
+    waterInstances.castShadow = false;
+    waterInstances.receiveShadow = false;
 
     let treeCount = 0, houseCount = 0, fenceCount = 0;
     for (let y = 0; y < size; y++) {
@@ -442,7 +519,6 @@ export function addChunk(cx, cy, tilesData) {
     let treeIdx = 0, houseIdx = 0, fenceIdx = 0;
     const anomalyLODs = [];
 
-    // Структура для хранения индексов объектов каждого тайла
     const objectIndices = {
         trees: new Array(size * size).fill().map(() => []),
         houses: new Array(size * size).fill().map(() => []),
@@ -505,6 +581,12 @@ export function addChunk(cx, cy, tilesData) {
                             obj.color || getDefaultColorForType('anomaly'),
                             obj.scale || 1.0
                         );
+                        lod.traverse(child => {
+                            if (child.isMesh) {
+                                child.castShadow = false;
+                                child.receiveShadow = false;
+                            }
+                        });
                         scene.add(lod);
                         anomalyLODs.push(lod);
                     } else {
@@ -603,7 +685,6 @@ export function removeChunk(cx, cy) {
     if (entry.trees) scene.remove(entry.trees);
     if (entry.houses) scene.remove(entry.houses);
     if (entry.fences) scene.remove(entry.fences);
-
     if (entry.anomalyLODs) {
         entry.anomalyLODs.forEach(lod => scene.remove(lod));
     }
@@ -625,21 +706,6 @@ function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
 
     const dummy = new THREE.Object3D();
 
-    // Обновляем деревья
-    if (entry.objectIndices.trees[tileIndex]) {
-        entry.objectIndices.trees[tileIndex].forEach(objIndex => {
-            // Найти соответствующий объект в данных тайла (нужен доступ к tile.objects)
-            // Для простоты будем перебирать объекты тайла и сопоставлять по порядку
-            // Но это не совсем точно. Лучше хранить для каждого индекса ссылку на объект.
-            // Упростим: переберём все объекты тайла и обновим их, используя известный индекс.
-            // Так как у нас для каждого тайла может быть несколько деревьев, нужно знать,
-            // какому объекту соответствует какой индекс. Для этого при создании мы сохраняли
-            // индексы в том же порядке, в котором объекты лежат в tile.objects.
-            // Поэтому при обновлении мы можем пройти по tile.objects и использовать индексы по порядку.
-        });
-    }
-
-    // Более простой и надёжный способ: перебираем объекты тайла и для каждого находим индекс из objectIndices.
     const tile = entry.tilesData[tileY][tileX];
     if (!tile.objects) return;
 
@@ -661,7 +727,6 @@ function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
         if (obj.type === 'tree' && entry.trees) {
             const idx = entry.objectIndices.trees[tileIndex][treeIdxPos++];
             entry.trees.setMatrixAt(idx, dummy.matrix);
-            // цвет не меняем
         } else if (obj.type === 'house' && entry.houses) {
             const idx = entry.objectIndices.houses[tileIndex][houseIdxPos++];
             entry.houses.setMatrixAt(idx, dummy.matrix);
@@ -678,7 +743,6 @@ function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
 
 // --- Функция для полного перестроения объектов чанка (при изменении объектов) ---
 function rebuildChunkObjects(entry) {
-    // Удаляем старые объектные меши из сцены
     if (entry.trees) scene.remove(entry.trees);
     if (entry.houses) scene.remove(entry.houses);
     if (entry.fences) scene.remove(entry.fences);
@@ -690,7 +754,6 @@ function rebuildChunkObjects(entry) {
     const size = CHUNK_SIZE;
     let treeCount = 0, houseCount = 0, fenceCount = 0;
 
-    // Подсчёт количества объектов каждого типа
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
             const tile = tilesData[y][x];
@@ -704,7 +767,6 @@ function rebuildChunkObjects(entry) {
         }
     }
 
-    // Создаём новые инстанс-меши
     const treeInstances = treeCount > 0 ? new THREE.InstancedMesh(treeGeo, treeMat, treeCount) : null;
     if (treeInstances) {
         treeInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(treeCount * 3), 3);
@@ -730,7 +792,6 @@ function rebuildChunkObjects(entry) {
     let treeIdx = 0, houseIdx = 0, fenceIdx = 0;
     const anomalyLODs = [];
 
-    // Новая структура objectIndices
     const objectIndices = {
         trees: new Array(size * size).fill().map(() => []),
         houses: new Array(size * size).fill().map(() => []),
@@ -763,6 +824,12 @@ function rebuildChunkObjects(entry) {
                             obj.color || getDefaultColorForType('anomaly'),
                             obj.scale || 1.0
                         );
+                        lod.traverse(child => {
+                            if (child.isMesh) {
+                                child.castShadow = false;
+                                child.receiveShadow = false;
+                            }
+                        });
                         scene.add(lod);
                         anomalyLODs.push(lod);
                     } else {
@@ -817,7 +884,6 @@ function rebuildChunkObjects(entry) {
         scene.add(fenceInstances);
     }
 
-    // Обновляем entry
     entry.trees = treeInstances;
     entry.houses = houseInstances;
     entry.fences = fenceInstances;
@@ -833,7 +899,6 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     const tile = entry.tilesData[tileY][tileX];
     Object.assign(tile, updates);
 
-    // Обновляем ground
     if (entry.ground) {
         const index = tileY * CHUNK_SIZE + tileX;
         const dummy = new THREE.Object3D();
@@ -857,7 +922,6 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         entry.ground.instanceColor.needsUpdate = true;
     }
 
-    // Обновляем water
     if (entry.water) {
         const index = tileY * CHUNK_SIZE + tileX;
         const dummy = new THREE.Object3D();
@@ -876,12 +940,10 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         entry.water.instanceMatrix.needsUpdate = true;
     }
 
-    // Если изменилась высота – быстро обновляем позиции объектов на этом тайле
     if (updates.height !== undefined) {
         updateTileObjectsPositions(entry, tileX, tileY, tile.height);
     }
 
-    // Если изменились объекты – откладываем перестройку чанка
     if (updates.objects !== undefined) {
         if (entry.pendingRebuild) {
             cancelAnimationFrame(entry.pendingRebuild);
@@ -988,6 +1050,8 @@ function performRaycast(clientX, clientY) {
                         <b>Тайл (${chunkX * CHUNK_SIZE + tileX}, ${chunkY * CHUNK_SIZE + tileY})</b><br>
                         Ландшафт: ${tileData.terrain}<br>
                         Высота: ${tileData.height}<br>
+                        Название: ${tileData.name || '—'}<br>
+                        Радиация: ${tileData.radiation !== undefined ? tileData.radiation : '—'}<br>
                         Объектов: ${tileData.objects ? tileData.objects.length : 0}
                     `;
                     tileInfoDiv.style.display = 'block';
@@ -1051,10 +1115,6 @@ function canvasMouseDownHandler(event) {
 }
 
 renderer.domElement.addEventListener('mousedown', canvasMouseDownHandler, { capture: true });
-
-function onMouseMoveUpdate(event) {
-    performRaycast(event.clientX, event.clientY);
-}
 
 window.addEventListener('click', (event) => {
     if (event.target.closest('.ui-overlay')) return;

@@ -15,3 +15,5 @@ class TileUpdateSchema(Schema):
     terrain = fields.Str(allow_none=True)
     height = fields.Float(allow_none=True)
     objects = fields.List(fields.Dict(), allow_none=True)
+    name = fields.Str(allow_none=True)
+    radiation = fields.Float(allow_none=True)

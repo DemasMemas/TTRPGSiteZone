@@ -1,6 +1,17 @@
 // static/js/mapEdit.js
-import AppState from './state.js';  // 1. Импортируем состояние
-import { getHoveredTile, updateTileInChunk, chunksMap, getObjectHeightOffset, getObjectDimensions, showObjectHighlight, hideObjectHighlight } from './lobby3d.js';
+import AppState from './state.js';
+import {
+    getHoveredTile,
+    updateTileInChunk,
+    chunksMap,
+    getObjectHeightOffset,
+    getObjectDimensions,
+    showObjectHighlight,
+    hideObjectHighlight,
+    createPreviewObject,
+    updatePreviewObject,
+    removePreviewObject
+} from './lobby3d.js';
 import { updateTile, batchUpdateTiles } from './api.js';
 import { showNotification } from './utils.js';
 
@@ -16,16 +27,30 @@ export function initMapEdit(lobbyId, authToken) {
     currentLobbyId = lobbyId;
     token = authToken;
 
-    // 2. Убираем присваивания в window, теперь они не нужны
-    // (applyBrush всё равно оставляем как функцию, она будет вызываться из window)
-
-    // Слушатель для изменения типа тайла
     const typeSelect = document.getElementById('tile-type-select');
     if (typeSelect) {
         typeSelect.addEventListener('change', (e) => {
-            AppState.setCurrentTileType(e.target.value);  // 3. Используем метод состояния
+            AppState.setCurrentTileType(e.target.value);
         });
     }
+
+    const previewFields = [
+        'object-type-select',
+        'object-color',
+        'object-offset-x',
+        'object-offset-z',
+        'object-scale',
+        'object-rotation'
+    ];
+    previewFields.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('input', updatePreviewFromModal);
+            if (el.tagName === 'SELECT') {
+                el.addEventListener('change', updatePreviewFromModal);
+            }
+        }
+    });
 }
 
 export function setEditMode(enabled) {
@@ -41,19 +66,18 @@ export function setEditMode(enabled) {
 }
 
 export function getEditMode() {
-    return AppState.editMode;  // 6. Читаем из состояния
+    return AppState.editMode;
 }
 
 export function setBrushRadius(radius) {
-    AppState.setBrushRadius(radius);  // 7. Через состояние
+    AppState.setBrushRadius(radius);
     import('./lobby3d.js').then(module => module.setBrushRadius(radius));
 }
 
 export function toggleEraserMode(enabled) {
-    AppState.setEraserMode(enabled);  // 8. Через состояние
+    AppState.setEraserMode(enabled);
 }
 
-// 9. Функции для получения текущих значений – больше не нужны, можно удалить, но пока оставим для обратной совместимости
 export function getCurrentTileType() { return AppState.currentTileType; }
 export function getTileHeight() { return AppState.tileHeight; }
 export function getEraserMode() { return AppState.eraserMode; }
@@ -61,7 +85,7 @@ export function getEraserMode() { return AppState.eraserMode; }
 function updateGMControlsVisibility() {
     const gmControls = document.getElementById('gm-only-controls');
     if (gmControls) {
-        gmControls.style.display = (AppState.isGM && AppState.editMode) ? 'flex' : 'none';  // 10. Используем состояние
+        gmControls.style.display = (AppState.isGM && AppState.editMode) ? 'flex' : 'none';
     }
 }
 
@@ -79,11 +103,10 @@ function scheduleBatchUpdate() {
 }
 
 export function applyBrush(centerTile, updates, radius) {
-    if (!AppState.isGM) {  // 11. Читаем из состояния
+    if (!AppState.isGM) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-    // Фильтрация разрешённых полей
     const allowedFields = ['terrain', 'height', 'objects'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
@@ -140,12 +163,11 @@ export function applyBrush(centerTile, updates, radius) {
 }
 
 export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
-    if (!AppState.isGM) {  // 12. Читаем из состояния
+    if (!AppState.isGM) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-    // Фильтрация
-    const allowedFields = ['terrain', 'height', 'objects'];
+    const allowedFields = ['terrain', 'height', 'objects', 'name', 'radiation'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
         if (updates[key] !== undefined) {
@@ -170,11 +192,13 @@ export function openTileEditModal(tile) {
     currentEditTile = tile;
     updateTileEditModal();
     document.getElementById('tile-edit-modal').style.display = 'flex';
+    updatePreviewFromModal();
 }
 
 export function closeTileEditModal() {
     document.getElementById('tile-edit-modal').style.display = 'none';
     hideObjectHighlight();
+    removePreviewObject();
     currentEditTile = null;
 }
 
@@ -219,6 +243,9 @@ function updateTileEditModal() {
     document.getElementById('tile-edit-terrain').value = tileData.terrain;
     document.getElementById('tile-edit-height').value = tileData.height;
     document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
+    document.getElementById('tile-edit-name').value = tileData.name || '';
+    document.getElementById('tile-edit-radiation').value = tileData.radiation !== undefined ? tileData.radiation : 0;
+    document.getElementById('tile-edit-radiation-value').textContent = (tileData.radiation !== undefined ? tileData.radiation : 0).toFixed(1);
 }
 
 export async function applyTerrainChange() {
@@ -304,6 +331,7 @@ export async function addObjectToTile() {
         currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
         updateTileEditModal();
     }
+    removePreviewObject();
 }
 
 export async function clearObjectsFromTile() {
@@ -321,6 +349,7 @@ export async function clearObjectsFromTile() {
         currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
         updateTileEditModal();
     }
+    removePreviewObject();
 }
 
 export async function removeObjectFromTile(index) {
@@ -341,6 +370,7 @@ export async function removeObjectFromTile(index) {
         currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
         updateTileEditModal();
     }
+    removePreviewObject();
 }
 
 export function highlightObject(index) {
@@ -391,18 +421,93 @@ export function updateTileEditHeight(value) {
 
 export function updateObjectOffsetX(value) {
     document.getElementById('object-offset-x-value').textContent = parseFloat(value).toFixed(2);
+    updatePreviewFromModal();
 }
 
 export function updateObjectOffsetZ(value) {
     document.getElementById('object-offset-z-value').textContent = parseFloat(value).toFixed(2);
+    updatePreviewFromModal();
 }
 
 export function updateObjectScale(value) {
     document.getElementById('object-scale-value').textContent = parseFloat(value).toFixed(2);
+    updatePreviewFromModal();
 }
 
 export function updateObjectRotation(value) {
     document.getElementById('object-rotation-value').textContent = value + '°';
+    updatePreviewFromModal();
+}
+
+export function updateTileEditRadiation(value) {
+    document.getElementById('tile-edit-radiation-value').textContent = parseFloat(value).toFixed(1);
+}
+
+export async function applyNameChange() {
+    if (!currentEditTile) return;
+    const newName = document.getElementById('tile-edit-name').value;
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { name: newName }
+    );
+    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+    const chunkEntry = chunksMap.get(chunkKey);
+    if (chunkEntry) {
+        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+        updateTileEditModal();
+    }
+}
+
+export async function applyRadiationChange() {
+    if (!currentEditTile) return;
+    const newRadiation = parseFloat(document.getElementById('tile-edit-radiation').value);
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { radiation: newRadiation }
+    );
+    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
+    const chunkEntry = chunksMap.get(chunkKey);
+    if (chunkEntry) {
+        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
+        updateTileEditModal();
+    }
+}
+
+function updatePreviewFromModal() {
+    if (!currentEditTile) return;
+    const selectValue = document.getElementById('object-type-select').value;
+    const color = document.getElementById('object-color').value;
+    const offsetX = parseFloat(document.getElementById('object-offset-x').value) || 0;
+    const offsetZ = parseFloat(document.getElementById('object-offset-z').value) || 0;
+    const scale = parseFloat(document.getElementById('object-scale').value) || 1.0;
+    const rotation = parseInt(document.getElementById('object-rotation').value) || 0;
+
+    let type, anomalyType;
+    const anomalyTypeFromSelect = getAnomalyTypeFromSelect(selectValue);
+    if (anomalyTypeFromSelect) {
+        type = 'anomaly';
+        anomalyType = anomalyTypeFromSelect;
+    } else {
+        type = selectValue;
+        anomalyType = null;
+    }
+
+    const params = {
+        type,
+        anomalyType,
+        color,
+        offsetX,
+        offsetZ,
+        scale,
+        rotation
+    };
+    createPreviewObject(currentEditTile, params);
 }
 
 window.applyBrush = applyBrush;
