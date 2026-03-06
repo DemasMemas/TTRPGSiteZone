@@ -12,5 +12,5 @@ def get_user_from_token(token):
         user_id = decoded['sub']
         return User.query.get(user_id)
     except Exception as e:
-        logger.warning(f"Failed to decode token: {e}")
+        logger.error(f"Token decode error: {e}")
         return None

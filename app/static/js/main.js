@@ -9,12 +9,17 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
  getEditMode, setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, updateTileEditHeight,
  updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
  applyNameChange, applyRadiationChange, updateTileEditRadiation} from './mapEdit.js';
-import { hideObjectHighlight } from './lobby3d.js';
+import { hideObjectHighlight, camera } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
 import { exportMap } from './api.js';
 import { initDraggablePanels } from './draggable.js';
 import { initHotkeys } from './hotkeys.js';
 import { initWeather, applyWeather } from './weather.js';
+import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
+openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
+fillEditCenterCoordinates} from './markers.js';
+import * as THREE from 'three';
+
 initWeather();
 
 const token = localStorage.getItem('access_token');
@@ -40,6 +45,10 @@ initLobbyData(currentLobbyId);
 initCharacters(currentLobbyId, token);
 initMapEdit(currentLobbyId, token);
 const socket = initSocket(currentLobbyId, token);
+
+// Инициализация маркеров
+initMarkers(currentLobbyId, token, socket);
+setupMarkerInteraction();
 
 // Глобальные функции для onclick
 window.sendMessage = () => {
@@ -111,15 +120,16 @@ window.updateObjectRotation = updateObjectRotation;
 
 window.showCreateCharacterForm = showCreateCharacterForm;
 
-// Маркеры (если нужны)
-window.setMarkerType = (type) => {
-    console.warn('setMarkerType not implemented');
-};
-window.addMarkerAtCenter = () => {
-    const x = Math.floor(Math.random() * 10) - 5;
-    const y = Math.floor(Math.random() * 10) - 5;
-    socket.emit('add_marker', { token, lobby_id: currentLobbyId, x, y, type: 'default' });
-};
+// Маркеры
+window.closeMarkerEditModal = closeMarkerEditModal;
+window.saveMarkerEdit = saveMarkerEdit;
+window.submitCreateMarker = submitCreateMarker;
+window.openCreateMarkerModal = openCreateMarkerModal;
+window.openCreateMarkerModalAtCenter = openCreateMarkerModalAtCenter;
+window.fillCenterCoordinates = fillCenterCoordinates;
+window.addMarkerAtCenter = openCreateMarkerModal;
+window.deleteMarker = deleteMarker;
+window.fillEditCenterCoordinates = fillEditCenterCoordinates;
 
 // Экспорт карты
 window.exportMap = async () => {

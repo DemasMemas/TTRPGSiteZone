@@ -8,6 +8,8 @@ export const chunksMap = new Map();
 let lastMouseX = 0, lastMouseY = 0;
 let lastModifiers = { alt: false, shift: false };
 
+let postRenderCallbacks = [];
+
 const MIN_CHUNK = 0;
 let MAX_CHUNK_X = 15;
 let MAX_CHUNK_Y = 15;
@@ -1345,6 +1347,7 @@ function animate() {
     }
 
     renderer.render(scene, camera);
+    postRenderCallbacks.forEach(cb => cb());
 }
 animate();
 
@@ -1382,11 +1385,6 @@ export function hideObjectHighlight() {
 export function getHoveredTile() {
     return hoveredTile;
 }
-
-export function addMarker(marker) { console.warn('addMarker not implemented'); }
-export function moveMarker(markerId, x, y) { console.warn('moveMarker not implemented'); }
-export function removeMarker(markerId) { console.warn('removeMarker not implemented'); }
-export function loadMarkers(markers) { console.warn('loadMarkers not implemented'); }
 
 window.addEventListener('pointermove', (event) => {
     lastMouseX = event.clientX;
@@ -1427,5 +1425,17 @@ window.addEventListener('keyup', (e) => {
         lastModifiers.shift = false;
     }
 }, { capture: true });
+
+export function getTileHeightAt(globalX, globalZ) {
+    const chunkX = Math.floor(globalX / CHUNK_SIZE);
+    const chunkY = Math.floor(globalZ / CHUNK_SIZE);
+    const key = `${chunkX},${chunkY}`;
+    const chunk = chunksMap.get(key);
+    if (!chunk) return 0;
+    const tileX = Math.floor(globalX % CHUNK_SIZE);
+    const tileY = Math.floor(globalZ % CHUNK_SIZE);
+    if (tileX < 0 || tileX >= CHUNK_SIZE || tileY < 0 || tileY >= CHUNK_SIZE) return 0;
+    return chunk.tilesData[tileY][tileX].height || 1.0;
+}
 
 export { scene, camera, renderer, controls, directionalLight, ambientLight, waterMat };

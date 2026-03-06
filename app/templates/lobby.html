@@ -134,13 +134,7 @@
                 <span class="toggle-btn">▼</span>
             </div>
             <div class="panel-content">
-                <div class="marker-types">
-                    <button class="marker-btn red" onclick="setMarkerType('default')">🔴</button>
-                    <button class="marker-btn blue" onclick="setMarkerType('blue')">🔵</button>
-                    <button class="marker-btn green" onclick="setMarkerType('green')">🟢</button>
-                    <span>Тип: <span id="current-marker-type">default</span></span>
-                </div>
-                <button class="btn btn-primary" onclick="addMarkerAtCenter()">➕ Добавить метку</button>
+                <button class="btn btn-primary" onclick="addMarkerAtCenter()">➕ Создать маркер</button>
                 <div id="gm-only-controls" style="display: none; flex-direction: column; gap: 8px;">
                     <!-- Строка контролов (без переноса) -->
                     <div style="display: flex; gap: 15px; flex-wrap: nowrap; align-items: center;">
@@ -265,6 +259,98 @@
                     <button class="btn btn-primary" onclick="addObjectToTile()">➕ Добавить объект</button>
                     <br><br>
                     <button class="btn btn-danger" onclick="clearObjectsFromTile()">🗑️ Удалить все объекты</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Модальное окно создания маркера -->
+        <div id="marker-create-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <span class="close" onclick="document.getElementById('marker-create-modal').style.display='none'">&times;</span>
+                <h3>Создать маркер</h3>
+                <div class="form-group">
+                    <label>Тип:</label>
+                    <select id="marker-create-type" class="form-control">
+                        <option value="cache">Тайник</option>
+                        <option value="lair">Лежка</option>
+                        <option value="camp">Стоянка</option>
+                        <option value="anomaly">Аномалия</option>
+                        <option value="route_point">Точка маршрута</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Название:</label>
+                    <input type="text" id="marker-create-name" class="form-control" placeholder="Название">
+                </div>
+                <div class="form-group">
+                    <label>Описание:</label>
+                    <textarea id="marker-create-desc" class="form-control" rows="3" placeholder="Описание"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Цвет:</label>
+                    <input type="color" id="marker-create-color" class="form-control" style="height:40px;" value="#ffaa00">
+                </div>
+                <div class="form-group">
+                    <label>Координаты (x, y, z):</label>
+                    <div style="display: flex; gap: 5px; align-items: center;">
+                        <input type="number" id="marker-create-pos-x" step="0.1" class="form-control" style="width:30%">,
+                        <input type="number" id="marker-create-pos-y" step="0.1" class="form-control" style="width:30%">,
+                        <input type="number" id="marker-create-pos-z" step="0.1" class="form-control" style="width:30%">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="fillCenterCoordinates()" style="white-space: nowrap;">📍 В центр</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="marker-create-visible-all" checked> Виден всем</label>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="submitCreateMarker()">Создать</button>
+                </div>
+            </div>
+        </div>
+
+         <!-- Модальное окно редактирования маркера -->
+        <div id="marker-edit-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <span class="close" onclick="closeMarkerEditModal()">&times;</span>
+                <h3>Редактировать маркер</h3>
+                <input type="hidden" id="marker-edit-id">
+                <div class="form-group">
+                    <label>Название:</label>
+                    <input type="text" id="marker-edit-name" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label>Описание:</label>
+                    <textarea id="marker-edit-desc" class="form-control" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Цвет:</label>
+                    <input type="color" id="marker-edit-color" class="form-control" style="height:40px;">
+                </div>
+                <div class="form-group">
+                    <label>Тип:</label>
+                    <select id="marker-edit-type" class="form-control">
+                        <option value="cache">Тайник</option>
+                        <option value="lair">Лежка</option>
+                        <option value="camp">Стоянка</option>
+                        <option value="anomaly">Аномалия</option>
+                        <option value="route_point">Точка маршрута</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Координаты (x, y, z):</label>
+                    <div style="display: flex; gap: 5px; align-items: center;">
+                        <input type="number" id="marker-edit-pos-x" step="0.1" class="form-control" style="width:30%">,
+                        <input type="number" id="marker-edit-pos-y" step="0.1" class="form-control" style="width:30%">,
+                        <input type="number" id="marker-edit-pos-z" step="0.1" class="form-control" style="width:30%">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="fillEditCenterCoordinates()" style="white-space: nowrap;">📍 В центр</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="marker-edit-visible-all"> Виден всем</label>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="saveMarkerEdit()">Сохранить</button>
+                    <button class="btn btn-danger" onclick="deleteMarker()">Удалить</button>
                 </div>
             </div>
         </div>

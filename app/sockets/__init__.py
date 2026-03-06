@@ -9,3 +9,7 @@ from . import auth
 from . import chat
 from . import dice
 from . import markers
+
+@socketio.on('*')
+def catch_all(event, data):
+    print(f"GOT EVENT: {event} with data {data}")

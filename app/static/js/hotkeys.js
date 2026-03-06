@@ -3,33 +3,52 @@ import AppState from './state.js';
 import { setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, setEditMode, getEditMode } from './mapEdit.js';
 import { closeTileEditModal } from './mapEdit.js';
 import { closeVisibilityModal } from './ui.js';
-import { controls } from './lobby3d.js'; // импортируем controls
+import { controls } from './lobby3d.js';
+import { closeMarkerEditModal } from './markers.js';
 
 let modalOpen = false;
 let altPressed = false;
 
 export function initHotkeys() {
-    // Наблюдаем за модальными окнами
     const tileModal = document.getElementById('tile-edit-modal');
     const visModal = document.getElementById('visibility-modal');
+    const createMarkerModal = document.getElementById('marker-create-modal');
+    const editMarkerModal = document.getElementById('marker-edit-modal');
+
+    function updateModalOpen() {
+        const wasOpen = modalOpen;
+        modalOpen = (tileModal?.style.display === 'flex') ||
+                    (visModal?.style.display === 'flex') ||
+                    (createMarkerModal?.style.display === 'flex') ||
+                    (editMarkerModal?.style.display === 'flex');
+        if (modalOpen && !wasOpen) {
+            if (typeof window.hideTooltip === 'function') {
+                window.hideTooltip();
+            }
+        }
+    }
 
     if (tileModal) {
-        const observer = new MutationObserver(() => {
-            modalOpen = tileModal.style.display === 'flex' || visModal?.style.display === 'flex';
-        });
+        const observer = new MutationObserver(updateModalOpen);
         observer.observe(tileModal, { attributes: true, attributeFilter: ['style'] });
     }
     if (visModal) {
-        const observer = new MutationObserver(() => {
-            modalOpen = visModal.style.display === 'flex' || tileModal?.style.display === 'flex';
-        });
+        const observer = new MutationObserver(updateModalOpen);
         observer.observe(visModal, { attributes: true, attributeFilter: ['style'] });
+    }
+    if (createMarkerModal) {
+        const observer = new MutationObserver(updateModalOpen);
+        observer.observe(createMarkerModal, { attributes: true, attributeFilter: ['style'] });
+    }
+    if (editMarkerModal) {
+        const observer = new MutationObserver(updateModalOpen);
+        observer.observe(editMarkerModal, { attributes: true, attributeFilter: ['style'] });
     }
 
     document.addEventListener('keydown', handleKeyDown);
     document.addEventListener('keyup', handleKeyUp);
     document.addEventListener('wheel', handleWheel, { passive: false });
-    window.addEventListener('blur', handleBlur); // на случай, если Alt зажат и окно теряет фокус
+    window.addEventListener('blur', handleBlur);
 }
 
 function handleKeyDown(e) {
@@ -48,6 +67,14 @@ function handleKeyDown(e) {
             e.preventDefault();
             closeTileEditModal();
             closeVisibilityModal();
+            if (typeof window.closeMarkerEditModal === 'function') {
+                window.closeMarkerEditModal();
+            }
+            // Также можно закрыть окно создания, если оно открыто
+            const createModal = document.getElementById('marker-create-modal');
+            if (createModal && createModal.style.display === 'flex') {
+                createModal.style.display = 'none';
+            }
         }
         return;
     }

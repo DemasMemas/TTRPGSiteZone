@@ -4,6 +4,7 @@ import { setMapDimensions, setTileClickCallback } from './lobby3d.js';
 import { setLobbyData, updateParticipantsList } from './ui.js';
 import AppState from './state.js';
 import { applyWeather } from './weather.js';
+import { updateMapTileSize } from './markers.js';
 
 let currentLobbyId;
 
@@ -28,6 +29,7 @@ export async function loadLobbyInfo() {
         window.MAP_CHUNKS_WIDTH = lobby.chunks_width;
         window.MAP_CHUNKS_HEIGHT = lobby.chunks_height;
         setMapDimensions(lobby.chunks_width, lobby.chunks_height);
+        updateMapTileSize(lobby.chunks_width, lobby.chunks_height);
 
         const weatherTab = document.getElementById('weather-tab-btn');
         if (weatherTab) {

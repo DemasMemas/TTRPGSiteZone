@@ -27,7 +27,6 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('new_message', (data) => {
-        // Системные сообщения (броски кубиков и т.п.) показываем как уведомления
         if (data.username.startsWith('System')) {
             showNotification(data.message, 'system', 'bottom-left');
         } else {
@@ -37,16 +36,6 @@ export function initSocket(lobbyId, token) {
 
     socket.on('error', (data) => {
         showNotification('Ошибка: ' + data.message, 'error', 'top-right');
-    });
-
-    socket.on('marker_added', (marker) => {
-        import('./lobby3d.js').then(module => module.addMarker(marker));
-    });
-    socket.on('marker_moved', (data) => {
-        import('./lobby3d.js').then(module => module.moveMarker(data.id, data.x, data.y));
-    });
-    socket.on('marker_deleted', (data) => {
-        import('./lobby3d.js').then(module => module.removeMarker(data.id));
     });
 
     socket.on('chat_history', (messages) => {
