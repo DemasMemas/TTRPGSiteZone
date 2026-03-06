@@ -83,7 +83,7 @@ def handle_authenticate(data):
     emit('authenticated', {'username': user.username}, room=request.sid)
     logger.info(f"User {user.id} ({user.username}) authenticated in lobby {lobby_id}")
 
-    # Оповещаем всех в лобби о новом участнике
+    # Оповещаем всех в комнате о новом участнике
     emit('user_joined', {'user_id': user.id, 'username': user.username}, room=f"lobby_{lobby_id}")
 
     # Отправляем новому участнику список текущих онлайн-пользователей

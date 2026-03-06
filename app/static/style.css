@@ -528,7 +528,7 @@ body {
   color: var(--ban-btn-hover);
 }
 
-/* ===== Правое меню лобби ===== */
+/* ===== Правое меню комнаты ===== */
 .lobby-menu {
   position: absolute;
   top: 15px;

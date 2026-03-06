@@ -16,9 +16,9 @@ class LobbyService:
     @staticmethod
     def create_lobby(user_id, name, map_type, chunks_width=16, chunks_height=16, import_data=None):
         """
-        Создаёт новое лобби.
+        Создаёт новую комнату.
         - user_id: ID создателя (GM)
-        - name: название лобби
+        - name: название комнаты
         - map_type: тип карты ('empty', 'random', 'predefined', 'imported')
         - chunks_width, chunks_height: размер в чанках (для не-imported)
         - import_data: если map_type='imported', словарь с данными импорта
@@ -92,7 +92,7 @@ class LobbyService:
 
     @staticmethod
     def get_lobby(lobby_id, user_id):
-        """Получение информации о лобби (с проверкой участия)."""
+        """Получение информации о комнмате (с проверкой участия)."""
         lobby = Lobby.query.get(lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
@@ -105,7 +105,7 @@ class LobbyService:
 
     @staticmethod
     def delete_lobby(lobby_id, gm_id):
-        """Мягкое удаление лобби (только GM)."""
+        """Мягкое удаление комнаты (только GM)."""
         lobby = Lobby.query.get(lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
@@ -119,7 +119,7 @@ class LobbyService:
 
     @staticmethod
     def get_my_lobbies(user_id, limit=None, offset=0):
-        """Возвращает список лобби, созданных пользователем, с пагинацией."""
+        """Возвращает список комнат, созданных пользователем, с пагинацией."""
         query = Lobby.query.filter_by(gm_id=user_id, is_active=True).order_by(Lobby.created_at.desc())
         if limit is not None:
             query = query.limit(limit).offset(offset)
@@ -134,7 +134,7 @@ class LobbyService:
 
     @staticmethod
     def join_by_code(user_id, code):
-        """Присоединение к лобби по коду."""
+        """Присоединение к комнате по коду."""
         lobby = Lobby.query.filter_by(invite_code=code, is_active=True).first()
         if not lobby:
             raise NotFoundError("Invalid or inactive code")
@@ -147,7 +147,7 @@ class LobbyService:
 
     @staticmethod
     def list_active_lobbies():
-        """Возвращает список всех активных лобби (для общего списка)."""
+        """Возвращает список всех активных комнат (для общего списка)."""
         lobbies = Lobby.query.filter_by(is_active=True).all()
         return [{
             'id': l.id,

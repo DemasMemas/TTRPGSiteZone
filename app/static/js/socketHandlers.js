@@ -66,7 +66,7 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('user_joined', (data) => {
-        showNotification(`${data.username} присоединился к лобби`, 'system', 'bottom-left');
+        showNotification(`${data.username} присоединился к комнате`, 'system', 'bottom-left');
         if (!lobbyParticipants.some(p => p.user_id === data.user_id)) {
             lobbyParticipants.push({ user_id: data.user_id, username: data.username });
         }
@@ -76,14 +76,14 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('user_left', (data) => {
-        showNotification(`${data.username} покинул лобби`, 'system', 'bottom-left');
+        showNotification(`${data.username} покинул комнату`, 'system', 'bottom-left');
         onlineUserIds.delete(data.user_id);
         updateParticipantsList();
         loadLobbyCharacters();
     });
 
     socket.on('kicked', () => {
-        showNotification('Вы были заблокированы в этом лобби', 'error', 'top-right');
+        showNotification('Вы были заблокированы в этой комнате', 'error', 'top-right');
         window.location.href = '/';
     });
 

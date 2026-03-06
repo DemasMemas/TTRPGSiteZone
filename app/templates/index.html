@@ -84,9 +84,9 @@
             <h2>Добро пожаловать, <span id="username"></span>!</h2>
             <button onclick="logout()">Выйти</button>
 
-            <h3>Создать лобби</h3>
+            <h3>Создать комнату</h3>
             <div class="form-group">
-                <label>Название лобби</label>
+                <label>Название комнаты</label>
                 <input type="text" id="lobby-name">
                 <label>Тип карты:</label>
                 <select id="map-type">
@@ -109,13 +109,13 @@
                 <input type="file" id="map-file" accept=".gz">
             </div>
 
-            <button onclick="createLobby()">Создать лобби</button>
+            <button onclick="createLobby()">Создать комнату</button>
 
             <div id="loading-indicator" style="display:none; margin-top:10px;">
                 <span>Загрузка... ⏳</span>
             </div>
 
-            <h3>Мои лобби</h3>
+            <h3>Мои комнаты</h3>
             <div id="my-lobbies-list"></div>
             <button id="load-more-my-lobbies" onclick="loadMoreMyLobbies()" style="margin-bottom: 20px;">Загрузить ещё</button>
 

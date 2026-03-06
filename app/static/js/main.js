@@ -30,7 +30,7 @@ if (!token) {
     window.location.href = '/';
 }
 if (!currentLobbyId) {
-    showNotification('Некорректный URL лобби');
+    showNotification('Некорректный URL комнаты');
     window.location.href = '/';
 }
 
@@ -51,7 +51,7 @@ window.sendMessage = () => {
 };
 
 window.leaveLobby = async () => {
-    if (!confirm('Покинуть лобби?')) return;
+    if (!confirm('Покинуть комнату?')) return;
     try {
         const response = await fetch(`/lobbies/${currentLobbyId}/leave`, {
             method: 'POST',

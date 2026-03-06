@@ -142,7 +142,7 @@ async function createLobby() {
 
     const name = document.getElementById('lobby-name').value;
     if (!name) {
-        showNotification('Введите название лобби');
+        showNotification('Введите название комнаты');
         return;
     }
 
@@ -207,7 +207,7 @@ async function createLobby() {
                 window.location.href = `/lobbies/${lobby.id}/page`;
             } else {
                 const err = await response.json();
-                throw new Error(getErrorMessage(err) || 'Ошибка создания лобби');
+                throw new Error(getErrorMessage(err) || 'Ошибка создания комнаты');
             }
         } else {
             let chunksWidth = 16, chunksHeight = 16;
@@ -233,11 +233,11 @@ async function createLobby() {
                 window.location.href = `/lobbies/${lobby.id}/page`;
             } else {
                 const err = await response.json();
-                throw new Error(getErrorMessage(err) || 'Ошибка создания лобби');
+                throw new Error(getErrorMessage(err) || 'Ошибка создания комнаты');
             }
         }
     } catch (error) {
-        showNotification(error.message || 'Ошибка создания лобби');
+        showNotification(error.message || 'Ошибка создания комнаты');
         console.error(error);
     } finally {
         if (createBtn) createBtn.disabled = false;
@@ -303,7 +303,7 @@ async function loadMyLobbies(reset = false) {
         if (lobbies.length === 0) {
             hasMoreMyLobbies = false;
             if (myLobbiesOffset === 0) {
-                container.innerHTML = '<p>У вас пока нет созданных лобби</p>';
+                container.innerHTML = '<p>У вас пока нет созданных комнат</p>';
             }
         } else {
             lobbies.forEach(lobby => {
@@ -324,7 +324,7 @@ async function loadMyLobbies(reset = false) {
             }
         }
     } catch (error) {
-        console.error('Ошибка загрузки моих лобби', error);
+        console.error('Ошибка загрузки моих комнат', error);
     }
 }
 
@@ -333,7 +333,7 @@ window.loadMoreMyLobbies = function() {
 };
 
 async function deleteLobby(lobbyId) {
-    if (!confirm('Вы уверены, что хотите удалить лобби? Это действие необратимо.')) return;
+    if (!confirm('Вы уверены, что хотите удалить комнату? Это действие необратимо.')) return;
 
     const token = localStorage.getItem('access_token');
     if (!token) return;
@@ -344,7 +344,7 @@ async function deleteLobby(lobbyId) {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
-            showNotification('Лобби удалено', 'success');
+            showNotification('Комната удалена', 'success');
             loadMyLobbies();
         } else {
             const err = await response.json();

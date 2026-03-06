@@ -34,7 +34,7 @@ class CharacterService:
         if not character:
             raise NotFoundError("Character not found")
 
-        # Проверяем, что пользователь в том же лобби
+        # Проверяем, что пользователь в той же комнате
         participant = LobbyParticipant.query.filter_by(
             lobby_id=character.lobby_id, user_id=user_id
         ).first()
@@ -79,7 +79,7 @@ class CharacterService:
 
     @staticmethod
     def get_lobby_characters(lobby_id, user_id):
-        """Возвращает список персонажей в лобби, видимых пользователю."""
+        """Возвращает список персонажей в комнаты, видимых пользователю."""
         participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
         if not participant:
             raise PermissionDenied("You are not in this lobby")

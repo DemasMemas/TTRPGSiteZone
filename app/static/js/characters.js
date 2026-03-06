@@ -25,7 +25,7 @@ function displayLobbyCharacters(characters) {
     if (!container) return;
     container.innerHTML = '';
     if (characters.length === 0) {
-        container.innerHTML = '<p>В лобби пока нет персонажей</p>';
+        container.innerHTML = '<p>В комнате пока нет персонажей</p>';
         return;
     }
     characters.forEach(char => {

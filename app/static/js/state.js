@@ -9,7 +9,7 @@ const AppState = {
     brushRadius: 0,
     tileHeight: 1.0,
 
-    // Данные лобби (из ui.js)
+    // Данные комнаты (из ui.js)
     isGM: false,
     lobbyId: null,
     token: localStorage.getItem('access_token') || null,

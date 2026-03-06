@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class ParticipantService:
     @staticmethod
     def join_lobby(user_id, lobby_id):
-        """Добавляет пользователя в лобби (если он уже не участник)."""
+        """Добавляет пользователя в комнату (если он уже не участник)."""
         lobby = Lobby.query.get(lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
@@ -37,7 +37,7 @@ class ParticipantService:
 
     @staticmethod
     def leave_lobby(user_id, lobby_id):
-        """Пользователь покидает лобби."""
+        """Пользователь покидает комнату."""
         lobby = Lobby.query.get(lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
