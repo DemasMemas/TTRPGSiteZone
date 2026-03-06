@@ -111,7 +111,30 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
 
     socket.on('marker_updated', (data) => {
         console.log('Marker updated:', data);
-        updateMarkerInScene(data.id, data.updates);
+        const markerId = data.id;
+        const updates = data.updates;
+
+        const entry = markers.get(markerId);
+        if (!entry) return;
+
+        // Обновляем данные маркера
+        Object.assign(entry.data, updates);
+
+        // Проверяем видимость после обновления
+        if (!canSeeMarkerForCurrentUser(entry.data)) {
+            // Маркер стал невидим – удаляем
+            removeMarkerFromScene(markerId);
+        } else {
+            // Маркер видим – обновляем внешний вид
+            if (updates.color || updates.type) {
+                const newTexture = createMarkerTexture(entry.data.type, entry.data.color);
+                entry.sprite.material.map = newTexture;
+                entry.sprite.material.needsUpdate = true;
+            }
+            if (updates.position) {
+                entry.sprite.position.set(updates.position.x, updates.position.y + 0.8, updates.position.z);
+            }
+        }
     });
 
     socket.on('marker_moved', (data) => {
@@ -245,88 +268,98 @@ export function setupMarkerInteraction() {
         }
     });
 
-    // Обработчик перетаскивания с capture, чтобы перехватывать событие до lobby3d
-    canvas.addEventListener('mousedown', (event) => {
-        console.log('mousedown on canvas');
-        if (event.button !== 0) return;
+    canvas.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
 
-        console.log('Marker mousedown');
-        const rect = canvas.getBoundingClientRect();
-        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
-        raycaster.setFromCamera(mouse, camera);
-        const markerSprites = Array.from(markers.values()).map(e => e.sprite);
-        const intersects = raycaster.intersectObjects(markerSprites);
+    raycaster.setFromCamera(mouse, camera);
+    const markerSprites = Array.from(markers.values()).map(e => e.sprite);
+    const intersects = raycaster.intersectObjects(markerSprites);
 
-        if (intersects.length > 0) {
-            const hit = intersects[0].object;
-            const markerId = hit.userData.markerId;
-            console.log('Starting drag for marker', markerId);
+    if (intersects.length > 0) {
+        const hit = intersects[0].object;
+        const markerId = hit.userData.markerId;
+        console.log('Starting drag for marker', markerId);
 
-            event.preventDefault();
-            event.stopPropagation();
+        event.preventDefault();
+        event.stopPropagation();
 
-            const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.position.y);
-            const offset = hit.position.clone().sub(raycaster.ray.origin);
+        canvas.setPointerCapture(event.pointerId);
 
-            dragState = {
-                markerId,
-                offset,
-                plane,
-                startPosition: hit.position.clone()
-            };
+        const hitPoint = hit.point.clone();
+        const spritePos = hit.position.clone();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -spritePos.y);
 
-            controls.enabled = false;
-            canvas.style.cursor = 'grabbing';
+        dragState = {
+            markerId,
+            startPoint: hitPoint,
+            startSpritePos: spritePos,
+            plane,
+            pointerId: event.pointerId
+        };
 
-            const onMouseMove = (e) => {
-                if (!dragState) return;
-                e.preventDefault();
-                e.stopPropagation();
+        controls.enabled = false;
+        canvas.style.cursor = 'grabbing';
 
-                const mouseCoords = new THREE.Vector2(
-                    ((e.clientX - rect.left) / rect.width) * 2 - 1,
-                    -((e.clientY - rect.top) / rect.height) * 2 + 1
-                );
-                raycaster.setFromCamera(mouseCoords, camera);
-                const intersectionPoint = new THREE.Vector3();
-                if (!raycaster.ray.intersectPlane(dragState.plane, intersectionPoint)) return;
+        const onPointerMove = (e) => {
+            if (!dragState || e.pointerId !== dragState.pointerId) return;
+            e.preventDefault();
+            e.stopPropagation();
 
-                const newPos = intersectionPoint.clone().sub(dragState.offset);
-                newPos.y = Math.max(0, newPos.y);
+            const mouseCoords = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1
+            );
+            raycaster.setFromCamera(mouseCoords, camera);
+            const newPoint = new THREE.Vector3();
+            if (!raycaster.ray.intersectPlane(dragState.plane, newPoint)) return;
 
-                const entry = markers.get(dragState.markerId);
-                if (entry) {
-                    entry.sprite.position.copy(newPos);
-                }
-            };
+            const deltaX = newPoint.x - dragState.startPoint.x;
+            const deltaZ = newPoint.z - dragState.startPoint.z;
 
-            const onMouseUp = () => {
-                if (dragState) {
-                    const entry = markers.get(dragState.markerId);
-                    if (entry) {
-                        const newPos = entry.sprite.position.clone();
-                        console.log('Move marker sent', dragState.markerId, newPos);
-                        socket.emit('move_marker', {
-                            token,
-                            lobby_id: currentLobbyId,
-                            marker_id: dragState.markerId,
-                            position: { x: newPos.x, y: newPos.y - 0.8, z: newPos.z }
-                        });
-                    }
-                    dragState = null;
-                    controls.enabled = true;
-                    canvas.style.cursor = 'default';
-                    document.removeEventListener('mousemove', onMouseMove);
-                    document.removeEventListener('mouseup', onMouseUp);
-                }
-            };
+            const newPos = dragState.startSpritePos.clone();
+            newPos.x += deltaX;
+            newPos.z += deltaZ;
 
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', onMouseUp);
-        }
-    }, { capture: true }); // capture, чтобы перехватить до lobby3d
+            const entry = markers.get(dragState.markerId);
+            if (entry) {
+                entry.sprite.position.copy(newPos);
+            }
+        };
+
+        const onPointerUp = (e) => {
+            if (!dragState || e.pointerId !== dragState.pointerId) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            const entry = markers.get(dragState.markerId);
+            if (entry) {
+                const newPos = entry.sprite.position.clone();
+                console.log('Move marker sent', dragState.markerId, newPos);
+                socket.emit('move_marker', {
+                    token,
+                    lobby_id: currentLobbyId,
+                    marker_id: dragState.markerId,
+                    position: { x: newPos.x, y: newPos.y - 0.8, z: newPos.z }
+                });
+            }
+
+            canvas.releasePointerCapture(e.pointerId);
+            dragState = null;
+            controls.enabled = true;
+            canvas.style.cursor = 'default';
+
+            canvas.removeEventListener('pointermove', onPointerMove);
+            canvas.removeEventListener('pointerup', onPointerUp);
+        };
+
+        canvas.addEventListener('pointermove', onPointerMove);
+        canvas.addEventListener('pointerup', onPointerUp);
+    }
+}, { capture: true });
 
     // Обработчик двойного клика с capture
     canvas.addEventListener('dblclick', (event) => {
@@ -482,6 +515,13 @@ export function saveMarkerEdit() {
         updates
     });
     closeMarkerEditModal();
+}
+
+function canSeeMarkerForCurrentUser(marker) {
+    const userId = parseInt(localStorage.getItem('user_id'));
+    if (AppState.isGM) return true; // GM видит всё
+    const visibleTo = marker.visibleTo || [];
+    return visibleTo.includes('all') || visibleTo.includes(userId);
 }
 
 export function fillEditCenterCoordinates() {
