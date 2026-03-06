@@ -356,3 +356,20 @@ def update_weather(lobby_id, lobby):
 
     socketio.emit('weather_updated', data, room=f"lobby_{lobby_id}")
     return jsonify({'message': 'Weather updated'}), 200
+
+@lobbies_bp.route('/joined', methods=['GET'])
+@jwt_required()
+def get_joined_lobbies():
+    user_id = int(get_jwt_identity())
+    limit = request.args.get('limit', type=int)
+    offset = request.args.get('offset', default=0, type=int)
+
+    if limit is not None and (limit <= 0 or limit > 100):
+        return jsonify({'error': 'limit must be between 1 and 100'}), 400
+    if offset < 0:
+        return jsonify({'error': 'offset must be non-negative'}), 400
+
+    lobbies = LobbyService.get_joined_lobbies(user_id, limit=limit, offset=offset)
+    from app.schemas.lobby import LobbyMySchema
+    schema = LobbyMySchema(many=True)
+    return jsonify(schema.dump(lobbies)), 200

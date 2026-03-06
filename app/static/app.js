@@ -5,6 +5,10 @@ let myLobbiesOffset = 0;
 const MY_LOBBIES_LIMIT = 5;
 let hasMoreMyLobbies = true;
 
+let joinedLobbiesOffset = 0;
+const JOINED_LOBBIES_LIMIT = 5;
+let hasMoreJoinedLobbies = true;
+
 function getErrorMessage(data) {
     if (!data) return 'Неизвестная ошибка';
     if (typeof data === 'string') return data;
@@ -114,6 +118,7 @@ async function loadApp() {
     document.getElementById('username').textContent = localStorage.getItem('username') || '';
 
     await loadMyLobbies(true);
+    await loadJoinedLobbies(true);
 }
 
 function showNotification(message, type = 'error') {
@@ -374,6 +379,86 @@ async function joinLobby(lobbyId) {
         showNotification('Ошибка сети');
     }
 }
+
+async function loadJoinedLobbies(reset = false) {
+    const token = localStorage.getItem('access_token');
+    if (!token) return;
+
+    if (reset) {
+        joinedLobbiesOffset = 0;
+        hasMoreJoinedLobbies = true;
+        document.getElementById('joined-lobbies-list').innerHTML = '';
+    }
+
+    if (!hasMoreJoinedLobbies) return;
+
+    try {
+        const url = `/lobbies/joined?limit=${JOINED_LOBBIES_LIMIT}&offset=${joinedLobbiesOffset}`;
+        const response = await fetch(url, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.status === 401 || response.status === 422) {
+            logout();
+            return;
+        }
+        const lobbies = await response.json();
+        const container = document.getElementById('joined-lobbies-list');
+
+        if (lobbies.length === 0) {
+            hasMoreJoinedLobbies = false;
+            if (joinedLobbiesOffset === 0) {
+                container.innerHTML = '<p>Вы пока не присоединились ни к одной комнате</p>';
+            }
+        } else {
+            lobbies.forEach(lobby => {
+                const div = document.createElement('div');
+                div.className = 'lobby-item';
+                div.innerHTML = `
+                    <strong>${lobby.name}</strong> (код: ${lobby.invite_code})
+                    <div>
+                        <button onclick="joinLobby(${lobby.id})">Войти</button>
+                        <button class="delete-btn" onclick="leaveJoinedLobby(${lobby.id})">🚪 Покинуть</button>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+            joinedLobbiesOffset += lobbies.length;
+            if (lobbies.length < JOINED_LOBBIES_LIMIT) {
+                hasMoreJoinedLobbies = false;
+            }
+        }
+    } catch (error) {
+        console.error('Ошибка загрузки присоединённых комнат', error);
+    }
+}
+
+window.loadMoreJoinedLobbies = function() {
+    loadJoinedLobbies(false);
+};
+
+async function leaveJoinedLobby(lobbyId) {
+    if (!confirm('Покинуть комнату?')) return;
+
+    const token = localStorage.getItem('access_token');
+    if (!token) return;
+
+    try {
+        const response = await fetch(`/lobbies/${lobbyId}/leave`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+            showNotification('Вы покинули комнату', 'success');
+            loadJoinedLobbies(true);
+        } else {
+            const err = await response.json();
+            showNotification(getErrorMessage(err));
+        }
+    } catch (error) {
+        showNotification('Ошибка сети');
+    }
+}
+window.leaveJoinedLobby = leaveJoinedLobby;
 
 window.onload = () => {
     if (localStorage.getItem('access_token')) {

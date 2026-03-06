@@ -155,3 +155,28 @@ class LobbyService:
             'gm_id': l.gm_id,
             'participants_count': len(l.participants)
         } for l in lobbies]
+
+    @staticmethod
+    def get_joined_lobbies(user_id, limit=None, offset=0):
+        """
+        Возвращает список комнат, в которых пользователь участвует (но не создал),
+        с пагинацией. Комнаты должны быть активны, пользователь не забанен.
+        """
+        from app.models import LobbyParticipant
+        query = (db.session.query(Lobby)
+                 .join(LobbyParticipant, Lobby.id == LobbyParticipant.lobby_id)
+                 .filter(LobbyParticipant.user_id == user_id,
+                         LobbyParticipant.is_banned == False,
+                         Lobby.is_active == True,
+                         Lobby.gm_id != user_id)
+                 .order_by(Lobby.created_at.desc()))
+        if limit is not None:
+            query = query.limit(limit).offset(offset)
+        lobbies = query.all()
+        logger.debug(f"User {user_id} has {len(lobbies)} joined lobbies (limit={limit}, offset={offset})")
+        return [{
+            'id': l.id,
+            'name': l.name,
+            'created_at': l.created_at,
+            'invite_code': l.invite_code
+        } for l in lobbies]
