@@ -350,7 +350,7 @@ async function deleteLobby(lobbyId) {
         });
         if (response.ok) {
             showNotification('Комната удалена', 'success');
-            loadMyLobbies();
+            loadMyLobbies(true);
         } else {
             const err = await response.json();
             showNotification(getErrorMessage(err));

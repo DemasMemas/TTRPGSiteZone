@@ -13,7 +13,9 @@ let mouse = new THREE.Vector2();
 let dragState = null;
 let hoveredMarkerId = null;
 let tooltipDiv = null;
-let routeLines = new Map(); // routeId -> THREE.Line
+let routeLines = new Map();
+let routeDatalistCreate = null;
+let routeDatalistEdit = null;
 
 // Для выбора тайла
 let awaitingTilePick = false;
@@ -152,9 +154,9 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
     createTooltip();
 
     socket.on('markers_list', (markersData) => {
-        console.log('Markers list received, count:', markersData.length);
         clearMarkers();
         markersData.forEach(m => addMarkerToScene(m));
+        updateRouteDatalists();
 
         // После добавления всех маркеров обновляем линии маршрутов
         const uniqueRouteIds = new Set();
@@ -167,8 +169,8 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
     });
 
     socket.on('marker_added', (marker) => {
-        console.log('Marker added:', marker);
         addMarkerToScene(marker);
+        updateRouteDatalists();
     });
 
     socket.on('marker_updated', (data) => {
@@ -202,6 +204,7 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
         if (entry.data.routeId) {
             updateRouteLines(entry.data.routeId);
         }
+        updateRouteDatalists();
     });
 
     socket.on('marker_moved', (data) => {
@@ -221,6 +224,7 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
         if (routeId) {
             updateRouteLines(routeId);
         }
+        updateRouteDatalists();
     });
 
     socket.emit('get_markers', { token, lobby_id: currentLobbyId });
@@ -514,7 +518,7 @@ export function setupMarkerInteraction() {
     }, { capture: true });
 
     canvas.addEventListener('dblclick', (event) => {
-        console.log('dblclick on canvas');
+        if (AppState.editMode) return;
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -533,6 +537,16 @@ export function setupMarkerInteraction() {
             openMarkerEditModal(markerData);
             event.preventDefault();
             event.stopPropagation();
+        } else {
+            const hovered = getHoveredTile();
+            if (hovered) {
+                const worldX = hovered.chunk.chunkX * 32 + hovered.tileX + 0.5;
+                const worldZ = hovered.chunk.chunkY * 32 + hovered.tileY + 0.5;
+                const height = hovered.tileData.height || 1.0;
+                openCreateMarkerModal({ x: worldX, y: height + 0.8, z: worldZ });
+                event.preventDefault();
+                event.stopPropagation();
+            }
         }
     }, { capture: true });
 }
@@ -553,38 +567,17 @@ export function pickTileForMarker() {
 }
 
 // ---------- Функции для работы с выпадающим списком маршрутов ----------
-function populateRouteSelect(selectId) {
-    const select = document.getElementById(selectId);
-    if (!select) return;
-    const routeIds = new Set();
-    markers.forEach(entry => {
-        if (entry.data.type === 'route_point' && entry.data.routeId) {
-            routeIds.add(entry.data.routeId);
-        }
-    });
-    select.innerHTML = '<option value="">-- Выберите или введите новый --</option>';
-    routeIds.forEach(id => {
-        const option = document.createElement('option');
-        option.value = id;
-        option.textContent = id;
-        select.appendChild(option);
-    });
-}
-
 function toggleRouteFields(modalType) {
     const typeSelect = document.getElementById(`marker-${modalType}-type`);
     const routeFields = document.getElementById(`route-fields-${modalType}`);
     if (typeSelect && routeFields) {
-        const isRoutePoint = typeSelect.value === 'route_point';
-        routeFields.style.display = isRoutePoint ? 'block' : 'none';
-        if (isRoutePoint) {
-            populateRouteSelect(`marker-${modalType}-route-select`);
-        }
+        routeFields.style.display = typeSelect.value === 'route_point' ? 'block' : 'none';
     }
 }
 
 // ---------- Модальное окно создания ----------
 export function openCreateMarkerModal(position = null) {
+    updateRouteDatalists();
     if (position) {
         document.getElementById('marker-create-pos-x').value = position.x.toFixed(2);
         document.getElementById('marker-create-pos-y').value = position.y.toFixed(2);
@@ -601,25 +594,11 @@ export function openCreateMarkerModal(position = null) {
     document.getElementById('marker-create-visible-all').checked = true;
     document.getElementById('marker-create-route-id').value = '';
     document.getElementById('marker-create-route-order').value = '1';
-    document.getElementById('new-route-field-create').style.display = 'none';
 
     const typeSelect = document.getElementById('marker-create-type');
     typeSelect.removeEventListener('change', () => toggleRouteFields('create'));
     typeSelect.addEventListener('change', () => toggleRouteFields('create'));
     toggleRouteFields('create');
-
-    // Обработчик выбора маршрута
-    const routeSelect = document.getElementById('marker-create-route-select');
-    const newRouteDiv = document.getElementById('new-route-field-create');
-    routeSelect.addEventListener('change', () => {
-        if (routeSelect.value === '') {
-            newRouteDiv.style.display = 'block';
-            document.getElementById('marker-create-route-id').value = '';
-        } else {
-            newRouteDiv.style.display = 'none';
-            document.getElementById('marker-create-route-id').value = routeSelect.value;
-        }
-    });
 
     document.getElementById('marker-create-modal').style.display = 'flex';
 }
@@ -682,6 +661,7 @@ export function submitCreateMarker() {
 
 // ---------- Модальное окно редактирования ----------
 function openMarkerEditModal(marker) {
+    updateRouteDatalists();
     const idField = document.getElementById('marker-edit-id');
     const nameField = document.getElementById('marker-edit-name');
     const descField = document.getElementById('marker-edit-desc');
@@ -719,29 +699,6 @@ function openMarkerEditModal(marker) {
     typeSelect.removeEventListener('change', () => toggleRouteFields('edit'));
     typeSelect.addEventListener('change', () => toggleRouteFields('edit'));
     toggleRouteFields('edit');
-
-    // Для редактирования сразу заполняем скрытое поле и селект
-    if (marker.type === 'route_point' && marker.routeId) {
-        const routeSelect = document.getElementById('marker-edit-route-select');
-        const newRouteDiv = document.getElementById('new-route-field-edit');
-        // Устанавливаем селект на нужное значение, если оно есть в списке
-        let optionExists = false;
-        for (let i = 0; i < routeSelect.options.length; i++) {
-            if (routeSelect.options[i].value === marker.routeId) {
-                routeSelect.selectedIndex = i;
-                optionExists = true;
-                break;
-            }
-        }
-        if (optionExists) {
-            newRouteDiv.style.display = 'none';
-            document.getElementById('marker-edit-route-id').value = marker.routeId;
-        } else {
-            routeSelect.selectedIndex = 0; // выбрать пустое
-            newRouteDiv.style.display = 'block';
-            document.getElementById('marker-edit-route-id').value = marker.routeId;
-        }
-    }
 
     document.getElementById('marker-edit-modal').style.display = 'flex';
 }
@@ -810,4 +767,35 @@ export function deleteMarker() {
         marker_id: id
     });
     closeMarkerEditModal();
+}
+
+function updateRouteDatalists() {
+    const routeIds = new Set();
+    markers.forEach(entry => {
+        if (entry.data.type === 'route_point' && entry.data.routeId) {
+            routeIds.add(entry.data.routeId);
+        }
+    });
+
+    // Обновляем datalist для создания
+    const datalistCreate = document.getElementById('route-datalist-create');
+    if (datalistCreate) {
+        datalistCreate.innerHTML = '';
+        routeIds.forEach(id => {
+            const option = document.createElement('option');
+            option.value = id;
+            datalistCreate.appendChild(option);
+        });
+    }
+
+    // Обновляем datalist для редактирования
+    const datalistEdit = document.getElementById('route-datalist-edit');
+    if (datalistEdit) {
+        datalistEdit.innerHTML = '';
+        routeIds.forEach(id => {
+            const option = document.createElement('option');
+            option.value = id;
+            datalistEdit.appendChild(option);
+        });
+    }
 }
