@@ -17,7 +17,7 @@ import { initHotkeys } from './hotkeys.js';
 import { initWeather, applyWeather } from './weather.js';
 import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
-fillEditCenterCoordinates} from './markers.js';
+fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
 import * as THREE from 'three';
 
 initWeather();
@@ -130,6 +130,7 @@ window.fillCenterCoordinates = fillCenterCoordinates;
 window.addMarkerAtCenter = openCreateMarkerModal;
 window.deleteMarker = deleteMarker;
 window.fillEditCenterCoordinates = fillEditCenterCoordinates;
+window.pickTileForMarker = pickTileForMarker;
 
 // Экспорт карты
 window.exportMap = async () => {

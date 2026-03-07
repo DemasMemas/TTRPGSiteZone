@@ -11,6 +11,32 @@ from .utils import get_user_from_token
 
 logger = logging.getLogger(__name__)
 
+# ========== Вспомогательные функции для работы с маршрутами ==========
+def reorder_route_points(markers, route_id, new_order, exclude_id=None):
+    changed_ids = []
+    for m in markers:
+        if (m.get('type') == 'route_point' and
+            m.get('routeId') == route_id and
+            m.get('id') != exclude_id and
+            m.get('routeOrder', 0) >= new_order):
+            m['routeOrder'] = m.get('routeOrder', 0) + 1
+            changed_ids.append(m['id'])
+    return changed_ids
+
+def compact_route_points(markers, route_id, exclude_id=None):
+    points = [m for m in markers
+              if m.get('type') == 'route_point'
+              and m.get('routeId') == route_id
+              and m.get('id') != exclude_id]
+    points.sort(key=lambda x: x.get('routeOrder', 0))
+    changed_ids = []
+    for idx, m in enumerate(points):
+        expected = idx + 1
+        if m.get('routeOrder') != expected:
+            m['routeOrder'] = expected
+            changed_ids.append(m['id'])
+    return changed_ids
+
 def can_edit_marker(user_id, lobby_id, marker):
     lobby = Lobby.query.get(lobby_id)
     if not lobby:
@@ -26,7 +52,6 @@ def can_see_marker(user_id, lobby_id, marker):
     if lobby.gm_id == user_id:
         return True
     visible_to = marker.get('visibleTo', [])
-    logger.debug(f"can_see_marker: user_id={user_id}, visible_to={visible_to}, result={('all' in visible_to) or (user_id in visible_to)}")
     if 'all' in visible_to:
         return True
     return user_id in visible_to
@@ -41,7 +66,6 @@ def get_game_state(lobby_id):
         db.session.add(game_state)
         db.session.commit()
     else:
-        # Принудительно обновляем объект из БД, чтобы избежать устаревших данных
         db.session.refresh(game_state)
     if 'markers' not in game_state.map_data:
         game_state.map_data['markers'] = []
@@ -49,6 +73,7 @@ def get_game_state(lobby_id):
         db.session.commit()
     return game_state
 
+# ========== Обработчики событий ==========
 @socketio.on('get_markers')
 def handle_get_markers(data):
     token = data.get('token')
@@ -102,7 +127,7 @@ def handle_add_marker(data):
 
     new_marker = {
         'id': new_id,
-        'type': marker_data.get('type', 'default'),
+        'type': marker_type,
         'name': marker_data.get('name', ''),
         'description': marker_data.get('description', ''),
         'position': marker_data.get('position', {'x': 0, 'y': 0, 'z': 0}),
@@ -110,8 +135,15 @@ def handle_add_marker(data):
         'visibleTo': marker_data.get('visibleTo', ['all'] if not is_gm else ['all']),
         'createdBy': user.id,
         'createdAt': datetime.now(timezone.utc).isoformat(),
-        'routePoints': marker_data.get('routePoints', [])
+        'routePoints': marker_data.get('routePoints', []),
+        'routeId': marker_data.get('routeId'),
+        'routeOrder': marker_data.get('routeOrder')
     }
+
+    changed_ids = []  # ID маркеров, у которых изменился порядок
+    # Если это точка маршрута, выполняем перенумерацию
+    if marker_type == 'route_point' and new_marker.get('routeId') and new_marker.get('routeOrder') is not None:
+        changed_ids = reorder_route_points(markers, new_marker['routeId'], new_marker['routeOrder'])
 
     try:
         markers.append(new_marker)
@@ -119,7 +151,19 @@ def handle_add_marker(data):
         flag_modified(game_state, 'map_data')
         db.session.commit()
         logger.info(f"Marker {new_id} added by {user.username} in lobby {lobby_id}")
+
+        # Отправляем новый маркер
         emit('marker_added', new_marker, room=f"lobby_{lobby_id}")
+
+        # Отправляем обновления для затронутых маркеров
+        for marker_id in changed_ids:
+            # Находим обновлённый маркер (уже после коммита)
+            updated_marker = next((m for m in markers if m['id'] == marker_id), None)
+            if updated_marker:
+                emit('marker_updated', {
+                    'id': marker_id,
+                    'updates': {'routeOrder': updated_marker['routeOrder']}
+                }, room=f"lobby_{lobby_id}")
     except Exception as e:
         db.session.rollback()
         logger.exception("Failed to add marker")
@@ -140,7 +184,6 @@ def handle_update_marker(data):
         emit('error', {'message': 'Invalid token'}, room=request.sid)
         return
 
-    # Проверка на участие и бан
     participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user.id).first()
     if not participant or participant.is_banned:
         emit('error', {'message': 'Access denied'}, room=request.sid)
@@ -153,11 +196,42 @@ def handle_update_marker(data):
         emit('error', {'message': 'Marker not found'}, room=request.sid)
         return
 
-    # Разрешённые поля, включая position
-    allowed_fields = ['name', 'description', 'color', 'visibleTo', 'routePoints', 'type', 'position']
+    # Сохраняем старые значения для проверки изменений маршрута
+    old_route_id = marker.get('routeId')
+    old_order = marker.get('routeOrder')
+    old_type = marker.get('type')
+
+    allowed_fields = ['name', 'description', 'color', 'visibleTo', 'routePoints', 'type', 'position', 'routeId', 'routeOrder']
     for field in allowed_fields:
         if field in updates:
             marker[field] = updates[field]
+
+    # Если это точка маршрута, выполняем корректировку порядка
+    new_type = marker.get('type')
+    new_route_id = marker.get('routeId')
+    new_order = marker.get('routeOrder')
+
+    # Сначала удаляем старую точку из старого маршрута (если была)
+    if old_type == 'route_point' and old_route_id:
+        # Удаляем точку из старого маршрута (она всё ещё в markers, но мы её временно исключим из расчётов)
+        # Сдвигаем точки с order > old_order на -1
+        for m in markers:
+            if (m.get('type') == 'route_point' and
+                m.get('routeId') == old_route_id and
+                m.get('id') != marker_id and
+                m.get('routeOrder', 0) > old_order):
+                m['routeOrder'] = m['routeOrder'] - 1
+
+    # Если теперь это точка маршрута и есть новый routeId
+    if new_type == 'route_point' and new_route_id:
+        # Вставляем в новый маршрут с новым order
+        reorder_route_points(markers, new_route_id, new_order, exclude_id=marker_id)
+
+    # Упорядочиваем оба маршрута (старый и новый, если они разные)
+    if old_type == 'route_point' and old_route_id and old_route_id != new_route_id:
+        compact_route_points(markers, old_route_id)
+    if new_type == 'route_point' and new_route_id:
+        compact_route_points(markers, new_route_id)
 
     try:
         game_state.map_data['markers'] = markers
@@ -235,6 +309,17 @@ def handle_delete_marker(data):
     if not marker:
         emit('error', {'message': 'Marker not found'}, room=request.sid)
         return
+
+    # Если удаляется точка маршрута, сдвигаем оставшиеся
+    if marker.get('type') == 'route_point' and marker.get('routeId'):
+        route_id = marker['routeId']
+        order = marker.get('routeOrder', 0)
+        for m in markers:
+            if (m.get('type') == 'route_point' and
+                m.get('routeId') == route_id and
+                m.get('id') != marker_id and
+                m.get('routeOrder', 0) > order):
+                m['routeOrder'] = m['routeOrder'] - 1
 
     markers = [m for m in markers if m.get('id') != marker_id]
 

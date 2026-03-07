@@ -276,6 +276,7 @@
                         <option value="camp">Стоянка</option>
                         <option value="anomaly">Аномалия</option>
                         <option value="route_point">Точка маршрута</option>
+                        <option value="place">Название места</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -297,6 +298,24 @@
                         <input type="number" id="marker-create-pos-y" step="0.1" class="form-control" style="width:30%">,
                         <input type="number" id="marker-create-pos-z" step="0.1" class="form-control" style="width:30%">
                         <button type="button" class="btn btn-sm btn-secondary" onclick="fillCenterCoordinates()" style="white-space: nowrap;">📍 В центр</button>
+                        <button type="button" class="btn btn-secondary" onclick="pickTileForMarker()">📍 Выбрать на карте</button>
+                    </div>
+                </div>
+                <!-- Поля для маршрута (скрыты по умолчанию) -->
+                <div id="route-fields-create" style="display: none;">
+                    <div class="form-group">
+                        <label>Маршрут:</label>
+                        <select id="marker-create-route-select" class="form-control">
+                            <option value="">-- Выберите или введите новый --</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="new-route-field-create" style="display: none;">
+                        <label>Новый ID маршрута:</label>
+                        <input type="text" id="marker-create-route-id" class="form-control" placeholder="Например: route1">
+                    </div>
+                    <div class="form-group">
+                        <label>Порядок в маршруте:</label>
+                        <input type="number" id="marker-create-route-order" class="form-control" value="1" min="1">
                     </div>
                 </div>
                 <div class="form-group">
@@ -308,7 +327,7 @@
             </div>
         </div>
 
-         <!-- Модальное окно редактирования маркера -->
+        <!-- Модальное окно редактирования маркера -->
         <div id="marker-edit-modal" class="modal" style="display:none;">
             <div class="modal-content">
                 <span class="close" onclick="closeMarkerEditModal()">&times;</span>
@@ -334,6 +353,7 @@
                         <option value="camp">Стоянка</option>
                         <option value="anomaly">Аномалия</option>
                         <option value="route_point">Точка маршрута</option>
+                        <option value="place">Название места</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -343,6 +363,23 @@
                         <input type="number" id="marker-edit-pos-y" step="0.1" class="form-control" style="width:30%">,
                         <input type="number" id="marker-edit-pos-z" step="0.1" class="form-control" style="width:30%">
                         <button type="button" class="btn btn-sm btn-secondary" onclick="fillEditCenterCoordinates()" style="white-space: nowrap;">📍 В центр</button>
+                    </div>
+                </div>
+                <!-- Поля для маршрута (скрыты по умолчанию) -->
+                <div id="route-fields-edit" style="display: none;">
+                    <div class="form-group">
+                        <label>Маршрут:</label>
+                        <select id="marker-edit-route-select" class="form-control">
+                            <option value="">-- Выберите или введите новый --</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="new-route-field-edit" style="display: none;">
+                        <label>Новый ID маршрута:</label>
+                        <input type="text" id="marker-edit-route-id" class="form-control">
+                    </div>
+                    <div class="form-group">
+                        <label>Порядок в маршруте:</label>
+                        <input type="number" id="marker-edit-route-order" class="form-control" min="1">
                     </div>
                 </div>
                 <div class="form-group">
