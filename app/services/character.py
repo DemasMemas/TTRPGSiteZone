@@ -45,19 +45,33 @@ class CharacterService:
 
     @staticmethod
     def update_character(character_id, user_id, updates):
-        """Обновление персонажа (владелец или GM)."""
+        """Обновление персонажа (любой участник лобби может менять поля, кроме visible_to)."""
         character = LobbyCharacter.query.get(character_id)
         if not character:
             raise NotFoundError("Character not found")
 
-        lobby = Lobby.query.get(character.lobby_id)
-        if character.owner_id != user_id and lobby.gm_id != user_id:
-            raise PermissionDenied("Permission denied")
+        # Проверяем, что пользователь вообще в лобби
+        participant = LobbyParticipant.query.filter_by(
+            lobby_id=character.lobby_id, user_id=user_id
+        ).first()
+        if not participant:
+            raise PermissionDenied("You are not in this lobby")
 
+        lobby = Lobby.query.get(character.lobby_id)
+
+        # Если пытаются изменить visible_to, проверяем права (только владелец или GM)
+        if 'visible_to' in updates:
+            if character.owner_id != user_id and lobby.gm_id != user_id:
+                raise PermissionDenied("Only owner or GM can change visibility")
+            character.visible_to = list(updates['visible_to'])
+
+        # Разрешаем обновление остальных полей
         if 'name' in updates:
             character.name = updates['name']
         if 'data' in updates:
+            # Можно разрешить менять data всем
             character.data = updates['data']
+
         db.session.commit()
         logger.info(f"Character {character_id} updated by user {user_id}")
         return character

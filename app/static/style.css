@@ -1,5 +1,6 @@
-/* static/style.css */
+/* static/style.css - основной файл стилей проекта TTRPG */
 
+/* ===== Базовые сбросы и переменные ===== */
 * {
   margin: 0;
   padding: 0;
@@ -7,7 +8,7 @@
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
-/* ===== Тёмная тема (по умолчанию) ===== */
+/* ===== Темы ===== */
 :root {
   --bg-color: #111122;
   --text-color: white;
@@ -70,11 +71,9 @@
   --range-thumb: #4a6fa5;
 
   --hint-color: #aaa;
-
   --loading-color: #007bff;
 }
 
-/* ===== Светлая тема ===== */
 body.light-theme {
   --bg-color: #f0f0f0;
   --text-color: #222;
@@ -137,11 +136,10 @@ body.light-theme {
   --range-thumb: #4a6fa5;
 
   --hint-color: #666;
-
   --loading-color: #0066cc;
 }
 
-/* ===== Базовые стили ===== */
+/* ===== Глобальные стили ===== */
 body {
   background: var(--bg-color);
   color: var(--text-color);
@@ -170,13 +168,11 @@ body {
   text-shadow: var(--text-shadow);
 }
 
-/* Все панели должны получать pointer-events: auto */
 .top-bar, .chat-panel, .right-panel, .map-tools,
 .participants-panel, .lobby-menu, .modal {
   pointer-events: auto;
 }
 
-/* Верхняя панель (не используется, но оставим) */
 .top-bar {
   display: flex;
   justify-content: space-between;
@@ -197,11 +193,10 @@ body {
   color: var(--text-color);
 }
 
-/* ===== Кнопки ===== */
 .btn {
   background: var(--btn-bg);
   border: none;
-  color: white; /* текст кнопок всегда белый для контраста */
+  color: white;
   padding: 8px 16px;
   border-radius: 20px;
   cursor: pointer;
@@ -237,7 +232,6 @@ body {
   background: var(--btn-danger-hover);
 }
 
-/* ===== Чат-панель ===== */
 .chat-panel {
   position: absolute;
   left: 15px;
@@ -311,7 +305,6 @@ body {
   color: var(--input-placeholder);
 }
 
-/* ===== Правая панель (персонажи) ===== */
 .right-panel {
   position: absolute;
   right: 15px;
@@ -371,6 +364,7 @@ body {
 .character-card h4 {
   font-size: 1rem;
   margin-bottom: 5px;
+  cursor: pointer;
 }
 
 .skills-list {
@@ -395,7 +389,6 @@ body {
   background: var(--skill-btn-hover);
 }
 
-/* ===== Нижняя панель инструментов ===== */
 .map-tools {
   position: absolute;
   bottom: 15px;
@@ -439,7 +432,6 @@ body {
 .marker-btn.blue { background: var(--marker-btn-blue); }
 .marker-btn.green { background: var(--marker-btn-green); }
 
-/* ===== Скроллбары ===== */
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -451,7 +443,6 @@ body {
   border-radius: 10px;
 }
 
-/* ===== Системные сообщения ===== */
 .message.system {
   background: var(--message-system-bg);
   border-left: 3px solid var(--message-system-border);
@@ -460,7 +451,6 @@ body {
   color: var(--message-system-border);
 }
 
-/* ===== Панель участников ===== */
 .participants-panel {
   position: absolute;
   top: 15px;
@@ -528,7 +518,6 @@ body {
   color: var(--ban-btn-hover);
 }
 
-/* ===== Правое меню комнаты ===== */
 .lobby-menu {
   position: absolute;
   top: 15px;
@@ -565,7 +554,6 @@ body {
   background: var(--btn-danger-hover);
 }
 
-/* ===== Панель настроек ===== */
 .settings-panel {
   position: absolute;
   top: 70px;
@@ -642,12 +630,6 @@ body {
   color: var(--unban-btn-hover);
 }
 
-.character-card.empty {
-  opacity: 0.6;
-  font-style: italic;
-}
-
-/* ===== Модальные окна ===== */
 .modal {
   position: fixed;
   z-index: 10;
@@ -668,7 +650,6 @@ body {
   border-radius: 16px;
   border: 1px solid var(--panel-border);
   width: 400px;
-  max-width: 500px;
   max-width: 90%;
   color: var(--text-color);
 }
@@ -681,39 +662,39 @@ body {
 
 .modal-content input[type="text"],
 .modal-content textarea {
-    width: 100%;
-    box-sizing: border-box;
-    word-wrap: break-word;
-    white-space: pre-wrap;
-    resize: vertical;
+  width: 100%;
+  box-sizing: border-box;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  resize: vertical;
 }
 
 .modal-content .form-group {
-    margin-bottom: 15px;
+  margin-bottom: 15px;
 }
 .modal-content .form-group label {
-    display: block;
-    margin-bottom: 5px;
-    font-weight: bold;
+  display: block;
+  margin-bottom: 5px;
+  font-weight: bold;
 }
 .modal-content .form-control {
-    width: 100%;
-    padding: 8px;
-    box-sizing: border-box;
-    border-radius: 4px;
-    border: 1px solid #ccc;
-    background: var(--input-bg);
-    color: var(--text-color);
+  width: 100%;
+  padding: 8px;
+  box-sizing: border-box;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  background: var(--input-bg);
+  color: var(--text-color);
 }
 .modal-content textarea.form-control {
-    resize: vertical;
-    min-height: 80px;
+  resize: vertical;
+  min-height: 80px;
 }
 .modal-content .form-actions {
-    display: flex;
-    gap: 10px;
-    justify-content: flex-end;
-    margin-top: 20px;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 20px;
 }
 
 #visibility-participants-list {
@@ -731,7 +712,6 @@ body {
   margin-right: 10px;
 }
 
-/* ===== Палитра тайлов ===== */
 .tile-palette {
   color: var(--text-color);
   font-size: 0.9rem;
@@ -746,7 +726,6 @@ body {
   margin-left: 5px;
 }
 
-/* ===== Ползунки ===== */
 input[type=range] {
   background: var(--range-bg);
   border-radius: 10px;
@@ -762,7 +741,6 @@ input[type=range]::-webkit-slider-thumb {
   cursor: pointer;
 }
 
-/* ===== Специфические ID ===== */
 #tile-edit-modal {
   position: absolute;
   bottom: 20px;
@@ -827,7 +805,6 @@ input[type=range]::-webkit-slider-thumb {
   }
 }
 
-/* ===== Draggable panels ===== */
 .draggable-panel {
   position: absolute;
   transition: width 0.3s, height 0.3s;
@@ -903,4 +880,728 @@ input[type=range]::-webkit-slider-thumb {
   align-items: center;
   flex-wrap: wrap;
   padding: 8px 16px;
+}
+
+/* ===== Стили для листа персонажа (вкладки) ===== */
+.sheet-tab-content {
+  display: none;
+  padding: 15px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.2);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.sheet-tab-content.active {
+  display: block;
+}
+#sheet-tabs {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.trait-item, .weapon-item {
+  margin-bottom: 10px;
+  padding: 10px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 8px;
+}
+.weapon-item input, .weapon-item textarea {
+  width: auto;
+  flex: 1 1 100px;
+}
+#pockets-container input, #backpack-container input {
+  width: auto;
+  flex: 1;
+}
+
+input.number-input, input[type=number].number-input {
+  width: 70px;
+}
+
+#character-sheet-modal .modal-content {
+  width: 90vw !important;
+  max-width: 90vw !important;
+}
+
+@media (max-width: 768px) {
+  #character-sheet-modal .modal-content {
+    padding: 10px;
+  }
+  .sheet-tab-content {
+    padding: 10px;
+  }
+}
+
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type=number] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* ===== Вкладка Здоровье ===== */
+#sheet-tab-health .zone-grid-vertical {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+#sheet-tab-health .zone-item-vertical {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(255,255,255,0.05);
+  padding: 8px 5px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+}
+
+#sheet-tab-health .zone-label {
+  font-weight: bold;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--text-color);
+}
+
+#sheet-tab-health .zone-fields {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  justify-content: center;
+}
+
+#sheet-tab-health .zone-fields input {
+  width: 55px;
+  padding: 4px 2px;
+  text-align: center;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--text-color);
+  border-radius: 4px;
+}
+
+#sheet-tab-health .zone-fields .slash {
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--text-muted);
+  margin: 0 2px;
+}
+
+#sheet-tab-health .status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  flex: 1;
+}
+
+#sheet-tab-health .status-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(255,255,255,0.05);
+  padding: 6px 4px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+}
+
+#sheet-tab-health .status-label {
+  font-weight: bold;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-color);
+}
+
+#sheet-tab-health .status-item input {
+  width: 70px;
+  padding: 4px 2px;
+  text-align: center;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--text-color);
+  border-radius: 4px;
+}
+
+/* ===== Экипировка: правильное выравнивание защиты ===== */
+.equipment-group {
+    background: rgba(255,255,255,0.05);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 15px;
+}
+
+/* Строка заголовков: Шлем слева, Защита справа */
+.equipment-group .equipment-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.equipment-group .equipment-header h4 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-color);
+}
+
+/* Строка с полями и защитой */
+.equipment-group .equipment-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+/* Контейнер для полей (левая часть) */
+.equipment-group .fields-container {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex: 0 1 auto;
+}
+
+/* Базовые стили полей */
+.equipment-group .field-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.equipment-group .field-group label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+    white-space: nowrap;
+}
+
+.equipment-group .field-group input,
+.equipment-group .field-group select {
+    height: 30px;
+    padding: 4px 6px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    font-size: 14px;
+    box-sizing: border-box;
+}
+
+.equipment-group .field-name { width: 180px; }
+.equipment-group .field-number { width: 80px; }
+.equipment-group .field-select { width: 100px; }
+.equipment-group .field-checkbox {
+    width: 50px;
+    align-items: center;
+}
+.equipment-group .field-checkbox input[type="checkbox"] {
+    width: 30px;
+    height: 30px;
+    margin: 0 auto;
+    accent-color: var(--btn-primary-bg);
+}
+
+/* Блок защиты (правая часть) */
+.equipment-group .protection-wrapper {
+    width: 208px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Сетка защиты */
+.equipment-group .protection-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 40px);
+    gap: 2px;
+    align-items: center;
+}
+
+.equipment-group .protection-grid div {
+    font-size: 0.7rem;
+    text-align: center;
+    color: var(--text-secondary);
+    line-height: 1.2;
+}
+
+.equipment-group .protection-grid input {
+    width: 40px;
+    height: 30px;
+    padding: 4px 2px;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+
+.equipment-group .protection-grid div {
+    font-size: 0.75rem !important;
+}
+
+.equipment-group .protection-grid input {
+    font-size: 14px !important;
+}
+
+/* Единый размер шрифта для заголовков колонок (как у label) */
+.equipment-group .protection-grid div {
+    font-size: 0.75rem !important;   /* перебивает старое значение 0.7rem */
+}
+
+/* Единый размер шрифта и высота для полей ввода (как у .field-group input) */
+.equipment-group .protection-grid input {
+    font-size: 14px !important;
+    height: 30px;
+}
+
+/* Выравнивание блоков экипировки */
+.equipment-group .equipment-header {
+    margin-bottom: 0;
+}
+.equipment-group .equipment-header h4 {
+    margin: 0;
+    line-height: 1.2;
+}
+.equipment-group .equipment-row {
+    display: flex;
+    align-items: flex-start;
+}
+
+.equipment-group .protection-grid {
+    margin-top: 0;
+    padding-top: 0;
+}
+.equipment-group .protection-grid div {
+    font-size: 0.75rem !important;
+    line-height: 1.2; /* соответствует высоте подписей полей */
+}
+.equipment-group .protection-grid input {
+    font-size: 14px !important;
+    height: 30px; /* соответствует высоте полей ввода */
+}
+
+/* Заголовок группы и заголовок защиты в одной строке */
+.equipment-group .equipment-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.equipment-group .equipment-header h4 {
+    margin: 0;
+    line-height: 1.2;
+}
+
+.equipment-group .protection-header {
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-color);
+    line-height: 1.2;
+}
+
+/* Единый размер шрифта и выравнивание для подписей колонок защиты */
+.equipment-group .protection-grid div {
+    font-size: 0.75rem !important;
+    line-height: 1.2;
+    text-align: center;
+}
+
+/* Единый размер и высота для полей ввода защиты */
+.equipment-group .protection-grid input {
+    font-size: 14px !important;
+    height: 30px;
+    text-align: center;
+}
+
+/* Заголовок группы (Шлем, Противогаз, Броня) — без лишних отступов */
+.equipment-group .equipment-header {
+    margin-bottom: 8px;
+}
+.equipment-group .equipment-header h4 {
+    margin: 0;
+    line-height: 1.2;
+}
+
+/* Сетка защиты */
+.equipment-group .protection-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 40px);
+    gap: 2px;
+    align-items: center;
+}
+
+/* Заголовки колонок (Физ, Хим, ...) */
+.equipment-group .protection-grid div {
+    font-size: 0.75rem !important;
+    line-height: 1.2;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+/* Поля ввода в сетке защиты — точно как левые поля */
+.equipment-group .protection-grid input.number-input,
+.equipment-group .protection-grid input[type="number"] {
+    width: 40px;
+    height: 30px !important;
+    font-size: 14px !important;
+    padding: 4px 2px;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+    line-height: normal; /* убираем возможное наследование line-height */
+}
+
+/* Сброс возможных конфликтов */
+.equipment-group .protection-grid input::-webkit-inner-spin-button,
+.equipment-group .protection-grid input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+.equipment-group .protection-grid input[type=number] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.equipment-group .protection-title {
+    display: block !important;         /* перебиваем возможное скрытие */
+    font-size: 1rem !important;
+    font-weight: bold;
+    color: var(--text-color);
+    margin: 0 0 5px 0;
+    text-align: left;
+    line-height: 1.2;
+}
+
+/* Сетка защиты */
+.equipment-group .protection-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 40px);
+    gap: 2px;
+    align-items: center;
+}
+
+/* Заголовки колонок (Физ, Хим, …) */
+.equipment-group .protection-grid div {
+    font-size: 0.75rem !important;
+    line-height: 1.2;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+/* Поля ввода – копируем стили левых полей ( .field-group .number-input ) */
+.equipment-group .protection-grid input.number-input,
+.equipment-group .protection-grid input[type="number"] {
+    width: 40px;
+    height: 30px !important;           /* принудительно, как у левых полей */
+    font-size: 14px !important;
+    line-height: normal !important;    /* сбрасываем возможное наследование */
+    padding: 4px 2px !important;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+/* Убираем стрелки в Chrome */
+.equipment-group .protection-grid input::-webkit-inner-spin-button,
+.equipment-group .protection-grid input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+
+/* Заголовок группы и заголовок защиты в одной строке, слева */
+.equipment-group .equipment-header {
+    display: flex;
+    align-items: center;
+    gap: 20px; /* расстояние между заголовками */
+    margin-bottom: 8px;
+}
+
+.equipment-group .equipment-header h4 {
+    margin: 0;
+    line-height: 1.2;
+}
+
+.equipment-group .protection-header {
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-color);
+    line-height: 1.2;
+}
+
+/* Сетка защиты */
+.equipment-group .protection-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 40px);
+    gap: 2px;
+    align-items: center;
+}
+
+/* Заголовки колонок защиты */
+.equipment-group .protection-grid div {
+    font-size: 0.75rem !important;
+    line-height: 1.2;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+/* Поля ввода защиты — точно как левые поля */
+.equipment-group .protection-grid input.number-input,
+.equipment-group .protection-grid input[type="number"] {
+    width: 40px;
+    height: 30px !important;          /* принудительно, как у левых полей */
+    font-size: 14px !important;
+    line-height: normal !important;
+    padding: 4px 2px !important;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+/* Убираем стрелки в Chrome */
+.equipment-group .protection-grid input::-webkit-inner-spin-button,
+.equipment-group .protection-grid input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* Выравнивание заголовков по левому краю */
+.equipment-group .equipment-header {
+    display: flex;
+    align-items: center;
+    gap: 20px; /* расстояние между "Шлем" и "Защита" */
+    justify-content: flex-start; /* явно по левому краю */
+    margin-bottom: 8px;
+}
+
+/* Убираем старые conflicting правила, если были */
+.equipment-group .protection-header {
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-color);
+    line-height: 1.2;
+}
+
+/* Небольшой отступ сверху для заголовков колонок защиты */
+.equipment-group .protection-grid div {
+    padding-top: 2px; /* или margin-top, но лучше padding-top, чтобы не смещать сетку */
+    line-height: 1.2;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+/* Поля ввода защиты – точная копия левых полей */
+.equipment-group .protection-grid input.number-input,
+.equipment-group .protection-grid input[type="number"] {
+    width: 40px;
+    height: 30px !important;
+    font-size: 14px !important;
+    line-height: normal !important;
+    padding: 4px 2px !important;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+/* Убираем стрелки в Chrome */
+.equipment-group .protection-grid input::-webkit-inner-spin-button,
+.equipment-group .protection-grid input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* Заголовки в одной строке: Шлем слева, Защита над колонками */
+.equipment-group .equipment-header {
+    display: grid;
+    grid-template-columns: 1fr 208px; /* вторая колонка равна ширине блока защиты */
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.equipment-group .equipment-header h4 {
+    grid-column: 1;
+    margin: 0;
+    line-height: 1.2;
+}
+
+.equipment-group .protection-header {
+    grid-column: 2;
+    text-align: left;          /* выравнивание по левому краю внутри своей колонки */
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-color);
+    line-height: 1.2;
+}
+/* Сдвигаем заголовки колонок (Физ, Хим, ...) немного вниз */
+.equipment-group .protection-grid div {
+    padding-top: 1px;           /* нужный отступ */
+    line-height: 1.2;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+/* Поля ввода защиты — точная копия левых полей */
+.equipment-group .protection-grid input.number-input,
+.equipment-group .protection-grid input[type="number"] {
+    width: 40px;
+    height: 30px !important;
+    font-size: 14px !important;
+    line-height: normal !important;
+    padding: 4px 2px !important;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+/* Убираем стрелки в Chrome */
+.equipment-group .protection-grid input::-webkit-inner-spin-button,
+.equipment-group .protection-grid input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* Шапка группы: две колонки — левая под поля, правая под защиту */
+.equipment-group .equipment-header {
+    display: grid;
+    grid-template-columns: 1fr 208px; /* 208px — ширина блока защиты */
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+/* Заголовок группы (Шлем, Противогаз, Броня) — в первой колонке */
+.equipment-group .equipment-header h4 {
+    grid-column: 1;
+    margin: 0;
+    line-height: 1.2;
+}
+
+/* Заголовок "Защита" — во второй колонке, прижат к левому краю */
+.equipment-group .protection-header {
+    grid-column: 2;
+    text-align: left;
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-color);
+    line-height: 1.2;
+}
+
+/* Убираем старые конфликтующие правила (если были) */
+.equipment-group .equipment-header {
+    justify-content: unset; /* отключаем предыдущий flex */
+}
+
+/* Сдвигаем подписи колонок (Физ, Хим, …) вниз на 1px */
+.equipment-group .protection-grid div {
+    padding-top: 1px;
+    line-height: 1.2;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+/* Поля ввода защиты — точная копия левых полей (ещё раз для надёжности) */
+.equipment-group .protection-grid input.number-input,
+.equipment-group .protection-grid input[type="number"] {
+    width: 40px;
+    height: 30px !important;
+    font-size: 14px !important;
+    line-height: normal !important;
+    padding: 4px 2px !important;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+/* Убираем стрелки в Chrome */
+.equipment-group .protection-grid input::-webkit-inner-spin-button,
+.equipment-group .protection-grid input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.equipment-group:nth-of-type(1) .protection-header {
+    margin-left: -500px;
+}
+.equipment-group:nth-of-type(2) .protection-header {
+    margin-left: -353px;
+}
+.equipment-group:nth-of-type(3) .protection-header {
+    margin-left: -587px;
+}
+
+@media (max-width: 1680px) {
+    .equipment-group:nth-of-type(1) .protection-header {
+        margin-left: -450px;
+    }
+    .equipment-group:nth-of-type(2) .protection-header {
+        margin-left: -320px;
+    }
+    .equipment-group:nth-of-type(3) .protection-header {
+        margin-left: -520px;
+    }
+}
+
+@media (max-width: 1440px) {
+    .equipment-group:nth-of-type(1) .protection-header {
+        margin-left: -400px;
+    }
+    .equipment-group:nth-of-type(2) .protection-header {
+        margin-left: -280px;
+    }
+    .equipment-group:nth-of-type(3) .protection-header {
+        margin-left: -470px;
+    }
+}
+
+@media (max-width: 1280px) {
+    .equipment-group:nth-of-type(1) .protection-header {
+        margin-left: -350px;
+    }
+    .equipment-group:nth-of-type(2) .protection-header {
+        margin-left: -240px;
+    }
+    .equipment-group:nth-of-type(3) .protection-header {
+        margin-left: -420px;
+    }
+}
+
+#character-sheet-modal {
+    z-index: 1000 !important;
 }

@@ -18,6 +18,7 @@ import { initWeather, applyWeather } from './weather.js';
 import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
 fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
+import { openCharacterSheet, closeCharacterSheet, exportCharacter, importCharacter } from './characterSheet.js';
 import * as THREE from 'three';
 
 initWeather();
@@ -86,6 +87,20 @@ window.openSettings = openSettings;
 window.closeVisibilityModal = closeVisibilityModal;
 window.saveVisibility = saveVisibility;
 window.unbanUserHandler = unbanUserHandler;
+
+window.openCharacterSheet = openCharacterSheet;
+window.closeCharacterSheet = closeCharacterSheet;
+window.exportCharacter = exportCharacter;
+window.importCharacter = importCharacter;
+
+window.addSpecialTrait = window.addSpecialTrait || (() => {});
+window.removeSpecialTrait = window.removeSpecialTrait || (() => {});
+window.addWeapon = window.addWeapon || (() => {});
+window.removeWeapon = window.removeWeapon || (() => {});
+window.addPocketItem = window.addPocketItem || (() => {});
+window.removePocketItem = window.removePocketItem || (() => {});
+window.addBackpackItem = window.addBackpackItem || (() => {});
+window.removeBackpackItem = window.removeBackpackItem || (() => {});
 
 // Функции редактирования карты
 window.toggleEditMode = () => setEditMode(!getEditMode());

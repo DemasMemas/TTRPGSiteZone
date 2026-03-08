@@ -294,9 +294,9 @@
                 <div class="form-group">
                     <label>Координаты (x, y, z):</label>
                     <div style="display: flex; gap: 5px; align-items: center;">
-                        <input type="number" id="marker-create-pos-x" step="0.1" class="form-control" style="width:30%">,
-                        <input type="number" id="marker-create-pos-y" step="0.1" class="form-control" style="width:30%">,
-                        <input type="number" id="marker-create-pos-z" step="0.1" class="form-control" style="width:30%">
+                        <input type="number" id="marker-create-pos-x" step="0.1" class="form-control number-input" style="width:30%">,
+                        <input type="number" id="marker-create-pos-y" step="0.1" class="form-control number-input" style="width:30%">,
+                        <input type="number" id="marker-create-pos-z" step="0.1" class="form-control number-input" style="width:30%">
                         <button type="button" class="btn btn-sm btn-secondary" onclick="fillCenterCoordinates()" style="white-space: nowrap;">📍 В центр</button>
                         <button type="button" class="btn btn-secondary" onclick="pickTileForMarker()">📍 Выбрать на карте</button>
                     </div>
@@ -354,9 +354,9 @@
                 <div class="form-group">
                     <label>Координаты (x, y, z):</label>
                     <div style="display: flex; gap: 5px; align-items: center;">
-                        <input type="number" id="marker-edit-pos-x" step="0.1" class="form-control" style="width:30%">,
-                        <input type="number" id="marker-edit-pos-y" step="0.1" class="form-control" style="width:30%">,
-                        <input type="number" id="marker-edit-pos-z" step="0.1" class="form-control" style="width:30%">
+                        <input type="number" id="marker-edit-pos-x" step="0.1" class="form-control number-input" style="width:30%">,
+                        <input type="number" id="marker-edit-pos-y" step="0.1" class="form-control number-input" style="width:30%">,
+                        <input type="number" id="marker-edit-pos-z" step="0.1" class="form-control number-input" style="width:30%">
                         <button type="button" class="btn btn-sm btn-secondary" onclick="fillEditCenterCoordinates()" style="white-space: nowrap;">📍 В центр</button>
                     </div>
                 </div>
@@ -382,15 +382,33 @@
             </div>
         </div>
 
-        <!-- Информация о тайле -->
-        <div id="tile-info" style="position: absolute; bottom: 100px; right: 20px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 8px; display: none; pointer-events: none; z-index: 5;">
-            <div id="tile-info-content"></div>
+        <!-- Модальное окно листа персонажа -->
+        <div id="character-sheet-modal" class="modal" style="display:none;">
+            <div class="modal-content" style="width: 90vw; max-width: 90vw; height: 80vh; overflow-y: auto;">
+                <span class="close" onclick="closeCharacterSheet()">&times;</span>
+                <h3 id="character-sheet-name"></h3>
+                <form id="character-sheet-form">
+                    <div id="sheet-tabs" class="settings-tabs" style="margin-bottom: 15px;"></div>
+                    <div id="sheet-content"></div>
+                    <div class="form-actions" style="margin-top: 20px;">
+                        <button type="button" class="btn btn-secondary" onclick="exportCharacter()">Экспорт JSON</button>
+                        <input type="file" id="import-character-file" accept=".json" style="display: none;" onchange="importCharacter(this.files[0])">
+                        <button type="button" class="btn btn-secondary" onclick="document.getElementById('import-character-file').click()">Импорт JSON</button>
+                        <button type="button" class="btn btn-danger" onclick="closeCharacterSheet()">Закрыть</button>
+                    </div>
+                </form>
+            </div>
         </div>
+    </div>
 
+    <!-- Информация о тайле -->
+    <div id="tile-info" style="position: absolute; bottom: 100px; right: 20px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 8px; display: none; pointer-events: none; z-index: 5;">
+        <div id="tile-info-content"></div>
     </div>
 
     <!-- Основной скрипт комнат (модуль) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.3/howler.min.js"></script>
     <script type="module" src="/static/js/main.js"></script>
+
 </body>
 </html>

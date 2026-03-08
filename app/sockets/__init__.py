@@ -9,6 +9,7 @@ from . import auth
 from . import chat
 from . import dice
 from . import markers
+from . import character
 
 @socketio.on('*')
 def catch_all(event, data):

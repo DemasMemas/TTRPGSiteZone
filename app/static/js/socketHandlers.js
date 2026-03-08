@@ -35,7 +35,12 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('error', (data) => {
-        showNotification('Ошибка: ' + data.message, 'error', 'top-right');
+        if (data.message === 'Invalid token') {
+            showNotification('Сессия истекла, войдите заново', 'error');
+            setTimeout(() => { window.location.href = '/'; }, 2000);
+        } else {
+            showNotification('Ошибка: ' + data.message, 'error');
+        }
     });
 
     socket.on('chat_history', (messages) => {
@@ -102,3 +107,5 @@ export function sendMessage(message) {
     if (!socket) return;
     socket.emit('send_message', { token: localStorage.getItem('access_token'), lobby_id: currentLobbyId, message });
 }
+
+export function getSocket() { return socket; }

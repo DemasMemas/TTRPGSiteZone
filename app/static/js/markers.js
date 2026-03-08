@@ -229,10 +229,6 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
 
     socket.emit('get_markers', { token, lobby_id: currentLobbyId });
 
-    socket.on('error', (data) => {
-        showNotification('Ошибка маркера: ' + data.message, 'error');
-    });
-
     socket.on('connect_error', (err) => {
         showNotification('Ошибка соединения: ' + err.message, 'error');
     });

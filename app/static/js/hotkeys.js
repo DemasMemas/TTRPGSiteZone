@@ -14,13 +14,15 @@ export function initHotkeys() {
     const visModal = document.getElementById('visibility-modal');
     const createMarkerModal = document.getElementById('marker-create-modal');
     const editMarkerModal = document.getElementById('marker-edit-modal');
+    const charSheetModal = document.getElementById('character-sheet-modal');
 
     function updateModalOpen() {
         const wasOpen = modalOpen;
         modalOpen = (tileModal?.style.display === 'flex') ||
                     (visModal?.style.display === 'flex') ||
                     (createMarkerModal?.style.display === 'flex') ||
-                    (editMarkerModal?.style.display === 'flex');
+                    (editMarkerModal?.style.display === 'flex') ||
+                    (charSheetModal?.style.display === 'flex');
         if (modalOpen && !wasOpen) {
             if (typeof window.hideTooltip === 'function') {
                 window.hideTooltip();
@@ -43,6 +45,10 @@ export function initHotkeys() {
     if (editMarkerModal) {
         const observer = new MutationObserver(updateModalOpen);
         observer.observe(editMarkerModal, { attributes: true, attributeFilter: ['style'] });
+    }
+    if (charSheetModal) {
+        const observer = new MutationObserver(updateModalOpen);
+        observer.observe(charSheetModal, { attributes: true, attributeFilter: ['style'] });
     }
 
     document.addEventListener('keydown', handleKeyDown);
@@ -69,6 +75,9 @@ function handleKeyDown(e) {
             closeVisibilityModal();
             if (typeof window.closeMarkerEditModal === 'function') {
                 window.closeMarkerEditModal();
+            }
+            if (typeof window.closeCharacterSheet === 'function') {
+                window.closeCharacterSheet();
             }
             // Также можно закрыть окно создания, если оно открыто
             const createModal = document.getElementById('marker-create-modal');
@@ -170,7 +179,6 @@ function handleKeyUp(e) {
 }
 
 function handleBlur() {
-    // Если окно теряет фокус, сбрасываем Alt
     if (altPressed) {
         altPressed = false;
         if (controls) controls.enableZoom = true;
@@ -178,7 +186,6 @@ function handleBlur() {
 }
 
 function handleWheel(e) {
-    // Alt + колесо - радиус кисти
     if (e.altKey) {
         e.preventDefault();
         e.stopPropagation();
@@ -188,7 +195,6 @@ function handleWheel(e) {
         return;
     }
 
-    // Если мышь над селектом типа тайла - переключение типа
     const tileSelect = document.getElementById('tile-type-select');
     if (tileSelect && tileSelect.matches(':hover')) {
         e.preventDefault();

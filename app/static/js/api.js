@@ -32,6 +32,10 @@ export async function createLobbyCharacter(lobbyId, name, data = {}) {
     });
 }
 
+export async function getCharacter(characterId) {
+    return apiFetch(`/lobbies/characters/${characterId}`);
+}
+
 export async function deleteCharacter(characterId) {
     return apiFetch(`/lobbies/characters/${characterId}`, { method: 'DELETE' });
 }
