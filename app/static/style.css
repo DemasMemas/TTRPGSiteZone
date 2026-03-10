@@ -1202,3 +1202,15 @@ input[type=number] {
 #sheet-tab-equipment input[type="number"] {
     text-align: center;
 }
+
+#sheet-tab-inventory input[type="text"],
+#sheet-tab-inventory input[type="number"],
+#sheet-tab-modifications input[type="text"] {
+    text-align: center;
+}
+
+/* Стили для кнопок в этих вкладках (если нужно уточнить) */
+#sheet-tab-inventory .btn,
+#sheet-tab-modifications .btn {
+    margin-top: 5px;
+}
