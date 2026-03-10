@@ -1029,579 +1029,176 @@ input[type=number] {
   border-radius: 4px;
 }
 
-/* ===== Экипировка: правильное выравнивание защиты ===== */
+/* ===== Экипировка ===== */
 .equipment-group {
-    background: rgba(255,255,255,0.05);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 15px;
-}
-
-/* Строка заголовков: Шлем слева, Защита справа */
-.equipment-group .equipment-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
-}
-
-.equipment-group .equipment-header h4 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: bold;
-    color: var(--text-color);
-}
-
-/* Строка с полями и защитой */
-.equipment-group .equipment-row {
-    display: flex;
-    gap: 8px;
-    align-items: flex-start;
-}
-
-/* Контейнер для полей (левая часть) */
-.equipment-group .fields-container {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    flex: 0 1 auto;
-}
-
-/* Базовые стили полей */
-.equipment-group .field-group {
-    display: flex;
-    flex-direction: column;
-}
-
-.equipment-group .field-group label {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-bottom: 2px;
-    white-space: nowrap;
-}
-
-.equipment-group .field-group input,
-.equipment-group .field-group select {
-    height: 30px;
-    padding: 4px 6px;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    font-size: 14px;
-    box-sizing: border-box;
-}
-
-.equipment-group .field-name { width: 180px; }
-.equipment-group .field-number { width: 80px; }
-.equipment-group .field-select { width: 100px; }
-.equipment-group .field-checkbox {
-    width: 50px;
-    align-items: center;
-}
-.equipment-group .field-checkbox input[type="checkbox"] {
-    width: 30px;
-    height: 30px;
-    margin: 0 auto;
-    accent-color: var(--btn-primary-bg);
-}
-
-/* Блок защиты (правая часть) */
-.equipment-group .protection-wrapper {
-    width: 208px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-}
-
-/* Сетка защиты */
-.equipment-group .protection-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 40px);
-    gap: 2px;
-    align-items: center;
-}
-
-.equipment-group .protection-grid div {
-    font-size: 0.7rem;
-    text-align: center;
-    color: var(--text-secondary);
-    line-height: 1.2;
-}
-
-.equipment-group .protection-grid input {
-    width: 40px;
-    height: 30px;
-    padding: 4px 2px;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    box-sizing: border-box;
-}
-
-.equipment-group .protection-grid div {
-    font-size: 0.75rem !important;
-}
-
-.equipment-group .protection-grid input {
-    font-size: 14px !important;
-}
-
-/* Единый размер шрифта для заголовков колонок (как у label) */
-.equipment-group .protection-grid div {
-    font-size: 0.75rem !important;   /* перебивает старое значение 0.7rem */
-}
-
-/* Единый размер шрифта и высота для полей ввода (как у .field-group input) */
-.equipment-group .protection-grid input {
-    font-size: 14px !important;
-    height: 30px;
-}
-
-/* Выравнивание блоков экипировки */
-.equipment-group .equipment-header {
-    margin-bottom: 0;
-}
-.equipment-group .equipment-header h4 {
-    margin: 0;
-    line-height: 1.2;
-}
-.equipment-group .equipment-row {
-    display: flex;
-    align-items: flex-start;
-}
-
-.equipment-group .protection-grid {
-    margin-top: 0;
-    padding-top: 0;
-}
-.equipment-group .protection-grid div {
-    font-size: 0.75rem !important;
-    line-height: 1.2; /* соответствует высоте подписей полей */
-}
-.equipment-group .protection-grid input {
-    font-size: 14px !important;
-    height: 30px; /* соответствует высоте полей ввода */
-}
-
-/* Заголовок группы и заголовок защиты в одной строке */
-.equipment-group .equipment-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-}
-
-.equipment-group .equipment-header h4 {
-    margin: 0;
-    line-height: 1.2;
-}
-
-.equipment-group .protection-header {
-    font-size: 1rem;
-    font-weight: bold;
-    color: var(--text-color);
-    line-height: 1.2;
-}
-
-/* Единый размер шрифта и выравнивание для подписей колонок защиты */
-.equipment-group .protection-grid div {
-    font-size: 0.75rem !important;
-    line-height: 1.2;
-    text-align: center;
-}
-
-/* Единый размер и высота для полей ввода защиты */
-.equipment-group .protection-grid input {
-    font-size: 14px !important;
-    height: 30px;
-    text-align: center;
-}
-
-/* Заголовок группы (Шлем, Противогаз, Броня) — без лишних отступов */
-.equipment-group .equipment-header {
-    margin-bottom: 8px;
-}
-.equipment-group .equipment-header h4 {
-    margin: 0;
-    line-height: 1.2;
-}
-
-/* Сетка защиты */
-.equipment-group .protection-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 40px);
-    gap: 2px;
-    align-items: center;
-}
-
-/* Заголовки колонок (Физ, Хим, ...) */
-.equipment-group .protection-grid div {
-    font-size: 0.75rem !important;
-    line-height: 1.2;
-    color: var(--text-secondary);
-    text-align: center;
-}
-
-/* Поля ввода в сетке защиты — точно как левые поля */
-.equipment-group .protection-grid input.number-input,
-.equipment-group .protection-grid input[type="number"] {
-    width: 40px;
-    height: 30px !important;
-    font-size: 14px !important;
-    padding: 4px 2px;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    box-sizing: border-box;
-    line-height: normal; /* убираем возможное наследование line-height */
-}
-
-/* Сброс возможных конфликтов */
-.equipment-group .protection-grid input::-webkit-inner-spin-button,
-.equipment-group .protection-grid input::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-.equipment-group .protection-grid input[type=number] {
-    -moz-appearance: textfield;
-    appearance: textfield;
-}
-
-.equipment-group .protection-title {
-    display: block !important;         /* перебиваем возможное скрытие */
-    font-size: 1rem !important;
-    font-weight: bold;
-    color: var(--text-color);
-    margin: 0 0 5px 0;
-    text-align: left;
-    line-height: 1.2;
-}
-
-/* Сетка защиты */
-.equipment-group .protection-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 40px);
-    gap: 2px;
-    align-items: center;
-}
-
-/* Заголовки колонок (Физ, Хим, …) */
-.equipment-group .protection-grid div {
-    font-size: 0.75rem !important;
-    line-height: 1.2;
-    color: var(--text-secondary);
-    text-align: center;
-}
-
-/* Поля ввода – копируем стили левых полей ( .field-group .number-input ) */
-.equipment-group .protection-grid input.number-input,
-.equipment-group .protection-grid input[type="number"] {
-    width: 40px;
-    height: 30px !important;           /* принудительно, как у левых полей */
-    font-size: 14px !important;
-    line-height: normal !important;    /* сбрасываем возможное наследование */
-    padding: 4px 2px !important;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    box-sizing: border-box;
-    -moz-appearance: textfield;
-    appearance: textfield;
-}
-
-/* Убираем стрелки в Chrome */
-.equipment-group .protection-grid input::-webkit-inner-spin-button,
-.equipment-group .protection-grid input::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-
-/* Заголовок группы и заголовок защиты в одной строке, слева */
-.equipment-group .equipment-header {
-    display: flex;
-    align-items: center;
-    gap: 20px; /* расстояние между заголовками */
-    margin-bottom: 8px;
-}
-
-.equipment-group .equipment-header h4 {
-    margin: 0;
-    line-height: 1.2;
-}
-
-.equipment-group .protection-header {
-    font-size: 1rem;
-    font-weight: bold;
-    color: var(--text-color);
-    line-height: 1.2;
-}
-
-/* Сетка защиты */
-.equipment-group .protection-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 40px);
-    gap: 2px;
-    align-items: center;
-}
-
-/* Заголовки колонок защиты */
-.equipment-group .protection-grid div {
-    font-size: 0.75rem !important;
-    line-height: 1.2;
-    color: var(--text-secondary);
-    text-align: center;
-}
-
-/* Поля ввода защиты — точно как левые поля */
-.equipment-group .protection-grid input.number-input,
-.equipment-group .protection-grid input[type="number"] {
-    width: 40px;
-    height: 30px !important;          /* принудительно, как у левых полей */
-    font-size: 14px !important;
-    line-height: normal !important;
-    padding: 4px 2px !important;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    box-sizing: border-box;
-    -moz-appearance: textfield;
-    appearance: textfield;
-}
-
-/* Убираем стрелки в Chrome */
-.equipment-group .protection-grid input::-webkit-inner-spin-button,
-.equipment-group .protection-grid input::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-/* Выравнивание заголовков по левому краю */
-.equipment-group .equipment-header {
-    display: flex;
-    align-items: center;
-    gap: 20px; /* расстояние между "Шлем" и "Защита" */
-    justify-content: flex-start; /* явно по левому краю */
-    margin-bottom: 8px;
-}
-
-/* Убираем старые conflicting правила, если были */
-.equipment-group .protection-header {
-    font-size: 1rem;
-    font-weight: bold;
-    color: var(--text-color);
-    line-height: 1.2;
-}
-
-/* Небольшой отступ сверху для заголовков колонок защиты */
-.equipment-group .protection-grid div {
-    padding-top: 2px; /* или margin-top, но лучше padding-top, чтобы не смещать сетку */
-    line-height: 1.2;
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    text-align: center;
-}
-
-/* Поля ввода защиты – точная копия левых полей */
-.equipment-group .protection-grid input.number-input,
-.equipment-group .protection-grid input[type="number"] {
-    width: 40px;
-    height: 30px !important;
-    font-size: 14px !important;
-    line-height: normal !important;
-    padding: 4px 2px !important;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    box-sizing: border-box;
-    -moz-appearance: textfield;
-    appearance: textfield;
-}
-
-/* Убираем стрелки в Chrome */
-.equipment-group .protection-grid input::-webkit-inner-spin-button,
-.equipment-group .protection-grid input::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-/* Заголовки в одной строке: Шлем слева, Защита над колонками */
-.equipment-group .equipment-header {
-    display: grid;
-    grid-template-columns: 1fr 208px; /* вторая колонка равна ширине блока защиты */
-    align-items: center;
-    margin-bottom: 8px;
-}
-
-.equipment-group .equipment-header h4 {
-    grid-column: 1;
-    margin: 0;
-    line-height: 1.2;
-}
-
-.equipment-group .protection-header {
-    grid-column: 2;
-    text-align: left;          /* выравнивание по левому краю внутри своей колонки */
-    font-size: 1rem;
-    font-weight: bold;
-    color: var(--text-color);
-    line-height: 1.2;
-}
-/* Сдвигаем заголовки колонок (Физ, Хим, ...) немного вниз */
-.equipment-group .protection-grid div {
-    padding-top: 1px;           /* нужный отступ */
-    line-height: 1.2;
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    text-align: center;
-}
-
-/* Поля ввода защиты — точная копия левых полей */
-.equipment-group .protection-grid input.number-input,
-.equipment-group .protection-grid input[type="number"] {
-    width: 40px;
-    height: 30px !important;
-    font-size: 14px !important;
-    line-height: normal !important;
-    padding: 4px 2px !important;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    box-sizing: border-box;
-    -moz-appearance: textfield;
-    appearance: textfield;
-}
-
-/* Убираем стрелки в Chrome */
-.equipment-group .protection-grid input::-webkit-inner-spin-button,
-.equipment-group .protection-grid input::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
+  background: rgba(255,255,255,0.05);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 15px;
 }
 
 /* Шапка группы: две колонки — левая под поля, правая под защиту */
 .equipment-group .equipment-header {
-    display: grid;
-    grid-template-columns: 1fr 208px; /* 208px — ширина блока защиты */
-    align-items: center;
-    margin-bottom: 8px;
+  display: grid;
+  grid-template-columns: 1fr 208px;
+  align-items: center;
+  margin-bottom: 8px;
 }
 
-/* Заголовок группы (Шлем, Противогаз, Броня) — в первой колонке */
 .equipment-group .equipment-header h4 {
-    grid-column: 1;
-    margin: 0;
-    line-height: 1.2;
+  grid-column: 1;
+  margin: 0;
+  line-height: 1.2;
+  font-size: 1rem;
+  font-weight: bold;
+  color: var(--text-color);
 }
 
-/* Заголовок "Защита" — во второй колонке, прижат к левому краю */
 .equipment-group .protection-header {
-    grid-column: 2;
-    text-align: left;
-    font-size: 1rem;
-    font-weight: bold;
-    color: var(--text-color);
-    line-height: 1.2;
+  grid-column: 2;
+  text-align: left;
+  font-size: 1rem;
+  font-weight: bold;
+  color: var(--text-color);
+  line-height: 1.2;
 }
 
-/* Убираем старые конфликтующие правила (если были) */
-.equipment-group .equipment-header {
-    justify-content: unset; /* отключаем предыдущий flex */
+/* Строка с полями и защитой */
+.equipment-group .equipment-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
 }
 
-/* Сдвигаем подписи колонок (Физ, Хим, …) вниз на 1px */
+/* Контейнер для полей (левая часть) */
+.equipment-group .fields-container {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 0 1 auto;
+}
+
+/* Базовые стили полей */
+.equipment-group .field-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.equipment-group .field-group label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+  white-space: nowrap;
+}
+
+.equipment-group .field-group input,
+.equipment-group .field-group select {
+  height: 30px;
+  padding: 4px 6px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--text-color);
+  border-radius: 4px;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.equipment-group .field-name { width: 180px; }
+.equipment-group .field-number { width: 100px; }
+.equipment-group .field-select { width: 100px; }
+.equipment-group .field-checkbox {
+  width: 50px;
+  align-items: center;
+}
+.equipment-group .field-checkbox input[type="checkbox"] {
+  width: 30px;
+  height: 30px;
+  margin: 0 auto;
+  accent-color: var(--btn-primary-bg);
+}
+
+/* Блок защиты (правая часть) */
+.equipment-group .protection-wrapper {
+  width: 208px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Сетка защиты */
+.equipment-group .protection-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 40px);
+  gap: 2px;
+  align-items: center;
+}
+
+/* Заголовки колонок защиты */
 .equipment-group .protection-grid div {
-    padding-top: 1px;
-    line-height: 1.2;
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    text-align: center;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  color: var(--text-secondary);
+  text-align: center;
+  padding-top: 1px;
 }
 
-/* Поля ввода защиты — точная копия левых полей (ещё раз для надёжности) */
+/* Поля ввода защиты */
 .equipment-group .protection-grid input.number-input,
 .equipment-group .protection-grid input[type="number"] {
-    width: 40px;
-    height: 30px !important;
-    font-size: 14px !important;
-    line-height: normal !important;
-    padding: 4px 2px !important;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
-    box-sizing: border-box;
-    -moz-appearance: textfield;
-    appearance: textfield;
+  width: 40px;
+  height: 30px !important;
+  font-size: 14px !important;
+  line-height: normal;
+  padding: 4px 2px;
+  text-align: center;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--text-color);
+  border-radius: 4px;
+  box-sizing: border-box;
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
 
-/* Убираем стрелки в Chrome */
 .equipment-group .protection-grid input::-webkit-inner-spin-button,
 .equipment-group .protection-grid input::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
+  -webkit-appearance: none;
+  margin: 0;
 }
 
-.equipment-group:nth-of-type(1) .protection-header {
-    margin-left: -500px;
-}
-.equipment-group:nth-of-type(2) .protection-header {
-    margin-left: -353px;
-}
-.equipment-group:nth-of-type(3) .protection-header {
-    margin-left: -587px;
-}
+/* Коррекция отступов для заголовка "Защита" (временный хак) */
+.equipment-group:nth-of-type(1) .protection-header { margin-left: -397px; }
+.equipment-group:nth-of-type(2) .protection-header { margin-left: -233px; }
+.equipment-group:nth-of-type(3) .protection-header { margin-left: -507px; }
 
 @media (max-width: 1680px) {
-    .equipment-group:nth-of-type(1) .protection-header {
-        margin-left: -450px;
-    }
-    .equipment-group:nth-of-type(2) .protection-header {
-        margin-left: -320px;
-    }
-    .equipment-group:nth-of-type(3) .protection-header {
-        margin-left: -520px;
-    }
+    .equipment-group:nth-of-type(1) .protection-header { margin-left: -347px; }
+    .equipment-group:nth-of-type(2) .protection-header { margin-left: -200px; }
+    .equipment-group:nth-of-type(3) .protection-header { margin-left: -440px; }
 }
 
 @media (max-width: 1440px) {
-    .equipment-group:nth-of-type(1) .protection-header {
-        margin-left: -400px;
-    }
-    .equipment-group:nth-of-type(2) .protection-header {
-        margin-left: -280px;
-    }
-    .equipment-group:nth-of-type(3) .protection-header {
-        margin-left: -470px;
-    }
+    .equipment-group:nth-of-type(1) .protection-header { margin-left: -297px; }
+    .equipment-group:nth-of-type(2) .protection-header { margin-left: -160px; }
+    .equipment-group:nth-of-type(3) .protection-header { margin-left: -390px; }
 }
 
 @media (max-width: 1280px) {
-    .equipment-group:nth-of-type(1) .protection-header {
-        margin-left: -350px;
-    }
-    .equipment-group:nth-of-type(2) .protection-header {
-        margin-left: -240px;
-    }
-    .equipment-group:nth-of-type(3) .protection-header {
-        margin-left: -420px;
-    }
+    .equipment-group:nth-of-type(1) .protection-header { margin-left: -247px; }
+    .equipment-group:nth-of-type(2) .protection-header { margin-left: -120px; }
+    .equipment-group:nth-of-type(3) .protection-header { margin-left: -340px; }
 }
 
 #character-sheet-modal {
-    z-index: 1000 !important;
+  z-index: 1000 !important;
+}
+
+.equipment-group .field-number input.number-input,
+.equipment-group .field-number input[type=number].number-input {
+    width: 100px; /* было унаследовано 70px */
+}
+
+#sheet-tab-equipment input[type="text"],
+#sheet-tab-equipment input[type="number"] {
+    text-align: center;
 }

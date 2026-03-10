@@ -358,7 +358,6 @@ export function setupMarkerInteraction() {
     const canvas = renderer.domElement;
 
     canvas.addEventListener('mousemove', (event) => {
-        console.log('mousemove on canvas');
         if (AppState.editMode) {
             if (hoveredMarkerId !== null) {
                 hoveredMarkerId = null;

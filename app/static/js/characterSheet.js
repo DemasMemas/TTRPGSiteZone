@@ -223,14 +223,15 @@ function renderBasicTab(data) {
                 <option value="custom" ${bg.name && !backgroundOptions.includes(bg.name) ? 'selected' : ''}>Свой вариант</option>
             </select>
             <input type="text" id="custom-background" class="form-control" style="width:100%; margin-top:5px; ${bg.name && !backgroundOptions.includes(bg.name) ? '' : 'display:none;'}" placeholder="Введите свою предысторию" value="${bg.name && !backgroundOptions.includes(bg.name) ? escapeHtml(bg.name) : ''}">
-        </div>
-        <div style="margin-bottom: 10px;">
-            <label>Плюсы</label>
-            <textarea class="form-control" name="basic.background.pluses" rows="1">${escapeHtml(bg.pluses || '')}</textarea>
-        </div>
-        <div style="margin-bottom: 10px;">
-            <label>Минусы</label>
-            <textarea class="form-control" name="basic.background.minuses" rows="1">${escapeHtml(bg.minuses || '')}</textarea>
+        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+            <div style="flex: 1;">
+                <label>Плюсы</label>
+                <textarea class="form-control" name="basic.background.pluses" rows="2" style="min-height: auto;">${escapeHtml(bg.pluses || '')}</textarea>
+            </div>
+            <div style="flex: 1;">
+                <label>Минусы</label>
+                <textarea class="form-control" name="basic.background.minuses" rows="2" style="min-height: auto;">${escapeHtml(bg.minuses || '')}</textarea>
+            </div>
         </div>
         <div>
             <label>Бонусы к навыкам</label>
@@ -349,7 +350,7 @@ function renderHealthTab(data) {
         const value = effect.value || 0;
         effectsHtml += `
             <div style="display: flex; gap: 5px; margin-bottom: 5px; align-items: center;">
-                <input list="effect-names" name="health.effects.${index}.name" value="${escapeHtml(name)}" placeholder="Название эффекта" style="flex:2;">
+                <input list="effect-names" class="form-control" name="health.effects.${index}.name" value="${escapeHtml(name)}" placeholder="Название эффекта" style="flex:2;">
                 <datalist id="effect-names">
                     <option value="Отравление">
                     <option value="Кровотечение">
@@ -358,7 +359,7 @@ function renderHealthTab(data) {
                     <option value="Тошнота">
                     <option value="Головокружение">
                 </datalist>
-                <input type="number" class="number-input" name="health.effects.${index}.value" value="${value}" placeholder="Знач" style="width:60px;">
+                <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Знач" style="width:80px;">
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">✕</button>
             </div>
         `;
@@ -402,47 +403,79 @@ function renderSkillsTab(data) {
     const other = skills.other || {};
     const specialized = skills.specialized || {};
 
-    function skillInput(category, name, label, valueObj) {
-        const base = valueObj?.base !== undefined ? valueObj.base : 5;
-        const bonus = valueObj?.bonus || 0;
+    // Списки навыков по категориям
+    const physicalSkills = [
+        { key: 'strength', label: 'Сила' },
+        { key: 'agility', label: 'Ловкость' },
+        { key: 'will', label: 'Воля' },
+        { key: 'throwing', label: 'Метание' },
+        { key: 'awareness', label: 'Внимательность' },
+        { key: 'melee', label: 'Ближний бой' },
+        { key: 'shooting', label: 'Стрельба' }
+    ];
+    const socialSkills = [
+        { key: 'charisma', label: 'Харизма' },
+        { key: 'barter', label: 'Бартер' },
+        { key: 'persuasion', label: 'Убеждение' },
+        { key: 'deception', label: 'Обман' },
+        { key: 'intimidation', label: 'Устрашение' }
+    ];
+    const otherSkills = [
+        { key: 'medicine', label: 'Медицина' },
+        { key: 'engineering', label: 'Инженерия' },
+        { key: 'stealth', label: 'Скрытность' },
+        { key: 'tactics', label: 'Тактика' },
+        { key: 'survival', label: 'Выживание' }
+    ];
+
+    // Унифицированная строка навыка
+    function renderSkillRow(label, base, bonus, path) {
         return `
-            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px; flex-wrap: wrap;">
-                <span style="min-width: 120px;">${label}</span>
-                <input type="number" class="number-input" name="skills.${category}.${name}.base" value="${base}" style="width: 60px;">
-                <span>+бонус</span>
-                <input type="number" class="number-input" name="skills.${category}.${name}.bonus" value="${bonus}" style="width: 60px;">
-                <button type="button" class="btn btn-sm" onclick="window.rollSkill('${category}.${name}')">Бросок</button>
+            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px;">
+                <span style="min-width: 120px; white-space: normal; word-break: break-word; cursor: pointer;" onclick="window.rollSkill('${path}')">${label}</span>
+                <input type="number" class="form-control number-input" name="skills.${path}.base" value="${base}" style="width: 60px;">
+                <span>+</span>
+                <input type="number" class="form-control number-input" name="skills.${path}.bonus" value="${bonus}" style="width: 60px;">
+                <span style="cursor: pointer; font-size: 1.2em;" onclick="window.rollSkill('${path}')">🎲</span>
             </div>
         `;
     }
 
-    let html = `
-        <h4>Физические</h4>
-        ${skillInput('physical', 'strength', 'Сила', physical.strength)}
-        ${skillInput('physical', 'agility', 'Ловкость', physical.agility)}
-        ${skillInput('physical', 'will', 'Воля', physical.will)}
-        ${skillInput('physical', 'throwing', 'Метание', physical.throwing)}
-        ${skillInput('physical', 'awareness', 'Внимательность', physical.awareness)}
-        ${skillInput('physical', 'melee', 'Ближний бой', physical.melee)}
-        ${skillInput('physical', 'shooting', 'Стрельба', physical.shooting)}
+    let html = '';
 
-        <h4>Социальные</h4>
-        ${skillInput('social', 'charisma', 'Харизма', social.charisma)}
-        ${skillInput('social', 'barter', 'Бартер', social.barter)}
-        ${skillInput('social', 'persuasion', 'Убеждение', social.persuasion)}
-        ${skillInput('social', 'deception', 'Обман', social.deception)}
-        ${skillInput('social', 'intimidation', 'Устрашение', social.intimidation)}
+    // Контейнер для четырёх колонок
+    html += `<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 20px;">`;
 
-        <h4>Прочие</h4>
-        ${skillInput('other', 'medicine', 'Медицина', other.medicine)}
-        ${skillInput('other', 'engineering', 'Инженерия', other.engineering)}
-        ${skillInput('other', 'stealth', 'Скрытность', other.stealth)}
-        ${skillInput('other', 'tactics', 'Тактика', other.tactics)}
-        ${skillInput('other', 'survival', 'Выживание', other.survival)}
+    // Колонка 1: Физические навыки
+    html += `<div>`;
+    html += `<h4>Физические</h4>`;
+    physicalSkills.forEach(s => {
+        const skillObj = physical[s.key] || { base: 5, bonus: 0 };
+        html += renderSkillRow(s.label, skillObj.base, skillObj.bonus, `physical.${s.key}`);
+    });
+    html += `</div>`;
 
-        <h4>Владение оружием</h4>
-    `;
+    // Колонка 2: Социальные навыки
+    html += `<div>`;
+    html += `<h4>Социальные</h4>`;
+    socialSkills.forEach(s => {
+        const skillObj = social[s.key] || { base: 5, bonus: 0 };
+        html += renderSkillRow(s.label, skillObj.base, skillObj.bonus, `social.${s.key}`);
+    });
+    html += `</div>`;
 
+    // Колонка 3: Прочие навыки
+    html += `<div>`;
+    html += `<h4>Прочие</h4>`;
+    otherSkills.forEach(s => {
+        const skillObj = other[s.key] || { base: 5, bonus: 0 };
+        html += renderSkillRow(s.label, skillObj.base, skillObj.bonus, `other.${s.key}`);
+    });
+    html += `</div>`;
+
+    // Колонка 4: Владение оружием
+    html += `<div>`;
+    html += `<h4>Владение оружием</h4>`;
     const levelOptions = [
         { value: 'unfamiliar', label: 'Не знаком' },
         { value: 'familiar', label: 'Знаком' },
@@ -459,23 +492,28 @@ function renderSkillsTab(data) {
             `<option value="${opt.value}" ${level === opt.value ? 'selected' : ''}>${opt.label}</option>`
         ).join('');
         html += `
-            <div style="margin-bottom: 5px; display: flex; align-items: center; gap: 5px;">
-                <span style="min-width: 100px;">${label}</span>
-                <select name="skills.specialized.${key}.level">${select}</select>
+            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px;">
+                <span style="min-width: 110px; white-space: normal; word-break: break-word;">${label}</span>
+                <select name="skills.specialized.${key}.level" class="form-control" style="width: 130px;">${select}</select>
             </div>
         `;
     }
+    html += `</div>`; // закрываем четвёртую колонку
 
+    html += `</div>`; // закрываем контейнер четырёх колонок
+
+    // Очки навыков и специализации
     html += `
         <hr>
         <div style="display: flex; gap: 15px;">
-            <div><label>Очки навыков</label><input type="number" class="number-input" name="skills.skillPoints" value="${skills.skillPoints || 30}"></div>
-            <div><label>Специализации</label><input type="number" class="number-input" name="skills.specializations" value="${skills.specializations || 10}"></div>
+            <div><label>Очки навыков</label><input type="number" class="form-control number-input" name="skills.skillPoints" value="${skills.skillPoints || 30}"></div>
+            <div><label>Специализации</label><input type="number" class="form-control number-input" name="skills.specializations" value="${skills.specializations || 10}"></div>
         </div>
         <h4>Особые черты</h4>
         <div id="special-traits-container"></div>
         <button type="button" class="btn btn-sm" onclick="addSpecialTrait()">+ Добавить</button>
     `;
+
     container.innerHTML = html;
     renderSpecialTraits(data.features?.specialTraits || []);
 }
@@ -498,13 +536,13 @@ function renderSpecialTraits(traits) {
         const div = document.createElement('div');
         div.className = 'trait-item';
         div.innerHTML = `
-            <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
-                <select name="features.specialTraits.${index}.name" style="min-width:150px;" onchange="fillTraitFromPreset(this, ${index})">
+            <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-bottom: 5px;">
+                <select name="features.specialTraits.${index}.name" class="form-control" style="min-width:150px; flex: 1;" onchange="fillTraitFromPreset(this, ${index})">
                     <option value="">-- Выберите --</option>
                     ${traitSelect}
                 </select>
-                <input type="text" name="features.specialTraits.${index}.effect" value="${escapeHtml(trait.effect || '')}" placeholder="Эффект" style="flex:2;">
-                <input type="number" class="number-input" name="features.specialTraits.${index}.cost" value="${trait.cost || 0}" placeholder="Стоимость" style="width:70px;">
+                <input type="text" class="form-control" name="features.specialTraits.${index}.effect" value="${escapeHtml(trait.effect || '')}" placeholder="Эффект" style="flex: 2;">
+                <input type="number" class="form-control number-input" name="features.specialTraits.${index}.cost" value="${trait.cost || 0}" placeholder="Стоимость" style="width: 70px;">
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeSpecialTrait(${index})">✕</button>
             </div>
         `;
@@ -565,11 +603,11 @@ function renderEquipmentTab(data) {
         return `
             <div class="protection-grid">
                 <div>Физ</div><div>Хим</div><div>Терм</div><div>Элек</div><div>Рад</div>
-                <input type="number" class="number-input" name="${prefix}.protection.physical" value="${prot.physical || 0}">
-                <input type="number" class="number-input" name="${prefix}.protection.chemical" value="${prot.chemical || 0}">
-                <input type="number" class="number-input" name="${prefix}.protection.thermal" value="${prot.thermal || 0}">
-                <input type="number" class="number-input" name="${prefix}.protection.electric" value="${prot.electric || 0}">
-                <input type="number" class="number-input" name="${prefix}.protection.radiation" value="${prot.radiation || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.physical" value="${prot.physical || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.chemical" value="${prot.chemical || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.thermal" value="${prot.thermal || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.electric" value="${prot.electric || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.radiation" value="${prot.radiation || 0}">
             </div>
         `;
     }
@@ -583,29 +621,46 @@ function renderEquipmentTab(data) {
             <div class="equipment-row">
                 <div class="fields-container">
                     <div class="field-group field-name">
-                        <label>Название</label>
-                        <select name="equipment.helmet.name" onchange="fillHelmetFromPreset(this)">
+                        <label style="text-align: center; width: 100%;">Название</label>
+                        <select name="equipment.helmet.name" class="form-control" onchange="fillHelmetFromPreset(this)">
                             <option value="">-- Выберите --</option>
                             <option value="Легкий шлем" ${helmet.name === 'Легкий шлем' ? 'selected' : ''}>Легкий шлем</option>
                             <option value="Тяжелый шлем" ${helmet.name === 'Тяжелый шлем' ? 'selected' : ''}>Тяжелый шлем</option>
                             <option value="Тактический шлем" ${helmet.name === 'Тактический шлем' ? 'selected' : ''}>Тактический шлем</option>
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input" name="equipment.helmet.maxDurability" value="${helmet.maxDurability || 1}" placeholder="Макс"></div>
-                    <div class="field-group field-select"><label>Состояние</label>
-                        <select name="equipment.helmet.condition">
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Прочность</label>
+                        <input type="number" class="number-input form-control" name="equipment.helmet.maxDurability" value="${helmet.maxDurability || 1}" placeholder="Макс">
+                    </div>
+                    <div class="field-group field-select">
+                        <label style="text-align: center; width: 100%;">Состояние</label>
+                        <select name="equipment.helmet.condition" class="form-control">
                             ${conditionOptions.map(opt => `<option value="${opt}" ${helmet.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input" name="equipment.helmet.currentDurability" value="${helmet.currentDurability || 1}" placeholder="Тек"></div>
-                    <div class="field-group field-select"><label>Материал</label>
-                        <select name="equipment.helmet.material">
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Стадия</label>
+                        <input type="number" class="number-input form-control" name="equipment.helmet.currentDurability" value="${helmet.currentDurability || 1}" placeholder="Тек">
+                    </div>
+                    <div class="field-group field-select">
+                        <label style="text-align: center; width: 100%;">Материал</label>
+                        <select name="equipment.helmet.material" class="form-control">
                             ${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}"></div>
-                    <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
-                    <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Точность</label>
+                        <input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}">
+                    </div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Эргономика</label>
+                        <input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}">
+                    </div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Харизма</label>
+                        <input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}">
+                    </div>
                 </div>
                 <div class="protection-wrapper">
                     ${protectionGrid('equipment.helmet', helmet.protection)}
@@ -621,33 +676,53 @@ function renderEquipmentTab(data) {
             <div class="equipment-row">
                 <div class="fields-container">
                     <div class="field-group field-name">
-                        <label>Название</label>
-                        <select name="equipment.gasMask.name" onchange="fillGasMaskFromPreset(this)">
+                        <label style="text-align: center; width: 100%;">Название</label>
+                        <select name="equipment.gasMask.name" class="form-control" onchange="fillGasMaskFromPreset(this)">
                             <option value="">-- Выберите --</option>
                             <option value="Противогаз ГП-5" ${gasMask.name === 'Противогаз ГП-5' ? 'selected' : ''}>Противогаз ГП-5</option>
                             <option value="Противогаз ПМК" ${gasMask.name === 'Противогаз ПМК' ? 'selected' : ''}>Противогаз ПМК</option>
                         </select>
                     </div>
                     <div class="field-group field-checkbox">
-                        <label>Надет</label>
+                        <label style="text-align: center; width: 100%;">Надет</label>
                         <input type="checkbox" name="equipment.gasMask.isWorn" ${gasMask.isWorn ? 'checked' : ''}>
                     </div>
-                    <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input" name="equipment.gasMask.maxDurability" value="${gasMask.maxDurability || 1}" placeholder="Макс"></div>
-                    <div class="field-group field-select"><label>Состояние</label>
-                        <select name="equipment.gasMask.condition">
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Прочность</label>
+                        <input type="number" class="number-input form-control" name="equipment.gasMask.maxDurability" value="${gasMask.maxDurability || 1}" placeholder="Макс">
+                    </div>
+                    <div class="field-group field-select">
+                        <label style="text-align: center; width: 100%;">Состояние</label>
+                        <select name="equipment.gasMask.condition" class="form-control">
                             ${conditionOptions.map(opt => `<option value="${opt}" ${gasMask.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input" name="equipment.gasMask.currentDurability" value="${gasMask.currentDurability || 1}" placeholder="Тек"></div>
-                    <div class="field-group field-number"><label>Фильтр</label><input type="number" class="number-input" name="equipment.gasMask.filterRemaining" value="${gasMask.filterRemaining || 0}"></div>
-                    <div class="field-group field-select"><label>Материал</label>
-                        <select name="equipment.gasMask.material">
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Стадия</label>
+                        <input type="number" class="number-input form-control" name="equipment.gasMask.currentDurability" value="${gasMask.currentDurability || 1}" placeholder="Тек">
+                    </div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Фильтр</label>
+                        <input type="number" class="number-input form-control" name="equipment.gasMask.filterRemaining" value="${gasMask.filterRemaining || 0}">
+                    </div>
+                    <div class="field-group field-select">
+                        <label style="text-align: center; width: 100%;">Материал</label>
+                        <select name="equipment.gasMask.material" class="form-control">
                             ${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}"></div>
-                    <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
-                    <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Точность</label>
+                        <input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}">
+                    </div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Эргономика</label>
+                        <input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}">
+                    </div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Харизма</label>
+                        <input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}">
+                    </div>
                 </div>
                 <div class="protection-wrapper">
                     ${protectionGrid('equipment.gasMask', gasMask.protection)}
@@ -663,27 +738,41 @@ function renderEquipmentTab(data) {
             <div class="equipment-row">
                 <div class="fields-container">
                     <div class="field-group field-name">
-                        <label>Название</label>
-                        <select name="equipment.armor.name" onchange="fillArmorFromPreset(this)">
+                        <label style="text-align: center; width: 100%;">Название</label>
+                        <select name="equipment.armor.name" class="form-control" onchange="fillArmorFromPreset(this)">
                             <option value="">-- Выберите --</option>
                             <option value="Бронежилет 6Б23" ${armor.name === 'Бронежилет 6Б23' ? 'selected' : ''}>Бронежилет 6Б23</option>
                             <option value="Экзоскелет" ${armor.name === 'Экзоскелет' ? 'selected' : ''}>Экзоскелет</option>
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input" name="equipment.armor.maxDurability" value="${armor.maxDurability || 1}" placeholder="Макс"></div>
-                    <div class="field-group field-select"><label>Состояние</label>
-                        <select name="equipment.armor.condition">
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Прочность</label>
+                        <input type="number" class="number-input form-control" name="equipment.armor.maxDurability" value="${armor.maxDurability || 1}" placeholder="Макс">
+                    </div>
+                    <div class="field-group field-select">
+                        <label style="text-align: center; width: 100%;">Состояние</label>
+                        <select name="equipment.armor.condition" class="form-control">
                             ${conditionOptions.map(opt => `<option value="${opt}" ${armor.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input" name="equipment.armor.currentDurability" value="${armor.currentDurability || 1}" placeholder="Тек"></div>
-                    <div class="field-group field-select"><label>Материал</label>
-                        <select name="equipment.armor.material">
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Стадия</label>
+                        <input type="number" class="number-input form-control" name="equipment.armor.currentDurability" value="${armor.currentDurability || 1}" placeholder="Тек">
+                    </div>
+                    <div class="field-group field-select">
+                        <label style="text-align: center; width: 100%;">Материал</label>
+                        <select name="equipment.armor.material" class="form-control">
                             ${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                         </select>
                     </div>
-                    <div class="field-group field-number"><label>Перемещение</label><input type="number" class="number-input" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
-                    <div class="field-group field-number"><label>Контейнеры</label><input type="number" class="number-input" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}"></div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Перемещение</label>
+                        <input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}">
+                    </div>
+                    <div class="field-group field-number">
+                        <label style="text-align: center; width: 100%;">Контейнеры</label>
+                        <input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}">
+                    </div>
                 </div>
                 <div class="protection-wrapper">
                     ${protectionGrid('equipment.armor', armor.protection)}
@@ -691,9 +780,18 @@ function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <h4>Оружие</h4>
-        <div id="weapons-container"></div>
-        <button type="button" class="btn btn-sm" onclick="addWeapon()">+ Добавить оружие</button>
+        <!-- Блок оружия, обёрнутый в equipment-group для единообразия -->
+        <div class="equipment-group">
+            <div class="equipment-header">
+                <h4>Оружие</h4>
+                <!-- Можно оставить пустой span, если не нужна защита, или добавить заглушку -->
+                <span class="protection-header"></span>
+            </div>
+            <div class="equipment-row" style="flex-direction: column; align-items: stretch;">
+                <div id="weapons-container"></div>
+                <button type="button" class="btn btn-sm" onclick="addWeapon()" style="align-self: flex-start; margin-top: 10px;">+ Добавить оружие</button>
+            </div>
+        </div>
     `;
     container.innerHTML = html;
     renderWeapons(weapons);
@@ -709,114 +807,144 @@ function renderWeapons(weapons) {
         { name: 'ПМ', accuracy: 3, noise: 60, ammo: '9x18', range: 50, ergonomics: 70, burst: '-', damage: 8, durability: 80, fireRate: 30, weight: 0.8 },
         { name: 'СВД', accuracy: 8, noise: 90, ammo: '7.62x54', range: 800, ergonomics: 40, burst: '-', damage: 20, durability: 90, fireRate: 30, weight: 4.3 }
     ];
-
     const moduleOptions = ['Прицел', 'Глушитель', 'ЛЦУ', 'Ремень', 'Магазин'];
     const modOptions = ['Нарезной ствол', 'Утяжеленный затвор', 'Спортивный спуск'];
+
+    // Определяем колонки: каждая имеет путь к данным, метку, ширину, тип (text/number)
+    const columns = [
+        { key: 'name', label: 'Название', width: 200, type: 'text' },
+        { key: 'magazine', label: 'Магазин', width: 70, type: 'text' },
+        { key: 'accuracy', label: 'Точность', width: 60, type: 'number' },
+        { key: 'noise', label: 'Шум', width: 40, type: 'number' },
+        { key: 'ammo', label: 'Патроны', width: 75, type: 'text' },
+        { key: 'range', label: 'Дальность', width: 60, type: 'number' },
+        { key: 'ergonomics', label: 'Эргономика', width: 70, type: 'number' },
+        { key: 'burst', label: 'Очередь', width: 75, type: 'text' },
+        { key: 'damage', label: 'Урон', width: 50, type: 'number' },
+        { key: 'durability', label: 'Прочность', width: 60, type: 'number' },
+        { key: 'fireRate', label: 'Скорострельность', width: 105, type: 'number' },
+        { key: 'weight', label: 'Вес', width: 50, type: 'number' }
+    ];
 
     weapons.forEach((weapon, index) => {
         const modules = Array.isArray(weapon.modules) ? weapon.modules : [];
         const modifications = Array.isArray(weapon.modifications) ? weapon.modifications : [];
 
-        let modulesHtml = modules.map((mod, mi) => {
-            const name = mod.name || '';
-            const description = mod.description || '';
-            return `
-                <div style="display: flex; gap: 5px; margin-bottom: 3px;">
-                    <select name="weapons.${index}.modules.${mi}.name" style="flex:1;">
-                        <option value="">-- Выберите --</option>
-                        ${moduleOptions.map(opt => `<option value="${opt}" ${name === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+        // Создаём flex-контейнер для всей строки полей, каждый столбец будет содержать лейбл и поле
+        let fieldsHtml = '<div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">';
+        columns.forEach(col => {
+            const value = weapon[col.key] !== undefined ? weapon[col.key] : (col.type === 'number' ? 0 : '');
+            fieldsHtml += `
+                <div style="width: ${col.width}px;">
+                    <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;">${col.label}</div>
+                    ${col.type === 'number'
+                        ? `<input type="number" class="form-control number-input" name="weapons.${index}.${col.key}" value="${value}" style="width: 100%;">`
+                        : `<input type="text" class="form-control" name="weapons.${index}.${col.key}" value="${escapeHtml(value)}" placeholder="${col.label}" style="width: 100%;">`
+                    }
+                </div>
+            `;
+        });
+        fieldsHtml += '</div>';
+
+        // Блок выбора модели (только если модель не выбрана)
+        let modelBlock = '';
+        if (!weapon.model) {
+            modelBlock = `
+                <div style="display: flex; gap: 5px; align-items: center; margin-bottom: 10px;">
+                    <select id="weapon-model-select-${index}" class="form-control" style="width: 200px;">
+                        <option value="">-- Выберите модель --</option>
+                        ${weaponModels.map(m => `<option value="${m.name}">${m.name}</option>`).join('')}
                     </select>
-                    <input type="text" name="weapons.${index}.modules.${mi}.description" value="${escapeHtml(description)}" placeholder="Описание" style="flex:2;">
+                    <button type="button" class="btn btn-sm btn-primary" onclick="selectWeaponModel(${index})">Выбрать</button>
+                </div>
+            `;
+        } else {
+            modelBlock = ''; // полностью убираем
+        }
+
+        // Модули
+        let modulesHtml = '';
+        modules.forEach((mod, mi) => {
+            modulesHtml += `
+                <div style="display: flex; gap: 5px; margin-bottom: 3px; align-items: center;">
+                    <select name="weapons.${index}.modules.${mi}.name" class="form-control" style="width: 150px;">
+                        <option value="">-- Выберите --</option>
+                        ${moduleOptions.map(opt => `<option value="${opt}" ${mod.name === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                    </select>
+                    <input type="text" class="form-control" name="weapons.${index}.modules.${mi}.description" value="${escapeHtml(mod.description || '')}" placeholder="Описание" style="flex:1;">
                     <button type="button" class="btn btn-sm btn-danger" onclick="removeWeaponModule(${index}, ${mi})">✕</button>
                 </div>
             `;
-        }).join('');
+        });
 
-        let modsHtml = modifications.map((mod, mi) => {
-            const name = mod.name || '';
-            const description = mod.description || '';
-            return `
-                <div style="display: flex; gap: 5px; margin-bottom: 3px;">
-                    <select name="weapons.${index}.modifications.${mi}.name" style="flex:1;">
+        // Модификации
+        let modificationsHtml = '';
+        modifications.forEach((mod, mi) => {
+            modificationsHtml += `
+                <div style="display: flex; gap: 5px; margin-bottom: 3px; align-items: center;">
+                    <select name="weapons.${index}.modifications.${mi}.name" class="form-control" style="width: 150px;">
                         <option value="">-- Выберите --</option>
-                        ${modOptions.map(opt => `<option value="${opt}" ${name === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                        ${modOptions.map(opt => `<option value="${opt}" ${mod.name === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                     </select>
-                    <input type="text" name="weapons.${index}.modifications.${mi}.description" value="${escapeHtml(description)}" placeholder="Описание" style="flex:2;">
+                    <input type="text" class="form-control" name="weapons.${index}.modifications.${mi}.description" value="${escapeHtml(mod.description || '')}" placeholder="Описание" style="flex:1;">
                     <button type="button" class="btn btn-sm btn-danger" onclick="removeWeaponModification(${index}, ${mi})">✕</button>
                 </div>
             `;
-        }).join('');
+        });
 
-        const div = document.createElement('div');
-        div.className = 'weapon-item';
-        div.innerHTML = `
+        const weaponDiv = document.createElement('div');
+        weaponDiv.className = 'weapon-item';
+        weaponDiv.innerHTML = `
             <div style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
-                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;">
-                    <div style="min-width: 200px;">
-                        <label>Модель</label>
-                        <select name="weapons.${index}.model" onchange="fillWeaponFromPreset(this, ${index})">
-                            <option value="">-- Выберите модель --</option>
-                            ${weaponModels.map(m => `<option value="${m.name}" ${weapon.model === m.name ? 'selected' : ''}>${m.name}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div style="flex:1;">
-                        <label>Название</label>
-                        <input type="text" name="weapons.${index}.name" value="${escapeHtml(weapon.name || '')}" placeholder="Если не из списка">
-                    </div>
-                </div>
-                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 10px;">
-                    <div class="field-group"><label>Магазин</label><input type="text" name="weapons.${index}.magazine" value="${escapeHtml(weapon.magazine || '')}"></div>
-                    <div class="field-group"><label>Точность</label><input type="number" class="number-input" name="weapons.${index}.accuracy" value="${weapon.accuracy || 0}"></div>
-                    <div class="field-group"><label>Шум</label><input type="number" class="number-input" name="weapons.${index}.noise" value="${weapon.noise || 0}"></div>
-                    <div class="field-group"><label>Патроны</label><input type="text" name="weapons.${index}.ammo" value="${escapeHtml(weapon.ammo || '')}"></div>
-                    <div class="field-group"><label>Дальность</label><input type="number" class="number-input" name="weapons.${index}.range" value="${weapon.range || 0}"></div>
-                    <div class="field-group"><label>Эргономика</label><input type="number" class="number-input" name="weapons.${index}.ergonomics" value="${weapon.ergonomics || 0}"></div>
-                    <div class="field-group"><label>Очередь</label><input type="text" name="weapons.${index}.burst" value="${escapeHtml(weapon.burst || '')}"></div>
-                    <div class="field-group"><label>Урон</label><input type="number" class="number-input" name="weapons.${index}.damage" value="${weapon.damage || 0}"></div>
-                    <div class="field-group"><label>Прочность</label><input type="number" class="number-input" name="weapons.${index}.durability" value="${weapon.durability || 0}"></div>
-                    <div class="field-group"><label>Скоростр.</label><input type="number" class="number-input" name="weapons.${index}.fireRate" value="${weapon.fireRate || 0}"></div>
-                    <div class="field-group"><label>Вес</label><input type="number" class="number-input" name="weapons.${index}.weight" value="${weapon.weight || 0}"></div>
-                </div>
+                ${modelBlock}
+                ${fieldsHtml}
                 <div style="margin-top:10px;">
                     <label>Модули</label>
-                    <div id="modules-${index}">
-                        ${modulesHtml}
-                    </div>
+                    <div id="modules-${index}">${modulesHtml}</div>
                     <button type="button" class="btn btn-sm" onclick="addWeaponModule(${index})">+ Модуль</button>
                 </div>
                 <div style="margin-top:10px;">
                     <label>Модификации</label>
-                    <div id="modifications-${index}">
-                        ${modsHtml}
-                    </div>
+                    <div id="modifications-${index}">${modificationsHtml}</div>
                     <button type="button" class="btn btn-sm" onclick="addWeaponModification(${index})">+ Модификация</button>
                 </div>
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})" style="margin-top:10px;">Удалить оружие</button>
             </div>
         `;
-        container.appendChild(div);
+        container.appendChild(weaponDiv);
     });
 
-    window.fillWeaponFromPreset = function(select, index) {
+    // Глобальная функция выбора модели
+    window.selectWeaponModel = function(index) {
+        const select = document.getElementById(`weapon-model-select-${index}`);
         const modelName = select.value;
-        const preset = weaponModels.find(m => m.name === modelName);
-        if (preset) {
-            const weapon = currentCharacterData.weapons[index];
-            weapon.name = preset.name;
-            weapon.accuracy = preset.accuracy;
-            weapon.noise = preset.noise;
-            weapon.ammo = preset.ammo;
-            weapon.range = preset.range;
-            weapon.ergonomics = preset.ergonomics;
-            weapon.burst = preset.burst;
-            weapon.damage = preset.damage;
-            weapon.durability = preset.durability;
-            weapon.fireRate = preset.fireRate;
-            weapon.weight = preset.weight;
-            weapon.model = modelName;
-            renderWeapons(currentCharacterData.weapons);
-            scheduleAutoSave();
+
+        if (!currentCharacterData.weapons) currentCharacterData.weapons = [];
+        const weapon = currentCharacterData.weapons[index];
+
+        if (modelName) {
+            const preset = weaponModels.find(m => m.name === modelName);
+            if (preset) {
+                weapon.magazine = '';
+                weapon.accuracy = preset.accuracy;
+                weapon.noise = preset.noise;
+                weapon.ammo = preset.ammo;
+                weapon.range = preset.range;
+                weapon.ergonomics = preset.ergonomics;
+                weapon.burst = preset.burst;
+                weapon.damage = preset.damage;
+                weapon.durability = preset.durability;
+                weapon.fireRate = preset.fireRate;
+                weapon.weight = preset.weight;
+                weapon.name = preset.name;
+            }
         }
+
+        // В любом случае помечаем, что модель "выбрана" — блок выбора больше не покажется
+        weapon.model = modelName || 'selected';
+
+        renderWeapons(currentCharacterData.weapons);
+        scheduleAutoSave();
     };
 }
 
@@ -973,22 +1101,27 @@ function renderInventoryTab(data) {
 
     let html = `
         <div style="display: flex; gap: 20px; margin-bottom: 15px; flex-wrap: wrap;">
-            <div><label class="money-label">Деньги</label><input type="number" class="number-input" name="inventory.money" value="${money}"></div>
-            <div><label>Детектор аномалий</label>
-                <select name="inventory.detectors.anomaly.name">
+            <div>
+                <label class="money-label">Деньги</label>
+                <input type="number" class="form-control number-input" name="inventory.money" value="${money}" style="width: 100px;">
+            </div>
+            <div>
+                <label>Детектор аномалий</label>
+                <select name="inventory.detectors.anomaly.name" class="form-control" style="width: 150px;">
                     <option value="">-- Выберите --</option>
                     <option value="Эхолокатор" ${detectors.anomaly.name === 'Эхолокатор' ? 'selected' : ''}>Эхолокатор</option>
                     <option value="Термограф" ${detectors.anomaly.name === 'Термограф' ? 'selected' : ''}>Термограф</option>
                 </select>
-                <input type="number" class="number-input" name="inventory.detectors.anomaly.bonus" value="${detectors.anomaly.bonus || 0}" placeholder="Бонус" style="width:70px;">
+                <input type="number" class="form-control number-input" name="inventory.detectors.anomaly.bonus" value="${detectors.anomaly.bonus || 0}" placeholder="Бонус" style="width: 70px; margin-top: 5px;">
             </div>
-            <div><label>Детектор артефактов</label>
-                <select name="inventory.detectors.artifact.name">
+            <div>
+                <label>Детектор артефактов</label>
+                <select name="inventory.detectors.artifact.name" class="form-control" style="width: 150px;">
                     <option value="">-- Выберите --</option>
                     <option value="Сканер" ${detectors.artifact.name === 'Сканер' ? 'selected' : ''}>Сканер</option>
                     <option value="Счетчик Гейгера" ${detectors.artifact.name === 'Счетчик Гейгера' ? 'selected' : ''}>Счетчик Гейгера</option>
                 </select>
-                <input type="number" class="number-input" name="inventory.detectors.artifact.bonus" value="${detectors.artifact.bonus || 0}" placeholder="Бонус" style="width:70px;">
+                <input type="number" class="form-control number-input" name="inventory.detectors.artifact.bonus" value="${detectors.artifact.bonus || 0}" placeholder="Бонус" style="width: 70px; margin-top: 5px;">
             </div>
         </div>
         <div style="display: flex; gap: 20px; margin-bottom: 15px;">
@@ -1003,26 +1136,27 @@ function renderInventoryTab(data) {
                 const options = containerOptions.map(opt => `<option value="${opt}" ${cont.name === opt ? 'selected' : ''}>${opt}</option>`).join('');
                 return `
                     <div>
-                        <select name="inventory.containers.${idx}.name">
+                        <select name="inventory.containers.${idx}.name" class="form-control" style="width: 150px;">
                             <option value="">-- Выберите --</option>
                             ${options}
                         </select>
-                        <input type="text" name="inventory.containers.${idx}.effect" value="${escapeHtml(cont.effect)}" placeholder="Эффект" style="width:100px;">
+                        <input type="text" class="form-control" name="inventory.containers.${idx}.effect" value="${escapeHtml(cont.effect)}" placeholder="Эффект" style="width: 150px; margin-top: 5px;">
                     </div>
                 `;
             }).join('')}
         </div>
         <hr>
-            <h4>Карманы <span style="font-weight:normal;">(заполнено: <span id="pocket-fill-display">${pocketFill}</span> / <input type="number" class="number-input" name="inventory.pocketMaxVolume" value="${pocketMaxVolume}" style="width:70px; display:inline;">)</span></h4>        <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
+        <h4>Карманы <span style="font-weight:normal;">(заполнено: <span id="pocket-fill-display">${pocketFill}</span> / <input type="number" class="form-control number-input" name="inventory.pocketMaxVolume" value="${pocketMaxVolume}" style="width:70px; display:inline;">)</span></h4>
+        <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="pockets-container"></div>
-        <button type="button" class="btn btn-sm" onclick="addPocketItem()">+ Добавить</button>
+        <button type="button" class="btn btn-sm btn-primary" onclick="addPocketItem()">+ Добавить</button>
 
         <h4 style="margin-top:20px;">Рюкзак</h4>
         <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
             <label>Модель:</label>
-            <select name="inventory.backpackModel" onchange="updateBackpackLimit(this)">
+            <select name="inventory.backpackModel" class="form-control" onchange="updateBackpackLimit(this)" style="width: 200px;">
                 ${backpackModels.map(m => `<option value="${m.name}" ${selectedBackpack === m.name ? 'selected' : ''}>${m.name} (лимит ${m.limit})</option>`).join('')}
             </select>
             <span>Заполнено: ${backpackFill} / ${backpackLimit}</span>
@@ -1031,7 +1165,7 @@ function renderInventoryTab(data) {
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="backpack-container"></div>
-        <button type="button" class="btn btn-sm" onclick="addBackpackItem()">+ Добавить</button>
+        <button type="button" class="btn btn-sm btn-primary" onclick="addBackpackItem()">+ Добавить</button>
     `;
     container.innerHTML = html;
     renderPockets(pockets);
@@ -1041,11 +1175,8 @@ function renderInventoryTab(data) {
     inventoryForm.addEventListener('input', (e) => {
         const target = e.target;
         if (target.matches('input[name*="weight"], input[name*="volume"], input[name*="quantity"]')) {
-            // Обновляем данные из полей
             updateDataFromFields();
-            // Пересчитываем и обновляем итоги
             recalculateInventoryTotals();
-            // Запускаем автосохранение (оно отправит изменения на сервер)
             scheduleAutoSave();
         }
     });
@@ -1095,10 +1226,10 @@ function renderPockets(pockets) {
         row.style.marginBottom = '5px';
         row.style.alignItems = 'center';
         row.innerHTML = `
-            <input type="text" name="inventory.pockets.${index}.name" value="${escapeHtml(item.name || '')}" placeholder="Название">
-            <input type="number" class="number-input" name="inventory.pockets.${index}.weight" value="${item.weight || 0}" placeholder="Вес">
-            <input type="number" class="number-input" name="inventory.pockets.${index}.volume" value="${item.volume || 0}" placeholder="Объём">
-            <input type="number" class="number-input" name="inventory.pockets.${index}.quantity" value="${item.quantity || 1}" placeholder="Кол-во">
+            <input type="text" class="form-control" name="inventory.pockets.${index}.name" value="${escapeHtml(item.name || '')}" placeholder="Название">
+            <input type="number" class="form-control number-input" name="inventory.pockets.${index}.weight" value="${item.weight || 0}" placeholder="Вес">
+            <input type="number" class="form-control number-input" name="inventory.pockets.${index}.volume" value="${item.volume || 0}" placeholder="Объём">
+            <input type="number" class="form-control number-input" name="inventory.pockets.${index}.quantity" value="${item.quantity || 1}" placeholder="Кол-во">
             <button type="button" class="btn btn-sm btn-danger" onclick="removePocketItem(${index})">✕</button>
         `;
         container.appendChild(row);
@@ -1117,10 +1248,10 @@ function renderBackpack(backpack) {
         row.style.marginBottom = '5px';
         row.style.alignItems = 'center';
         row.innerHTML = `
-            <input type="text" name="inventory.backpack.${index}.name" value="${escapeHtml(item.name || '')}" placeholder="Название">
-            <input type="number" class="number-input" name="inventory.backpack.${index}.weight" value="${item.weight || 0}" placeholder="Вес">
-            <input type="number" class="number-input" name="inventory.backpack.${index}.volume" value="${item.volume || 0}" placeholder="Объём">
-            <input type="number" class="number-input" name="inventory.backpack.${index}.quantity" value="${item.quantity || 1}" placeholder="Кол-во">
+            <input type="text" class="form-control" name="inventory.backpack.${index}.name" value="${escapeHtml(item.name || '')}" placeholder="Название">
+            <input type="number" class="form-control number-input" name="inventory.backpack.${index}.weight" value="${item.weight || 0}" placeholder="Вес">
+            <input type="number" class="form-control number-input" name="inventory.backpack.${index}.volume" value="${item.volume || 0}" placeholder="Объём">
+            <input type="number" class="form-control number-input" name="inventory.backpack.${index}.quantity" value="${item.quantity || 1}" placeholder="Кол-во">
             <button type="button" class="btn btn-sm btn-danger" onclick="removeBackpackItem(${index})">✕</button>
         `;
         container.appendChild(row);
@@ -1174,9 +1305,9 @@ function renderModificationsTab(data) {
         if (groupKey === 'pda') {
             const items = Array.isArray(groupData?.items) ? groupData.items : [];
             let itemsHtml = items.map((item, idx) => `
-                <div style="display: flex; gap: 5px; margin-bottom: 5px;">
-                    <input type="text" name="modifications.pda.items.${idx}.name" value="${escapeHtml(item.name || '')}" placeholder="Название" style="flex:1;">
-                    <input type="text" name="modifications.pda.items.${idx}.effect" value="${escapeHtml(item.effect || '')}" placeholder="Эффект" style="flex:2;">
+                <div style="display: flex; gap: 5px; margin-bottom: 5px; align-items: center;">
+                    <input type="text" class="form-control" name="modifications.pda.items.${idx}.name" value="${escapeHtml(item.name || '')}" placeholder="Название" style="flex:1;">
+                    <input type="text" class="form-control" name="modifications.pda.items.${idx}.effect" value="${escapeHtml(item.effect || '')}" placeholder="Эффект" style="flex:2;">
                     <button type="button" class="btn btn-sm btn-danger" onclick="removePdaItem(${idx})">✕</button>
                 </div>
             `).join('');
@@ -1185,7 +1316,7 @@ function renderModificationsTab(data) {
                 <div id="pda-items-container">
                     ${itemsHtml}
                 </div>
-                <button type="button" class="btn btn-sm" onclick="addPdaItem()">+ Добавить модификацию КПК</button>
+                <button type="button" class="btn btn-sm btn-primary" onclick="addPdaItem()">+ Добавить модификацию КПК</button>
             `;
         } else {
             const slots = Array.isArray(groupData?.slots) ? groupData.slots : ['', '', '', ''];
@@ -1193,9 +1324,9 @@ function renderModificationsTab(data) {
             let html = `<h4>${title}</h4>`;
             for (let i = 0; i < 4; i++) {
                 html += `
-                    <div style="display: flex; gap: 5px; margin-bottom: 5px;">
-                        <input type="text" name="modifications.${groupKey}.slots.${i}" value="${escapeHtml(slots[i])}" placeholder="Слот ${i+1}" style="flex:1;">
-                        <input type="text" name="modifications.${groupKey}.effects.${i}" value="${escapeHtml(effects[i])}" placeholder="Эффект" style="flex:2;">
+                    <div style="display: flex; gap: 5px; margin-bottom: 5px; align-items: center;">
+                        <input type="text" class="form-control" name="modifications.${groupKey}.slots.${i}" value="${escapeHtml(slots[i])}" placeholder="Слот ${i+1}" style="flex:1;">
+                        <input type="text" class="form-control" name="modifications.${groupKey}.effects.${i}" value="${escapeHtml(effects[i])}" placeholder="Эффект" style="flex:2;">
                     </div>
                 `;
             }
