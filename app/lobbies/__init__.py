@@ -16,6 +16,40 @@ from app.schemas.map import GameStateSchema, MapChunkSchema, TileUpdateSchema
 from app.models import LobbyParticipant, GameState, LobbyCharacter
 from app.utils.decorators import requires_participant, requires_gm
 
+from app.models.lobby_templates import (
+    LobbyWeaponTemplate, LobbyMeleeWeaponTemplate, LobbyArmorTemplate,
+    LobbyHelmetTemplate, LobbyGasMaskTemplate, LobbyDetectorTemplate,
+    LobbyContainerTemplate, LobbyArtifactTemplate, LobbyBackpackTemplate,
+    LobbyConsumableTemplate, LobbyCraftingMaterialTemplate,
+    LobbyModificationTemplate, LobbyBackgroundTemplate,
+    LobbySpecialTraitTemplate, LobbyOrganizationTemplate, LobbyEffectTemplate
+)
+from app.schemas.lobby_templates import (
+    LobbyWeaponTemplateSchema, LobbyMeleeWeaponTemplateSchema,
+    LobbyArmorTemplateSchema, LobbyHelmetTemplateSchema,
+    LobbyGasMaskTemplateSchema, LobbyDetectorTemplateSchema,
+    LobbyContainerTemplateSchema, LobbyArtifactTemplateSchema,
+    LobbyBackpackTemplateSchema, LobbyConsumableTemplateSchema,
+    LobbyCraftingMaterialTemplateSchema, LobbyModificationTemplateSchema,
+    LobbyBackgroundTemplateSchema, LobbySpecialTraitTemplateSchema,
+    LobbyOrganizationTemplateSchema, LobbyEffectTemplateSchema
+)
+from app.models.templates import (
+    WeaponTemplate, MeleeWeaponTemplate, ArmorTemplate, HelmetTemplate,
+    GasMaskTemplate, DetectorTemplate, ContainerTemplate, ArtifactTemplate,
+    BackpackTemplate, ConsumableTemplate, CraftingMaterialTemplate,
+    ModificationTemplate, BackgroundTemplate, SpecialTraitTemplate,
+    OrganizationTemplate, EffectTemplate
+)
+from app.schemas.templates import (
+    WeaponTemplateSchema, MeleeWeaponTemplateSchema, ArmorTemplateSchema,
+    HelmetTemplateSchema, GasMaskTemplateSchema, DetectorTemplateSchema,
+    ContainerTemplateSchema, ArtifactTemplateSchema, BackpackTemplateSchema,
+    ConsumableTemplateSchema, CraftingMaterialTemplateSchema,
+    ModificationTemplateSchema, BackgroundTemplateSchema,
+    SpecialTraitTemplateSchema, OrganizationTemplateSchema, EffectTemplateSchema
+)
+
 lobbies_bp = Blueprint('lobbies', __name__)
 
 @lobbies_bp.route('/', methods=['POST'])
@@ -373,3 +407,836 @@ def get_joined_lobbies():
     from app.schemas.lobby import LobbyMySchema
     schema = LobbyMySchema(many=True)
     return jsonify(schema.dump(lobbies)), 200
+
+# ----- Оружие -----
+@lobbies_bp.route('/<int:lobby_id>/templates/weapons', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_weapon_templates(lobby_id, lobby, participant):
+    """Возвращает объединённый список глобальных и локальных шаблонов оружия."""
+    global_templates = WeaponTemplate.query.all()
+    local_templates = LobbyWeaponTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = WeaponTemplateSchema(many=True)
+    local_schema = LobbyWeaponTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/weapons', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_weapon_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyWeaponTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyWeaponTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/weapons/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_weapon_template(lobby_id, lobby, template_id):
+    template = LobbyWeaponTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyWeaponTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/weapons/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_weapon_template(lobby_id, lobby, template_id):
+    template = LobbyWeaponTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Оружие ближнего боя -----
+@lobbies_bp.route('/<int:lobby_id>/templates/melee_weapons', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_melee_weapon_templates(lobby_id, lobby, participant):
+    global_templates = MeleeWeaponTemplate.query.all()
+    local_templates = LobbyMeleeWeaponTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = MeleeWeaponTemplateSchema(many=True)
+    local_schema = LobbyMeleeWeaponTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/melee_weapons', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_melee_weapon_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyMeleeWeaponTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyMeleeWeaponTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/melee_weapons/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_melee_weapon_template(lobby_id, lobby, template_id):
+    template = LobbyMeleeWeaponTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyMeleeWeaponTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/melee_weapons/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_melee_weapon_template(lobby_id, lobby, template_id):
+    template = LobbyMeleeWeaponTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Броня -----
+@lobbies_bp.route('/<int:lobby_id>/templates/armor', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_armor_templates(lobby_id, lobby, participant):
+    global_templates = ArmorTemplate.query.all()
+    local_templates = LobbyArmorTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = ArmorTemplateSchema(many=True)
+    local_schema = LobbyArmorTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/armor', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_armor_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyArmorTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyArmorTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/armor/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_armor_template(lobby_id, lobby, template_id):
+    template = LobbyArmorTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyArmorTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/armor/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_armor_template(lobby_id, lobby, template_id):
+    template = LobbyArmorTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Шлемы -----
+@lobbies_bp.route('/<int:lobby_id>/templates/helmets', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_helmet_templates(lobby_id, lobby, participant):
+    global_templates = HelmetTemplate.query.all()
+    local_templates = LobbyHelmetTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = HelmetTemplateSchema(many=True)
+    local_schema = LobbyHelmetTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/helmets', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_helmet_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyHelmetTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyHelmetTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/helmets/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_helmet_template(lobby_id, lobby, template_id):
+    template = LobbyHelmetTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyHelmetTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/helmets/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_helmet_template(lobby_id, lobby, template_id):
+    template = LobbyHelmetTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Противогазы -----
+@lobbies_bp.route('/<int:lobby_id>/templates/gas_masks', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_gas_mask_templates(lobby_id, lobby, participant):
+    global_templates = GasMaskTemplate.query.all()
+    local_templates = LobbyGasMaskTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = GasMaskTemplateSchema(many=True)
+    local_schema = LobbyGasMaskTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/gas_masks', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_gas_mask_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyGasMaskTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyGasMaskTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/gas_masks/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_gas_mask_template(lobby_id, lobby, template_id):
+    template = LobbyGasMaskTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyGasMaskTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/gas_masks/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_gas_mask_template(lobby_id, lobby, template_id):
+    template = LobbyGasMaskTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Детекторы -----
+@lobbies_bp.route('/<int:lobby_id>/templates/detectors', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_detector_templates(lobby_id, lobby, participant):
+    global_templates = DetectorTemplate.query.all()
+    local_templates = LobbyDetectorTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = DetectorTemplateSchema(many=True)
+    local_schema = LobbyDetectorTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/detectors', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_detector_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyDetectorTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyDetectorTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/detectors/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_detector_template(lobby_id, lobby, template_id):
+    template = LobbyDetectorTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyDetectorTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/detectors/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_detector_template(lobby_id, lobby, template_id):
+    template = LobbyDetectorTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Контейнеры на броне -----
+@lobbies_bp.route('/<int:lobby_id>/templates/containers', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_container_templates(lobby_id, lobby, participant):
+    global_templates = ContainerTemplate.query.all()
+    local_templates = LobbyContainerTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = ContainerTemplateSchema(many=True)
+    local_schema = LobbyContainerTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/containers', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_container_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyContainerTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyContainerTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/containers/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_container_template(lobby_id, lobby, template_id):
+    template = LobbyContainerTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyContainerTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/containers/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_container_template(lobby_id, lobby, template_id):
+    template = LobbyContainerTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Артефакты -----
+@lobbies_bp.route('/<int:lobby_id>/templates/artifacts', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_artifact_templates(lobby_id, lobby, participant):
+    global_templates = ArtifactTemplate.query.all()
+    local_templates = LobbyArtifactTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = ArtifactTemplateSchema(many=True)
+    local_schema = LobbyArtifactTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/artifacts', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_artifact_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyArtifactTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyArtifactTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/artifacts/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_artifact_template(lobby_id, lobby, template_id):
+    template = LobbyArtifactTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyArtifactTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/artifacts/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_artifact_template(lobby_id, lobby, template_id):
+    template = LobbyArtifactTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Рюкзаки -----
+@lobbies_bp.route('/<int:lobby_id>/templates/backpacks', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_backpack_templates(lobby_id, lobby, participant):
+    global_templates = BackpackTemplate.query.all()
+    local_templates = LobbyBackpackTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = BackpackTemplateSchema(many=True)
+    local_schema = LobbyBackpackTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/backpacks', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_backpack_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyBackpackTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyBackpackTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/backpacks/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_backpack_template(lobby_id, lobby, template_id):
+    template = LobbyBackpackTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyBackpackTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/backpacks/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_backpack_template(lobby_id, lobby, template_id):
+    template = LobbyBackpackTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Расходники -----
+@lobbies_bp.route('/<int:lobby_id>/templates/consumables', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_consumable_templates(lobby_id, lobby, participant):
+    global_templates = ConsumableTemplate.query.all()
+    local_templates = LobbyConsumableTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = ConsumableTemplateSchema(many=True)
+    local_schema = LobbyConsumableTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/consumables', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_consumable_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyConsumableTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyConsumableTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/consumables/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_consumable_template(lobby_id, lobby, template_id):
+    template = LobbyConsumableTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyConsumableTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/consumables/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_consumable_template(lobby_id, lobby, template_id):
+    template = LobbyConsumableTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Материалы для крафта -----
+@lobbies_bp.route('/<int:lobby_id>/templates/crafting_materials', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_crafting_material_templates(lobby_id, lobby, participant):
+    global_templates = CraftingMaterialTemplate.query.all()
+    local_templates = LobbyCraftingMaterialTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = CraftingMaterialTemplateSchema(many=True)
+    local_schema = LobbyCraftingMaterialTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/crafting_materials', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_crafting_material_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyCraftingMaterialTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyCraftingMaterialTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/crafting_materials/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_crafting_material_template(lobby_id, lobby, template_id):
+    template = LobbyCraftingMaterialTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyCraftingMaterialTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/crafting_materials/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_crafting_material_template(lobby_id, lobby, template_id):
+    template = LobbyCraftingMaterialTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Модификации -----
+@lobbies_bp.route('/<int:lobby_id>/templates/modifications', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_modification_templates(lobby_id, lobby, participant):
+    global_templates = ModificationTemplate.query.all()
+    local_templates = LobbyModificationTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = ModificationTemplateSchema(many=True)
+    local_schema = LobbyModificationTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/modifications', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_modification_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyModificationTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyModificationTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/modifications/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_modification_template(lobby_id, lobby, template_id):
+    template = LobbyModificationTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyModificationTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/modifications/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_modification_template(lobby_id, lobby, template_id):
+    template = LobbyModificationTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Предыстории -----
+@lobbies_bp.route('/<int:lobby_id>/templates/backgrounds', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_background_templates(lobby_id, lobby, participant):
+    global_templates = BackgroundTemplate.query.all()
+    local_templates = LobbyBackgroundTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = BackgroundTemplateSchema(many=True)
+    local_schema = LobbyBackgroundTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/backgrounds', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_background_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyBackgroundTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyBackgroundTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/backgrounds/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_background_template(lobby_id, lobby, template_id):
+    template = LobbyBackgroundTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyBackgroundTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/backgrounds/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_background_template(lobby_id, lobby, template_id):
+    template = LobbyBackgroundTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Особые черты -----
+@lobbies_bp.route('/<int:lobby_id>/templates/special_traits', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_special_trait_templates(lobby_id, lobby, participant):
+    global_templates = SpecialTraitTemplate.query.all()
+    local_templates = LobbySpecialTraitTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = SpecialTraitTemplateSchema(many=True)
+    local_schema = LobbySpecialTraitTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/special_traits', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_special_trait_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbySpecialTraitTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbySpecialTraitTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/special_traits/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_special_trait_template(lobby_id, lobby, template_id):
+    template = LobbySpecialTraitTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbySpecialTraitTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/special_traits/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_special_trait_template(lobby_id, lobby, template_id):
+    template = LobbySpecialTraitTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Организации -----
+@lobbies_bp.route('/<int:lobby_id>/templates/organizations', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_organization_templates(lobby_id, lobby, participant):
+    global_templates = OrganizationTemplate.query.all()
+    local_templates = LobbyOrganizationTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = OrganizationTemplateSchema(many=True)
+    local_schema = LobbyOrganizationTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/organizations', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_organization_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyOrganizationTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyOrganizationTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/organizations/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_organization_template(lobby_id, lobby, template_id):
+    template = LobbyOrganizationTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyOrganizationTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/organizations/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_organization_template(lobby_id, lobby, template_id):
+    template = LobbyOrganizationTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ----- Эффекты -----
+@lobbies_bp.route('/<int:lobby_id>/templates/effects', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_lobby_effect_templates(lobby_id, lobby, participant):
+    global_templates = EffectTemplate.query.all()
+    local_templates = LobbyEffectTemplate.query.filter_by(lobby_id=lobby_id).all()
+    global_schema = EffectTemplateSchema(many=True)
+    local_schema = LobbyEffectTemplateSchema(many=True)
+    return jsonify({
+        'global': global_schema.dump(global_templates),
+        'local': local_schema.dump(local_templates)
+    })
+
+@lobbies_bp.route('/<int:lobby_id>/templates/effects', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_lobby_effect_template(lobby_id, lobby):
+    data = request.get_json()
+    schema = LobbyEffectTemplateSchema()
+    validated_data = schema.load(data)
+    template = LobbyEffectTemplate(
+        lobby_id=lobby_id,
+        created_by=int(get_jwt_identity()),
+        **validated_data
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(schema.dump(template)), 201
+
+@lobbies_bp.route('/<int:lobby_id>/templates/effects/<int:template_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_lobby_effect_template(lobby_id, lobby, template_id):
+    template = LobbyEffectTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    data = request.get_json()
+    schema = LobbyEffectTemplateSchema(partial=True)
+    validated_data = schema.load(data)
+    for key, value in validated_data.items():
+        setattr(template, key, value)
+    db.session.commit()
+    return jsonify(schema.dump(template))
+
+@lobbies_bp.route('/<int:lobby_id>/templates/effects/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_lobby_effect_template(lobby_id, lobby, template_id):
+    template = LobbyEffectTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
+    db.session.delete(template)
+    db.session.commit()
+    return '', 204

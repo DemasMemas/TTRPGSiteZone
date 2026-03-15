@@ -1214,3 +1214,58 @@ input[type=number] {
 #sheet-tab-modifications .btn {
     margin-top: 5px;
 }
+
+#create-weapon-template-modal .modal-content {
+    max-height: 80vh;
+    overflow-y: auto;
+}
+
+.health-tab .zone-grid-vertical {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.health-tab .zone-item-vertical {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: rgba(255,255,255,0.05);
+    padding: 8px 5px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+}
+
+.health-tab .zone-label {
+    font-weight: bold;
+    margin-bottom: 5px;
+    white-space: nowrap;
+    font-size: 14px;
+    color: var(--text-color);
+}
+
+.health-tab .zone-fields {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    width: 100%;
+    justify-content: center;
+}
+
+.health-tab .zone-fields input {
+    width: 55px;
+    padding: 4px 2px;
+    text-align: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--text-color);
+    border-radius: 4px;
+}
+
+.health-tab .zone-fields .slash {
+    font-size: 16px;
+    font-weight: bold;
+    color: var(--text-muted);
+    margin: 0 2px;
+}

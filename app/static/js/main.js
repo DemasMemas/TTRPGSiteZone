@@ -19,6 +19,7 @@ import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEd
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
 fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
 import { openCharacterSheet, closeCharacterSheet, exportCharacter, importCharacter } from './characterSheet.js';
+import { setCurrentLobbyId as setCharLobbyId } from './characterSheet.js';
 import * as THREE from 'three';
 
 initWeather();
@@ -42,6 +43,7 @@ if (!currentLobbyId) {
 
 // Инициализация модулей
 setCurrentLobbyId(currentLobbyId);
+setCharLobbyId(currentLobbyId);
 initLobbyData(currentLobbyId);
 initCharacters(currentLobbyId, token);
 initMapEdit(currentLobbyId, token);
