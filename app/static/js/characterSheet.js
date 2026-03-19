@@ -13,20 +13,41 @@ const AUTO_SAVE_DELAY = 1500;
 let templatesCache = {};
 let currentLobbyId = null;
 let cachedBackpackTemplates = [];
-
-// Экспортируем функцию для установки lobbyId
 export function setCurrentLobbyId(id) {
     currentLobbyId = id;
 }
 
-// Вспомогательная функция для загрузки шаблонов
-async function loadTemplatesForLobby(type) {
+const skillCategories = [
+    { label: 'Сила', path: 'physical.strength' },
+    { label: 'Ловкость', path: 'physical.agility' },
+    { label: 'Воля', path: 'physical.will' },
+    { label: 'Метание', path: 'physical.throwing' },
+    { label: 'Внимательность', path: 'physical.awareness' },
+    { label: 'Ближний бой', path: 'physical.melee' },
+    { label: 'Стрельба', path: 'physical.shooting' },
+    { label: 'Харизма', path: 'social.charisma' },
+    { label: 'Бартер', path: 'social.barter' },
+    { label: 'Убеждение', path: 'social.persuasion' },
+    { label: 'Обман', path: 'social.deception' },
+    { label: 'Устрашение', path: 'social.intimidation' },
+    { label: 'Медицина', path: 'other.medicine' },
+    { label: 'Инженерия', path: 'other.engineering' },
+    { label: 'Скрытность', path: 'other.stealth' },
+    { label: 'Тактика', path: 'other.tactics' },
+    { label: 'Выживание', path: 'other.survival' }
+];
+
+// Универсальная загрузка шаблонов по категории
+async function loadTemplatesForLobby(category, subcategory = null) {
     if (!currentLobbyId) throw new Error('Lobby ID not set');
-    const cacheKey = `${currentLobbyId}_${type}`;
+    const cacheKey = `${currentLobbyId}_${category}_${subcategory || ''}`;
     if (templatesCache[cacheKey]) return templatesCache[cacheKey];
 
+    let url = `/lobbies/${currentLobbyId}/templates?category=${category}`;
+    if (subcategory) url += `&subcategory=${subcategory}`;
+
     const token = localStorage.getItem('access_token');
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/${type}`, {
+    const response = await fetch(url, {
         headers: { 'Authorization': `Bearer ${token}` }
     });
     if (!response.ok) {
@@ -42,20 +63,76 @@ async function loadTemplatesForLobby(type) {
     return all;
 }
 
-// Очистка кеша (полезна при создании/удалении шаблона)
-function clearTemplatesCache(type) {
-    if (type) {
-        delete templatesCache[`${currentLobbyId}_${type}`];
+function clearTemplatesCache(category) {
+    if (category) {
+        const keyPattern = `${currentLobbyId}_${category}`;
+        Object.keys(templatesCache).forEach(key => {
+            if (key.startsWith(keyPattern)) delete templatesCache[key];
+        });
     } else {
         Object.keys(templatesCache).forEach(key => {
-            if (key.startsWith(currentLobbyId + '_')) {
-                delete templatesCache[key];
-            }
+            if (key.startsWith(currentLobbyId + '_')) delete templatesCache[key];
         });
     }
 }
 
-// Вспомогательные функции
+let allTemplatesCache = null;
+
+function getCategoryDisplay(cat) {
+    const map = {
+        'weapon': 'Оружие',
+        'armor': 'Броня',
+        'helmet': 'Шлемы',
+        'gas_mask': 'Противогазы',
+        'detector': 'Детекторы',
+        'container': 'Контейнеры',
+        'consumable': 'Расходники',
+        'crafting_material': 'Материалы',
+        'artifact': 'Артефакты',
+        'modification': 'Модификации',
+        'backpack': 'Рюкзаки',
+        'vest': 'Разгрузки',
+        'pouch': 'Подсумки'
+    };
+    return map[cat] || cat;
+}
+
+async function getAllItemTemplates(forceRefresh = false) {
+    if (!forceRefresh && allTemplatesCache) return allTemplatesCache;
+
+    const categories = [
+        'weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
+        'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch'
+    ];
+
+    let all = [];
+    for (const cat of categories) {
+        try {
+            const templates = await loadTemplatesForLobby(cat);
+            all = all.concat(templates.map(t => ({
+                ...t,
+                categoryDisplay: getCategoryDisplay(cat),
+                // Для удобства: вытаскиваем вес и объём из attributes или корня
+                effectiveWeight: t.attributes?.weight !== undefined ? t.attributes.weight : (t.weight || 0),
+                effectiveVolume: t.attributes?.volume !== undefined ? t.attributes.volume : (t.volume || 0)
+            })));
+        } catch (e) {
+            console.warn(`Failed to load ${cat} templates`, e);
+        }
+    }
+    allTemplatesCache = all;
+    return all;
+}
+
+function clearAllTemplatesCache() {
+    allTemplatesCache = null;
+    // Также очищаем кеш по категориям
+    const categories = ['weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
+                        'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch'];
+    categories.forEach(cat => clearTemplatesCache(cat));
+}
+
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 function escapeHtml(unsafe) {
     if (unsafe === undefined || unsafe === null) return '';
     return String(unsafe)
@@ -112,6 +189,10 @@ function updateDataFromFields() {
         } else {
             value = input.value;
         }
+        // Преобразование для templateId и подобных полей
+        if (name.endsWith('templateId') || name.endsWith('Id')) {
+            value = value === '' ? null : Number(value);
+        }
         setValueByPath(currentCharacterData, name, value);
     });
 }
@@ -137,6 +218,7 @@ function scheduleAutoSave() {
     }, AUTO_SAVE_DELAY);
 }
 
+// ========== РЕНДЕР ЛИСТА ==========
 async function renderCharacterSheet(characterName, data) {
     document.getElementById('character-sheet-name').textContent = characterName;
     const tabsContainer = document.getElementById('sheet-tabs');
@@ -191,49 +273,41 @@ function switchSheetTab(tabId) {
     });
 }
 
-// ---------- Вкладка Основное ----------
+// ========== УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ЗАПОЛНЕНИЯ ОБЪЕКТА ИЗ ШАБЛОНА ==========
+function applyTemplateToObject(obj, template, mapping) {
+    // mapping: { 'путь.в.obj': 'путь.в.attributes' }
+    for (const [targetPath, sourcePath] of Object.entries(mapping)) {
+        const value = sourcePath.split('.').reduce((o, p) => o?.[p], template.attributes);
+        if (value !== undefined) {
+            setValueByPath(obj, targetPath, value);
+        }
+    }
+    // Копируем базовые поля
+    if (template.name) obj.name = template.name;
+    if (template.price !== undefined) obj.price = template.price;
+    if (template.weight !== undefined) obj.weight = template.weight;
+    if (template.volume !== undefined) obj.volume = template.volume;
+    obj.templateId = template.id;
+}
+
+// ========== ВКЛАДКА ОСНОВНОЕ ==========
 async function renderBasicTab(data) {
     const container = document.getElementById('sheet-tab-basic');
     const basic = data.basic || {};
     const bg = basic.background || {};
     const inv = data.inventory || {};
 
-    // Загружаем шаблоны детекторов и контейнеров
+    // Загружаем шаблоны детекторов, контейнеров и предысторий
     let detectorTemplates = [];
     let containerTemplates = [];
+    let backgroundTemplates = [];
     try {
-        detectorTemplates = await loadTemplatesForLobby('detectors');
-        containerTemplates = await loadTemplatesForLobby('containers');
+        detectorTemplates = await loadTemplatesForLobby('detector');
+        containerTemplates = await loadTemplatesForLobby('container');
+        backgroundTemplates = await loadTemplatesForLobby('background');
     } catch (e) {
         console.error('Failed to load templates', e);
     }
-
-    const backgroundOptions = [
-        'Одиночка', 'Ученый', 'Военный', 'Медик', 'Бандит', 'Наемник', 'Бродяга', 'Другой'
-    ];
-    const bgSelect = backgroundOptions.map(opt =>
-        `<option value="${opt}" ${bg.name === opt ? 'selected' : ''}>${opt}</option>`
-    ).join('');
-
-    const skillCategories = [
-        { label: 'Сила', path: 'physical.strength' },
-        { label: 'Ловкость', path: 'physical.agility' },
-        { label: 'Воля', path: 'physical.will' },
-        { label: 'Метание', path: 'physical.throwing' },
-        { label: 'Внимательность', path: 'physical.awareness' },
-        { label: 'Ближний бой', path: 'physical.melee' },
-        { label: 'Стрельба', path: 'physical.shooting' },
-        { label: 'Харизма', path: 'social.charisma' },
-        { label: 'Бартер', path: 'social.barter' },
-        { label: 'Убеждение', path: 'social.persuasion' },
-        { label: 'Обман', path: 'social.deception' },
-        { label: 'Устрашение', path: 'social.intimidation' },
-        { label: 'Медицина', path: 'other.medicine' },
-        { label: 'Инженерия', path: 'other.engineering' },
-        { label: 'Скрытность', path: 'other.stealth' },
-        { label: 'Тактика', path: 'other.tactics' },
-        { label: 'Выживание', path: 'other.survival' }
-    ];
 
     const skillBonuses = Array.isArray(bg.skillBonuses) ? bg.skillBonuses : [];
     let skillBonusesHtml = '';
@@ -270,11 +344,10 @@ async function renderBasicTab(data) {
         <h4>Предыстория</h4>
         <div style="margin-bottom: 10px;">
             <label>Название</label>
-            <select name="basic.background.name" class="form-control" style="width:100%;" onchange="toggleCustomBackground(this)">
-                ${bgSelect}
-                <option value="custom" ${bg.name && !backgroundOptions.includes(bg.name) ? 'selected' : ''}>Свой вариант</option>
+            <select name="basic.background.templateId" class="form-control" style="width:100%;" onchange="fillBackgroundFromTemplate(this)">
+                <option value="">-- Выберите предысторию --</option>
+                ${backgroundTemplates.map(t => `<option value="${t.id}" ${bg.templateId == t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
             </select>
-            <input type="text" id="custom-background" class="form-control" style="width:100%; margin-top:5px; ${bg.name && !backgroundOptions.includes(bg.name) ? '' : 'display:none;'}" placeholder="Введите свою предысторию" value="${bg.name && !backgroundOptions.includes(bg.name) ? escapeHtml(bg.name) : ''}">
         </div>
         <div style="display: flex; gap: 10px; margin-bottom: 10px;">
             <div style="flex: 1;">
@@ -293,33 +366,49 @@ async function renderBasicTab(data) {
             </div>
             <button type="button" class="btn btn-sm" onclick="addBackgroundSkillBonus()">+ Добавить бонус навыка</button>
         </div>
+        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateBackgroundTemplateModal()" style="margin-top:10px;">➕ Создать кастомную предысторию</button>` : ''}
 
         <hr>
         <h4>Снаряжение</h4>
-        <div style="display: flex; gap: 20px; margin-bottom: 15px; flex-wrap: wrap;">
-            <div>
+        <div style="display: grid; grid-template-columns: 120px 1fr 1fr; gap: 20px; margin-bottom: 15px; align-items: start;">
+            <!-- Деньги -->
+            <div style="display: flex; flex-direction: column; gap: 5px;">
                 <label class="money-label">Деньги</label>
                 <input type="number" class="form-control number-input" name="inventory.money" value="${inv.money || 0}" style="width: 100px;">
             </div>
-            <div style="display: flex; flex-direction: column;">
-                <label>Детектор аномалий</label>
-                <select name="inventory.detectors.anomaly.templateId" class="form-control" style="width: 150px;">
-                    <option value="">-- Выберите --</option>
-                    ${detectorTemplates.filter(t => t.type === 'anomaly').map(t =>
-                        `<option value="${t.id}" ${inv.detectors?.anomaly?.templateId === t.id ? 'selected' : ''}>${t.name}</option>`
-                    ).join('')}
-                </select>
-                <input type="number" class="form-control number-input" name="inventory.detectors.anomaly.bonus" value="${inv.detectors?.anomaly?.bonus || 0}" placeholder="Бонус" style="width: 70px; margin-top: 5px;">
+
+            <!-- Детектор аномалий -->
+            <div style="display: grid; grid-template-columns: 1fr auto; gap: 10px;">
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                    <span>Детектор аномалий</span>
+                    <select name="inventory.detectors.anomaly.templateId" class="form-control" style="width: 100%; height: 38px;">
+                        <option value="">-- Выберите --</option>
+                        ${detectorTemplates.filter(t => t.attributes?.type === 'anomaly').map(t =>
+                            `<option value="${t.id}" ${inv.detectors?.anomaly?.templateId == t.id ? 'selected' : ''}>${t.name}</option>`
+                        ).join('')}
+                    </select>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                    <span>Бонус</span>
+                    <input type="number" class="form-control number-input" name="inventory.detectors.anomaly.bonus" value="${inv.detectors?.anomaly?.bonus || 0}" placeholder="0" style="width: 70px; height: 38px;">
+                </div>
             </div>
-            <div style="display: flex; flex-direction: column;">
-                <label>Детектор артефактов</label>
-                <select name="inventory.detectors.artifact.templateId" class="form-control" style="width: 150px;">
-                    <option value="">-- Выберите --</option>
-                    ${detectorTemplates.filter(t => t.type === 'artifact').map(t =>
-                        `<option value="${t.id}" ${inv.detectors?.artifact?.templateId === t.id ? 'selected' : ''}>${t.name}</option>`
-                    ).join('')}
-                </select>
-                <input type="number" class="form-control number-input" name="inventory.detectors.artifact.bonus" value="${inv.detectors?.artifact?.bonus || 0}" placeholder="Бонус" style="width: 70px; margin-top: 5px;">
+
+            <!-- Детектор артефактов -->
+            <div style="display: grid; grid-template-columns: 1fr auto; gap: 10px;">
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                    <span>Детектор артефактов</span>
+                    <select name="inventory.detectors.artifact.templateId" class="form-control" style="width: 100%;">
+                        <option value="">-- Выберите --</option>
+                        ${detectorTemplates.filter(t => t.attributes?.type === 'artifact').map(t =>
+                            `<option value="${t.id}" ${inv.detectors?.artifact?.templateId == t.id ? 'selected' : ''}>${t.name}</option>`
+                        ).join('')}
+                    </select>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                    <span>Бонус</span>
+                    <input type="number" class="form-control number-input" name="inventory.detectors.artifact.bonus" value="${inv.detectors?.artifact?.bonus || 0}" placeholder="0" style="width: 70px; height: 38px;">
+                </div>
             </div>
         </div>
         <button type="button" class="btn btn-sm btn-secondary" onclick="addContainer()" style="margin-top: 10px; margin-bottom: 10px;">+ Добавить контейнер</button>
@@ -336,7 +425,7 @@ async function renderBasicTab(data) {
                             <option value="">-- Выберите --</option>
                             ${options}
                         </select>
-                        <input type="text" class="form-control" name="inventory.containers.${idx}.effect" value="${escapeHtml(cont.effect || selectedTemplate?.effect || '')}" placeholder="Содержимое" style="width: 150px; margin-top: 5px;">
+                        <input type="text" class="form-control" name="inventory.containers.${idx}.effect" value="${escapeHtml(cont.effect || selectedTemplate?.attributes?.effect || '')}" placeholder="Содержимое" style="width: 150px; margin-top: 5px;">
                         <button type="button" class="btn btn-sm btn-danger" onclick="removeContainer(${idx})" style="position: absolute; top: 0; right: -30px;">✕</button>
                     </div>
                 `;
@@ -347,7 +436,6 @@ async function renderBasicTab(data) {
     // Правая колонка со здоровьем
     let rightHtml = `<div id="health-right-column"></div>`;
 
-    // Общий HTML с двумя колонками
     let html = `
         <div style="display: flex; gap: 20px;">
             <div style="flex: 1;">${leftHtml}</div>
@@ -358,17 +446,145 @@ async function renderBasicTab(data) {
 
     const healthContainer = document.getElementById('health-right-column');
     renderHealthTab(data, healthContainer);
-
-    window.toggleCustomBackground = function(select) {
-        const customInput = document.getElementById('custom-background');
-        if (select.value === 'custom') {
-            customInput.style.display = 'block';
-        } else {
-            customInput.style.display = 'none';
-        }
-    };
 }
 
+window.fillBackgroundFromTemplate = async function(select) {
+    const selectedId = parseInt(select.value, 10);
+    if (isNaN(selectedId)) {
+        // Пустой выбор — очищаем поля
+        const plusesInput = document.querySelector('textarea[name="basic.background.pluses"]');
+        const minusesInput = document.querySelector('textarea[name="basic.background.minuses"]');
+        if (plusesInput) plusesInput.value = '';
+        if (minusesInput) minusesInput.value = '';
+        document.getElementById('background-skill-bonuses').innerHTML = '';
+        if (currentCharacterData.basic?.background) {
+            delete currentCharacterData.basic.background.templateId;
+            delete currentCharacterData.basic.background.name;
+            delete currentCharacterData.basic.background.pluses;
+            delete currentCharacterData.basic.background.minuses;
+            delete currentCharacterData.basic.background.skillBonuses;
+        }
+        scheduleAutoSave();
+        return;
+    }
+
+    const templates = await loadTemplatesForLobby('background');
+    const template = templates.find(t => t.id === selectedId);
+    if (!template) return;
+
+    // Заполняем поля
+    const plusesInput = document.querySelector('textarea[name="basic.background.pluses"]');
+    const minusesInput = document.querySelector('textarea[name="basic.background.minuses"]');
+    if (plusesInput) plusesInput.value = template.attributes?.pluses || '';
+    if (minusesInput) minusesInput.value = template.attributes?.minuses || '';
+
+    // Обновляем бонусы к навыкам
+    const skillBonuses = template.attributes?.skillBonuses || [];
+    const container = document.getElementById('background-skill-bonuses');
+    container.innerHTML = '';
+    skillBonuses.forEach((bonus, index) => {
+        const div = document.createElement('div');
+        div.style.display = 'flex';
+        div.style.gap = '5px';
+        div.style.alignItems = 'center';
+        div.style.marginBottom = '5px';
+        div.innerHTML = `
+            <select name="basic.background.skillBonuses.${index}.skill" class="form-control" style="flex:2;">
+                ${skillCategories.map(cat => `<option value="${cat.path}" ${bonus.skill === cat.path ? 'selected' : ''}>${cat.label}</option>`).join('')}
+            </select>
+            <input type="number" class="form-control number-input" name="basic.background.skillBonuses.${index}.bonus" value="${bonus.bonus || 0}" style="width: 60px;" placeholder="Бонус">
+            <button type="button" class="btn btn-sm btn-danger" onclick="removeBackgroundSkillBonus(${index})">✕</button>
+        `;
+        container.appendChild(div);
+    });
+
+    // Сохраняем в данные
+    if (!currentCharacterData.basic) currentCharacterData.basic = {};
+    if (!currentCharacterData.basic.background) currentCharacterData.basic.background = {};
+    currentCharacterData.basic.background.templateId = template.id;
+    currentCharacterData.basic.background.name = template.name;
+    currentCharacterData.basic.background.pluses = template.attributes?.pluses || '';
+    currentCharacterData.basic.background.minuses = template.attributes?.minuses || '';
+    currentCharacterData.basic.background.skillBonuses = skillBonuses;
+
+    scheduleAutoSave();
+};
+
+// ========== МОДАЛЬНОЕ ОКНО ДЛЯ КАСТОМНОЙ ПРЕДЫСТОРИИ ==========
+window.openCreateBackgroundTemplateModal = function() {
+    let modal = document.getElementById('create-background-template-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'create-background-template-modal';
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+                <span class="close" onclick="document.getElementById('create-background-template-modal').style.display='none'">&times;</span>
+                <h3>Создать кастомную предысторию</h3>
+                <div class="form-group">
+                    <label>Название</label>
+                    <input type="text" id="background-name" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label>Плюсы</label>
+                    <textarea id="background-pluses" class="form-control" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Минусы</label>
+                    <textarea id="background-minuses" class="form-control" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Бонусы к навыкам (JSON-массив)</label>
+                    <textarea id="background-skillBonuses" class="form-control" rows="5">[]</textarea>
+                    <small>Формат: [{"skill": "physical.strength", "bonus": 2}, ...]</small>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="saveBackgroundTemplate()">Сохранить</button>
+                    <button class="btn btn-secondary" onclick="document.getElementById('create-background-template-modal').style.display='none'">Отмена</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    }
+    modal.style.display = 'flex';
+};
+
+window.saveBackgroundTemplate = async function() {
+    const attributes = {
+        pluses: document.getElementById('background-pluses').value,
+        minuses: document.getElementById('background-minuses').value,
+        skillBonuses: JSON.parse(document.getElementById('background-skillBonuses').value || '[]')
+    };
+    const data = {
+        name: document.getElementById('background-name').value,
+        category: 'background',
+        subcategory: null,
+        price: 0,
+        weight: 0,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
+        body: JSON.stringify(data)
+    });
+    if (response.ok) {
+        clearTemplatesCache('background');
+        clearAllTemplatesCache();
+        await renderBasicTab(currentCharacterData);
+        document.getElementById('create-background-template-modal').style.display = 'none';
+        showNotification('Шаблон предыстории создан', 'success');
+    } else {
+        const err = await response.json();
+        showNotification(err.message);
+    }
+};
+
+// Функции для контейнеров (без изменений)
 window.addContainer = function() {
     updateDataFromFields();
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
@@ -556,7 +772,7 @@ async function renderSkillsTab(data) {
     // Загружаем шаблоны особых черт
     let specialTraitTemplates = [];
     try {
-        specialTraitTemplates = await loadTemplatesForLobby('special_traits');
+        specialTraitTemplates = await loadTemplatesForLobby('special_trait');
     } catch (e) {
         console.error('Failed to load special trait templates', e);
     }
@@ -671,8 +887,6 @@ async function renderSkillsTab(data) {
     renderSpecialTraits(data.features?.specialTraits || [], specialTraitTemplates);
 }
 
-// static/js/characterSheet.js — обновлённая функция renderSpecialTraits без поля "Название"
-
 function renderSpecialTraits(traits, templates) {
     const container = document.getElementById('special-traits-container');
     if (!container) return;
@@ -703,7 +917,7 @@ function renderSpecialTraits(traits, templates) {
     window.fillTraitFromTemplate = async function(select, index) {
         const selectedId = parseInt(select.value, 10);
         if (isNaN(selectedId)) {
-            // Пустой выбор — очищаем поля и удаляем привязку к шаблону
+            // Пустой выбор — очищаем поля
             const effectInput = document.querySelector(`[name="features.specialTraits.${index}.effect"]`);
             const costInput = document.querySelector(`[name="features.specialTraits.${index}.cost"]`);
             if (effectInput) effectInput.value = '';
@@ -718,23 +932,21 @@ function renderSpecialTraits(traits, templates) {
             return;
         }
 
-        const templates = await loadTemplatesForLobby('special_traits');
+        const templates = await loadTemplatesForLobby('special_trait');
         const template = templates.find(t => t.id === selectedId);
         if (!template) return;
 
-        // Обновляем отображаемые поля
         const effectInput = document.querySelector(`[name="features.specialTraits.${index}.effect"]`);
         const costInput = document.querySelector(`[name="features.specialTraits.${index}.cost"]`);
-        if (effectInput) effectInput.value = template.effect;
-        if (costInput) costInput.value = template.cost;
+        if (effectInput) effectInput.value = template.attributes?.effect || '';
+        if (costInput) costInput.value = template.attributes?.cost || 0;
 
-        // Сохраняем данные (название только в данных)
         if (!currentCharacterData.features) currentCharacterData.features = {};
         if (!currentCharacterData.features.specialTraits) currentCharacterData.features.specialTraits = [];
         const trait = currentCharacterData.features.specialTraits[index];
         trait.name = template.name;
-        trait.effect = template.effect;
-        trait.cost = template.cost;
+        trait.effect = template.attributes?.effect || '';
+        trait.cost = template.attributes?.cost || 0;
         trait.templateId = template.id;
 
         scheduleAutoSave();
@@ -749,7 +961,6 @@ window.addSpecialTrait = function() {
         currentCharacterData.features.specialTraits = [];
     }
     currentCharacterData.features.specialTraits.push({ name: '', effect: '', cost: 0 });
-    // Перерисовываем вкладку навыков, чтобы обновился список
     renderSkillsTab(currentCharacterData);
     scheduleAutoSave();
 };
@@ -797,13 +1008,20 @@ window.openCreateSpecialTraitTemplateModal = function() {
 };
 
 window.saveSpecialTraitTemplate = async function() {
-    const data = {
-        name: document.getElementById('special-trait-name').value,
+    const attributes = {
         effect: document.getElementById('special-trait-effect').value,
         cost: parseInt(document.getElementById('special-trait-cost').value) || 0
     };
-
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/special_traits`, {
+    const data = {
+        name: document.getElementById('special-trait-name').value,
+        category: 'special_trait',
+        subcategory: null,
+        price: 0,
+        weight: 0,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -812,7 +1030,7 @@ window.saveSpecialTraitTemplate = async function() {
         body: JSON.stringify(data)
     });
     if (response.ok) {
-        clearTemplatesCache('special_traits');
+        clearTemplatesCache('special_trait');
         await renderSkillsTab(currentCharacterData);
         document.getElementById('create-special-trait-template-modal').style.display = 'none';
         showNotification('Шаблон особой черты создан', 'success');
@@ -822,7 +1040,7 @@ window.saveSpecialTraitTemplate = async function() {
     }
 };
 
-// ---------- Вкладка Экипировка ----------
+// ========== ВКЛАДКА ЭКИПИРОВКА ==========
 async function renderEquipmentTab(data) {
     const container = document.getElementById('sheet-tab-equipment');
     const eq = data.equipment || {};
@@ -858,30 +1076,33 @@ async function renderEquipmentTab(data) {
         `;
     }
 
+    // Загружаем шаблоны по категориям
     let weaponTemplates = [], helmetTemplates = [], gasMaskTemplates = [], armorTemplates = [];
     let modificationTemplates = [], containerTemplates = [], vestTemplates = [], pouchTemplates = [];
     try {
-        weaponTemplates = await loadTemplatesForLobby('weapons');
-        helmetTemplates = await loadTemplatesForLobby('helmets');
-        gasMaskTemplates = await loadTemplatesForLobby('gas_masks');
+        weaponTemplates = await loadTemplatesForLobby('weapon');
+        helmetTemplates = await loadTemplatesForLobby('helmet');
+        gasMaskTemplates = await loadTemplatesForLobby('gas_mask');
         armorTemplates = await loadTemplatesForLobby('armor');
-        modificationTemplates = await loadTemplatesForLobby('modifications');
-        containerTemplates = await loadTemplatesForLobby('containers');
+        modificationTemplates = await loadTemplatesForLobby('modification');
+        containerTemplates = await loadTemplatesForLobby('container');
+        // Для подсумков и разгрузок пока используем заглушки
     } catch (e) {
         console.error('Failed to load templates', e);
     }
 
-    const helmetModTemplates = modificationTemplates.filter(t => t.type === 'helmet');
-    const gasMaskModTemplates = modificationTemplates.filter(t => t.type === 'gas_mask');
-    const armorModTemplates = modificationTemplates.filter(t => t.type === 'armor');
-    const pdaModTemplates = modificationTemplates.filter(t => t.type === 'pda');
-    const weaponModuleTemplates = modificationTemplates.filter(t => t.type === 'weapon_module' || t.category === 'module');
-    const weaponModTemplates = modificationTemplates.filter(t => t.type === 'weapon_modification' || t.category === 'modification');
+    // Фильтруем модификации по типу (хранится в attributes.type)
+    const helmetModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'helmet');
+    const gasMaskModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'gas_mask');
+    const armorModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'armor');
+    const pdaModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'pda');
+    const weaponModuleTemplates = modificationTemplates.filter(t => t.attributes?.type === 'weapon_module' || t.attributes?.category === 'module');
+    const weaponModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'weapon_modification' || t.attributes?.category === 'modification');
 
     function groupByCategory(templates) {
         const grouped = {};
         templates.forEach(t => {
-            const cat = t.category || 'Прочее';
+            const cat = t.subcategory || 'Прочее';
             if (!grouped[cat]) grouped[cat] = [];
             grouped[cat].push(t);
         });
@@ -893,6 +1114,7 @@ async function renderEquipmentTab(data) {
     const groupedArmorMods = groupByCategory(armorModTemplates);
     const groupedPdaMods = groupByCategory(pdaModTemplates);
 
+    // Генерация HTML для каждого блока (шаблоны теперь через attributes)
     let html = `
         <!-- Шлем -->
         <div class="equipment-group">
@@ -907,7 +1129,7 @@ async function renderEquipmentTab(data) {
                         <label style="text-align: center; width: 100%;">Название</label>
                         <select name="equipment.helmet.templateId" class="form-control" onchange="fillHelmetFromPreset(this)">
                             <option value="">-- Выберите --</option>
-                            ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId === t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
+                            ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                         </select>
                     </div>
                     <div class="field-group field-number">
@@ -969,7 +1191,7 @@ async function renderEquipmentTab(data) {
                         <label style="text-align: center; width: 100%;">Название</label>
                         <select name="equipment.gasMask.templateId" class="form-control" onchange="fillGasMaskFromPreset(this)">
                             <option value="">-- Выберите --</option>
-                            ${gasMaskTemplates.map(t => `<option value="${t.id}" ${gasMask.templateId === t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
+                            ${gasMaskTemplates.map(t => `<option value="${t.id}" ${gasMask.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                         </select>
                     </div>
                     <div class="field-group field-checkbox">
@@ -1039,7 +1261,7 @@ async function renderEquipmentTab(data) {
                         <label style="text-align: center; width: 100%;">Название</label>
                         <select name="equipment.armor.templateId" class="form-control" onchange="fillArmorFromPreset(this)">
                             <option value="">-- Выберите --</option>
-                            ${armorTemplates.map(t => `<option value="${t.id}" ${armor.templateId === t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
+                            ${armorTemplates.map(t => `<option value="${t.id}" ${armor.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                         </select>
                     </div>
                     <div class="field-group field-number">
@@ -1108,7 +1330,7 @@ async function renderEquipmentTab(data) {
             <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltPouch()">+ Добавить подсумок</button>
             <h5 style="margin-top: 15px;">Модификации пояса</h5>
             <div id="belt-modifications-container">
-                ${renderBeltModifications(eq.belt?.modifications || [], modificationTemplates.filter(t => t.type === 'belt'))}
+                ${renderBeltModifications(eq.belt?.modifications || [], modificationTemplates.filter(t => t.attributes?.type === 'belt'))}
             </div>
             <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltModification()">+ Добавить модификацию</button>
         </div>
@@ -1335,28 +1557,28 @@ function renderPdaModifications(items, groupedTemplates) {
     return html;
 }
 
-// Рендер оружия (без изменений, как в предыдущей версии)
+// Рендер оружия
 async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponModTemplates) {
     const container = document.getElementById('weapons-container');
     if (!container) return;
 
     const groupedWeapons = {};
     weaponTemplates.forEach(t => {
-        const cat = t.category || 'Прочее';
+        const cat = t.subcategory || 'Прочее';
         if (!groupedWeapons[cat]) groupedWeapons[cat] = [];
         groupedWeapons[cat].push(t);
     });
 
     const groupedModules = {};
     moduleTemplates.forEach(t => {
-        const cat = t.category || 'Прочее';
+        const cat = t.subcategory || 'Прочее';
         if (!groupedModules[cat]) groupedModules[cat] = [];
         groupedModules[cat].push(t);
     });
 
     const groupedMods = {};
     weaponModTemplates.forEach(t => {
-        const cat = t.category || 'Прочее';
+        const cat = t.subcategory || 'Прочее';
         if (!groupedMods[cat]) groupedMods[cat] = [];
         groupedMods[cat].push(t);
     });
@@ -1475,7 +1697,6 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
     container.innerHTML = weaponsHtml.join('');
 }
 
-// Глобальные функции выбора модели оружия
 window.selectWeaponModel = async function(index) {
     const select = document.getElementById(`weapon-model-select-${index}`);
     const selectedId = parseInt(select.value, 10);
@@ -1484,49 +1705,48 @@ window.selectWeaponModel = async function(index) {
     if (!currentCharacterData.weapons) currentCharacterData.weapons = [];
     const weapon = currentCharacterData.weapons[index];
 
-    const templates = await loadTemplatesForLobby('weapons');
+    const templates = await loadTemplatesForLobby('weapon');
     const template = templates.find(t => t.id === selectedId);
-    if (template) {
-        weapon.magazine = template.magazine_size || '';
-        weapon.accuracy = template.accuracy;
-        weapon.noise = template.noise;
-        weapon.ammo = template.ammo;
-        weapon.range = template.range;
-        weapon.ergonomics = template.ergonomics;
-        weapon.burst = template.burst;
-        weapon.damage = template.damage;
-        weapon.durability = template.durability;
-        weapon.fireRate = template.fire_rate;
-        weapon.weight = template.weight;
-        weapon.name = template.name;
-        weapon.model = template.name;
-        weapon.source = template.source;
-    } else {
-        weapon.model = 'selected';
-    }
+    if (!template) return;
+
+    const mapping = {
+        'magazine': 'magazine_size',
+        'accuracy': 'accuracy',
+        'noise': 'noise',
+        'ammo': 'ammo',
+        'range': 'range',
+        'ergonomics': 'ergonomics',
+        'burst': 'burst',
+        'damage': 'damage',
+        'durability': 'durability',
+        'fireRate': 'fire_rate',
+        'weight': 'weight'
+    };
+    applyTemplateToObject(weapon, template, mapping);
+    weapon.model = template.name;
 
     await renderEquipmentTab(currentCharacterData);
     scheduleAutoSave();
 };
 
-// Функции заполнения пресетов (теперь используют templateId)
 window.fillHelmetFromPreset = async function(select) {
     const selectedId = parseInt(select.value, 10);
     if (isNaN(selectedId)) return;
 
-    const templates = await loadTemplatesForLobby('helmets');
+    const templates = await loadTemplatesForLobby('helmet');
     const template = templates.find(t => t.id === selectedId);
     if (!template) return;
 
     const helmet = currentCharacterData.equipment?.helmet || {};
-    helmet.templateId = template.id;
-    helmet.maxDurability = template.max_durability;
-    helmet.material = template.material;
-    helmet.accuracyPenalty = template.accuracy_penalty;
-    helmet.ergonomicsPenalty = template.ergonomics_penalty;
-    helmet.charismaBonus = template.charisma_bonus;
-    helmet.protection = template.protection;
-    helmet.name = template.name;
+    const mapping = {
+        'maxDurability': 'max_durability',
+        'material': 'material',
+        'accuracyPenalty': 'accuracy_penalty',
+        'ergonomicsPenalty': 'ergonomics_penalty',
+        'charismaBonus': 'charisma_bonus',
+        'protection': 'protection'
+    };
+    applyTemplateToObject(helmet, template, mapping);
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.helmet = helmet;
     await renderEquipmentTab(currentCharacterData);
@@ -1537,20 +1757,21 @@ window.fillGasMaskFromPreset = async function(select) {
     const selectedId = parseInt(select.value, 10);
     if (isNaN(selectedId)) return;
 
-    const templates = await loadTemplatesForLobby('gas_masks');
+    const templates = await loadTemplatesForLobby('gas_mask');
     const template = templates.find(t => t.id === selectedId);
     if (!template) return;
 
     const gasMask = currentCharacterData.equipment?.gasMask || {};
-    gasMask.templateId = template.id;
-    gasMask.maxDurability = template.max_durability;
-    gasMask.filterRemaining = template.filter_capacity;
-    gasMask.material = template.material;
-    gasMask.accuracyPenalty = template.accuracy_penalty;
-    gasMask.ergonomicsPenalty = template.ergonomics_penalty;
-    gasMask.charismaBonus = template.charisma_bonus;
-    gasMask.protection = template.protection;
-    gasMask.name = template.name;
+    const mapping = {
+        'maxDurability': 'max_durability',
+        'filterRemaining': 'filter_capacity',
+        'material': 'material',
+        'accuracyPenalty': 'accuracy_penalty',
+        'ergonomicsPenalty': 'ergonomics_penalty',
+        'charismaBonus': 'charisma_bonus',
+        'protection': 'protection'
+    };
+    applyTemplateToObject(gasMask, template, mapping);
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.gasMask = gasMask;
     await renderEquipmentTab(currentCharacterData);
@@ -1566,13 +1787,14 @@ window.fillArmorFromPreset = async function(select) {
     if (!template) return;
 
     const armor = currentCharacterData.equipment?.armor || {};
-    armor.templateId = template.id;
-    armor.maxDurability = template.max_durability;
-    armor.material = template.material;
-    armor.movementPenalty = template.movement_penalty;
-    armor.containerSlots = template.container_slots;
-    armor.protection = template.protection;
-    armor.name = template.name;
+    const mapping = {
+        'maxDurability': 'max_durability',
+        'material': 'material',
+        'movementPenalty': 'movement_penalty',
+        'containerSlots': 'container_slots',
+        'protection': 'protection'
+    };
+    applyTemplateToObject(armor, template, mapping);
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.armor = armor;
     await renderEquipmentTab(currentCharacterData);
@@ -1780,8 +2002,7 @@ window.openCreateHelmetTemplateModal = function() {
 };
 
 window.saveHelmetTemplate = async function() {
-    const data = {
-        name: document.getElementById('helmet-name').value,
+    const attributes = {
         material: document.getElementById('helmet-material').value,
         max_durability: parseInt(document.getElementById('helmet-maxDurability').value) || 1,
         accuracy_penalty: parseInt(document.getElementById('helmet-accuracyPenalty').value) || 0,
@@ -1789,8 +2010,16 @@ window.saveHelmetTemplate = async function() {
         charisma_bonus: parseInt(document.getElementById('helmet-charismaBonus').value) || 0,
         protection: JSON.parse(document.getElementById('helmet-protection').value || '{}')
     };
-
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/helmets`, {
+    const data = {
+        name: document.getElementById('helmet-name').value,
+        category: 'helmet',
+        subcategory: null,
+        price: 0,
+        weight: 0,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -1799,7 +2028,8 @@ window.saveHelmetTemplate = async function() {
         body: JSON.stringify(data)
     });
     if (response.ok) {
-        clearTemplatesCache('helmets');
+        clearTemplatesCache('helmet');
+        clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-helmet-template-modal').style.display = 'none';
         showNotification('Шаблон шлема создан', 'success');
@@ -1863,8 +2093,7 @@ window.openCreateGasMaskTemplateModal = function() {
 };
 
 window.saveGasMaskTemplate = async function() {
-    const data = {
-        name: document.getElementById('gasMask-name').value,
+    const attributes = {
         material: document.getElementById('gasMask-material').value,
         max_durability: parseInt(document.getElementById('gasMask-maxDurability').value) || 1,
         filter_capacity: parseInt(document.getElementById('gasMask-filterCapacity').value) || 0,
@@ -1873,8 +2102,16 @@ window.saveGasMaskTemplate = async function() {
         charisma_bonus: parseInt(document.getElementById('gasMask-charismaBonus').value) || 0,
         protection: JSON.parse(document.getElementById('gasMask-protection').value || '{}')
     };
-
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/gas_masks`, {
+    const data = {
+        name: document.getElementById('gasMask-name').value,
+        category: 'gas_mask',
+        subcategory: null,
+        price: 0,
+        weight: 0,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -1883,7 +2120,8 @@ window.saveGasMaskTemplate = async function() {
         body: JSON.stringify(data)
     });
     if (response.ok) {
-        clearTemplatesCache('gas_masks');
+        clearTemplatesCache('gas_mask');
+        clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-gasMask-template-modal').style.display = 'none';
         showNotification('Шаблон противогаза создан', 'success');
@@ -1939,16 +2177,23 @@ window.openCreateArmorTemplateModal = function() {
 };
 
 window.saveArmorTemplate = async function() {
-    const data = {
-        name: document.getElementById('armor-name').value,
+    const attributes = {
         material: document.getElementById('armor-material').value,
         max_durability: parseInt(document.getElementById('armor-maxDurability').value) || 1,
         movement_penalty: parseInt(document.getElementById('armor-movementPenalty').value) || 0,
         container_slots: parseInt(document.getElementById('armor-containerSlots').value) || 0,
         protection: JSON.parse(document.getElementById('armor-protection').value || '{}')
     };
-
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/armor`, {
+    const data = {
+        name: document.getElementById('armor-name').value,
+        category: 'armor',
+        subcategory: null,
+        price: 0,
+        weight: 0,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -1958,6 +2203,7 @@ window.saveArmorTemplate = async function() {
     });
     if (response.ok) {
         clearTemplatesCache('armor');
+        clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-armor-template-modal').style.display = 'none';
         showNotification('Шаблон брони создан', 'success');
@@ -1982,7 +2228,7 @@ window.openCreateWeaponTemplateModal = function(weaponIndex) {
                     <input type="text" id="template-name" class="form-control">
                 </div>
                 <div class="form-group">
-                    <label>Категория</label>
+                    <label>Категория (подтип)</label>
                     <input type="text" id="template-category" class="form-control" placeholder="например, пистолеты">
                 </div>
                 <div class="form-group">
@@ -2045,9 +2291,7 @@ window.openCreateWeaponTemplateModal = function(weaponIndex) {
 };
 
 window.saveWeaponTemplate = async function() {
-    const data = {
-        name: document.getElementById('template-name').value,
-        category: document.getElementById('template-category').value,
+    const attributes = {
         accuracy: parseInt(document.getElementById('template-accuracy').value) || 0,
         noise: parseInt(document.getElementById('template-noise').value) || 0,
         ammo: document.getElementById('template-ammo').value,
@@ -2061,8 +2305,16 @@ window.saveWeaponTemplate = async function() {
         caliber: document.getElementById('template-caliber').value,
         magazine_size: parseInt(document.getElementById('template-magazineSize').value) || 0
     };
-
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/weapons`, {
+    const data = {
+        name: document.getElementById('template-name').value,
+        category: 'weapon',
+        subcategory: document.getElementById('template-category').value || null,
+        price: 0,
+        weight: attributes.weight,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -2071,10 +2323,11 @@ window.saveWeaponTemplate = async function() {
         body: JSON.stringify(data)
     });
     if (response.ok) {
-        clearTemplatesCache('weapons');
+        clearTemplatesCache('weapon');
+        clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-weapon-template-modal').style.display = 'none';
-        showNotification('Шаблон создан', 'success');
+        showNotification('Шаблон оружия создан', 'success');
     } else {
         const err = await response.json();
         showNotification(err.message);
@@ -2115,13 +2368,20 @@ window.openCreateVestTemplateModal = function() {
 };
 
 window.saveVestTemplate = async function() {
-    const data = {
-        name: document.getElementById('vest-name').value,
+    const attributes = {
         total_capacity: parseInt(document.getElementById('vest-totalCapacity').value) || 0,
         pouches: JSON.parse(document.getElementById('vest-pouches').value || '[]')
     };
-
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/vests`, {
+    const data = {
+        name: document.getElementById('vest-name').value,
+        category: 'vest',
+        subcategory: null,
+        price: 0,
+        weight: 0,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -2130,7 +2390,8 @@ window.saveVestTemplate = async function() {
         body: JSON.stringify(data)
     });
     if (response.ok) {
-        clearTemplatesCache('vests');
+        clearTemplatesCache('vest');
+        clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-vest-template-modal').style.display = 'none';
         showNotification('Шаблон разгрузки создан', 'success');
@@ -2150,57 +2411,49 @@ async function renderInventoryTab(data) {
     const pocketMaxVolume = inv.pocketMaxVolume || 10;
     const pocketFill = pockets.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
 
-    // Загружаем шаблоны предметов и рюкзаков
-    let consumableTemplates = [];
-    let materialTemplates = [];
-    let artifactTemplates = [];
+    // Загружаем шаблоны рюкзаков (они нужны отдельно)
     let backpackTemplates = [];
     try {
-        consumableTemplates = await loadTemplatesForLobby('consumables');
-        materialTemplates = await loadTemplatesForLobby('crafting_materials');
-        artifactTemplates = await loadTemplatesForLobby('artifacts');
-        backpackTemplates = await loadTemplatesForLobby('backpacks');
+        backpackTemplates = await loadTemplatesForLobby('backpack');
         cachedBackpackTemplates = backpackTemplates;
     } catch (e) {
-        console.error('Failed to load inventory templates', e);
+        console.error('Failed to load backpack templates', e);
     }
 
-    // Объединяем все типы предметов для выбора в карманах/рюкзаке
-    const allItemTemplates = [
-        ...consumableTemplates.map(t => ({ ...t, category: 'Расходники' })),
-        ...materialTemplates.map(t => ({ ...t, category: 'Материалы' })),
-        ...artifactTemplates.map(t => ({ ...t, category: 'Артефакты' }))
-    ];
-    const groupedItems = {};
-    allItemTemplates.forEach(t => {
-        const cat = t.category || 'Прочее';
-        if (!groupedItems[cat]) groupedItems[cat] = [];
-        groupedItems[cat].push(t);
+    // Загружаем все возможные шаблоны предметов (для селекторов)
+    const allTemplates = await getAllItemTemplates();
+
+    // Группируем для удобного отображения в селекторах
+    const groupedByCategory = {};
+    allTemplates.forEach(t => {
+        const group = t.categoryDisplay || 'Прочее';
+        if (!groupedByCategory[group]) groupedByCategory[group] = [];
+        groupedByCategory[group].push(t);
     });
 
-    // Определяем текущий выбранный рюкзак
     const selectedBackpackId = inv.backpackModel ? parseInt(inv.backpackModel, 10) : null;
     const selectedBackpack = backpackTemplates.find(t => t.id === selectedBackpackId);
-    const backpackLimit = selectedBackpack ? selectedBackpack.limit : 0;
-    const backpackWeightReduction = selectedBackpack ? selectedBackpack.weight_reduction || 0 : 0;
+    const backpackLimit = selectedBackpack ? selectedBackpack.attributes?.limit || 0 : 0;
+    const backpackWeightReduction = selectedBackpack ? selectedBackpack.attributes?.weight_reduction || 0 : 0;
     const backpackFill = backpack.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
 
     const rawTotalWeight = pockets.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0) +
                            backpack.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0);
-    // Штраф от веса: 1 за каждые 5 кг
     const movePenaltyFromWeight = Math.floor(rawTotalWeight / 5);
-    // Итоговый штраф с учётом снижения от рюкзака
     const movePenalty = Math.max(0, movePenaltyFromWeight - backpackWeightReduction);
 
     let html = `
-        <!-- Вес и штраф -->
         <div style="display: flex; gap: 20px; margin-bottom: 15px;">
             <div><strong>Общий вес:</strong> <span id="total-weight-display">${rawTotalWeight}</span></div>
             <div><strong>Штраф перемещения:</strong> <span id="move-penalty-display">${movePenalty}</span></div>
         </div>
+        ${window.isGM ? `
+            <div style="margin-bottom: 15px; display: flex; gap: 10px;">
+                <button type="button" class="btn btn-sm btn-primary" onclick="openCreateInventoryItemModal()">➕ Создать предмет</button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateBackpackTemplateModal()">➕ Создать рюкзак</button>
+            </div>
+        ` : ''}
         <hr>
-
-        <!-- Карманы -->
         <h4>Карманы <span style="font-weight:normal;">(заполнено: <span id="pocket-fill-display">${pocketFill}</span> / <input type="number" class="form-control number-input" name="inventory.pocketMaxVolume" value="${pocketMaxVolume}" style="width:70px; display:inline;">)</span></h4>
         <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
@@ -2208,15 +2461,13 @@ async function renderInventoryTab(data) {
         <div id="pockets-container"></div>
         <button type="button" class="btn btn-sm btn-primary" onclick="addPocketItem()">+ Добавить в карманы</button>
 
-        <!-- Рюкзак -->
         <h4 style="margin-top:20px;">Рюкзак</h4>
         <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
             <label>Модель:</label>
             <select name="inventory.backpackModel" class="form-control" onchange="onBackpackModelChange(this)" style="width: 200px;">
                 <option value="">-- Без рюкзака --</option>
-                ${backpackTemplates.map(t => `<option value="${t.id}" ${selectedBackpackId === t.id ? 'selected' : ''}>${t.name} (лимит ${t.limit}, снижение веса ${t.weight_reduction || 0})</option>`).join('')}
+                ${backpackTemplates.map(t => `<option value="${t.id}" ${selectedBackpackId === t.id ? 'selected' : ''}>${t.name} (лимит ${t.attributes?.limit || 0}, снижение веса ${t.attributes?.weight_reduction || 0})</option>`).join('')}
             </select>
-            ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateBackpackTemplateModal()">➕ Создать кастом</button>` : ''}
             <span id="backpack-fill-display">Заполнено: ${backpackFill} / ${backpackLimit}</span>
         </div>
         <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
@@ -2227,19 +2478,187 @@ async function renderInventoryTab(data) {
     `;
 
     container.innerHTML = html;
-    renderPockets(pockets, groupedItems);
-    renderBackpack(backpack, groupedItems);
+    renderPockets(pockets, groupedByCategory);
+    renderBackpack(backpack, groupedByCategory);
 
-    // Обработчик изменений для автосохранения и пересчёта
     container.addEventListener('input', (e) => {
         const target = e.target;
         if (target.matches('input[name*="weight"], input[name*="volume"], input[name*="quantity"]')) {
             updateDataFromFields();
-            recalculateInventoryTotals(); // использует кешированные шаблоны
+            recalculateInventoryTotals();
             scheduleAutoSave();
         }
     });
 }
+
+// ========== МОДАЛЬНОЕ ОКНО ДЛЯ СОЗДАНИЯ ПРЕДМЕТА В ИНВЕНТАРЕ ==========
+let currentItemCategory = 'consumable'; // по умолчанию
+
+function showItemCategoryFields() {
+    document.getElementById('consumable-fields').style.display = 'none';
+    document.getElementById('material-fields').style.display = 'none';
+    document.getElementById('artifact-fields').style.display = 'none';
+
+    if (currentItemCategory === 'consumable') {
+        document.getElementById('consumable-fields').style.display = 'block';
+    } else if (currentItemCategory === 'material') {
+        document.getElementById('material-fields').style.display = 'block';
+    } else if (currentItemCategory === 'artifact') {
+        document.getElementById('artifact-fields').style.display = 'block';
+    }
+}
+
+window.openCreateInventoryItemModal = function() {
+    let modal = document.getElementById('create-inventory-item-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'create-inventory-item-modal';
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+                <span class="close" onclick="document.getElementById('create-inventory-item-modal').style.display='none'">&times;</span>
+                <h3>Создать кастомный предмет</h3>
+                <div class="form-group">
+                    <label>Категория</label>
+                    <select id="item-category-select" class="form-control" onchange="window.itemCategoryChanged(this)">
+                        <option value="consumable">Расходник</option>
+                        <option value="material">Материал</option>
+                        <option value="artifact">Артефакт</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Название</label>
+                    <input type="text" id="item-name" class="form-control">
+                </div>
+
+                <!-- Поля для расходника -->
+                <div id="consumable-fields" style="display: block;">
+                    <div class="form-group">
+                        <label>Вес</label>
+                        <input type="number" id="consumable-weight" class="form-control number-input" value="0" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Объём</label>
+                        <input type="number" id="consumable-volume" class="form-control number-input" value="0" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Эффект (JSON)</label>
+                        <textarea id="consumable-effect" class="form-control" rows="3">{}</textarea>
+                        <small>Например: {"heals": 25, "uses": 3}</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Количество использований</label>
+                        <input type="number" id="consumable-uses" class="form-control number-input" value="1">
+                    </div>
+                </div>
+
+                <!-- Поля для материала -->
+                <div id="material-fields" style="display: none;">
+                    <div class="form-group">
+                        <label>Вес</label>
+                        <input type="number" id="material-weight" class="form-control number-input" value="0" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Объём</label>
+                        <input type="number" id="material-volume" class="form-control number-input" value="0" step="0.1">
+                    </div>
+                </div>
+
+                <!-- Поля для артефакта -->
+                <div id="artifact-fields" style="display: none;">
+                    <div class="form-group">
+                        <label>Вес</label>
+                        <input type="number" id="artifact-weight" class="form-control number-input" value="0" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Объём</label>
+                        <input type="number" id="artifact-volume" class="form-control number-input" value="0" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Эффект</label>
+                        <input type="text" id="artifact-effect" class="form-control">
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="saveInventoryItemTemplate()">Сохранить</button>
+                    <button class="btn btn-secondary" onclick="document.getElementById('create-inventory-item-modal').style.display='none'">Отмена</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    }
+    // Сброс на категорию по умолчанию
+    document.getElementById('item-category-select').value = 'consumable';
+    window.itemCategoryChanged(document.getElementById('item-category-select'));
+    modal.style.display = 'flex';
+};
+
+window.itemCategoryChanged = function(select) {
+    currentItemCategory = select.value;
+    showItemCategoryFields();
+};
+
+window.saveInventoryItemTemplate = async function() {
+    const name = document.getElementById('item-name').value;
+    if (!name) {
+        showNotification('Введите название');
+        return;
+    }
+
+    let category, attributes;
+    if (currentItemCategory === 'consumable') {
+        category = 'consumable';
+        attributes = {
+            weight: parseFloat(document.getElementById('consumable-weight').value) || 0,
+            volume: parseFloat(document.getElementById('consumable-volume').value) || 0,
+            effect: JSON.parse(document.getElementById('consumable-effect').value || '{}'),
+            uses: parseInt(document.getElementById('consumable-uses').value) || 1
+        };
+    } else if (currentItemCategory === 'material') {
+        category = 'crafting_material';
+        attributes = {
+            weight: parseFloat(document.getElementById('material-weight').value) || 0,
+            volume: parseFloat(document.getElementById('material-volume').value) || 0
+        };
+    } else if (currentItemCategory === 'artifact') {
+        category = 'artifact';
+        attributes = {
+            weight: parseFloat(document.getElementById('artifact-weight').value) || 0,
+            volume: parseFloat(document.getElementById('artifact-volume').value) || 0,
+            effect: document.getElementById('artifact-effect').value
+        };
+    }
+
+    const data = {
+        name: name,
+        category: category,
+        subcategory: null,
+        price: 0,
+        weight: attributes.weight || 0,
+        volume: attributes.volume || 0,
+        attributes: attributes
+    };
+
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
+        body: JSON.stringify(data)
+    });
+    if (response.ok) {
+        // Очищаем кеш для всех затронутых категорий
+        clearAllTemplatesCache();
+        await renderInventoryTab(currentCharacterData);
+        document.getElementById('create-inventory-item-modal').style.display = 'none';
+        showNotification('Предмет создан', 'success');
+    } else {
+        const err = await response.json();
+        showNotification(err.message);
+    }
+};
 
 function recalculateInventoryTotals() {
     const inv = currentCharacterData.inventory || {};
@@ -2247,46 +2666,40 @@ function recalculateInventoryTotals() {
     const backpack = inv.backpack || [];
     const selectedBackpackId = inv.backpackModel ? parseInt(inv.backpackModel, 10) : null;
     const selectedBackpack = cachedBackpackTemplates.find(t => t.id === selectedBackpackId);
-    const backpackWeightReduction = selectedBackpack ? selectedBackpack.weight_reduction || 0 : 0;
+    const backpackWeightReduction = selectedBackpack ? selectedBackpack.attributes?.weight_reduction || 0 : 0;
+    const backpackLimit = selectedBackpack ? selectedBackpack.attributes?.limit || 0 : 0;
 
-    // Заполненность карманов
     const pocketFill = pockets.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
     const pocketFillSpan = document.querySelector('#pocket-fill-display');
     if (pocketFillSpan) pocketFillSpan.textContent = pocketFill;
 
-    // Заполненность рюкзака
     const backpackFill = backpack.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
-    const backpackLimit = selectedBackpack ? selectedBackpack.limit : 0;
     const backpackFillSpan = document.querySelector('#backpack-fill-display');
     if (backpackFillSpan) {
         backpackFillSpan.textContent = `Заполнено: ${backpackFill} / ${backpackLimit}`;
     }
 
-    // Общий вес (без учёта снижения)
     const rawTotalWeight = pockets.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0) +
                            backpack.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0);
     const totalWeightSpan = document.querySelector('#total-weight-display');
     if (totalWeightSpan) totalWeightSpan.textContent = rawTotalWeight;
 
-    // Штраф от веса
     const movePenaltyFromWeight = Math.floor(rawTotalWeight / 5);
     const movePenalty = Math.max(0, movePenaltyFromWeight - backpackWeightReduction);
     const movePenaltySpan = document.querySelector('#move-penalty-display');
     if (movePenaltySpan) movePenaltySpan.textContent = movePenalty;
 }
 
-// Обработчик изменения модели рюкзака
 window.onBackpackModelChange = async function(select) {
     updateDataFromFields();
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     currentCharacterData.inventory.backpackModel = select.value;
-    // Обновляем кеш, если вдруг изменился
-    cachedBackpackTemplates = await loadTemplatesForLobby('backpacks');
+    cachedBackpackTemplates = await loadTemplatesForLobby('backpack');
     recalculateInventoryTotals();
     scheduleAutoSave();
 };
 
-function renderPockets(pockets, groupedItems) {
+function renderPockets(pockets, groupedByCategory) {
     const container = document.getElementById('pockets-container');
     if (!container) return;
     container.innerHTML = '';
@@ -2303,7 +2716,8 @@ function renderPockets(pockets, groupedItems) {
 
         let nameCell;
         if (!hasTemplate) {
-            const options = Object.entries(groupedItems).map(([cat, items]) => `
+            // Строим селектор со всеми категориями
+            const options = Object.entries(groupedByCategory).map(([cat, items]) => `
                 <optgroup label="${cat}">
                     ${items.map(t => `<option value="${t.id}">${t.name}</option>`).join('')}
                 </optgroup>
@@ -2331,7 +2745,7 @@ function renderPockets(pockets, groupedItems) {
     });
 }
 
-function renderBackpack(backpack, groupedItems) {
+function renderBackpack(backpack, groupedByCategory) {
     const container = document.getElementById('backpack-container');
     if (!container) return;
     container.innerHTML = '';
@@ -2348,7 +2762,7 @@ function renderBackpack(backpack, groupedItems) {
 
         let nameCell;
         if (!hasTemplate) {
-            const options = Object.entries(groupedItems).map(([cat, items]) => `
+            const options = Object.entries(groupedByCategory).map(([cat, items]) => `
                 <optgroup label="${cat}">
                     ${items.map(t => `<option value="${t.id}">${t.name}</option>`).join('')}
                 </optgroup>
@@ -2376,27 +2790,29 @@ function renderBackpack(backpack, groupedItems) {
     });
 }
 
-// Функции выбора предмета из шаблона
 window.selectPocketItem = async function(index, selectedId) {
     const id = parseInt(selectedId, 10);
     if (isNaN(id)) return;
 
-    const consumables = await loadTemplatesForLobby('consumables');
-    const materials = await loadTemplatesForLobby('crafting_materials');
-    const artifacts = await loadTemplatesForLobby('artifacts');
-    const all = [...consumables, ...materials, ...artifacts];
-    const template = all.find(t => t.id === id);
+    const allTemplates = await getAllItemTemplates();
+    const template = allTemplates.find(t => t.id === id);
     if (!template) return;
 
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     if (!currentCharacterData.inventory.pockets) currentCharacterData.inventory.pockets = [];
     const item = currentCharacterData.inventory.pockets[index];
-    item.name = template.name;
-    item.weight = template.weight || 0;
-    item.volume = template.volume || 0;
-    item.templateId = template.id;
-    // Количество оставляем без изменений (не трогаем item.quantity)
 
+    // Сохраняем данные из шаблона
+    item.name = template.name;
+    item.templateId = template.id;
+    item.category = template.category;
+    item.weight = template.effectiveWeight;
+    item.volume = template.effectiveVolume;
+
+    // Для предметов с прочностью (броня) добавляем состояние по умолчанию
+    if (['armor', 'helmet', 'gas_mask'].includes(template.category)) {
+        item.condition = '1. Целая';
+    }
     await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
@@ -2405,21 +2821,23 @@ window.selectBackpackItem = async function(index, selectedId) {
     const id = parseInt(selectedId, 10);
     if (isNaN(id)) return;
 
-    const consumables = await loadTemplatesForLobby('consumables');
-    const materials = await loadTemplatesForLobby('crafting_materials');
-    const artifacts = await loadTemplatesForLobby('artifacts');
-    const all = [...consumables, ...materials, ...artifacts];
-    const template = all.find(t => t.id === id);
+    const allTemplates = await getAllItemTemplates();
+    const template = allTemplates.find(t => t.id === id);
     if (!template) return;
 
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
     const item = currentCharacterData.inventory.backpack[index];
+
     item.name = template.name;
-    item.weight = template.weight || 0;
-    item.volume = template.volume || 0;
     item.templateId = template.id;
-    // Количество не трогаем
+    item.category = template.category;
+    item.weight = template.effectiveWeight;
+    item.volume = template.effectiveVolume;
+
+    if (['armor', 'helmet', 'gas_mask'].includes(template.category)) {
+        item.condition = '1. Целая';
+    }
 
     await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
@@ -2459,13 +2877,20 @@ window.openCreateBackpackTemplateModal = function() {
 };
 
 window.saveBackpackTemplate = async function() {
-    const data = {
-        name: document.getElementById('backpack-name').value,
+    const attributes = {
         limit: parseInt(document.getElementById('backpack-limit').value) || 0,
         weight_reduction: parseInt(document.getElementById('backpack-weightReduction').value) || 0
     };
-
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates/backpacks`, {
+    const data = {
+        name: document.getElementById('backpack-name').value,
+        category: 'backpack',
+        subcategory: null,
+        price: 0,
+        weight: 0,
+        volume: 0,
+        attributes: attributes
+    };
+    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -2474,7 +2899,7 @@ window.saveBackpackTemplate = async function() {
         body: JSON.stringify(data)
     });
     if (response.ok) {
-        clearTemplatesCache('backpacks');
+        clearAllTemplatesCache();
         await renderInventoryTab(currentCharacterData);
         document.getElementById('create-backpack-template-modal').style.display = 'none';
         showNotification('Шаблон рюкзака создан', 'success');
@@ -2575,7 +3000,6 @@ export async function openCharacterSheet(characterId) {
         const socket = getSocket();
         if (socket) {
             socket.emit('join_character', { token: localStorage.getItem('access_token'), character_id: characterId });
-
             socket.off('character_data_updated');
             socket.on('character_data_updated', (data) => {
                 if (data.character_id === currentCharacterId && data.updated_by !== parseInt(localStorage.getItem('user_id'))) {
@@ -2648,8 +3072,6 @@ export function importCharacter(file) {
 
 window.rollSkill = function(skillPath, skillLabel) {
     if (!currentCharacterData) return;
-
-    // Получаем объект навыка по пути
     const parts = skillPath.split('.');
     let skillObj = currentCharacterData.skills;
     for (const part of parts) {
@@ -2657,35 +3079,21 @@ window.rollSkill = function(skillPath, skillLabel) {
         skillObj = skillObj[part];
     }
     if (!skillObj) return;
-
-    // Модификатор от собственной базы навыка (для всех)
     const base = skillObj.base;
     const selfMod = typeof base === 'number' ? Math.floor((base - 10) / 2) : 0;
-
-    // Модификатор харизмы (только для социальных навыков, кроме самой харизмы)
     let charismaMod = 0;
     if (skillPath.startsWith('social.') && skillPath !== 'social.charisma') {
         const charisma = currentCharacterData.skills?.social?.charisma;
         const charismaBase = charisma?.base;
         charismaMod = typeof charismaBase === 'number' ? Math.floor((charismaBase - 10) / 2) : 0;
     }
-
-    // Ручной бонус навыка
     const bonus = skillObj.bonus || 0;
-
-    // Бросок d20
     const dice = Math.floor(Math.random() * 20) + 1;
     const total = dice + selfMod + charismaMod + bonus;
-
-    // Формируем строку для вывода
     let modStr = `модификатор навыка = ${selfMod}`;
     if (charismaMod !== 0) modStr += ` + харизма = ${charismaMod}`;
     if (bonus !== 0) modStr += ` + бонус = ${bonus}`;
-
-    // Уведомление для игрока
     showNotification(`🎲 ${skillLabel}: бросок d20 = ${dice}, ${modStr}, итог = ${total}`, 'system');
-
-    // Отправка в чат
     const socket = getSocket();
     if (socket && currentLobbyId) {
         const message = `🎲 ${skillLabel}: бросок d20 = ${dice}, ${modStr}, итог = **${total}**`;
