@@ -1166,29 +1166,6 @@ input[type=number] {
   margin: 0;
 }
 
-/* Коррекция отступов для заголовка "Защита" (временный хак) */
-.equipment-group:nth-of-type(1) .protection-header { margin-left: -397px; }
-.equipment-group:nth-of-type(2) .protection-header { margin-left: -233px; }
-.equipment-group:nth-of-type(3) .protection-header { margin-left: -507px; }
-
-@media (max-width: 1680px) {
-    .equipment-group:nth-of-type(1) .protection-header { margin-left: -347px; }
-    .equipment-group:nth-of-type(2) .protection-header { margin-left: -200px; }
-    .equipment-group:nth-of-type(3) .protection-header { margin-left: -440px; }
-}
-
-@media (max-width: 1440px) {
-    .equipment-group:nth-of-type(1) .protection-header { margin-left: -297px; }
-    .equipment-group:nth-of-type(2) .protection-header { margin-left: -160px; }
-    .equipment-group:nth-of-type(3) .protection-header { margin-left: -390px; }
-}
-
-@media (max-width: 1280px) {
-    .equipment-group:nth-of-type(1) .protection-header { margin-left: -247px; }
-    .equipment-group:nth-of-type(2) .protection-header { margin-left: -120px; }
-    .equipment-group:nth-of-type(3) .protection-header { margin-left: -340px; }
-}
-
 #character-sheet-modal {
   z-index: 1000 !important;
 }

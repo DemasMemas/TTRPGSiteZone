@@ -2653,7 +2653,6 @@ window.openCreateInventoryItemModal = function() {
         modal = document.createElement('div');
         modal.id = 'create-inventory-item-modal';
         modal.className = 'modal';
-        modal.style.width = '500px';
         modal.style.display = 'flex';
         modal.style.alignItems = 'center';
         modal.style.justifyContent = 'center';
