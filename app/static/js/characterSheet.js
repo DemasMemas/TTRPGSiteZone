@@ -36,6 +36,27 @@ const skillCategories = [
     { label: 'Тактика', path: 'other.tactics' },
     { label: 'Выживание', path: 'other.survival' }
 ];
+const MATERIAL_OPTIONS = [
+    'Текстиль',
+    'Композит',
+    'Кевлар',
+    'Плита'
+];
+const PREDEFINED_EFFECTS = [
+    { type: "Исцеление", value: "+5 HP" },
+    { type: "Исцеление", value: "+10 HP" },
+    { type: "Исцеление", value: "+20 HP" },
+    { type: "Урон", value: "-5 HP" },
+    { type: "Урон", value: "-10 HP" },
+    { type: "Защита", value: "+1 к броне" },
+    { type: "Защита", value: "+2 к броне" },
+    { type: "Характеристика", value: "Сила +1" },
+    { type: "Характеристика", value: "Ловкость +1" },
+    { type: "Характеристика", value: "Выносливость +1" },
+    { type: "Характеристика", value: "Интеллект +1" },
+    { type: "Радиация", value: "-10 рад" },
+    { type: "Радиация", value: "-20 рад" }
+];
 
 // Универсальная загрузка шаблонов по категории
 async function loadTemplatesForLobby(category, subcategory = null) {
@@ -413,20 +434,20 @@ async function renderBasicTab(data) {
         </div>
         <button type="button" class="btn btn-sm btn-secondary" onclick="addContainer()" style="margin-top: 10px; margin-bottom: 10px;">+ Добавить контейнер</button>
         <h4>Контейнеры на броне</h4>
-        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <div style="display: flex; flex-direction: column; gap: 10px;">
             ${Array.isArray(inv.containers) ? inv.containers.map((cont, idx) => {
                 const selectedTemplate = containerTemplates.find(t => t.id === cont.templateId);
                 const options = containerTemplates.map(t =>
-                    `<option value="${t.id}" ${cont.templateId === t.id ? 'selected' : ''}>${t.name}</option>`
+                    `<option value="${t.id}" ${cont.templateId == t.id ? 'selected' : ''}>${t.name}</option>`
                 ).join('');
                 return `
-                    <div style="position: relative;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
                         <select name="inventory.containers.${idx}.templateId" class="form-control" style="width: 150px;">
                             <option value="">-- Выберите --</option>
                             ${options}
                         </select>
-                        <input type="text" class="form-control" name="inventory.containers.${idx}.effect" value="${escapeHtml(cont.effect || selectedTemplate?.attributes?.effect || '')}" placeholder="Содержимое" style="width: 150px; margin-top: 5px;">
-                        <button type="button" class="btn btn-sm btn-danger" onclick="removeContainer(${idx})" style="position: absolute; top: 0; right: -30px;">✕</button>
+                        <input type="text" class="form-control" name="inventory.containers.${idx}.effect" value="${escapeHtml(cont.effect || selectedTemplate?.attributes?.effect || '')}" placeholder="Содержимое" style="flex: 1;">
+                        <button type="button" class="btn btn-sm btn-danger" onclick="removeContainer(${idx})">✕</button>
                     </div>
                 `;
             }).join('') : ''}
@@ -534,9 +555,9 @@ window.openCreateBackgroundTemplateModal = function() {
                     <textarea id="background-minuses" class="form-control" rows="3"></textarea>
                 </div>
                 <div class="form-group">
-                    <label>Бонусы к навыкам (JSON-массив)</label>
-                    <textarea id="background-skillBonuses" class="form-control" rows="5">[]</textarea>
-                    <small>Формат: [{"skill": "physical.strength", "bonus": 2}, ...]</small>
+                    <label>Бонусы к навыкам</label>
+                    <div id="background-skill-bonuses-container"></div>
+                    <button type="button" class="btn btn-sm btn-primary" onclick="addBackgroundSkillBonusToModal()">+ Добавить бонус</button>
                 </div>
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="saveBackgroundTemplate()">Сохранить</button>
@@ -546,17 +567,51 @@ window.openCreateBackgroundTemplateModal = function() {
         `;
         document.body.appendChild(modal);
     }
+    // Очищаем список бонусов при открытии
+    const container = document.getElementById('background-skill-bonuses-container');
+    if (container) container.innerHTML = '';
     modal.style.display = 'flex';
 };
 
+window.addBackgroundSkillBonusToModal = function() {
+    const container = document.getElementById('background-skill-bonuses-container');
+    const div = document.createElement('div');
+    div.className = 'skill-bonus-item';
+    div.style.display = 'flex';
+    div.style.gap = '5px';
+    div.style.marginBottom = '5px';
+    div.innerHTML = `
+        <select class="form-control skill-select" style="flex:2;">
+            ${skillCategories.map(cat => `<option value="${cat.path}">${cat.label}</option>`).join('')}
+        </select>
+        <input type="number" class="form-control number-input bonus-input" placeholder="Бонус" value="0" style="width: 80px;">
+        <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">✕</button>
+    `;
+    container.appendChild(div);
+};
+
 window.saveBackgroundTemplate = async function() {
-    const attributes = {
-        pluses: document.getElementById('background-pluses').value,
-        minuses: document.getElementById('background-minuses').value,
-        skillBonuses: JSON.parse(document.getElementById('background-skillBonuses').value || '[]')
-    };
+    const name = document.getElementById('background-name').value;
+    const pluses = document.getElementById('background-pluses').value;
+    const minuses = document.getElementById('background-minuses').value;
+
+    const skillBonuses = [];
+    const items = document.querySelectorAll('#background-skill-bonuses-container .skill-bonus-item');
+    items.forEach(item => {
+        const skillSelect = item.querySelector('.skill-select');
+        const bonusInput = item.querySelector('.bonus-input');
+        if (skillSelect && bonusInput) {
+            const skill = skillSelect.value;
+            const bonus = parseInt(bonusInput.value) || 0;
+            if (skill && bonus !== 0) {
+                skillBonuses.push({ skill, bonus });
+            }
+        }
+    });
+
+    const attributes = { pluses, minuses, skillBonuses };
     const data = {
-        name: document.getElementById('background-name').value,
+        name: name,
         category: 'background',
         subcategory: null,
         price: 0,
@@ -669,33 +724,69 @@ function renderHealthTab(data, container = null) {
             </div>
             <hr>
             <h4>Зоны тела</h4>
-            <div class="zone-grid-vertical">
-    `;
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                <div></div>
+                <div class="zone-item-vertical">
+                    <div class="zone-label">Голова</div>
+                    <div class="zone-fields">
+                        <input type="number" class="number-input" name="health.zones.head.current" value="${(zones.head || {}).current || 0}" placeholder="Тек">
+                        <span class="slash">/</span>
+                        <input type="number" class="number-input" name="health.zones.head.max" value="${(zones.head || {}).max || 100}" placeholder="Макс">
+                    </div>
+                </div>
+                <div></div>
 
-    const zoneOrder = [
-        { key: 'head', label: 'Голова' },
-        { key: 'chest', label: 'Грудь' },
-        { key: 'abdomen', label: 'Живот' },
-        { key: 'leftArm', label: 'Левая рука' },
-        { key: 'rightArm', label: 'Правая рука' },
-        { key: 'leftLeg', label: 'Левая нога' },
-        { key: 'rightLeg', label: 'Правая нога' }
-    ];
+                <div class="zone-item-vertical">
+                    <div class="zone-label">Правая рука</div>
+                    <div class="zone-fields">
+                        <input type="number" class="number-input" name="health.zones.rightArm.current" value="${(zones.rightArm || {}).current || 0}">
+                        <span class="slash">/</span>
+                        <input type="number" class="number-input" name="health.zones.rightArm.max" value="${(zones.rightArm || {}).max || 100}">
+                    </div>
+                </div>
+                <div class="zone-item-vertical">
+                    <div class="zone-label">Грудь</div>
+                    <div class="zone-fields">
+                        <input type="number" class="number-input" name="health.zones.chest.current" value="${(zones.chest || {}).current || 0}">
+                        <span class="slash">/</span>
+                        <input type="number" class="number-input" name="health.zones.chest.max" value="${(zones.chest || {}).max || 100}">
+                    </div>
+                </div>
+                <div class="zone-item-vertical">
+                    <div class="zone-label">Левая рука</div>
+                    <div class="zone-fields">
+                        <input type="number" class="number-input" name="health.zones.leftArm.current" value="${(zones.leftArm || {}).current || 0}">
+                        <span class="slash">/</span>
+                        <input type="number" class="number-input" name="health.zones.leftArm.max" value="${(zones.leftArm || {}).max || 100}">
+                    </div>
+                </div>
 
-    zoneOrder.forEach(({ key, label }) => {
-        const zone = zones[key] || { current: 100, max: 100 };
-        html += `
-            <div class="zone-item-vertical">
-                <div class="zone-label">${label}</div>
-                <div class="zone-fields">
-                    <input type="number" class="number-input" name="health.zones.${key}.current" value="${zone.current || 0}" placeholder="Тек">
-                    <span class="slash">/</span>
-                    <input type="number" class="number-input" name="health.zones.${key}.max" value="${zone.max || 100}" placeholder="Макс">
+                <div class="zone-item-vertical">
+                    <div class="zone-label">Правая нога</div>
+                    <div class="zone-fields">
+                        <input type="number" class="number-input" name="health.zones.rightLeg.current" value="${(zones.rightLeg || {}).current || 0}">
+                        <span class="slash">/</span>
+                        <input type="number" class="number-input" name="health.zones.rightLeg.max" value="${(zones.rightLeg || {}).max || 100}">
+                    </div>
+                </div>
+                <div class="zone-item-vertical">
+                    <div class="zone-label">Живот</div>
+                    <div class="zone-fields">
+                        <input type="number" class="number-input" name="health.zones.abdomen.current" value="${(zones.abdomen || {}).current || 0}">
+                        <span class="slash">/</span>
+                        <input type="number" class="number-input" name="health.zones.abdomen.max" value="${(zones.abdomen || {}).max || 100}">
+                    </div>
+                </div>
+                <div class="zone-item-vertical">
+                    <div class="zone-label">Левая нога</div>
+                    <div class="zone-fields">
+                        <input type="number" class="number-input" name="health.zones.leftLeg.current" value="${(zones.leftLeg || {}).current || 0}">
+                        <span class="slash">/</span>
+                        <input type="number" class="number-input" name="health.zones.leftLeg.max" value="${(zones.leftLeg || {}).max || 100}">
+                    </div>
                 </div>
             </div>
-        `;
-    });
-    html += `</div><hr>`;
+    `;
 
     const effects = Array.isArray(health.effects) ? health.effects : [];
     let effectsHtml = '';
@@ -1078,7 +1169,7 @@ async function renderEquipmentTab(data) {
 
     // Загружаем шаблоны по категориям
     let weaponTemplates = [], helmetTemplates = [], gasMaskTemplates = [], armorTemplates = [];
-    let modificationTemplates = [], containerTemplates = [], vestTemplates = [], pouchTemplates = [];
+    let modificationTemplates = [], containerTemplates = [];
     try {
         weaponTemplates = await loadTemplatesForLobby('weapon');
         helmetTemplates = await loadTemplatesForLobby('helmet');
@@ -1086,12 +1177,11 @@ async function renderEquipmentTab(data) {
         armorTemplates = await loadTemplatesForLobby('armor');
         modificationTemplates = await loadTemplatesForLobby('modification');
         containerTemplates = await loadTemplatesForLobby('container');
-        // Для подсумков и разгрузок пока используем заглушки
     } catch (e) {
         console.error('Failed to load templates', e);
     }
 
-    // Фильтруем модификации по типу (хранится в attributes.type)
+    // Фильтруем модификации по типу
     const helmetModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'helmet');
     const gasMaskModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'gas_mask');
     const armorModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'armor');
@@ -1114,8 +1204,19 @@ async function renderEquipmentTab(data) {
     const groupedArmorMods = groupByCategory(armorModTemplates);
     const groupedPdaMods = groupByCategory(pdaModTemplates);
 
-    // Генерация HTML для каждого блока (шаблоны теперь через attributes)
     let html = `
+        <!-- Оружие -->
+        <div class="equipment-group">
+            <div class="equipment-header">
+                <h4>Оружие</h4>
+                <span class="protection-header"></span>
+            </div>
+            <div class="equipment-row" style="flex-direction: column; align-items: stretch;">
+                <div id="weapons-container"></div>
+                <button type="button" class="btn btn-sm" onclick="addWeapon()" style="align-self: flex-start; margin-top: 10px;">+ Добавить оружие</button>
+            </div>
+        </div>
+
         <!-- Шлем -->
         <div class="equipment-group">
             <div class="equipment-header">
@@ -1306,76 +1407,6 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Пояс -->
-        <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Пояс</h4>
-            </div>
-            <div style="margin-bottom: 10px;">
-                <label>Предмет на поясе</label>
-                <select name="equipment.belt.storedItem" class="form-control">
-                    <option value="">-- Нет --</option>
-                    <optgroup label="Шлемы">
-                        ${helmetTemplates.map(t => `<option value="helmet:${t.id}" ${eq.belt?.storedItem === `helmet:${t.id}` ? 'selected' : ''}>${t.name}</option>`).join('')}
-                    </optgroup>
-                    <optgroup label="Противогазы">
-                        ${gasMaskTemplates.map(t => `<option value="gasMask:${t.id}" ${eq.belt?.storedItem === `gasMask:${t.id}` ? 'selected' : ''}>${t.name}</option>`).join('')}
-                    </optgroup>
-                </select>
-            </div>
-            <h5>Подсумки</h5>
-            <div id="belt-pouches-container">
-                ${renderBeltPouches(eq.belt?.pouches || [], pouchTemplates)}
-            </div>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltPouch()">+ Добавить подсумок</button>
-            <h5 style="margin-top: 15px;">Модификации пояса</h5>
-            <div id="belt-modifications-container">
-                ${renderBeltModifications(eq.belt?.modifications || [], modificationTemplates.filter(t => t.attributes?.type === 'belt'))}
-            </div>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltModification()">+ Добавить модификацию</button>
-        </div>
-
-        <!-- Разгрузка -->
-        <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Разгрузка</h4>
-                ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateVestTemplateModal()">➕ Создать кастом</button>` : ''}
-            </div>
-            <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
-                <div style="flex: 1;">
-                    <label>Модель</label>
-                    <select name="equipment.vest.model" class="form-control" onchange="onVestModelChange(this)">
-                        <option value="">-- Выберите модель --</option>
-                        <option value="custom" ${eq.vest?.model === 'custom' ? 'selected' : ''}>Своя (база)</option>
-                        ${vestTemplates.map(t => `<option value="${t.id}" ${eq.vest?.model === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
-                    </select>
-                </div>
-            </div>
-            ${eq.vest?.model === 'custom' ? `
-                <div style="margin-bottom: 10px;">
-                    <label>Общий объём</label>
-                    <input type="number" class="form-control number-input" name="equipment.vest.totalCapacity" value="${eq.vest?.totalCapacity || 0}" placeholder="Объём">
-                </div>
-            ` : ''}
-            <h5>Подсумки</h5>
-            <div id="vest-pouches-container">
-                ${renderVestPouches(eq.vest?.pouches || [], pouchTemplates, eq.vest?.model === 'custom', eq.vest?.totalCapacity)}
-            </div>
-            ${eq.vest?.model === 'custom' ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addVestPouch()">+ Добавить подсумок</button>` : ''}
-        </div>
-
-        <!-- Оружие -->
-        <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Оружие</h4>
-                <span class="protection-header"></span>
-            </div>
-            <div class="equipment-row" style="flex-direction: column; align-items: stretch;">
-                <div id="weapons-container"></div>
-                <button type="button" class="btn btn-sm" onclick="addWeapon()" style="align-self: flex-start; margin-top: 10px;">+ Добавить оружие</button>
-            </div>
-        </div>
-
         <!-- Модификации КПК -->
         <div class="equipment-group">
             <div class="equipment-header">
@@ -1387,6 +1418,7 @@ async function renderEquipmentTab(data) {
             <button type="button" class="btn btn-sm btn-secondary" onclick="addPdaItem()">+ Добавить модификацию КПК</button>
         </div>
     `;
+
     container.innerHTML = html;
     await renderWeapons(weapons, weaponTemplates, weaponModuleTemplates, weaponModTemplates);
 }
@@ -1871,7 +1903,7 @@ window.addBeltPouch = function() {
         currentCharacterData.equipment.belt.pouches = [];
     }
     currentCharacterData.equipment.belt.pouches.push({});
-    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
@@ -1879,7 +1911,7 @@ window.removeBeltPouch = function(index) {
     updateDataFromFields();
     if (!currentCharacterData.equipment?.belt?.pouches) return;
     currentCharacterData.equipment.belt.pouches.splice(index, 1);
-    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData)
     scheduleAutoSave();
 };
 
@@ -1891,7 +1923,7 @@ window.addBeltModification = function() {
         currentCharacterData.equipment.belt.modifications = [];
     }
     currentCharacterData.equipment.belt.modifications.push({ name: '', description: '' });
-    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
@@ -1899,7 +1931,7 @@ window.removeBeltModification = function(index) {
     updateDataFromFields();
     if (!currentCharacterData.equipment?.belt?.modifications) return;
     currentCharacterData.equipment.belt.modifications.splice(index, 1);
-    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
@@ -1913,7 +1945,7 @@ window.addVestPouch = function() {
         currentCharacterData.equipment.vest.pouches = [];
     }
     currentCharacterData.equipment.vest.pouches.push({});
-    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
@@ -1921,7 +1953,7 @@ window.removeVestPouch = function(index) {
     updateDataFromFields();
     if (!currentCharacterData.equipment?.vest?.pouches) return;
     currentCharacterData.equipment.vest.pouches.splice(index, 1);
-    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
@@ -1947,7 +1979,7 @@ window.onVestModelChange = async function(select) {
     } else {
         delete currentCharacterData.equipment.vest;
     }
-    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
@@ -1968,7 +2000,9 @@ window.openCreateHelmetTemplateModal = function() {
                 </div>
                 <div class="form-group">
                     <label>Материал</label>
-                    <input type="text" id="helmet-material" class="form-control" placeholder="например, Текстиль">
+                    <select id="helmet-material" class="form-control">
+                        ${MATERIAL_OPTIONS.map(opt => `<option value="${opt}">${opt}</option>`).join('')}
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>Прочность (макс)</label>
@@ -1987,8 +2021,14 @@ window.openCreateHelmetTemplateModal = function() {
                     <input type="number" id="helmet-charismaBonus" class="form-control number-input" value="0">
                 </div>
                 <div class="form-group">
-                    <label>Защита (JSON)</label>
-                    <textarea id="helmet-protection" class="form-control" rows="3">{"physical":0,"chemical":0,"thermal":0,"electric":0,"radiation":0}</textarea>
+                    <label>Защита</label>
+                    <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px;">
+                        <div><label>Физ</label><input type="number" id="helmet-physical" class="form-control number-input" value="0"></div>
+                        <div><label>Хим</label><input type="number" id="helmet-chemical" class="form-control number-input" value="0"></div>
+                        <div><label>Терм</label><input type="number" id="helmet-thermal" class="form-control number-input" value="0"></div>
+                        <div><label>Элек</label><input type="number" id="helmet-electric" class="form-control number-input" value="0"></div>
+                        <div><label>Рад</label><input type="number" id="helmet-radiation" class="form-control number-input" value="0"></div>
+                    </div>
                 </div>
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="saveHelmetTemplate()">Сохранить</button>
@@ -2008,7 +2048,13 @@ window.saveHelmetTemplate = async function() {
         accuracy_penalty: parseInt(document.getElementById('helmet-accuracyPenalty').value) || 0,
         ergonomics_penalty: parseInt(document.getElementById('helmet-ergonomicsPenalty').value) || 0,
         charisma_bonus: parseInt(document.getElementById('helmet-charismaBonus').value) || 0,
-        protection: JSON.parse(document.getElementById('helmet-protection').value || '{}')
+        protection: {
+            physical: parseInt(document.getElementById('helmet-physical').value) || 0,
+            chemical: parseInt(document.getElementById('helmet-chemical').value) || 0,
+            thermal: parseInt(document.getElementById('helmet-thermal').value) || 0,
+            electric: parseInt(document.getElementById('helmet-electric').value) || 0,
+            radiation: parseInt(document.getElementById('helmet-radiation').value) || 0
+        }
     };
     const data = {
         name: document.getElementById('helmet-name').value,
@@ -2055,7 +2101,9 @@ window.openCreateGasMaskTemplateModal = function() {
                 </div>
                 <div class="form-group">
                     <label>Материал</label>
-                    <input type="text" id="gasMask-material" class="form-control" placeholder="например, Резина">
+                    <select id="gasMask-material" class="form-control">
+                        ${MATERIAL_OPTIONS.map(opt => `<option value="${opt}">${opt}</option>`).join('')}
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>Прочность (макс)</label>
@@ -2078,8 +2126,14 @@ window.openCreateGasMaskTemplateModal = function() {
                     <input type="number" id="gasMask-charismaBonus" class="form-control number-input" value="0">
                 </div>
                 <div class="form-group">
-                    <label>Защита (JSON)</label>
-                    <textarea id="gasMask-protection" class="form-control" rows="3">{"physical":0,"chemical":0,"thermal":0,"electric":0,"radiation":0}</textarea>
+                    <label>Защита</label>
+                    <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px;">
+                        <div><label>Физ</label><input type="number" id="gasMask-physical" class="form-control number-input" value="0"></div>
+                        <div><label>Хим</label><input type="number" id="gasMask-chemical" class="form-control number-input" value="0"></div>
+                        <div><label>Терм</label><input type="number" id="gasMask-thermal" class="form-control number-input" value="0"></div>
+                        <div><label>Элек</label><input type="number" id="gasMask-electric" class="form-control number-input" value="0"></div>
+                        <div><label>Рад</label><input type="number" id="gasMask-radiation" class="form-control number-input" value="0"></div>
+                    </div>
                 </div>
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="saveGasMaskTemplate()">Сохранить</button>
@@ -2100,7 +2154,13 @@ window.saveGasMaskTemplate = async function() {
         accuracy_penalty: parseInt(document.getElementById('gasMask-accuracyPenalty').value) || 0,
         ergonomics_penalty: parseInt(document.getElementById('gasMask-ergonomicsPenalty').value) || 0,
         charisma_bonus: parseInt(document.getElementById('gasMask-charismaBonus').value) || 0,
-        protection: JSON.parse(document.getElementById('gasMask-protection').value || '{}')
+        protection: {
+            physical: parseInt(document.getElementById('gasMask-physical').value) || 0,
+            chemical: parseInt(document.getElementById('gasMask-chemical').value) || 0,
+            thermal: parseInt(document.getElementById('gasMask-thermal').value) || 0,
+            electric: parseInt(document.getElementById('gasMask-electric').value) || 0,
+            radiation: parseInt(document.getElementById('gasMask-radiation').value) || 0
+        }
     };
     const data = {
         name: document.getElementById('gasMask-name').value,
@@ -2147,7 +2207,9 @@ window.openCreateArmorTemplateModal = function() {
                 </div>
                 <div class="form-group">
                     <label>Материал</label>
-                    <input type="text" id="armor-material" class="form-control" placeholder="например, Кевлар">
+                    <select id="armor-material" class="form-control">
+                        ${MATERIAL_OPTIONS.map(opt => `<option value="${opt}">${opt}</option>`).join('')}
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>Прочность (макс)</label>
@@ -2162,8 +2224,14 @@ window.openCreateArmorTemplateModal = function() {
                     <input type="number" id="armor-containerSlots" class="form-control number-input" value="0">
                 </div>
                 <div class="form-group">
-                    <label>Защита (JSON)</label>
-                    <textarea id="armor-protection" class="form-control" rows="3">{"physical":0,"chemical":0,"thermal":0,"electric":0,"radiation":0}</textarea>
+                    <label>Защита</label>
+                    <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px;">
+                        <div><label>Физ</label><input type="number" id="armor-physical" class="form-control number-input" value="0"></div>
+                        <div><label>Хим</label><input type="number" id="armor-chemical" class="form-control number-input" value="0"></div>
+                        <div><label>Терм</label><input type="number" id="armor-thermal" class="form-control number-input" value="0"></div>
+                        <div><label>Элек</label><input type="number" id="armor-electric" class="form-control number-input" value="0"></div>
+                        <div><label>Рад</label><input type="number" id="armor-radiation" class="form-control number-input" value="0"></div>
+                    </div>
                 </div>
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="saveArmorTemplate()">Сохранить</button>
@@ -2182,7 +2250,13 @@ window.saveArmorTemplate = async function() {
         max_durability: parseInt(document.getElementById('armor-maxDurability').value) || 1,
         movement_penalty: parseInt(document.getElementById('armor-movementPenalty').value) || 0,
         container_slots: parseInt(document.getElementById('armor-containerSlots').value) || 0,
-        protection: JSON.parse(document.getElementById('armor-protection').value || '{}')
+        protection: {
+            physical: parseInt(document.getElementById('armor-physical').value) || 0,
+            chemical: parseInt(document.getElementById('armor-chemical').value) || 0,
+            thermal: parseInt(document.getElementById('armor-thermal').value) || 0,
+            electric: parseInt(document.getElementById('armor-electric').value) || 0,
+            radiation: parseInt(document.getElementById('armor-radiation').value) || 0
+        }
     };
     const data = {
         name: document.getElementById('armor-name').value,
@@ -2405,13 +2479,13 @@ window.saveVestTemplate = async function() {
 async function renderInventoryTab(data) {
     const container = document.getElementById('sheet-tab-inventory');
     const inv = data.inventory || {};
+    const eq = data.equipment || {};                       // данные пояса и разгрузки
     const pockets = Array.isArray(inv.pockets) ? inv.pockets : [];
     const backpack = Array.isArray(inv.backpack) ? inv.backpack : [];
-    const money = inv.money || 0;
     const pocketMaxVolume = inv.pocketMaxVolume || 10;
     const pocketFill = pockets.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
 
-    // Загружаем шаблоны рюкзаков (они нужны отдельно)
+    // Загружаем шаблоны рюкзаков
     let backpackTemplates = [];
     try {
         backpackTemplates = await loadTemplatesForLobby('backpack');
@@ -2420,10 +2494,17 @@ async function renderInventoryTab(data) {
         console.error('Failed to load backpack templates', e);
     }
 
-    // Загружаем все возможные шаблоны предметов (для селекторов)
+    // Загружаем все возможные шаблоны предметов
     const allTemplates = await getAllItemTemplates();
 
-    // Группируем для удобного отображения в селекторах
+    // Фильтруем нужные категории из allTemplates
+    const helmetTemplates = allTemplates.filter(t => t.category === 'helmet');
+    const gasMaskTemplates = allTemplates.filter(t => t.category === 'gas_mask');
+    const pouchTemplates = allTemplates.filter(t => t.category === 'pouch');
+    const modificationTemplates = allTemplates.filter(t => t.category === 'modification');
+    const vestTemplates = allTemplates.filter(t => t.category === 'vest');
+
+    // Группируем для селекторов в карманах/рюкзаке
     const groupedByCategory = {};
     allTemplates.forEach(t => {
         const group = t.categoryDisplay || 'Прочее';
@@ -2460,6 +2541,64 @@ async function renderInventoryTab(data) {
         </div>
         <div id="pockets-container"></div>
         <button type="button" class="btn btn-sm btn-primary" onclick="addPocketItem()">+ Добавить в карманы</button>
+
+        <!-- Пояс -->
+        <div class="equipment-group" style="margin-top: 20px;">
+            <div class="equipment-header">
+                <h4>Пояс</h4>
+            </div>
+            <div style="margin-bottom: 10px;">
+                <label>Предмет на поясе</label>
+                <select name="equipment.belt.storedItem" class="form-control">
+                    <option value="">-- Нет --</option>
+                    <optgroup label="Шлемы">
+                        ${helmetTemplates.map(t => `<option value="helmet:${t.id}" ${eq.belt?.storedItem === `helmet:${t.id}` ? 'selected' : ''}>${t.name}</option>`).join('')}
+                    </optgroup>
+                    <optgroup label="Противогазы">
+                        ${gasMaskTemplates.map(t => `<option value="gasMask:${t.id}" ${eq.belt?.storedItem === `gasMask:${t.id}` ? 'selected' : ''}>${t.name}</option>`).join('')}
+                    </optgroup>
+                </select>
+            </div>
+            <h5>Подсумки</h5>
+            <div id="belt-pouches-container">
+                ${renderBeltPouches(eq.belt?.pouches || [], pouchTemplates)}
+            </div>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltPouch()">+ Добавить подсумок</button>
+            <h5 style="margin-top: 15px;">Модификации пояса</h5>
+            <div id="belt-modifications-container">
+                ${renderBeltModifications(eq.belt?.modifications || [], modificationTemplates.filter(t => t.attributes?.type === 'belt'))}
+            </div>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltModification()">+ Добавить модификацию</button>
+        </div>
+
+        <!-- Разгрузка -->
+        <div class="equipment-group" style="margin-top: 20px;">
+            <div class="equipment-header">
+                <h4>Разгрузка</h4>
+                ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateVestTemplateModal()">➕ Создать кастом</button>` : ''}
+            </div>
+            <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
+                <div style="flex: 1;">
+                    <label>Модель</label>
+                    <select name="equipment.vest.model" class="form-control" onchange="onVestModelChange(this)">
+                        <option value="">-- Выберите модель --</option>
+                        <option value="custom" ${eq.vest?.model === 'custom' ? 'selected' : ''}>Своя (база)</option>
+                        ${vestTemplates.map(t => `<option value="${t.id}" ${eq.vest?.model === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+            ${eq.vest?.model === 'custom' ? `
+                <div style="margin-bottom: 10px;">
+                    <label>Общий объём</label>
+                    <input type="number" class="form-control number-input" name="equipment.vest.totalCapacity" value="${eq.vest?.totalCapacity || 0}" placeholder="Объём">
+                </div>
+            ` : ''}
+            <h5>Подсумки</h5>
+            <div id="vest-pouches-container">
+                ${renderVestPouches(eq.vest?.pouches || [], pouchTemplates, eq.vest?.model === 'custom', eq.vest?.totalCapacity)}
+            </div>
+            ${eq.vest?.model === 'custom' ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addVestPouch()">+ Добавить подсумок</button>` : ''}
+        </div>
 
         <h4 style="margin-top:20px;">Рюкзак</h4>
         <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
@@ -2514,6 +2653,10 @@ window.openCreateInventoryItemModal = function() {
         modal = document.createElement('div');
         modal.id = 'create-inventory-item-modal';
         modal.className = 'modal';
+        modal.style.width = '500px';
+        modal.style.display = 'flex';
+        modal.style.alignItems = 'center';
+        modal.style.justifyContent = 'center';
         modal.innerHTML = `
             <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
                 <span class="close" onclick="document.getElementById('create-inventory-item-modal').style.display='none'">&times;</span>
@@ -2542,13 +2685,13 @@ window.openCreateInventoryItemModal = function() {
                         <input type="number" id="consumable-volume" class="form-control number-input" value="0" step="0.1">
                     </div>
                     <div class="form-group">
-                        <label>Эффект (JSON)</label>
-                        <textarea id="consumable-effect" class="form-control" rows="3">{}</textarea>
-                        <small>Например: {"heals": 25, "uses": 3}</small>
-                    </div>
-                    <div class="form-group">
                         <label>Количество использований</label>
                         <input type="number" id="consumable-uses" class="form-control number-input" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Эффекты</label>
+                        <div id="consumable-effects-container"></div>
+                        <button type="button" class="btn btn-sm btn-primary" onclick="addEffectToModal('consumable')">+ Добавить эффект</button>
                     </div>
                 </div>
 
@@ -2564,7 +2707,6 @@ window.openCreateInventoryItemModal = function() {
                     </div>
                 </div>
 
-                <!-- Поля для артефакта -->
                 <div id="artifact-fields" style="display: none;">
                     <div class="form-group">
                         <label>Вес</label>
@@ -2575,8 +2717,9 @@ window.openCreateInventoryItemModal = function() {
                         <input type="number" id="artifact-volume" class="form-control number-input" value="0" step="0.1">
                     </div>
                     <div class="form-group">
-                        <label>Эффект</label>
-                        <input type="text" id="artifact-effect" class="form-control">
+                        <label>Эффекты</label>
+                        <div id="artifact-effects-container"></div>
+                        <button type="button" class="btn btn-sm btn-primary" onclick="addEffectToModal('artifact')">+ Добавить эффект</button>
                     </div>
                 </div>
 
@@ -2591,7 +2734,56 @@ window.openCreateInventoryItemModal = function() {
     // Сброс на категорию по умолчанию
     document.getElementById('item-category-select').value = 'consumable';
     window.itemCategoryChanged(document.getElementById('item-category-select'));
+    const consumableContainer = document.getElementById('consumable-effects-container');
+    if (consumableContainer) consumableContainer.innerHTML = '';
+    const artifactContainer = document.getElementById('artifact-effects-container');
+    if (artifactContainer) artifactContainer.innerHTML = '';
     modal.style.display = 'flex';
+};
+
+window.addEffectToModal = function(type) {
+    const container = document.getElementById(`${type}-effects-container`);
+    const div = document.createElement('div');
+    div.className = 'effect-item';
+    div.style.display = 'flex';
+    div.style.gap = '8px';
+    div.style.marginBottom = '8px';
+    div.style.alignItems = 'center';
+
+    div.innerHTML = `
+        <select class="form-control effect-category" style="width: 160px;">
+            <optgroup label="Основные эффекты">
+                <option value="Исцеление">Исцеление</option>
+                <option value="Урон">Урон</option>
+                <option value="Защита">Защита</option>
+                <option value="Характеристика">Характеристика</option>
+                <option value="Радиация">Радиация</option>
+                <option value="Статус">Статус</option>
+            </optgroup>
+            <optgroup label="Другое">
+                <option value="__custom__">✨ Свой</option>
+            </optgroup>
+        </select>
+        <input type="text" class="form-control effect-value" placeholder="Значение (например, +5 HP)" style="flex: 2;">
+        <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">✕</button>
+    `;
+    container.appendChild(div);
+
+    const categorySelect = div.querySelector('.effect-category');
+    const valueInput = div.querySelector('.effect-value');
+
+    categorySelect.addEventListener('change', function() {
+        if (this.value === '__custom__') {
+            const customInput = document.createElement('input');
+            customInput.type = 'text';
+            customInput.className = 'form-control effect-custom-category';
+            customInput.placeholder = 'Введите тип эффекта';
+            customInput.style.width = '160px';
+            customInput.style.marginRight = '8px';
+            this.parentNode.insertBefore(customInput, this);
+            this.style.display = 'none';
+        }
+    });
 };
 
 window.itemCategoryChanged = function(select) {
@@ -2607,15 +2799,31 @@ window.saveInventoryItemTemplate = async function() {
     }
 
     let category, attributes;
-    if (currentItemCategory === 'consumable') {
-        category = 'consumable';
-        attributes = {
-            weight: parseFloat(document.getElementById('consumable-weight').value) || 0,
-            volume: parseFloat(document.getElementById('consumable-volume').value) || 0,
-            effect: JSON.parse(document.getElementById('consumable-effect').value || '{}'),
-            uses: parseInt(document.getElementById('consumable-uses').value) || 1
-        };
-    } else if (currentItemCategory === 'material') {
+        if (currentItemCategory === 'consumable') {
+            category = 'consumable';
+            const effects = [];
+            const items = document.querySelectorAll('#consumable-effects-container .effect-item');
+            items.forEach(item => {
+                let type = '';
+                const categorySelect = item.querySelector('.effect-category');
+                const customInput = item.querySelector('.effect-custom-category');
+                if (customInput && customInput.value) {
+                    type = customInput.value;
+                } else if (categorySelect && categorySelect.value !== '__custom__') {
+                    type = categorySelect.value;
+                }
+                const value = item.querySelector('.effect-value').value;
+                if (type && value) {
+                    effects.push({ type, value });
+                }
+            });
+            attributes = {
+                weight: parseFloat(document.getElementById('consumable-weight').value) || 0,
+                volume: parseFloat(document.getElementById('consumable-volume').value) || 0,
+                uses: parseInt(document.getElementById('consumable-uses').value) || 1,
+                effects: effects
+            };
+        } else if (currentItemCategory === 'material') {
         category = 'crafting_material';
         attributes = {
             weight: parseFloat(document.getElementById('material-weight').value) || 0,
@@ -2623,10 +2831,26 @@ window.saveInventoryItemTemplate = async function() {
         };
     } else if (currentItemCategory === 'artifact') {
         category = 'artifact';
+        const effects = [];
+        const items = document.querySelectorAll('#artifact-effects-container .effect-item');
+        items.forEach(item => {
+            let type = '';
+            const categorySelect = item.querySelector('.effect-category');
+            const customInput = item.querySelector('.effect-custom-category');
+            if (customInput && customInput.value) {
+                type = customInput.value;
+            } else if (categorySelect && categorySelect.value !== '__custom__') {
+                type = categorySelect.value;
+            }
+            const value = item.querySelector('.effect-value').value;
+            if (type && value) {
+                effects.push({ type, value });
+            }
+        });
         attributes = {
             weight: parseFloat(document.getElementById('artifact-weight').value) || 0,
             volume: parseFloat(document.getElementById('artifact-volume').value) || 0,
-            effect: document.getElementById('artifact-effect').value
+            effects: effects
         };
     }
 

@@ -9,6 +9,18 @@ import { closeMarkerEditModal } from './markers.js';
 let modalOpen = false;
 let altPressed = false;
 
+const customModals = [
+    '#create-helmet-template-modal',
+    '#create-gasMask-template-modal',
+    '#create-armor-template-modal',
+    '#create-weapon-template-modal',
+    '#create-backpack-template-modal',
+    '#create-vest-template-modal',
+    '#create-inventory-item-modal',
+    '#create-special-trait-template-modal',
+    '#create-background-template-modal'
+];
+
 export function initHotkeys() {
     const tileModal = document.getElementById('tile-edit-modal');
     const visModal = document.getElementById('visibility-modal');
@@ -69,6 +81,19 @@ function handleKeyDown(e) {
 
     // ESC - закрыть модальное окно
     if (e.key === 'Escape') {
+        let anyCustomOpen = false;
+        customModals.forEach(selector => {
+            const modal = document.querySelector(selector);
+            if (modal && modal.style.display === 'flex') {
+                anyCustomOpen = true;
+                modal.style.display = 'none';
+            }
+        });
+        if (anyCustomOpen) {
+            e.preventDefault();
+            return;
+        }
+
         if (modalOpen) {
             e.preventDefault();
             closeTileEditModal();
@@ -206,4 +231,13 @@ function handleWheel(e) {
         AppState.setCurrentTileType(tileSelect.value);
         tileSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
+}
+
+function closeCustomModals() {
+    customModals.forEach(selector => {
+        const modal = document.querySelector(selector);
+        if (modal && modal.style.display === 'flex') {
+            modal.style.display = 'none';
+        }
+    });
 }
