@@ -168,8 +168,13 @@ body {
   text-shadow: var(--text-shadow);
 }
 
-.top-bar, .chat-panel, .right-panel, .map-tools,
-.participants-panel, .lobby-menu, .modal {
+.top-bar,
+.chat-panel,
+.right-panel,
+.map-tools,
+.participants-panel,
+.lobby-menu,
+.modal {
   pointer-events: auto;
 }
 
@@ -232,6 +237,7 @@ body {
   background: var(--btn-danger-hover);
 }
 
+/* Панели и чат */
 .chat-panel {
   position: absolute;
   left: 15px;
@@ -270,18 +276,23 @@ body {
   max-width: 90%;
   word-wrap: break-word;
 }
-
 .message .username {
   font-weight: bold;
   color: var(--username-color);
   margin-right: 5px;
 }
-
 .message .timestamp {
   font-size: 0.7rem;
   color: var(--text-muted);
   float: right;
   margin-left: 10px;
+}
+.message.system {
+  background: var(--message-system-bg);
+  border-left: 3px solid var(--message-system-border);
+}
+.message.system .username {
+  color: var(--message-system-border);
 }
 
 .chat-input-area {
@@ -290,7 +301,6 @@ body {
   gap: 8px;
   border-top: 1px solid var(--panel-border);
 }
-
 .chat-input-area input {
   flex: 1;
   background: var(--input-bg);
@@ -300,7 +310,6 @@ body {
   color: var(--text-color);
   outline: none;
 }
-
 .chat-input-area input::placeholder {
   color: var(--input-placeholder);
 }
@@ -320,75 +329,181 @@ body {
   overflow-y: auto;
 }
 
-.participants-list {
-  list-style: none;
-  margin-bottom: 10px;
+/* Участники */
+.participants-panel {
+  position: absolute;
+  top: 15px;
+  left: 15px;
+  width: 250px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(5px);
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  overflow: hidden;
+  transition: width 0.3s;
+  z-index: 3;
 }
-
-.participants-list li {
-  padding: 5px 10px;
+.participants-panel.collapsed {
+  width: 135px;
+}
+.participants-panel.collapsed .participants-content {
+  display: none;
+}
+.participants-content {
+  padding: 10px;
+}
+.online-section h4,
+.offline-section h4 {
+  font-size: 0.9rem;
+  margin: 5px 0;
+  color: var(--text-soft);
+}
+#online-participants,
+#offline-participants {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+#online-participants li,
+#offline-participants li {
+  padding: 5px 10px 5px 20px;
   background: rgba(255,255,255,0.05);
   border-radius: 20px;
   margin-bottom: 4px;
-}
-
-.character-selector {
   display: flex;
-  gap: 5px;
-  margin-top: 5px;
+  justify-content: space-between;
+  align-items: center;
+}
+#online-participants li {
+  color: var(--online-color);
+}
+#offline-participants li {
+  color: var(--offline-color);
+  opacity: 0.7;
+}
+.ban-btn {
+  background: none;
+  border: none;
+  color: var(--ban-btn-color);
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 0 5px;
+}
+.ban-btn:hover {
+  color: var(--ban-btn-hover);
 }
 
-.character-select {
-  flex: 1;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  border-radius: 20px;
-  padding: 5px 10px;
+/* Меню лобби */
+.lobby-menu {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(5px);
+  border-radius: 40px;
+  border: 1px solid var(--panel-border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  z-index: 3;
+}
+.lobby-menu .menu-item {
   color: var(--text-color);
 }
-
-.characters-list {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.character-card {
-  background: rgba(255,255,255,0.05);
-  border-radius: 12px;
-  padding: 10px;
-  border: 1px solid var(--panel-border);
-}
-
-.character-card h4 {
-  font-size: 1rem;
-  margin-bottom: 5px;
-  cursor: pointer;
-}
-
-.skills-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 5px;
-}
-
-.skill-button {
-  background: var(--skill-btn-bg);
+.lobby-menu .exit-btn {
+  background: var(--btn-danger-bg);
   border: none;
   color: white;
-  padding: 4px 10px;
-  border-radius: 15px;
-  font-size: 0.8rem;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
   cursor: pointer;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lobby-menu .exit-btn:hover {
+  background: var(--btn-danger-hover);
+}
+
+/* Панель настроек */
+.settings-panel {
+  position: absolute;
+  top: 70px;
+  right: 15px;
+  width: 300px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(5px);
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  padding: 15px;
+  z-index: 4;
+  pointer-events: auto;
+  box-shadow: var(--panel-shadow);
+}
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+  font-size: 1.1rem;
+  font-weight: 500;
+}
+.settings-tabs {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 15px;
+  border-bottom: 1px solid var(--panel-border);
+  padding-bottom: 10px;
+}
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--tab-btn-color);
+  padding: 5px 10px;
+  cursor: pointer;
+  border-radius: 20px;
   transition: background 0.2s;
 }
-
-.skill-button:hover {
-  background: var(--skill-btn-hover);
+.tab-btn.active {
+  background: var(--tab-btn-active-bg);
+  color: white;
+}
+.tab-btn:hover {
+  background: rgba(255,255,255,0.1);
+}
+.settings-tab-content {
+  padding: 10px 0;
 }
 
+#settings-content {
+  max-height: 300px;
+  overflow-y: auto;
+}
+.banned-user {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 20px;
+  margin-bottom: 5px;
+}
+.unban-btn {
+  background: none;
+  border: none;
+  color: var(--unban-btn-color);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 2px 8px;
+}
+.unban-btn:hover {
+  color: var(--unban-btn-hover);
+}
+
+/* Карта и инструменты */
 .map-tools {
   position: absolute;
   bottom: 15px;
@@ -407,13 +522,31 @@ body {
   white-space: nowrap;
   justify-content: flex-start;
 }
+#gm-only-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+#gm-only-controls > div {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.tile-palette select {
+  background: var(--tile-palette-select-bg);
+  color: var(--text-color);
+  border: 1px solid var(--tile-palette-select-border);
+  border-radius: 20px;
+  padding: 4px 10px;
+  margin-left: 5px;
+}
 
 .marker-types {
   display: flex;
   gap: 5px;
   align-items: center;
 }
-
 .marker-btn {
   width: 36px;
   height: 36px;
@@ -423,14 +556,28 @@ body {
   font-size: 1.2rem;
   transition: transform 0.1s;
 }
-
 .marker-btn:hover {
   transform: scale(1.1);
 }
-
 .marker-btn.red { background: var(--marker-btn-red); }
 .marker-btn.blue { background: var(--marker-btn-blue); }
 .marker-btn.green { background: var(--marker-btn-green); }
+
+/* Стили для диапазонов и скролла */
+input[type=range] {
+  background: var(--range-bg);
+  border-radius: 10px;
+  height: 6px;
+  -webkit-appearance: none;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--range-thumb);
+  cursor: pointer;
+}
 
 ::-webkit-scrollbar {
   width: 6px;
@@ -443,193 +590,7 @@ body {
   border-radius: 10px;
 }
 
-.message.system {
-  background: var(--message-system-bg);
-  border-left: 3px solid var(--message-system-border);
-}
-.message.system .username {
-  color: var(--message-system-border);
-}
-
-.participants-panel {
-  position: absolute;
-  top: 15px;
-  left: 15px;
-  width: 250px;
-  background: var(--panel-bg);
-  backdrop-filter: blur(5px);
-  border-radius: 16px;
-  border: 1px solid var(--panel-border);
-  overflow: hidden;
-  transition: width 0.3s;
-  z-index: 3;
-}
-
-.participants-panel.collapsed {
-  width: 135px;
-}
-.participants-panel.collapsed .participants-content {
-  display: none;
-}
-
-.participants-content {
-  padding: 10px;
-}
-
-.online-section h4, .offline-section h4 {
-  font-size: 0.9rem;
-  margin: 5px 0;
-  color: var(--text-soft);
-}
-
-#online-participants, #offline-participants {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-#online-participants li, #offline-participants li {
-  padding: 5px 10px 5px 20px;
-  background: rgba(255,255,255,0.05);
-  border-radius: 20px;
-  margin-bottom: 4px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-#online-participants li {
-  color: var(--online-color);
-}
-#offline-participants li {
-  color: var(--offline-color);
-  opacity: 0.7;
-}
-
-.ban-btn {
-  background: none;
-  border: none;
-  color: var(--ban-btn-color);
-  cursor: pointer;
-  font-size: 1.2rem;
-  padding: 0 5px;
-}
-.ban-btn:hover {
-  color: var(--ban-btn-hover);
-}
-
-.lobby-menu {
-  position: absolute;
-  top: 15px;
-  right: 15px;
-  background: var(--panel-bg);
-  backdrop-filter: blur(5px);
-  border-radius: 40px;
-  border: 1px solid var(--panel-border);
-  padding: 8px 16px;
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  z-index: 3;
-}
-
-.lobby-menu .menu-item {
-  color: var(--text-color);
-}
-
-.lobby-menu .exit-btn {
-  background: var(--btn-danger-bg);
-  border: none;
-  color: white;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  cursor: pointer;
-  font-size: 1.2rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.lobby-menu .exit-btn:hover {
-  background: var(--btn-danger-hover);
-}
-
-.settings-panel {
-  position: absolute;
-  top: 70px;
-  right: 15px;
-  width: 300px;
-  background: var(--panel-bg);
-  backdrop-filter: blur(5px);
-  border-radius: 16px;
-  border: 1px solid var(--panel-border);
-  padding: 15px;
-  z-index: 4;
-  pointer-events: auto;
-  box-shadow: var(--panel-shadow);
-}
-
-.settings-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 15px;
-  font-size: 1.1rem;
-  font-weight: 500;
-}
-
-.settings-tabs {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 15px;
-  border-bottom: 1px solid var(--panel-border);
-  padding-bottom: 10px;
-}
-
-.tab-btn {
-  background: transparent;
-  border: none;
-  color: var(--tab-btn-color);
-  padding: 5px 10px;
-  cursor: pointer;
-  border-radius: 20px;
-  transition: background 0.2s;
-}
-.tab-btn.active {
-  background: var(--tab-btn-active-bg);
-  color: white;
-}
-.tab-btn:hover {
-  background: rgba(255,255,255,0.1);
-}
-
-#settings-content {
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.banned-user {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  background: rgba(255,255,255,0.05);
-  border-radius: 20px;
-  margin-bottom: 5px;
-}
-
-.unban-btn {
-  background: none;
-  border: none;
-  color: var(--unban-btn-color);
-  cursor: pointer;
-  font-size: 1rem;
-  padding: 2px 8px;
-}
-.unban-btn:hover {
-  color: var(--unban-btn-hover);
-}
-
+/* Модальные окна */
 .modal {
   position: fixed;
   z-index: 10;
@@ -642,7 +603,6 @@ body {
   align-items: center;
   justify-content: center;
 }
-
 .modal-content {
   background: var(--panel-bg);
   backdrop-filter: blur(5px);
@@ -653,22 +613,11 @@ body {
   max-width: 90%;
   color: var(--text-color);
 }
-
 .modal-content .close {
   float: right;
   cursor: pointer;
   font-size: 1.5rem;
 }
-
-.modal-content input[type="text"],
-.modal-content textarea {
-  width: 100%;
-  box-sizing: border-box;
-  word-wrap: break-word;
-  white-space: pre-wrap;
-  resize: vertical;
-}
-
 .modal-content .form-group {
   margin-bottom: 15px;
 }
@@ -697,50 +646,6 @@ body {
   margin-top: 20px;
 }
 
-#visibility-participants-list {
-  margin: 15px 0;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.visibility-participant {
-  display: flex;
-  align-items: center;
-  margin-bottom: 5px;
-}
-.visibility-participant input {
-  margin-right: 10px;
-}
-
-.tile-palette {
-  color: var(--text-color);
-  font-size: 0.9rem;
-}
-
-.tile-palette select {
-  background: var(--tile-palette-select-bg);
-  color: var(--text-color);
-  border: 1px solid var(--tile-palette-select-border);
-  border-radius: 20px;
-  padding: 4px 10px;
-  margin-left: 5px;
-}
-
-input[type=range] {
-  background: var(--range-bg);
-  border-radius: 10px;
-  height: 6px;
-  -webkit-appearance: none;
-}
-input[type=range]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--range-thumb);
-  cursor: pointer;
-}
-
 #tile-edit-modal {
   position: absolute;
   bottom: 20px;
@@ -749,140 +654,155 @@ input[type=range]::-webkit-slider-thumb {
   z-index: 100;
   pointer-events: auto;
 }
-
-#gm-only-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 15px;
-  flex-wrap: wrap;
-}
-
-#gm-only-controls > div {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.tile-palette {
-  margin-left: 0 !important;
-  padding-left: 0 !important;
-  border-left: none !important;
-}
-
-#gm-only-controls .hint-box {
-  color: var(--hint-color);
-  font-size: 0.8rem;
-  line-height: 1.2;
-}
-
-.settings-tab-content {
-  padding: 10px 0;
-}
-
-#loading-indicator {
-  display: inline-block;
-  margin-left: 10px;
-  color: var(--loading-color);
-  font-weight: bold;
-}
-#loading-indicator span {
-  animation: pulse 1s infinite;
-}
-@keyframes pulse {
-  0% { opacity: 0.5; }
-  50% { opacity: 1; }
-  100% { opacity: 0.5; }
-}
-
-@keyframes slideIn {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-.draggable-panel {
+#tile-info {
   position: absolute;
-  transition: width 0.3s, height 0.3s;
-  z-index: 100;
-}
-
-.draggable-panel .panel-header {
-  cursor: grab;
-  user-select: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--panel-header-bg);
-  border-radius: 12px 12px 0 0;
-}
-
-.draggable-panel .panel-header:active {
-  cursor: grabbing;
-}
-
-.draggable-panel.collapsed .panel-content {
-  display: none;
-}
-
-.toggle-btn, .pin-btn {
-  cursor: pointer;
-  font-size: 1.2rem;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: rgba(255,255,255,0.1);
-  transition: background 0.2s;
-}
-
-.toggle-btn:hover, .pin-btn:hover {
-  background: rgba(255,255,255,0.2);
-}
-
-.pin-menu {
-  position: absolute;
-  background: var(--pin-menu-bg);
-  backdrop-filter: blur(5px);
-  border: 1px solid var(--pin-menu-border);
+  bottom: 100px;
+  right: 20px;
+  background: rgba(0,0,0,0.7);
+  color: white;
+  padding: 10px;
   border-radius: 8px;
-  padding: 5px;
-  display: flex;
-  gap: 5px;
-  z-index: 10000;
+  display: none;
+  pointer-events: none;
+  z-index: 5;
 }
 
-.pin-menu button {
-  background: var(--pin-menu-btn-bg);
+/* Персонажи */
+.character-selector {
+  display: flex;
+  gap: 5px;
+  margin-top: 5px;
+}
+.character-select {
+  flex: 1;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 20px;
+  padding: 5px 10px;
+  color: var(--text-color);
+}
+.characters-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.character-card {
+  background: rgba(255,255,255,0.05);
+  border-radius: 12px;
+  padding: 10px;
+  border: 1px solid var(--panel-border);
+}
+.character-card h4 {
+  font-size: 1rem;
+  margin-bottom: 5px;
+  cursor: pointer;
+}
+.skills-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+.skill-button {
+  background: var(--skill-btn-bg);
   border: none;
   color: white;
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
+  padding: 4px 10px;
+  border-radius: 15px;
+  font-size: 0.8rem;
   cursor: pointer;
-  font-size: 1.2rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   transition: background 0.2s;
 }
-.pin-menu button:hover {
-  background: var(--pin-menu-btn-hover);
+.skill-button:hover {
+  background: var(--skill-btn-hover);
 }
 
-.map-tools .panel-content {
+/* Вкладка Здоровье */
+.health-tab .zone-grid-vertical {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 15px;
+}
+.health-tab .zone-item-vertical {
   display: flex;
-  gap: 15px;
+  flex-direction: column;
   align-items: center;
-  flex-wrap: wrap;
-  padding: 8px 16px;
+  background: rgba(255,255,255,0.05);
+  padding: 8px 5px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+}
+.health-tab .zone-label {
+  font-weight: bold;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--text-color);
+}
+.health-tab .zone-fields {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  justify-content: center;
+}
+.health-tab .zone-fields input {
+  width: 55px;
+  padding: 4px 2px;
+  text-align: center;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--text-color);
+  border-radius: 4px;
+}
+.health-tab .zone-fields .slash {
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--text-muted);
+  margin: 0 2px;
+}
+.health-tab .status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  flex: 1;
+}
+.health-tab .status-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(255,255,255,0.05);
+  padding: 6px 4px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+}
+.health-tab .status-label {
+  font-weight: bold;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-color);
+}
+.health-tab .status-item input {
+  width: 70px;
+  padding: 4px 2px;
+  text-align: center;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--text-color);
+  border-radius: 4px;
 }
 
-/* ===== Стили для листа персонажа (вкладки) ===== */
+/* Лист персонажа */
+#character-sheet-modal .modal-content {
+  width: 90vw !important;
+  max-width: 90vw !important;
+}
+#character-sheet-modal {
+    z-index: 1000;
+}
 .sheet-tab-content {
   display: none;
   padding: 15px;
@@ -900,39 +820,12 @@ input[type=range]::-webkit-slider-thumb {
   gap: 10px;
   flex-wrap: wrap;
 }
-.trait-item, .weapon-item {
-  margin-bottom: 10px;
-  padding: 10px;
-  background: rgba(255,255,255,0.05);
-  border-radius: 8px;
-}
-.weapon-item input, .weapon-item textarea {
-  width: auto;
-  flex: 1 1 100px;
-}
-#pockets-container input, #backpack-container input {
-  width: auto;
-  flex: 1;
-}
 
-input.number-input, input[type=number].number-input {
+/* Общие стили для инпутов и кнопок */
+input.number-input,
+input[type=number].number-input {
   width: 70px;
 }
-
-#character-sheet-modal .modal-content {
-  width: 90vw !important;
-  max-width: 90vw !important;
-}
-
-@media (max-width: 768px) {
-  #character-sheet-modal .modal-content {
-    padding: 10px;
-  }
-  .sheet-tab-content {
-    padding: 10px;
-  }
-}
-
 input[type=number]::-webkit-inner-spin-button,
 input[type=number]::-webkit-outer-spin-button {
   -webkit-appearance: none;
@@ -942,307 +835,370 @@ input[type=number] {
   -moz-appearance: textfield;
   appearance: textfield;
 }
-
-/* ===== Вкладка Здоровье ===== */
-#sheet-tab-health .zone-grid-vertical {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 10px;
-  margin-bottom: 15px;
-}
-
-#sheet-tab-health .zone-item-vertical {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+.trait-item,
+.weapon-item {
+  margin-bottom: 10px;
+  padding: 10px;
   background: rgba(255,255,255,0.05);
-  padding: 8px 5px;
   border-radius: 8px;
-  border: 1px solid var(--panel-border);
 }
-
-#sheet-tab-health .zone-label {
-  font-weight: bold;
-  margin-bottom: 5px;
-  white-space: nowrap;
-  font-size: 14px;
-  color: var(--text-color);
-}
-
-#sheet-tab-health .zone-fields {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-  justify-content: center;
-}
-
-#sheet-tab-health .zone-fields input {
-  width: 55px;
-  padding: 4px 2px;
-  text-align: center;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  color: var(--text-color);
-  border-radius: 4px;
-}
-
-#sheet-tab-health .zone-fields .slash {
-  font-size: 16px;
-  font-weight: bold;
-  color: var(--text-muted);
-  margin: 0 2px;
-}
-
-#sheet-tab-health .status-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+#pockets-container input,
+#backpack-container input {
+  width: auto;
   flex: 1;
 }
-
-#sheet-tab-health .status-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  background: rgba(255,255,255,0.05);
-  padding: 6px 4px;
-  border-radius: 8px;
-  border: 1px solid var(--panel-border);
-}
-
-#sheet-tab-health .status-label {
-  font-weight: bold;
-  margin-bottom: 4px;
-  white-space: nowrap;
-  font-size: 13px;
-  color: var(--text-color);
-}
-
-#sheet-tab-health .status-item input {
-  width: 70px;
-  padding: 4px 2px;
-  text-align: center;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  color: var(--text-color);
-  border-radius: 4px;
-}
-
-/* ===== Экипировка ===== */
-.equipment-group {
-  background: rgba(255,255,255,0.05);
-  border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 15px;
-}
-
-/* Шапка группы: две колонки — левая под поля, правая под защиту */
-.equipment-group .equipment-header {
-  display: grid;
-  grid-template-columns: 1fr 208px;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.equipment-group .equipment-header h4 {
-  grid-column: 1;
-  margin: 0;
-  line-height: 1.2;
-  font-size: 1rem;
-  font-weight: bold;
-  color: var(--text-color);
-}
-
-.equipment-group .protection-header {
-  grid-column: 2;
-  text-align: left;
-  font-size: 1rem;
-  font-weight: bold;
-  color: var(--text-color);
-  line-height: 1.2;
-}
-
-/* Строка с полями и защитой */
-.equipment-group .equipment-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-
-/* Контейнер для полей (левая часть) */
-.equipment-group .fields-container {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  flex: 0 1 auto;
-}
-
-/* Базовые стили полей */
-.equipment-group .field-group {
-  display: flex;
-  flex-direction: column;
-}
-
-.equipment-group .field-group label {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  margin-bottom: 2px;
-  white-space: nowrap;
-}
-
-.equipment-group .field-group input,
-.equipment-group .field-group select {
-  height: 30px;
-  padding: 4px 6px;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  color: var(--text-color);
-  border-radius: 4px;
-  font-size: 14px;
-  box-sizing: border-box;
-}
-
-.equipment-group .field-name { width: 180px; }
-.equipment-group .field-number { width: 100px; }
-.equipment-group .field-select { width: 100px; }
-.equipment-group .field-checkbox {
-  width: 50px;
-  align-items: center;
-}
-.equipment-group .field-checkbox input[type="checkbox"] {
-  width: 30px;
-  height: 30px;
-  margin: 0 auto;
-  accent-color: var(--btn-primary-bg);
-}
-
-/* Блок защиты (правая часть) */
-.equipment-group .protection-wrapper {
-  width: 208px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-/* Сетка защиты */
-.equipment-group .protection-grid {
-  display: grid;
-  grid-template-columns: repeat(5, 40px);
-  gap: 2px;
-  align-items: center;
-}
-
-/* Заголовки колонок защиты */
-.equipment-group .protection-grid div {
-  font-size: 0.75rem;
-  line-height: 1.2;
-  color: var(--text-secondary);
-  text-align: center;
-  padding-top: 1px;
-}
-
-/* Поля ввода защиты */
-.equipment-group .protection-grid input.number-input,
-.equipment-group .protection-grid input[type="number"] {
-  width: 40px;
-  height: 30px !important;
-  font-size: 14px !important;
-  line-height: normal;
-  padding: 4px 2px;
-  text-align: center;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  color: var(--text-color);
-  border-radius: 4px;
-  box-sizing: border-box;
-  -moz-appearance: textfield;
-  appearance: textfield;
-}
-
-.equipment-group .protection-grid input::-webkit-inner-spin-button,
-.equipment-group .protection-grid input::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-
-#character-sheet-modal {
-  z-index: 1000 !important;
-}
-
-.equipment-group .field-number input.number-input,
-.equipment-group .field-number input[type=number].number-input {
-    width: 100px; /* было унаследовано 70px */
-}
-
 #sheet-tab-equipment input[type="text"],
-#sheet-tab-equipment input[type="number"] {
-    text-align: center;
-}
-
+#sheet-tab-equipment input[type="number"],
 #sheet-tab-inventory input[type="text"],
 #sheet-tab-inventory input[type="number"],
 #sheet-tab-modifications input[type="text"] {
-    text-align: center;
+  text-align: center;
 }
 
-/* Стили для кнопок в этих вкладках (если нужно уточнить) */
-#sheet-tab-inventory .btn,
-#sheet-tab-modifications .btn {
-    margin-top: 5px;
+/* Анимации и прочее */
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.draggable-panel {
+  position: absolute;
+  transition: width 0.3s, height 0.3s;
+  z-index: 100;
+}
+.draggable-panel .panel-header {
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel-header-bg);
+  border-radius: 12px 12px 0 0;
+}
+.draggable-panel .panel-header:active {
+  cursor: grabbing;
+}
+.draggable-panel.collapsed .panel-content {
+  display: none;
+}
+.toggle-btn,
+.pin-btn {
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.1);
+  transition: background 0.2s;
+}
+.toggle-btn:hover,
+.pin-btn:hover {
+  background: rgba(255,255,255,0.2);
+}
+.pin-menu {
+  position: absolute;
+  background: var(--pin-menu-bg);
+  backdrop-filter: blur(5px);
+  border: 1px solid var(--pin-menu-border);
+  border-radius: 8px;
+  padding: 5px;
+  display: flex;
+  gap: 5px;
+  z-index: 10000;
+}
+.pin-menu button {
+  background: var(--pin-menu-btn-bg);
+  border: none;
+  color: white;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+.pin-menu button:hover {
+  background: var(--pin-menu-btn-hover);
+}
+#loading-indicator {
+  display: inline-block;
+  margin-left: 10px;
+  color: var(--loading-color);
+  font-weight: bold;
+}
+#loading-indicator span {
+  animation: pulse 1s infinite;
+}
+@keyframes pulse {
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
+}
+@media (max-width: 768px) {
+  #character-sheet-modal .modal-content {
+    padding: 10px;
+  }
+  .sheet-tab-content {
+    padding: 10px;
+  }
 }
 
-#create-weapon-template-modal .modal-content {
-    max-height: 80vh;
-    overflow-y: auto;
+/* Экипировка – общий контейнер */
+.equipment-group {
+    background: rgba(255,255,255,0.05) !important;
+    border-radius: 8px !important;
+    padding: 12px !important;
+    margin-bottom: 15px !important;
 }
 
-.health-tab .zone-grid-vertical {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-    gap: 10px;
-    margin-bottom: 15px;
+/* Горизонтальный ряд для двух колонок */
+.equipment-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 12px !important; /* минимальный отступ между блоками */
+    align-items: stretch !important;
+    margin-bottom: 15px !important;
 }
 
-.health-tab .zone-item-vertical {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    background: rgba(255,255,255,0.05);
-    padding: 8px 5px;
-    border-radius: 8px;
-    border: 1px solid var(--panel-border);
+/* Левая колонка (основные поля) */
+.equipment-main-block {
+    flex: 3 !important;
+    background: rgba(255,255,255,0.03) !important;
+    border-radius: 8px !important;
+    padding: 10px !important;
+    border: 1px solid var(--panel-border) !important;
 }
 
-.health-tab .zone-label {
-    font-weight: bold;
-    margin-bottom: 5px;
-    white-space: nowrap;
-    font-size: 14px;
-    color: var(--text-color);
+/* Правая колонка (защита) */
+.equipment-protection-block {
+    flex: 1 !important;
+    min-width: 200px !important;
+    background: rgba(255,255,255,0.03) !important;
+    border-radius: 8px !important;
+    padding: 10px !important;
+    border: 1px solid var(--panel-border) !important;
 }
 
-.health-tab .zone-fields {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    width: 100%;
-    justify-content: center;
+/* Заголовки блоков */
+.block-header {
+    display: flex !important;
+    align-items: center !important;
+    margin-bottom: 10px !important;
+    padding-bottom: 5px !important;
+    border-bottom: 1px solid var(--panel-border) !important;
+    min-height: 38px !important;
+}
+.block-header h4, .block-header h5 {
+    margin: 0 !important;
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+}
+/* В блоке защиты заголовок центрируем */
+.equipment-protection-block .block-header {
+    justify-content: center !important;
+}
+/* В основном блоке заголовок и кнопка по краям */
+.equipment-main-block .block-header {
+    justify-content: space-between !important;
 }
 
-.health-tab .zone-fields input {
-    width: 55px;
-    padding: 4px 2px;
-    text-align: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    color: var(--text-color);
-    border-radius: 4px;
+/* Контейнер полей */
+.fields-container {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px 12px !important; /* минимальный отступ между полями */
+    align-items: flex-start !important;
 }
 
-.health-tab .zone-fields .slash {
-    font-size: 16px;
-    font-weight: bold;
-    color: var(--text-muted);
-    margin: 0 2px;
+/* Каждая группа поля */
+.field-group {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 2px !important;
+}
+.field-group label {
+    font-size: 0.7rem !important;
+    color: var(--text-secondary) !important;
+}
+.field-group input,
+.field-group select {
+    height: 34px !important;
+    padding: 4px 8px !important;
+    background: var(--input-bg) !important;
+    border: 1px solid var(--input-border) !important;
+    color: var(--text-color) !important;
+    border-radius: 4px !important;
+    font-size: 0.85rem !important;
+    box-sizing: border-box !important;
+    line-height: normal !important;
+}
+.field-name { width: 170px !important; }
+.field-number { width: 90px !important; }
+.field-select { width: 110px !important; }
+.field-checkbox {
+    width: 60px !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+.field-checkbox input {
+    width: 18px !important;
+    height: 18px !important;
+    margin: 0 !important;
+    transform: scale(1.2) !important;
+    cursor: pointer !important;
+    vertical-align: middle !important;
+}
+
+/* Сетка защиты */
+.protection-grid {
+    display: grid !important;
+    grid-template-columns: repeat(5, 1fr) !important;
+    gap: 6px !important;
+    text-align: center !important;
+    margin-top: 5px !important;
+}
+.protection-grid div {
+    font-size: 0.7rem !important;
+    color: var(--text-secondary) !important;
+    padding: 2px 0 !important;
+}
+.protection-grid input {
+    width: 100% !important;
+    height: 34px !important; /* та же высота, что и основные поля */
+    padding: 2px 0 !important;
+    text-align: center !important;
+    background: var(--input-bg) !important;
+    border: 1px solid var(--input-border) !important;
+    color: var(--text-color) !important;
+    border-radius: 4px !important;
+    font-size: 0.85rem !important;
+    box-sizing: border-box !important;
+}
+
+/* Блок модификаций */
+.modifications-block {
+    margin-top: 12px !important;
+    padding-top: 12px !important;
+    border-top: 1px solid var(--panel-border) !important;
+}
+.modifications-block h5 {
+    font-size: 0.9rem !important;
+    margin-bottom: 8px !important;
+}
+
+.protection-grid {
+    gap: 2px 6px !important;   /* уменьшаем вертикальный зазор */
+    margin-top: 0 !important;
+}
+.protection-grid div {
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: normal !important;
+}
+
+/* Левая колонка – по содержимому */
+.equipment-main-block {
+    flex: 0 0 auto !important;
+}
+/* Правая колонка – фиксированная ширина */
+.equipment-protection-block {
+    flex: 0 0 280px !important;
+    width: 280px !important;
+}
+/* Отступ между блоками */
+.equipment-row {
+    gap: 12px !important;
+}
+
+/* Уменьшаем и выравниваем отступы между полями в левом блоке */
+.equipment-main-block .fields-container {
+    gap: 0 8px !important;
+}
+/* Для крайних полей убираем лишние отступы */
+.field-group {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Устанавливаем вертикальные отступы между полями в левом блоке */
+.equipment-main-block .field-group {
+    margin-bottom: 4px !important;
+}
+
+.equipment-main-block .field-group {
+    min-height: 48px !important; /* высота label + поле */
+    margin: 0 8px 4px 0 !important; /* правый отступ 8px, нижний 4px */
+}
+/* Убираем gap у контейнера, управляем вручную */
+.equipment-main-block .fields-container {
+    gap: 0 !important;
+    display: flex !important;
+    flex-wrap: wrap !important;
+}
+
+.equipment-main-block .field-group input,
+.equipment-main-block .field-group select {
+    margin: 0 !important;
+}
+
+/* Унифицируем padding и box-sizing у всех полей ввода и селекторов в левом блоке */
+.equipment-main-block .field-group input,
+.equipment-main-block .field-group select {
+    box-sizing: border-box !important;
+    padding: 4px 6px !important;
+    width: 100% !important;
+}
+/* Убедимся, что все поля имеют одинаковый правый отступ внутри .field-group */
+.equipment-main-block .field-group {
+    margin-right: 0 !important;
+}
+
+.equipment-main-block .field-number input,
+.equipment-main-block .field-number select {
+    width: 90px !important;
+}
+.equipment-main-block .field-select select {
+    width: 110px !important;
+}
+
+.equipment-main-block .fields-container {
+    gap: 8px !important;          /* единый отступ и по горизонтали, и по вертикали */
+}
+.field-group {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.field-checkbox {
+    display: grid !important;
+    grid-template-rows: auto 1fr !important;
+    gap: 6px !important;
+    height: 34px !important;
+    align-items: start !important;
+    width: auto !important;
+}
+.field-checkbox label {
+    font-size: 0.7rem !important;
+    margin: 0 !important;
+    line-height: 1 !important;
+    color: var(--text-secondary) !important;
+    transform: translateY(1.5px) !important;
+}
+.field-checkbox input {
+    width: 24px !important;
+    height: 24px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    justify-self: start !important;
+    align-self: center !important;
+    transform: translateY(2px) !important;
 }

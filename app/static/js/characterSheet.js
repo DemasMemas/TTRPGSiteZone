@@ -1140,6 +1140,7 @@ async function renderEquipmentTab(data) {
     const armor = eq.armor || {};
     const weapons = data.weapons || [];
 
+    // Инициализация массивов модификаций
     if (!helmet.modifications) helmet.modifications = [];
     if (!gasMask.modifications) gasMask.modifications = [];
     if (!armor.modifications) armor.modifications = [];
@@ -1153,21 +1154,7 @@ async function renderEquipmentTab(data) {
         '5. Поломана'
     ];
 
-    function protectionGrid(prefix, prot) {
-        prot = prot || {};
-        return `
-            <div class="protection-grid">
-                <div>Физ</div><div>Хим</div><div>Терм</div><div>Элек</div><div>Рад</div>
-                <input type="number" class="number-input form-control" name="${prefix}.protection.physical" value="${prot.physical || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.chemical" value="${prot.chemical || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.thermal" value="${prot.thermal || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.electric" value="${prot.electric || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.radiation" value="${prot.radiation || 0}">
-            </div>
-        `;
-    }
-
-    // Загружаем шаблоны по категориям
+    // Загрузка шаблонов
     let weaponTemplates = [], helmetTemplates = [], gasMaskTemplates = [], armorTemplates = [];
     let modificationTemplates = [], containerTemplates = [];
     try {
@@ -1181,7 +1168,7 @@ async function renderEquipmentTab(data) {
         console.error('Failed to load templates', e);
     }
 
-    // Фильтруем модификации по типу
+    // Группировка модификаций по типу
     const helmetModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'helmet');
     const gasMaskModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'gas_mask');
     const armorModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'armor');
@@ -1189,6 +1176,7 @@ async function renderEquipmentTab(data) {
     const weaponModuleTemplates = modificationTemplates.filter(t => t.attributes?.type === 'weapon_module' || t.attributes?.category === 'module');
     const weaponModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'weapon_modification' || t.attributes?.category === 'modification');
 
+    // Группировка по подкатегориям
     function groupByCategory(templates) {
         const grouped = {};
         templates.forEach(t => {
@@ -1204,6 +1192,22 @@ async function renderEquipmentTab(data) {
     const groupedArmorMods = groupByCategory(armorModTemplates);
     const groupedPdaMods = groupByCategory(pdaModTemplates);
 
+    // Вспомогательная функция для генерации сетки защиты
+    function protectionGrid(prefix, prot) {
+        prot = prot || {};
+        return `
+            <div class="protection-grid">
+                <div>Физ</div><div>Хим</div><div>Терм</div><div>Элек</div><div>Рад</div>
+                <input type="number" class="number-input form-control" name="${prefix}.protection.physical" value="${prot.physical || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.chemical" value="${prot.chemical || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.thermal" value="${prot.thermal || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.electric" value="${prot.electric || 0}">
+                <input type="number" class="number-input form-control" name="${prefix}.protection.radiation" value="${prot.radiation || 0}">
+            </div>
+        `;
+    }
+
+    // Формирование HTML
     let html = `
         <!-- Оружие -->
         <div class="equipment-group">
@@ -1217,60 +1221,66 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Шлем -->
+        <!-- Шлем (двухблочная структура) -->
         <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Шлем</h4>
-                ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateHelmetTemplateModal()">➕ Создать кастом</button>` : ''}
-                <span class="protection-header">Защита</span>
-            </div>
             <div class="equipment-row">
-                <div class="fields-container">
-                    <div class="field-group field-name">
-                        <label style="text-align: center; width: 100%;">Название</label>
-                        <select name="equipment.helmet.templateId" class="form-control" onchange="fillHelmetFromPreset(this)">
-                            <option value="">-- Выберите --</option>
-                            ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
-                        </select>
+                <!-- Блок основных параметров -->
+                <div class="equipment-main-block">
+                    <div class="block-header">
+                        <h4>Шлем</h4>
+                        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateHelmetTemplateModal()">➕ Создать кастом</button>` : ''}
                     </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Прочность (макс)</label>
-                        <input type="number" class="number-input form-control" name="equipment.helmet.maxDurability" value="${helmet.maxDurability || 1}" placeholder="Макс">
-                    </div>
-                    <div class="field-group field-select">
-                        <label style="text-align: center; width: 100%;">Состояние</label>
-                        <select name="equipment.helmet.condition" class="form-control">
-                            ${conditionOptions.map(opt => `<option value="${opt}" ${helmet.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Стадия</label>
-                        <input type="number" class="number-input form-control" name="equipment.helmet.currentDurability" value="${helmet.currentDurability || 1}" placeholder="Тек">
-                    </div>
-                    <div class="field-group field-select">
-                        <label style="text-align: center; width: 100%;">Материал</label>
-                        <select name="equipment.helmet.material" class="form-control">
-                            ${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Точность</label>
-                        <input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}">
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Эргономика</label>
-                        <input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}">
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Харизма</label>
-                        <input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}">
+                    <div class="fields-container">
+                        <div class="field-group field-name">
+                            <label>Название</label>
+                            <select name="equipment.helmet.templateId" class="form-control" onchange="fillHelmetFromPreset(this)">
+                                <option value="">-- Выберите --</option>
+                                ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Прочность</label>
+                            <input type="number" class="number-input form-control" name="equipment.helmet.maxDurability" value="${helmet.maxDurability || 1}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Состояние</label>
+                            <select name="equipment.helmet.condition" class="form-control">
+                                ${conditionOptions.map(opt => `<option value="${opt}" ${helmet.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Стадия</label>
+                            <input type="number" class="number-input form-control" name="equipment.helmet.currentDurability" value="${helmet.currentDurability || 1}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Материал</label>
+                            <select name="equipment.helmet.material" class="form-control">
+                                ${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Точность</label>
+                            <input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}">
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Эргономика</label>
+                            <input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}">
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Харизма</label>
+                            <input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}">
+                        </div>
                     </div>
                 </div>
-                <div class="protection-wrapper">
+                <!-- Блок защиты -->
+                <div class="equipment-protection-block">
+                    <div class="block-header">
+                        <h5>Защита</h5>
+                    </div>
                     ${protectionGrid('equipment.helmet', helmet.protection)}
                 </div>
             </div>
-            <div style="margin-top: 15px;">
+            <div class="modifications-block">
                 <h5>Модификации шлема</h5>
                 <div id="helmet-modifications-container">
                     ${renderHelmetModifications(helmet.modifications, groupedHelmetMods)}
@@ -1279,68 +1289,72 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Противогаз -->
+        <!-- Противогаз (двухблочная структура) -->
         <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Противогаз</h4>
-                ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateGasMaskTemplateModal()">➕ Создать кастом</button>` : ''}
-                <span class="protection-header">Защита</span>
-            </div>
             <div class="equipment-row">
-                <div class="fields-container">
-                    <div class="field-group field-name">
-                        <label style="text-align: center; width: 100%;">Название</label>
-                        <select name="equipment.gasMask.templateId" class="form-control" onchange="fillGasMaskFromPreset(this)">
-                            <option value="">-- Выберите --</option>
-                            ${gasMaskTemplates.map(t => `<option value="${t.id}" ${gasMask.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
-                        </select>
+                <div class="equipment-main-block">
+                    <div class="block-header">
+                        <h4>Противогаз</h4>
+                        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateGasMaskTemplateModal()">➕ Создать кастом</button>` : ''}
                     </div>
-                    <div class="field-group field-checkbox">
-                        <label style="text-align: center; width: 100%;">Надет</label>
-                        <input type="checkbox" name="equipment.gasMask.isWorn" ${gasMask.isWorn ? 'checked' : ''}>
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Прочность (макс)</label>
-                        <input type="number" class="number-input form-control" name="equipment.gasMask.maxDurability" value="${gasMask.maxDurability || 1}" placeholder="Макс">
-                    </div>
-                    <div class="field-group field-select">
-                        <label style="text-align: center; width: 100%;">Состояние</label>
-                        <select name="equipment.gasMask.condition" class="form-control">
-                            ${conditionOptions.map(opt => `<option value="${opt}" ${gasMask.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Стадия</label>
-                        <input type="number" class="number-input form-control" name="equipment.gasMask.currentDurability" value="${gasMask.currentDurability || 1}" placeholder="Тек">
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Фильтр</label>
-                        <input type="number" class="number-input form-control" name="equipment.gasMask.filterRemaining" value="${gasMask.filterRemaining || 0}">
-                    </div>
-                    <div class="field-group field-select">
-                        <label style="text-align: center; width: 100%;">Материал</label>
-                        <select name="equipment.gasMask.material" class="form-control">
-                            ${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Точность</label>
-                        <input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}">
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Эргономика</label>
-                        <input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}">
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Харизма</label>
-                        <input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}">
+                    <div class="fields-container">
+                        <div class="field-group field-name">
+                            <label>Название</label>
+                            <select name="equipment.gasMask.templateId" class="form-control" onchange="fillGasMaskFromPreset(this)">
+                                <option value="">-- Выберите --</option>
+                                ${gasMaskTemplates.map(t => `<option value="${t.id}" ${gasMask.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-checkbox">
+                            <label>Надет</label>
+                            <input type="checkbox" name="equipment.gasMask.isWorn" ${gasMask.isWorn ? 'checked' : ''}>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Прочность</label>
+                            <input type="number" class="number-input form-control" name="equipment.gasMask.maxDurability" value="${gasMask.maxDurability || 1}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Состояние</label>
+                            <select name="equipment.gasMask.condition" class="form-control">
+                                ${conditionOptions.map(opt => `<option value="${opt}" ${gasMask.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Стадия</label>
+                            <input type="number" class="number-input form-control" name="equipment.gasMask.currentDurability" value="${gasMask.currentDurability || 1}">
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Фильтр</label>
+                            <input type="number" class="number-input form-control" name="equipment.gasMask.filterRemaining" value="${gasMask.filterRemaining || 0}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Материал</label>
+                            <select name="equipment.gasMask.material" class="form-control">
+                                ${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Точность</label>
+                            <input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}">
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Эргономика</label>
+                            <input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}">
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Харизма</label>
+                            <input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}">
+                        </div>
                     </div>
                 </div>
-                <div class="protection-wrapper">
+                <div class="equipment-protection-block">
+                    <div class="block-header">
+                        <h5>Защита</h5>
+                    </div>
                     ${protectionGrid('equipment.gasMask', gasMask.protection)}
                 </div>
             </div>
-            <div style="margin-top: 15px;">
+            <div class="modifications-block">
                 <h5>Модификации противогаза</h5>
                 <div id="gasMask-modifications-container">
                     ${renderGasMaskModifications(gasMask.modifications, groupedGasMaskMods)}
@@ -1349,56 +1363,60 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Броня -->
+        <!-- Броня (двухблочная структура) -->
         <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Броня</h4>
-                ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateArmorTemplateModal()">➕ Создать кастом</button>` : ''}
-                <span class="protection-header">Защита</span>
-            </div>
             <div class="equipment-row">
-                <div class="fields-container">
-                    <div class="field-group field-name">
-                        <label style="text-align: center; width: 100%;">Название</label>
-                        <select name="equipment.armor.templateId" class="form-control" onchange="fillArmorFromPreset(this)">
-                            <option value="">-- Выберите --</option>
-                            ${armorTemplates.map(t => `<option value="${t.id}" ${armor.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
-                        </select>
+                <div class="equipment-main-block">
+                    <div class="block-header">
+                        <h4>Броня</h4>
+                        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateArmorTemplateModal()">➕ Создать кастом</button>` : ''}
                     </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Прочность (макс)</label>
-                        <input type="number" class="number-input form-control" name="equipment.armor.maxDurability" value="${armor.maxDurability || 1}" placeholder="Макс">
-                    </div>
-                    <div class="field-group field-select">
-                        <label style="text-align: center; width: 100%;">Состояние</label>
-                        <select name="equipment.armor.condition" class="form-control">
-                            ${conditionOptions.map(opt => `<option value="${opt}" ${armor.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Стадия</label>
-                        <input type="number" class="number-input form-control" name="equipment.armor.currentDurability" value="${armor.currentDurability || 1}" placeholder="Тек">
-                    </div>
-                    <div class="field-group field-select">
-                        <label style="text-align: center; width: 100%;">Материал</label>
-                        <select name="equipment.armor.material" class="form-control">
-                            ${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Перемещение</label>
-                        <input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}">
-                    </div>
-                    <div class="field-group field-number">
-                        <label style="text-align: center; width: 100%;">Контейнеры</label>
-                        <input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}">
+                    <div class="fields-container">
+                        <div class="field-group field-name">
+                            <label>Название</label>
+                            <select name="equipment.armor.templateId" class="form-control" onchange="fillArmorFromPreset(this)">
+                                <option value="">-- Выберите --</option>
+                                ${armorTemplates.map(t => `<option value="${t.id}" ${armor.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Прочность</label>
+                            <input type="number" class="number-input form-control" name="equipment.armor.maxDurability" value="${armor.maxDurability || 1}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Состояние</label>
+                            <select name="equipment.armor.condition" class="form-control">
+                                ${conditionOptions.map(opt => `<option value="${opt}" ${armor.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Стадия</label>
+                            <input type="number" class="number-input form-control" name="equipment.armor.currentDurability" value="${armor.currentDurability || 1}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Материал</label>
+                            <select name="equipment.armor.material" class="form-control">
+                                ${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Перемещение</label>
+                            <input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}">
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Контейнеры</label>
+                            <input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}">
+                        </div>
                     </div>
                 </div>
-                <div class="protection-wrapper">
+                <div class="equipment-protection-block">
+                    <div class="block-header">
+                        <h5>Защита</h5>
+                    </div>
                     ${protectionGrid('equipment.armor', armor.protection)}
                 </div>
             </div>
-            <div style="margin-top: 15px;">
+            <div class="modifications-block">
                 <h5>Модификации брони</h5>
                 <div id="armor-modifications-container">
                     ${renderArmorModifications(armor.modifications, groupedArmorMods)}
@@ -1420,6 +1438,8 @@ async function renderEquipmentTab(data) {
     `;
 
     container.innerHTML = html;
+
+    // Рендер оружия (асинхронный)
     await renderWeapons(weapons, weaponTemplates, weaponModuleTemplates, weaponModTemplates);
 }
 
@@ -2005,7 +2025,7 @@ window.openCreateHelmetTemplateModal = function() {
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Прочность (макс)</label>
+                    <label>Прочность</label>
                     <input type="number" id="helmet-maxDurability" class="form-control number-input" value="1">
                 </div>
                 <div class="form-group">
@@ -2106,7 +2126,7 @@ window.openCreateGasMaskTemplateModal = function() {
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Прочность (макс)</label>
+                    <label>Прочность</label>
                     <input type="number" id="gasMask-maxDurability" class="form-control number-input" value="1">
                 </div>
                 <div class="form-group">
@@ -2212,7 +2232,7 @@ window.openCreateArmorTemplateModal = function() {
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Прочность (макс)</label>
+                    <label>Прочность</label>
                     <input type="number" id="armor-maxDurability" class="form-control number-input" value="1">
                 </div>
                 <div class="form-group">
