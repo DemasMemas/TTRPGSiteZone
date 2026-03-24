@@ -796,7 +796,7 @@ input[type="number"] {
   height: 24px !important;
   margin: 0 !important;
   padding: 0 !important;
-  transform: translateY(2px) !important;
+  transform: translateY(6px) !important;
 }
 .protection-grid {
   display: grid !important;
