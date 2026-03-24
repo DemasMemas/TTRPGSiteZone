@@ -147,7 +147,6 @@ async function getAllItemTemplates(forceRefresh = false) {
 
 function clearAllTemplatesCache() {
     allTemplatesCache = null;
-    // Также очищаем кеш по категориям
     const categories = ['weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
                         'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch'];
     categories.forEach(cat => clearTemplatesCache(cat));
