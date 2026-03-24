@@ -153,6 +153,120 @@ function clearAllTemplatesCache() {
     categories.forEach(cat => clearTemplatesCache(cat));
 }
 
+function getRequiredXp(level) {
+    return level < 11 ? 1 : level - 10;
+}
+function getSkillByPath(path) {
+    const parts = path.split('.');
+    let skill = currentCharacterData.skills;
+    for (const part of parts) {
+        if (!skill) return null;
+        skill = skill[part];
+    }
+    return skill;
+}
+
+function checkAndLevelUpSkill(skill, skillPath) {
+    while (true) {
+        const required = getRequiredXp(skill.base);
+        if (skill.xp >= required) {
+            skill.xp -= required;
+            skill.base += 1;
+            showNotification(`Навык ${skillPath.split('.').pop()} повышен до ${skill.base}!`, 'system');
+        } else {
+            break;
+        }
+    }
+}
+
+window.addSkillXpFromPoints = function(skillPath) {
+    if (!currentCharacterData.skills) currentCharacterData.skills = {};
+    let skill = getSkillByPath(skillPath);
+    if (!skill) return;
+
+    let freePoints = currentCharacterData.skills.skillPoints ?? 30;
+    if (freePoints <= 0) {
+        showNotification('Нет свободных очков навыков');
+        return;
+    }
+
+    currentCharacterData.skills.skillPoints = freePoints - 1;
+
+    skill.xp = (skill.xp || 0) + 1;
+
+    checkAndLevelUpSkill(skill, skillPath);
+
+    renderSkillsTab(currentCharacterData);
+    scheduleAutoSave();
+};
+
+window.addSkillXpFromUse = function(skillPath) {
+    let skill = getSkillByPath(skillPath);
+    if (!skill) return;
+
+    skill.xp = (skill.xp || 0) + 1;
+    checkAndLevelUpSkill(skill, skillPath);
+
+    renderSkillsTab(currentCharacterData);
+    scheduleAutoSave();
+};
+
+window.addWeaponXp = function(weaponKey) {
+    if (!currentCharacterData.skills) currentCharacterData.skills = {};
+    if (!currentCharacterData.skills.specialized) currentCharacterData.skills.specialized = {};
+
+    let weapon = currentCharacterData.skills.specialized[weaponKey];
+    if (!weapon) {
+        weapon = { level: 'unfamiliar', xp: 0 };
+        currentCharacterData.skills.specialized[weaponKey] = weapon;
+    }
+
+    if (weapon.level === 'professional') {
+        showNotification('Уже профессионал, дальше не развивается');
+        return;
+    }
+
+    const required = weapon.level === 'unfamiliar' ? 5 : 25;
+    weapon.xp = (weapon.xp || 0) + 1;
+
+    // Проверка на повышение (возможно, сразу несколько)
+    while (true) {
+        const currentLevel = weapon.level;
+        const need = currentLevel === 'unfamiliar' ? 5 : (currentLevel === 'familiar' ? 25 : 0);
+        if (need === 0) break;
+        if (weapon.xp >= need) {
+            weapon.xp -= need;
+            if (currentLevel === 'unfamiliar') {
+                weapon.level = 'familiar';
+                showNotification(`Владение ${weaponKey} повышено до Знаком!`, 'system');
+            } else if (currentLevel === 'familiar') {
+                weapon.level = 'professional';
+                showNotification(`Владение ${weaponKey} повышено до Профессионал!`, 'system');
+            }
+        } else {
+            break;
+        }
+    }
+
+    renderSkillsTab(currentCharacterData);
+    scheduleAutoSave();
+};
+
+window.setWeaponLevel = function(weaponKey, newLevel) {
+    if (!currentCharacterData.skills) currentCharacterData.skills = {};
+    if (!currentCharacterData.skills.specialized) currentCharacterData.skills.specialized = {};
+
+    let weapon = currentCharacterData.skills.specialized[weaponKey];
+    if (!weapon) weapon = {};
+
+    weapon.level = newLevel;
+    weapon.xp = 0; // при ручной смене уровня сбрасываем накопленный прогресс
+
+    currentCharacterData.skills.specialized[weaponKey] = weapon;
+    renderSkillsTab(currentCharacterData);
+    scheduleAutoSave();
+};
+
 // ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 function escapeHtml(unsafe) {
     if (unsafe === undefined || unsafe === null) return '';
@@ -892,81 +1006,96 @@ async function renderSkillsTab(data) {
         { key: 'survival', label: 'Выживание' }
     ];
 
-    function renderSkillRow(label, base, bonus, path) {
+    function renderSkillRow(label, base, bonus, xp, path) {
+        const required = getRequiredXp(base);
         return `
-            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px;">
-                <span style="min-width: 120px; white-space: normal; word-break: break-word; cursor: pointer;" onclick="window.rollSkill('${path}', '${label}')">${label}</span>
-                <input type="number" class="form-control number-input" name="skills.${path}.base" value="${base}" style="width: 60px;">
+            <div style="display: flex; align-items: center; gap: 3px; margin-bottom: 5px; flex-wrap: wrap;">
+                <span style="width: 125px; word-break: break-word; line-height: 1.3;" onclick="window.rollSkill('${path}', '${label}')" title="${label}">${label}</span>
+                <input type="number" class="form-control number-input" name="skills.${path}.base" value="${base}" style="width: 55px;">
                 <span>+</span>
-                <input type="number" class="form-control number-input" name="skills.${path}.bonus" value="${bonus}" style="width: 60px;">
-                <span style="cursor: pointer; font-size: 1.2em;" onclick="window.rollSkill('${path}', '${label}')">🎲</span>
+                <input type="number" class="form-control number-input" name="skills.${path}.bonus" value="${bonus}" style="width: 55px;">
+                <span style="font-size: 0.7rem;">Опыт: ${xp}/${required}</span>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="addSkillXpFromPoints('${path}')" style="padding: 2px 4px; font-size: 0.7rem;" title="Взять 1 свободное очко навыка">➕</button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="addSkillXpFromUse('${path}')" style="padding: 2px 4px; font-size: 0.7rem;" title="Добавить опыт за использование">💡</button>
+                <span style="cursor: pointer; font-size: 1.1em;" onclick="window.rollSkill('${path}', '${label}')">🎲</span>
             </div>
         `;
     }
 
-    let html = '';
-    html += `<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 20px;">`;
-
-    // Колонка 1: Физические навыки
-    html += `<div>`;
-    html += `<h4>Физические</h4>`;
-    physicalSkills.forEach(s => {
-        const skillObj = physical[s.key] || { base: 5, bonus: 0 };
-        html += renderSkillRow(s.label, skillObj.base, skillObj.bonus, `physical.${s.key}`);
-    });
-    html += `</div>`;
-
-    // Колонка 2: Социальные навыки
-    html += `<div>`;
-    html += `<h4>Социальные</h4>`;
-    socialSkills.forEach(s => {
-        const skillObj = social[s.key] || { base: 5, bonus: 0 };
-        html += renderSkillRow(s.label, skillObj.base, skillObj.bonus, `social.${s.key}`);
-    });
-    html += `</div>`;
-
-    // Колонка 3: Прочие навыки
-    html += `<div>`;
-    html += `<h4>Прочие</h4>`;
-    otherSkills.forEach(s => {
-        const skillObj = other[s.key] || { base: 5, bonus: 0 };
-        html += renderSkillRow(s.label, skillObj.base, skillObj.bonus, `other.${s.key}`);
-    });
-    html += `</div>`;
-
-    // Колонка 4: Владение оружием
-    html += `<div>`;
-    html += `<h4>Владение оружием</h4>`;
-    const levelOptions = [
-        { value: 'unfamiliar', label: 'Не знаком' },
-        { value: 'familiar', label: 'Знаком' },
-        { value: 'professional', label: 'Профессионал' }
-    ];
-    const specLabels = {
-        pistols: 'Пистолеты', shotguns: 'Дробовики', smgs: 'ПП',
-        assaultRifles: 'Штурмовые', sniperRifles: 'Снайперские',
-        grenadeLaunchers: 'Гранатометы', machineGuns: 'Пулеметы'
-    };
-    for (const [key, label] of Object.entries(specLabels)) {
-        const level = specialized[key]?.level || 'unfamiliar';
-        const select = levelOptions.map(opt =>
-            `<option value="${opt.value}" ${level === opt.value ? 'selected' : ''}>${opt.label}</option>`
-        ).join('');
-        html += `
-            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px;">
-                <span style="min-width: 110px; white-space: normal; word-break: break-word;">${label}</span>
-                <select name="skills.specialized.${key}.level" class="form-control" style="width: 100px;">${select}</select>
+    let html = `
+        <div style="display: grid; grid-template-columns: repeat(4, minmax(320px, 1fr)); gap: 20px; margin-bottom: 20px;">
+            <div>
+                <h4>Физические</h4>
+                ${physicalSkills.map(s => {
+                    const skillObj = physical[s.key] || { base: 5, bonus: 0 };
+                    return renderSkillRow(s.label, skillObj.base, skillObj.bonus, skillObj.xp || 0, `physical.${s.key}`);
+                }).join('')}
             </div>
-        `;
-    }
-    html += `</div>`;
-    html += `</div>`;
+            <div>
+                <h4>Социальные</h4>
+                ${socialSkills.map(s => {
+                    const skillObj = social[s.key] || { base: 5, bonus: 0 };
+                    return renderSkillRow(s.label, skillObj.base, skillObj.bonus, skillObj.xp || 0, `social.${s.key}`);
+                }).join('')}
+            </div>
+            <div>
+                <h4>Прочие</h4>
+                ${otherSkills.map(s => {
+                    const skillObj = other[s.key] || { base: 5, bonus: 0 };
+                    return renderSkillRow(s.label, skillObj.base, skillObj.bonus, skillObj.xp || 0, `other.${s.key}`);
+                }).join('')}
+            </div>
+            <div>
+                <h4>Владение оружием</h4>
+                ${(() => {
+                    const levelOptions = [
+                        { value: 'unfamiliar', label: 'Не знаком' },
+                        { value: 'familiar', label: 'Знаком' },
+                        { value: 'professional', label: 'Профессионал' }
+                    ];
+                    const specLabels = {
+                        pistols: 'Пистолеты',
+                        shotguns: 'Дробовики',
+                        smgs: 'ПП',
+                        assaultRifles: 'Штурмовые',
+                        sniperRifles: 'Снайперские',
+                        grenadeLaunchers: 'Гранатометы',
+                        machineGuns: 'Пулеметы'
+                    };
 
-    html += `
+                    function getRequiredXpForWeapon(level) {
+                        if (level === 'unfamiliar') return 5;
+                        if (level === 'familiar') return 25;
+                        return 0; // professional
+                    }
+
+                    let specHtml = '';
+                    for (const [key, label] of Object.entries(specLabels)) {
+                        const current = specialized[key] || { level: 'unfamiliar', xp: 0 };
+                        const level = current.level;
+                        const xp = current.xp || 0;
+                        const required = getRequiredXpForWeapon(level);
+                        const progressDisplay = required > 0 ? `${xp}/${required}` : 'максимум';
+                        const canAdd = level !== 'professional';
+                        specHtml += `
+                            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px; flex-wrap: wrap;">
+                                <span style="width: 115px;">${label}</span>
+                                <select name="skills.specialized.${key}.level" class="form-control" style="width: 100px;" onchange="setWeaponLevel('${key}', this.value)">
+                                    ${levelOptions.map(opt => `<option value="${opt.value}" ${level === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('')}
+                                </select>
+                                <span style="font-size: 0.7rem;">Прогресс: ${progressDisplay}</span>
+                                ${canAdd ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addWeaponXp('${key}')" style="padding: 2px 4px; font-size: 0.7rem;" title="Добавить прогресс за сражение">➕</button>` : ''}
+                            </div>
+                        `;
+                    }
+                    return specHtml;
+                })()}
+            </div>
+        </div>
         <hr>
         <div style="display: flex; gap: 15px;">
-            <div><label>Очки навыков </label><input type="number" class="form-control number-input" name="skills.skillPoints" value="${skills.skillPoints || 30}"></div>
-            <div><label>Специализации </label><input type="number" class="form-control number-input" name="skills.specializations" value="${skills.specializations || 10}"></div>
+            <div><label>Очки навыков</label><input type="number" class="form-control number-input" name="skills.skillPoints" value="${skills.skillPoints ?? 30}"></div>
+            <div><label>Специализации</label><input type="number" class="form-control number-input" name="skills.specializations" value="${skills.specializations || 10}"></div>
         </div>
         <h4>Особые черты</h4>
         <div id="special-traits-container"></div>
@@ -3234,6 +3363,28 @@ export async function openCharacterSheet(characterId) {
     try {
         const character = await getCharacter(characterId);
         currentCharacterData = character.data || {};
+
+        function ensureSkillXp(data) {
+            if (!data.skills) data.skills = {};
+            const skills = data.skills;
+            const categories = ['physical', 'social', 'other'];
+            for (const cat of categories) {
+                if (!skills[cat]) skills[cat] = {};
+                for (const skill of Object.values(skills[cat])) {
+                    if (skill.xp === undefined) skill.xp = 0;
+                }
+            }
+            if (skills.skillPoints === undefined) skills.skillPoints = 30;
+
+            const weaponKeys = ['pistols', 'shotguns', 'smgs', 'assaultRifles', 'sniperRifles', 'grenadeLaunchers', 'machineGuns'];
+            if (!skills.specialized) skills.specialized = {};
+            for (const key of weaponKeys) {
+                if (!skills.specialized[key]) skills.specialized[key] = { level: 'unfamiliar', xp: 0 };
+                if (skills.specialized[key].xp === undefined) skills.specialized[key].xp = 0;
+            }
+        }
+        ensureSkillXp(currentCharacterData);
+
         currentCharacterData.ownerId = character.owner_id;
         currentCharacterData.ownerUsername = character.owner_username;
         currentCharacterData.visible_to = character.visible_to || [];
