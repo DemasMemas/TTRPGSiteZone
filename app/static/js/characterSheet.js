@@ -965,8 +965,8 @@ async function renderSkillsTab(data) {
     html += `
         <hr>
         <div style="display: flex; gap: 15px;">
-            <div><label>Очки навыков</label><input type="number" class="form-control number-input" name="skills.skillPoints" value="${skills.skillPoints || 30}"></div>
-            <div><label>Специализации</label><input type="number" class="form-control number-input" name="skills.specializations" value="${skills.specializations || 10}"></div>
+            <div><label>Очки навыков </label><input type="number" class="form-control number-input" name="skills.skillPoints" value="${skills.skillPoints || 30}"></div>
+            <div><label>Специализации </label><input type="number" class="form-control number-input" name="skills.specializations" value="${skills.specializations || 10}"></div>
         </div>
         <h4>Особые черты</h4>
         <div id="special-traits-container"></div>
