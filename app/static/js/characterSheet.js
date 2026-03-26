@@ -545,8 +545,10 @@ async function renderBasicTab(data) {
                 </div>
             </div>
         </div>
-        <button type="button" class="btn btn-sm btn-secondary" onclick="addContainer()" style="margin-top: 10px; margin-bottom: 10px;">+ Добавить контейнер</button>
-        <h4>Контейнеры на броне</h4>
+        <div style="display: flex; align-items: center; margin-top: 10px; margin-bottom: 10px;">
+            <h4 style="margin: 0;">Контейнеры на броне</h4>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="addContainer()" style="padding: 2px 8px;">➕</button>
+        </div>
         <div style="display: flex; flex-direction: column; gap: 10px;">
             ${Array.isArray(inv.containers) ? inv.containers.map((cont, idx) => {
                 const selectedTemplate = containerTemplates.find(t => t.id === cont.templateId);
@@ -910,12 +912,26 @@ function renderHealthTab(data, container = null) {
             <div style="display: flex; gap: 5px; margin-bottom: 5px; align-items: center;">
                 <input list="effect-names" class="form-control" name="health.effects.${index}.name" value="${escapeHtml(name)}" placeholder="Название эффекта" style="flex:2;">
                 <datalist id="effect-names">
-                    <option value="Отравление">
-                    <option value="Кровотечение">
+                    <option value="Слабое Внешнее Кровотечение">
+                    <option value="Среднее Внешнее Кровотечение">
+                    <option value="Сильное Внешнее Кровотечение">
+                    <option value="Экстремальное Внешнее Кровотечение">
+                    <option value="Слабое Внутреннее Кровотечение">
+                    <option value="Среднее Внутреннее Кровотечение">
+                    <option value="Сильное Внутреннее Кровотечение">
+                    <option value="Экстремальное Внутреннее Кровотечение">
                     <option value="Перелом">
-                    <option value="Слабость">
-                    <option value="Тошнота">
-                    <option value="Головокружение">
+                    <option value="Опьянение">
+                    <option value="Зависимость от препарата">
+                    <option value="Неделя ломки">
+                    <option value="Температура тела">
+                    <option value="Заражение крови">
+                    <option value="Критический уровень">
+                    <option value="Оглушение">
+                    <option value="Слепота">
+                    <option value="Контузия">
+                    <option value="Пси-состояние">
+                    <option value="Болевой шок">
                 </datalist>
                 <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Знач" style="width:80px;">
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">✕</button>
@@ -1409,11 +1425,13 @@ async function renderEquipmentTab(data) {
                 </div>
             </div>
             <div class="modifications-block">
-                <h5>Модификации шлема</h5>
+                <div style="display: flex; align-items: center;">
+                    <h5 style="margin: 0;">Модификации шлема</h5>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="addHelmetModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                </div>
                 <div id="helmet-modifications-container">
                     ${renderHelmetModifications(helmet.modifications, groupedHelmetMods)}
                 </div>
-                <button type="button" class="btn btn-sm btn-secondary" onclick="addHelmetModification()">+ Добавить модификацию</button>
             </div>
         </div>
 
@@ -1483,11 +1501,13 @@ async function renderEquipmentTab(data) {
                 </div>
             </div>
             <div class="modifications-block">
-                <h5>Модификации противогаза</h5>
+                <div style="display: flex; align-items: center;">
+                    <h5 style="margin: 0;">Модификации противогаза</h5>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="addGasMaskModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                </div>
                 <div id="gasMask-modifications-container">
                     ${renderGasMaskModifications(gasMask.modifications, groupedGasMaskMods)}
                 </div>
-                <button type="button" class="btn btn-sm btn-secondary" onclick="addGasMaskModification()">+ Добавить модификацию</button>
             </div>
         </div>
 
@@ -1545,23 +1565,24 @@ async function renderEquipmentTab(data) {
                 </div>
             </div>
             <div class="modifications-block">
-                <h5>Модификации брони</h5>
+                <div style="display: flex; align-items: center;">
+                    <h5 style="margin: 0;">Модификации брони</h5>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="addArmorModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                </div>
                 <div id="armor-modifications-container">
                     ${renderArmorModifications(armor.modifications, groupedArmorMods)}
                 </div>
-                <button type="button" class="btn btn-sm btn-secondary" onclick="addArmorModification()">+ Добавить модификацию</button>
             </div>
         </div>
 
-        <!-- Модификации КПК -->
         <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Модификации КПК</h4>
+            <div style="display: flex; align-items: center;">
+                <h4 style="margin: 0;">Модификации КПК</h4>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="addPdaItem()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
             </div>
             <div id="pda-modifications-container">
                 ${renderPdaModifications(data.modifications?.pda?.items || [], groupedPdaMods)}
             </div>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="addPdaItem()">+ Добавить модификацию КПК</button>
         </div>
     `;
 
@@ -1861,14 +1882,18 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 ${modelBlock}
                 ${fieldsHtml}
                 <div style="margin-top:10px;">
-                    <label>Модули</label>
+                    <div style="display: flex; align-items: center;">
+                        <label style="margin: 0;">Модули</label>
+                        <button type="button" class="btn btn-sm" onclick="addWeaponModule(${index})" title="Добавить модуль" style="padding: 2px 8px;">➕</button>
+                    </div>
                     <div id="modules-${index}">${modulesHtml}</div>
-                    <button type="button" class="btn btn-sm" onclick="addWeaponModule(${index})">+ Модуль</button>
                 </div>
                 <div style="margin-top:10px;">
-                    <label>Модификации</label>
+                    <div style="display: flex; align-items: center;">
+                        <label style="margin: 0;">Модификации</label>
+                        <button type="button" class="btn btn-sm" onclick="addWeaponModification(${index})" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                    </div>
                     <div id="modifications-${index}">${modificationsHtml}</div>
-                    <button type="button" class="btn btn-sm" onclick="addWeaponModification(${index})">+ Модификация</button>
                 </div>
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})" style="margin-top:10px;">Удалить оружие</button>
             </div>
@@ -2676,12 +2701,11 @@ async function renderInventoryTab(data) {
             <div><strong>Общий вес:</strong> <span id="total-weight-display">${rawTotalWeight}</span></div>
             <div><strong>Штраф перемещения:</strong> <span id="move-penalty-display">${movePenalty}</span></div>
         </div>
-        ${window.isGM ? `
-            <div style="margin-bottom: 15px; display: flex; gap: 10px;">
-                <button type="button" class="btn btn-sm btn-primary" onclick="openCreateInventoryItemModal()">➕ Создать предмет</button>
-                <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateBackpackTemplateModal()">➕ Создать рюкзак</button>
-            </div>
-        ` : ''}
+        ${window.isGM ? `<div style="margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+            <button type="button" class="btn btn-sm btn-primary" onclick="openCreateInventoryItemModal()">➕ Создать предмет</button>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateBackpackTemplateModal()">➕ Создать рюкзак</button>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateVestTemplateModal()">➕ Создать разгрузку</button>
+        </div>` : ''}
         <hr>
         <h4>Карманы <span style="font-weight:normal;">(заполнено: <span id="pocket-fill-display">${pocketFill}</span> / <input type="number" class="form-control number-input" name="inventory.pocketMaxVolume" value="${pocketMaxVolume}" style="width:70px; display:inline;">)</span></h4>
         <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
@@ -2707,23 +2731,26 @@ async function renderInventoryTab(data) {
                     </optgroup>
                 </select>
             </div>
-            <h5>Подсумки</h5>
+            <div style="display: flex; align-items: center;">
+                <h5 style="margin: 0;">Подсумки</h5>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltPouch()" style="padding: 2px 8px;">➕</button>
+            </div>
             <div id="belt-pouches-container">
                 ${renderBeltPouches(eq.belt?.pouches || [], pouchTemplates)}
             </div>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltPouch()">+ Добавить подсумок</button>
-            <h5 style="margin-top: 15px;">Модификации пояса</h5>
+            <div style="display: flex; align-items: center; margin-top: 15px;">
+                <h5 style="margin: 0;">Модификации пояса</h5>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+            </div>
             <div id="belt-modifications-container">
                 ${renderBeltModifications(eq.belt?.modifications || [], modificationTemplates.filter(t => t.attributes?.type === 'belt'))}
             </div>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltModification()">+ Добавить модификацию</button>
         </div>
 
         <!-- Разгрузка -->
         <div class="equipment-group" style="margin-top: 20px;">
             <div class="equipment-header">
                 <h4>Разгрузка</h4>
-                ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateVestTemplateModal()">➕ Создать кастом</button>` : ''}
             </div>
             <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
                 <div style="flex: 1;">
@@ -2741,11 +2768,13 @@ async function renderInventoryTab(data) {
                     <input type="number" class="form-control number-input" name="equipment.vest.totalCapacity" value="${eq.vest?.totalCapacity || 0}" placeholder="Объём">
                 </div>
             ` : ''}
-            <h5>Подсумки</h5>
+            <div style="display: flex; align-items: center;">
+                <h5 style="margin: 0;">Подсумки</h5>
+                ${eq.vest?.model === 'custom' ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addVestPouch()" style="padding: 2px 8px;">➕</button>` : ''}
+            </div>
             <div id="vest-pouches-container">
                 ${renderVestPouches(eq.vest?.pouches || [], pouchTemplates, eq.vest?.model === 'custom', eq.vest?.totalCapacity)}
             </div>
-            ${eq.vest?.model === 'custom' ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addVestPouch()">+ Добавить подсумок</button>` : ''}
         </div>
 
         <h4 style="margin-top:20px;">Рюкзак</h4>
@@ -3486,10 +3515,10 @@ window.rollSkill = function(skillPath, skillLabel) {
     let modStr = `модификатор навыка = ${selfMod}`;
     if (charismaMod !== 0) modStr += ` + харизма = ${charismaMod}`;
     if (bonus !== 0) modStr += ` + бонус = ${bonus}`;
-    showNotification(`🎲 ${skillLabel}: бросок d20 = ${dice}, ${modStr}, итог = ${total}`, 'system');
+    showNotification(`🎲 ${skillLabel}: бросок к20 = ${dice}, ${modStr}, итог = ${total}`, 'system');
     const socket = getSocket();
     if (socket && currentLobbyId) {
-        const message = `🎲 ${skillLabel}: бросок d20 = ${dice}, ${modStr}, итог = **${total}**`;
+        const message = `🎲 ${skillLabel}: бросок к20 = ${dice}, ${modStr}, итог = **${total}**`;
         socket.emit('send_message', {
             token: localStorage.getItem('access_token'),
             lobby_id: currentLobbyId,
