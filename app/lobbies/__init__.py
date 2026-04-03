@@ -107,23 +107,6 @@ def delete_lobby(lobby_id, lobby):
 def lobby_page(lobby_id):
     return render_template('lobby.html')
 
-@lobbies_bp.route('/<int:lobby_id>/select_character', methods=['POST'])
-@jwt_required()
-@requires_participant
-def select_character(lobby_id, lobby, participant):
-    data = request.get_json()
-    character_id = data.get('character_id')
-    if not character_id:
-        return jsonify({'error': 'character_id required'}), 400
-
-    character = LobbyCharacter.query.filter_by(id=character_id, owner_id=participant.user_id).first()
-    if not character:
-        return jsonify({'error': 'Character not found or not yours'}), 404
-
-    participant.character_id = character_id
-    db.session.commit()
-    return jsonify({'message': 'Character selected'}), 200
-
 @lobbies_bp.route('/<int:lobby_id>/participants_characters', methods=['GET'])
 @jwt_required()
 @requires_participant
