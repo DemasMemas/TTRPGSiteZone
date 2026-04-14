@@ -3284,12 +3284,23 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
     itemDiv.style.borderRadius = '4px';
     itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
 
-    // Верхняя строка: выбор типа и удаление
     const row = document.createElement('div');
     row.style.display = 'grid';
     row.style.gridTemplateColumns = '2fr 1fr auto';
     row.style.gap = '10px';
     row.style.alignItems = 'center';
+
+    // Иконка сворачивания + селект
+    const leftWrapper = document.createElement('div');
+    leftWrapper.style.display = 'flex';
+    leftWrapper.style.alignItems = 'center';
+    leftWrapper.style.gap = '5px';
+
+    const toggleIcon = document.createElement('span');
+    toggleIcon.textContent = '▶';
+    toggleIcon.style.cursor = 'pointer';
+    toggleIcon.style.userSelect = 'none';
+    leftWrapper.appendChild(toggleIcon);
 
     const select = document.createElement('select');
     select.className = 'form-control';
@@ -3308,15 +3319,17 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
             pouch.capacity = template.volume || 0;
             pouch.name = template.name;
             renderInventoryTab(currentCharacterData);
-            recalculateInventoryTotals();
             scheduleAutoSave();
         }
     };
+    leftWrapper.appendChild(select);
+    row.appendChild(leftWrapper);
 
     const infoSpan = document.createElement('span');
     const used = calculatePouchUsedVolume(pouch);
     const internalLimit = pouch.internalVolume || pouch.capacity;
     infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
+    row.appendChild(infoSpan);
 
     const delBtn = document.createElement('button');
     delBtn.className = 'btn btn-sm btn-danger';
@@ -3325,22 +3338,19 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
         const parentArray = currentCharacterData.equipment.belt.pouches;
         parentArray.splice(index, 1);
         renderInventoryTab(currentCharacterData);
-        recalculateInventoryTotals();
         scheduleAutoSave();
     };
-
-    row.appendChild(select);
-    row.appendChild(infoSpan);
     row.appendChild(delBtn);
     itemDiv.appendChild(row);
 
-    // Блок содержимого
+    // Содержимое
     const contentsDiv = document.createElement('div');
     contentsDiv.className = 'container-contents';
     contentsDiv.style.marginLeft = '20px';
     contentsDiv.style.marginTop = '10px';
     contentsDiv.style.paddingLeft = '10px';
     contentsDiv.style.borderLeft = '2px dashed #666';
+    contentsDiv.style.display = 'none';
 
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
@@ -3352,10 +3362,21 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
     addBtn.type = 'button';
     addBtn.className = 'btn btn-sm btn-secondary';
     addBtn.textContent = '➕ Добавить внутрь';
-    addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv);
+    addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv, path.concat('contents'));
     contentsDiv.appendChild(addBtn);
 
     itemDiv.appendChild(contentsDiv);
+
+    toggleIcon.onclick = () => {
+        if (contentsDiv.style.display === 'none') {
+            contentsDiv.style.display = 'block';
+            toggleIcon.textContent = '▼';
+        } else {
+            contentsDiv.style.display = 'none';
+            toggleIcon.textContent = '▶';
+        }
+    };
+
     parentContainer.appendChild(itemDiv);
 }
 
@@ -3369,14 +3390,27 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
 
     const row = document.createElement('div');
-    row.style.display = 'grid';
-    row.style.gridTemplateColumns = isCustom ? '2fr 1fr auto' : '2fr auto';
-    row.style.gap = '10px';
+    row.style.display = 'flex';
     row.style.alignItems = 'center';
+    row.style.gap = '10px';
+
+    // Левая часть с иконкой и селектом
+    const leftWrapper = document.createElement('div');
+    leftWrapper.style.display = 'flex';
+    leftWrapper.style.alignItems = 'center';
+    leftWrapper.style.gap = '5px';
+    leftWrapper.style.flex = '1';
+
+    const toggleIcon = document.createElement('span');
+    toggleIcon.textContent = '▶';
+    toggleIcon.style.cursor = 'pointer';
+    toggleIcon.style.userSelect = 'none';
+    leftWrapper.appendChild(toggleIcon);
 
     const select = document.createElement('select');
     select.className = 'form-control';
     select.disabled = !isCustom;
+    select.style.flex = '1';
     select.innerHTML = '<option value="">-- Выберите подсумок --</option>';
     pouchTemplates.forEach(t => {
         const option = document.createElement('option');
@@ -3393,35 +3427,35 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
             pouch.capacity = template.volume || 0;
             pouch.name = template.name;
             renderInventoryTab(currentCharacterData);
-            recalculateInventoryTotals();
             scheduleAutoSave();
         }
     };
-    row.appendChild(select);
+    leftWrapper.appendChild(select);
+    row.appendChild(leftWrapper);
 
+    // Информация о заполненности
     const infoSpan = document.createElement('span');
     const used = calculatePouchUsedVolume(pouch);
     const internalLimit = pouch.internalVolume || pouch.capacity;
     infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
+    infoSpan.style.whiteSpace = 'nowrap';
     row.appendChild(infoSpan);
 
+    // Кнопка удаления ТОЛЬКО для кастомной разгрузки
     if (isCustom) {
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'btn btn-sm btn-danger';
         delBtn.textContent = '✕';
-        delBtn.disabled = !isCustom;
+        delBtn.style.flexShrink = '0';
         delBtn.onclick = () => {
-            if (!isCustom) return;
             const parentArray = currentCharacterData.equipment.vest.pouches;
             parentArray.splice(index, 1);
             renderInventoryTab(currentCharacterData);
-            recalculateInventoryTotals();
             scheduleAutoSave();
         };
         row.appendChild(delBtn);
     }
-
     itemDiv.appendChild(row);
 
     // Содержимое
@@ -3431,6 +3465,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     contentsDiv.style.marginTop = '10px';
     contentsDiv.style.paddingLeft = '10px';
     contentsDiv.style.borderLeft = '2px dashed #666';
+    contentsDiv.style.display = 'none';
 
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
@@ -3442,10 +3477,21 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     addBtn.type = 'button';
     addBtn.className = 'btn btn-sm btn-secondary';
     addBtn.textContent = '➕ Добавить внутрь';
-    addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv);
+    addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv, path.concat('contents'));
     contentsDiv.appendChild(addBtn);
 
     itemDiv.appendChild(contentsDiv);
+
+    toggleIcon.onclick = () => {
+        if (contentsDiv.style.display === 'none') {
+            contentsDiv.style.display = 'block';
+            toggleIcon.textContent = '▼';
+        } else {
+            contentsDiv.style.display = 'none';
+            toggleIcon.textContent = '▶';
+        }
+    };
+
     parentContainer.appendChild(itemDiv);
 }
 
@@ -3891,14 +3937,16 @@ function renderBackpackNew(items, groupedByCategory) {
 
 function renderBackpackItem(item, index, parentPath, parentContainer) {
     const itemDiv = document.createElement('div');
-    itemDiv.className = 'container-item';
     itemDiv.style.marginBottom = '5px';
     itemDiv.style.padding = '5px';
     itemDiv.style.border = '1px solid #444';
     itemDiv.style.borderRadius = '4px';
     itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
 
-    // Основная строка с предметом
+    // Сохраняем путь к ЭТОМУ предмету в data-атрибуте
+    const itemPath = parentPath.concat(index);
+    itemDiv.dataset.path = JSON.stringify(itemPath);
+
     const row = document.createElement('div');
     row.style.display = 'grid';
     row.style.gridTemplateColumns = '2fr 1fr 1fr 1fr auto';
@@ -3907,55 +3955,106 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
 
     let nameCell;
     if (item.templateId) {
-        nameCell = `<strong>${escapeHtml(item.name)}</strong>`;
+        nameCell = document.createElement('strong');
+        nameCell.textContent = item.name;
     } else {
-        nameCell = `<input type="text" class="form-control" value="${escapeHtml(item.name)}" placeholder="Название" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'name', this.value)">`;
+        nameCell = document.createElement('input');
+        nameCell.type = 'text';
+        nameCell.className = 'form-control';
+        nameCell.value = item.name || '';
+        nameCell.placeholder = 'Название';
+        nameCell.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'name', e.target.value);
     }
 
-    row.innerHTML = `
-        <div style="display: flex; flex-direction: column; gap: 2px;">
-            ${nameCell}
-            ${item.isContainer ? '<span style="font-size:0.7rem;">📦 Контейнер</span>' : ''}
-        </div>
-        <input type="number" class="form-control number-input" value="${item.weight}" placeholder="Вес" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'weight', this.value)">
-        <input type="number" class="form-control number-input" value="${item.volume}" placeholder="Объём" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'volume', this.value)">
-        <input type="number" class="form-control number-input" value="${item.quantity}" placeholder="Кол-во" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'quantity', this.value)">
-        <button type="button" class="btn btn-sm btn-danger" onclick="removeBackpackItemAtPath('${parentPath.concat(index).join(',')}')">✕</button>
-    `;
+    const nameWrapper = document.createElement('div');
+    nameWrapper.style.display = 'flex';
+    nameWrapper.style.alignItems = 'center';
+
+    if (item.isContainer) {
+        const toggleIcon = document.createElement('span');
+        toggleIcon.textContent = '▶';
+        toggleIcon.style.cursor = 'pointer';
+        toggleIcon.style.marginRight = '5px';
+        toggleIcon.style.userSelect = 'none';
+        nameWrapper.appendChild(toggleIcon);
+        itemDiv._toggleIcon = toggleIcon;
+    }
+    nameWrapper.appendChild(nameCell);
+
+    const weightInput = document.createElement('input');
+    weightInput.type = 'number';
+    weightInput.className = 'form-control number-input';
+    weightInput.value = item.weight || 0;
+    weightInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'weight', e.target.value);
+
+    const volumeInput = document.createElement('input');
+    volumeInput.type = 'number';
+    volumeInput.className = 'form-control number-input';
+    volumeInput.value = item.volume || 0;
+    volumeInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'volume', e.target.value);
+
+    const qtyInput = document.createElement('input');
+    qtyInput.type = 'number';
+    qtyInput.className = 'form-control number-input';
+    qtyInput.value = item.quantity || 1;
+    qtyInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'quantity', e.target.value);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btn btn-sm btn-danger';
+    delBtn.textContent = '✕';
+    delBtn.onclick = () => removeBackpackItemAtPath(itemPath.join(','));
+
+    row.appendChild(nameWrapper);
+    row.appendChild(weightInput);
+    row.appendChild(volumeInput);
+    row.appendChild(qtyInput);
+    row.appendChild(delBtn);
     itemDiv.appendChild(row);
 
-    // Если контейнер — показываем его содержимое и кнопку добавления
     if (item.isContainer) {
         const contentsDiv = document.createElement('div');
+        contentsDiv.className = 'container-contents';
         contentsDiv.style.marginLeft = '25px';
         contentsDiv.style.marginTop = '8px';
         contentsDiv.style.paddingLeft = '10px';
         contentsDiv.style.borderLeft = '2px dashed #666';
-        contentsDiv.className = 'container-contents';
+        contentsDiv.style.display = 'none';
 
-        // Рендерим уже существующее содержимое
         if (item.contents && item.contents.length > 0) {
             item.contents.forEach((subItem, subIndex) => {
-                renderBackpackItem(subItem, subIndex, parentPath.concat(index, 'contents'), contentsDiv);
+                renderBackpackItem(subItem, subIndex, itemPath.concat('contents'), contentsDiv);
             });
         }
 
-        // Кнопка добавления внутрь
-        const addButton = document.createElement('button');
-        addButton.type = 'button';
-        addButton.className = 'btn btn-sm btn-secondary';
-        addButton.style.marginTop = '5px';
-        addButton.textContent = '➕ Добавить внутрь';
-        addButton.onclick = () => addItemToContainerDirect(item, contentsDiv);
-        contentsDiv.appendChild(addButton);
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'btn btn-sm btn-secondary';
+        addBtn.textContent = '➕ Добавить внутрь';
+        addBtn.onclick = () => addItemToContainerDirect(item, contentsDiv, itemPath.concat('contents'));
+        contentsDiv.appendChild(addBtn);
 
         itemDiv.appendChild(contentsDiv);
+        itemDiv._contentsDiv = contentsDiv;
+
+        const toggleIcon = itemDiv._toggleIcon;
+        if (toggleIcon) {
+            toggleIcon.onclick = () => {
+                if (contentsDiv.style.display === 'none') {
+                    contentsDiv.style.display = 'block';
+                    toggleIcon.textContent = '▼';
+                } else {
+                    contentsDiv.style.display = 'none';
+                    toggleIcon.textContent = '▶';
+                }
+            };
+        }
     }
 
     parentContainer.appendChild(itemDiv);
 }
 
-window.addItemToContainerDirect = async function(containerItem, contentsDiv) {
+async function addItemToContainerDirect(containerItem, contentsDiv, containerPath) {
     // Удаляем предыдущий селект
     const existingSelect = contentsDiv.querySelector('.inline-template-select');
     if (existingSelect) existingSelect.remove();
@@ -3987,26 +4086,46 @@ window.addItemToContainerDirect = async function(containerItem, contentsDiv) {
 
     select.onchange = async (e) => {
         const templateId = e.target.value;
-        if (!templateId) {
-            select.remove();
-            return;
-        }
+        if (!templateId) { select.remove(); return; }
         const template = allTemplates.find(t => t.id == templateId);
-        if (!template) {
-            select.remove();
-            return;
-        }
+        if (!template) { select.remove(); return; }
+
         const newItem = createItemFromTemplate(template);
-        if (!containerItem.contents) containerItem.contents = [];
+        if (!Array.isArray(containerItem.contents)) containerItem.contents = [];
         containerItem.contents.push(newItem);
-        recalculateInventoryTotals();
-        await renderInventoryTab(currentCharacterData);
-        scheduleAutoSave();
+
+        // Удаляем все элементы содержимого кроме кнопки и селекта
+        const children = Array.from(contentsDiv.children);
+        for (let child of children) {
+            if (!child.classList.contains('inline-template-select') && !child.matches('button')) {
+                child.remove();
+            }
+        }
+
+        // Перерисовываем всё содержимое с правильными путями
+        containerItem.contents.forEach((subItem, subIndex) => {
+            renderBackpackItem(subItem, subIndex, containerPath, contentsDiv);
+        });
+
+        // Находим кнопку добавления (она осталась)
+        const addBtn = contentsDiv.querySelector('button');
+        if (addBtn && contentsDiv.lastChild !== addBtn) {
+            contentsDiv.appendChild(addBtn);
+        }
+
         select.remove();
+        recalculateInventoryTotals();
+        scheduleAutoSave();
     };
 
-    contentsDiv.appendChild(select);
-};
+    // Вставляем селект перед кнопкой "Добавить внутрь"
+    const addButton = contentsDiv.querySelector('button');
+    if (addButton && addButton.parentNode === contentsDiv) {
+        contentsDiv.insertBefore(select, addButton);
+    } else {
+        contentsDiv.appendChild(select);
+    }
+}
 
 async function populateBackpackTemplateSelect() {
     const select = document.getElementById('backpack-add-template');
