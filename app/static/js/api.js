@@ -201,7 +201,17 @@ export const Server = {
     },
 
     async deleteLobbyTemplate(lobbyId, templateId) {
-        return apiFetch(`/lobbies/${lobbyId}/templates/${templateId}`, { method: 'DELETE' });
+        const token = localStorage.getItem('access_token');
+        const response = await fetch(`/lobbies/${lobbyId}/templates/${templateId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(getErrorMessage(data) || `HTTP error ${response.status}`);
+        }
+        // При успехе возвращаем true или ничего, т.к. статус 204 No Content
+        return true;
     },
 
     // ----- Аутентификация (если нужно) -----

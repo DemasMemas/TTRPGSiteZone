@@ -29,6 +29,8 @@ let currentCharacterData = null;
 let autoSaveTimer = null;
 const AUTO_SAVE_DELAY = 1500;
 
+let vestTemplateEditorPouches = [];
+
 // Кеш шаблонов для текущей комнаты
 let templatesCache = {};
 let currentLobbyId = null;
@@ -345,6 +347,171 @@ function scheduleAutoSave() {
         }
     }, AUTO_SAVE_DELAY);
 }
+
+// ========== УНИВЕРСАЛЬНАЯ МОДЕЛЬ ПРЕДМЕТА ==========
+function generateItemId() {
+    return 'item_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+/**
+ * Создаёт экземпляр предмета из шаблона
+ * @param {Object} template - шаблон предмета из getLobbyTemplates
+ * @param {number} quantity - количество (для стакающихся)
+ * @returns {Object} экземпляр Item
+ */
+function createItemFromTemplate(template, quantity = 1) {
+    return {
+        id: generateItemId(),
+        templateId: template.id,
+        name: template.name,
+        category: template.category,
+        subcategory: template.subcategory,
+        quantity: quantity,
+        weight: template.weight || 0,
+        volume: template.volume || 0,
+        price: template.price || 0,
+        attributes: { ...template.attributes }, // копируем атрибуты
+        durability: template.attributes?.durability || null, // если есть прочность
+        maxDurability: template.attributes?.max_durability || null,
+        installedModules: [],     // для оружия и брони
+        contents: [],             // для контейнеров (рюкзак, подсумки)
+        // флаги для быстрой проверки
+        isContainer: template.category === 'container' || template.category === 'backpack' || template.category === 'pouch',
+        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask'].includes(template.category),
+        isStackable: ['consumable', 'crafting_material', 'artifact'].includes(template.category)
+    };
+}
+
+function migrateOldItemToNew(oldItem) {
+    if (oldItem.id) return oldItem;
+
+    return {
+        id: generateItemId(),
+        templateId: oldItem.templateId || null,
+        name: oldItem.name,
+        category: oldItem.category || 'misc',
+        quantity: oldItem.quantity || 1,
+        weight: oldItem.weight || 0,
+        volume: oldItem.volume || 0,
+        price: oldItem.price || 0,
+        attributes: oldItem.attributes || {},
+        durability: oldItem.durability,
+        maxDurability: oldItem.maxDurability,
+        installedModules: [],
+        contents: oldItem.contents || [], // <-- важно
+        isContainer: oldItem.category === 'container' || oldItem.category === 'backpack' || oldItem.category === 'pouch',
+        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask'].includes(oldItem.category),
+        isStackable: ['consumable', 'crafting_material', 'artifact'].includes(oldItem.category)
+    };
+}
+
+function migratePouchesToNewFormat() {
+    const eq = currentCharacterData.equipment;
+    if (!eq) return;
+
+    // Пояс
+    if (eq.belt?.pouches && Array.isArray(eq.belt.pouches)) {
+        eq.belt.pouches = eq.belt.pouches.map(pouch => {
+            // Если содержимое — строка, превращаем в пустой массив
+            if (typeof pouch.contents === 'string') {
+                return {
+                    ...pouch,
+                    contents: [],
+                    isContainer: true,
+                    capacity: pouch.capacity || 0
+                };
+            }
+            // Уже массив или отсутствует
+            return {
+                ...pouch,
+                contents: pouch.contents || [],
+                isContainer: true
+            };
+        });
+    }
+
+    // Разгрузка (пока не трогаем, но для будущего)
+    if (eq.vest?.pouches && Array.isArray(eq.vest.pouches)) {
+        eq.vest.pouches = eq.vest.pouches.map(pouch => {
+            if (typeof pouch.contents === 'string') {
+                return {
+                    ...pouch,
+                    contents: [],
+                    isContainer: true,
+                    capacity: pouch.capacity || 0
+                };
+            }
+            return {
+                ...pouch,
+                contents: pouch.contents || [],
+                isContainer: true
+            };
+        });
+    }
+}
+
+// Рекурсивно вычисляет общий вес предмета с учётом содержимого
+function getTotalWeight(item) {
+    let total = item.weight * item.quantity;
+    if (item.contents && item.contents.length) {
+        total += item.contents.reduce((sum, subItem) => sum + getTotalWeight(subItem), 0);
+    }
+    if (item.installedModules && item.installedModules.length) {
+        total += item.installedModules.reduce((sum, mod) => sum + getTotalWeight(mod), 0);
+    }
+    return total;
+}
+
+//Рекурсивно вычисляет общий объём предмета с учётом содержимого
+function getTotalVolume(item) {
+    let total = item.volume * item.quantity;
+    if (item.contents && item.contents.length) {
+        total += item.contents.reduce((sum, subItem) => sum + getTotalVolume(subItem), 0);
+    }
+    if (item.installedModules && item.installedModules.length) {
+        total += item.installedModules.reduce((sum, mod) => sum + getTotalVolume(mod), 0);
+    }
+    return total;
+}
+
+function calculateBackpackTotals(items) {
+    let totalWeight = 0;
+    let totalVolume = 0;
+    items.forEach(item => {
+        totalWeight += getTotalWeight(item);
+        totalVolume += getTotalVolume(item);
+    });
+    return { totalWeight, totalVolume };
+}
+
+function calculatePouchUsedVolume(pouch) {
+    if (!pouch.contents) return 0;
+    return pouch.contents.reduce((sum, item) => sum + getTotalVolume(item), 0);
+}
+
+window.updatePouchField = function(pathStr, field, value) {
+    const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
+    let obj = currentCharacterData;
+    for (let i = 0; i < path.length - 1; i++) obj = obj[path[i]];
+    const pouch = obj[path[path.length - 1]];
+    if (!pouch) return;
+    pouch[field] = value;
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+};
+
+window.removePouchItem = function(pathStr) {
+    const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
+    let obj = currentCharacterData;
+    for (let i = 0; i < path.length - 2; i++) obj = obj[path[i]];
+    const parentArray = obj[path[path.length - 2]];
+    const index = path[path.length - 1];
+    if (Array.isArray(parentArray)) {
+        parentArray.splice(index, 1);
+    }
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+};
 
 // ========== 2. РЕНДЕРИНГ ЛИСТА И ВКЛАДКИ ==========
 async function renderCharacterSheet(characterName, data) {
@@ -2049,13 +2216,17 @@ window.removeArmorModification = function(index) {
 
 // Функции для подсумков
 window.addBeltPouch = function() {
-    updateDataFromFields();
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     if (!currentCharacterData.equipment.belt) currentCharacterData.equipment.belt = {};
     if (!Array.isArray(currentCharacterData.equipment.belt.pouches)) {
         currentCharacterData.equipment.belt.pouches = [];
     }
-    currentCharacterData.equipment.belt.pouches.push({});
+    currentCharacterData.equipment.belt.pouches.push({
+        type: null,
+        capacity: 0,
+        contents: [],
+        isContainer: true
+    });
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
@@ -2089,7 +2260,6 @@ window.removeBeltModification = function(index) {
 };
 
 window.addVestPouch = function() {
-    updateDataFromFields();
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     if (!currentCharacterData.equipment.vest) {
         currentCharacterData.equipment.vest = { model: 'custom', pouches: [], totalCapacity: 0 };
@@ -2097,7 +2267,12 @@ window.addVestPouch = function() {
     if (!Array.isArray(currentCharacterData.equipment.vest.pouches)) {
         currentCharacterData.equipment.vest.pouches = [];
     }
-    currentCharacterData.equipment.vest.pouches.push({});
+    currentCharacterData.equipment.vest.pouches.push({
+        type: null,
+        capacity: 0,
+        contents: [],
+        isContainer: true
+    });
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
@@ -2113,26 +2288,41 @@ window.removeVestPouch = function(index) {
 window.onVestModelChange = async function(select) {
     const selectedValue = select.value;
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
-    if (!currentCharacterData.equipment.vest) currentCharacterData.equipment.vest = {};
 
     if (selectedValue === 'custom') {
-        currentCharacterData.equipment.vest.model = 'custom';
-        currentCharacterData.equipment.vest.pouches = currentCharacterData.equipment.vest.pouches || [];
-        currentCharacterData.equipment.vest.totalCapacity = currentCharacterData.equipment.vest.totalCapacity || 0;
+        currentCharacterData.equipment.vest = {
+            model: 'custom',
+            pouches: currentCharacterData.equipment.vest?.pouches || [],
+            totalCapacity: currentCharacterData.equipment.vest?.totalCapacity || 0
+        };
     } else if (selectedValue) {
-        const templates = await loadTemplatesForLobby('vests');
+        const templates = await loadTemplatesForLobby('vest'); // <-- исправлено: 'vest', не 'vests'
         const template = templates.find(t => t.id == selectedValue);
         if (template) {
+            // Убедимся, что у каждого подсумка есть internalVolume
+            const pouches = (template.attributes?.pouches || []).map(p => ({
+                ...p,
+                internalVolume: p.internalVolume || template.volume || 0,
+                contents: p.contents || []
+            }));
             currentCharacterData.equipment.vest = {
                 model: selectedValue,
-                pouches: template.pouches ? template.pouches.map(p => ({ ...p })) : [],
-                totalCapacity: template.total_capacity
+                pouches: pouches,
+                totalCapacity: template.attributes?.total_capacity || 0
             };
+        } else {
+            showNotification('Шаблон разгрузки не найден');
+            return;
         }
     } else {
         delete currentCharacterData.equipment.vest;
     }
+
     await renderInventoryTab(currentCharacterData);
+    const selectElement = document.querySelector('select[name="equipment.vest.model"]');
+    if (selectElement) {
+        selectElement.value = currentCharacterData.equipment.vest?.model || '';
+    }
     scheduleAutoSave();
 };
 
@@ -2540,39 +2730,163 @@ window.openCreateVestTemplateModal = function() {
         modal.id = 'create-vest-template-modal';
         modal.className = 'modal';
         modal.innerHTML = `
-            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+            <div class="modal-content" style="max-height: 85vh; width: 700px; overflow-y: auto;">
                 <span class="close" onclick="document.getElementById('create-vest-template-modal').style.display='none'">&times;</span>
                 <h3>Создать кастомный шаблон разгрузки</h3>
                 <div class="form-group">
                     <label>Название</label>
-                    <input type="text" id="vest-name" class="form-control">
+                    <input type="text" id="vest-template-name" class="form-control" placeholder="Например: Разгрузка сталкера">
                 </div>
                 <div class="form-group">
-                    <label>Общий объём</label>
-                    <input type="number" id="vest-totalCapacity" class="form-control number-input" value="0">
+                    <label>Общий объём (литры)</label>
+                    <input type="number" id="vest-template-total-capacity" class="form-control number-input" value="0" min="0" step="1">
                 </div>
-                <div class="form-group">
-                    <label>Подсумки (JSON-массив объектов с полями type и capacity)</label>
-                    <textarea id="vest-pouches" class="form-control" rows="5">[]</textarea>
+                <hr>
+                <h4>Подсумки</h4>
+                <div id="vest-pouches-editor" style="margin-bottom: 10px;">
+                    <table style="width:100%; border-collapse: collapse;">
+                        <thead>
+                            <tr style="border-bottom:1px solid #555;">
+                                <th style="padding:5px; text-align:left;">Тип подсумка</th>
+                                <th style="padding:5px; text-align:left;">Объём (л)</th>
+                                <th style="width:40px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="vest-pouches-tbody">
+                            <!-- строки будут добавляться динамически -->
+                        </tbody>
+                    </table>
                 </div>
-                <div class="form-actions">
-                    <button class="btn btn-primary" onclick="saveVestTemplate()">Сохранить</button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="window.addVestPouchRow()">➕ Добавить подсумок</button>
+                <hr>
+                <div class="form-actions" style="margin-top:15px;">
+                    <button class="btn btn-primary" onclick="window.saveVestTemplateFromEditor()">Сохранить</button>
                     <button class="btn btn-secondary" onclick="document.getElementById('create-vest-template-modal').style.display='none'">Отмена</button>
                 </div>
             </div>
         `;
         document.body.appendChild(modal);
     }
+
+    // Очищаем таблицу и добавляем одну пустую строку для начала
+    const tbody = document.getElementById('vest-pouches-tbody');
+    if (tbody) tbody.innerHTML = '';
+    window.addVestPouchRow(); // добавляем первую строку
+
     modal.style.display = 'flex';
 };
 
-window.saveVestTemplate = async function() {
-    const attributes = {
-        total_capacity: parseInt(document.getElementById('vest-totalCapacity').value) || 0,
-        pouches: JSON.parse(document.getElementById('vest-pouches').value || '[]')
+// Загрузка шаблонов подсумков (pouch) для селекта
+async function loadPouchTemplatesForSelect() {
+    try {
+        return await loadTemplatesForLobby('pouch');
+    } catch (e) {
+        console.warn('Не удалось загрузить шаблоны подсумков', e);
+        return [];
+    }
+}
+
+// Добавление строки в таблицу подсумков
+window.addVestPouchRow = async function() {
+    const tbody = document.getElementById('vest-pouches-tbody');
+    if (!tbody) return;
+
+    const pouchTemplates = await loadPouchTemplatesForSelect();
+
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid #444';
+
+    // Ячейка выбора шаблона
+    const tdType = document.createElement('td');
+    tdType.style.padding = '5px';
+    const select = document.createElement('select');
+    select.className = 'form-control';
+    select.style.width = '100%';
+    select.innerHTML = '<option value="">-- Выберите --</option>';
+    pouchTemplates.forEach(t => {
+        const option = document.createElement('option');
+        option.value = t.id;
+        option.textContent = t.name;
+        select.appendChild(option);
+    });
+    // При выборе шаблона автоматически заполняем объём
+    select.onchange = (e) => {
+        const templateId = e.target.value;
+        const template = pouchTemplates.find(t => t.id == templateId);
+        if (template) {
+            const volumeInput = tr.querySelector('.pouch-volume');
+            const externalVolume = template.attributes?.external_volume || 0;
+            if (volumeInput) volumeInput.value = externalVolume;
+        }
     };
+    tdType.appendChild(select);
+
+    // Ячейка объёма
+    const tdVolume = document.createElement('td');
+    tdVolume.style.padding = '5px';
+    const volumeInput = document.createElement('input');
+    volumeInput.type = 'number';
+    volumeInput.className = 'form-control number-input pouch-volume';
+    volumeInput.value = 0;
+    volumeInput.min = 0;
+    volumeInput.step = 1;
+    tdVolume.appendChild(volumeInput);
+
+    // Ячейка удаления
+    const tdDel = document.createElement('td');
+    tdDel.style.padding = '5px';
+    tdDel.style.textAlign = 'center';
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btn btn-sm btn-danger';
+    delBtn.textContent = '✕';
+    delBtn.onclick = () => tr.remove();
+    tdDel.appendChild(delBtn);
+
+    tr.appendChild(tdType);
+    tr.appendChild(tdVolume);
+    tr.appendChild(tdDel);
+    tbody.appendChild(tr);
+};
+
+window.saveVestTemplateFromEditor = async function() {
+    const name = document.getElementById('vest-template-name').value.trim();
+    if (!name) {
+        showNotification('Введите название разгрузки');
+        return;
+    }
+
+    const totalCapacity = parseInt(document.getElementById('vest-template-total-capacity').value) || 0;
+
+    // ЗАГРУЖАЕМ ШАБЛОНЫ ПОДСУМКОВ (добавлено)
+    const pouchTemplates = await loadTemplatesForLobby('pouch');
+
+    const pouches = [];
+    const rows = document.querySelectorAll('#vest-pouches-tbody tr');
+    for (let row of rows) {
+        const select = row.querySelector('select');
+        const volumeInput = row.querySelector('.pouch-volume');
+        if (!select || !volumeInput) continue;
+
+        const typeId = select.value;
+        const capacity = parseInt(volumeInput.value) || 0;
+        if (!typeId) continue;
+
+        const template = pouchTemplates.find(t => t.id == typeId);
+        pouches.push({
+            type: parseInt(typeId, 10),
+            capacity: capacity,
+            internalVolume: template ? template.volume : 0
+        });
+    }
+
+    const attributes = {
+        total_capacity: totalCapacity,
+        pouches: pouches
+    };
+
     const data = {
-        name: document.getElementById('vest-name').value,
+        name: name,
         category: 'vest',
         subcategory: null,
         price: 0,
@@ -2584,10 +2898,120 @@ window.saveVestTemplate = async function() {
     try {
         await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('vest');
-        clearAllTemplatesCache();
+        allTemplatesCache = null;
         await renderEquipmentTab(currentCharacterData);
+        await refreshVestModelSelect();
         document.getElementById('create-vest-template-modal').style.display = 'none';
         showNotification('Шаблон разгрузки создан', 'success');
+    } catch (err) {
+        showNotification(err.message);
+    }
+};
+
+async function refreshVestModelSelect() {
+    const select = document.querySelector('select[name="equipment.vest.model"]');
+    if (!select) return;
+    const currentValue = select.value;
+    const vestTemplates = await loadTemplatesForLobby('vest');
+    select.innerHTML = '<option value="">-- Выберите модель --</option><option value="custom">Своя (база)</option>';
+    vestTemplates.forEach(t => {
+        const option = document.createElement('option');
+        option.value = t.id;
+        option.textContent = t.name;
+        select.appendChild(option);
+    });
+    select.value = currentValue;
+}
+
+window.addPouchToVestTemplateEditor = function() {
+    vestTemplateEditorPouches.push({
+        type: null,
+        capacity: 0
+    });
+    renderVestTemplatePouches();
+};
+
+async function renderVestTemplatePouches() {
+    const container = document.getElementById('vest-pouches-editor');
+    if (!container) return;
+    container.innerHTML = '';
+
+    // Загружаем шаблоны подсумков
+    let pouchTemplates = [];
+    try {
+        pouchTemplates = await loadTemplatesForLobby('pouch');
+    } catch (e) {
+        console.error('Failed to load pouch templates', e);
+    }
+
+    vestTemplateEditorPouches.forEach((pouch, index) => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '10px';
+        row.style.alignItems = 'center';
+        row.style.marginBottom = '5px';
+
+        const select = document.createElement('select');
+        select.className = 'form-control';
+        select.style.flex = '2';
+        select.innerHTML = '<option value="">-- Выберите подсумок --</option>';
+        pouchTemplates.forEach(t => {
+            const option = document.createElement('option');
+            option.value = t.id;
+            option.textContent = t.name;
+            if (pouch.type == t.id) option.selected = true;
+            select.appendChild(option);
+        });
+        select.onchange = (e) => {
+            const templateId = e.target.value;
+            const template = pouchTemplates.find(t => t.id == templateId);
+            if (template) {
+                pouch.type = template.id;
+                pouch.capacity = template.volume || 0;
+                renderVestTemplatePouches(); // обновить отображение объёма
+            }
+        };
+
+        const volumeSpan = document.createElement('span');
+        volumeSpan.style.width = '80px';
+        volumeSpan.textContent = `${pouch.capacity} л`;
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-sm btn-danger';
+        delBtn.textContent = '✕';
+        delBtn.onclick = () => {
+            vestTemplateEditorPouches.splice(index, 1);
+            renderVestTemplatePouches();
+        };
+
+        row.appendChild(select);
+        row.appendChild(volumeSpan);
+        row.appendChild(delBtn);
+        container.appendChild(row);
+    });
+}
+
+window.deleteVestTemplate = async function() {
+    const select = document.querySelector('select[name="equipment.vest.model"]');
+    if (!select) return;
+    const templateId = select.value;
+    if (!templateId || templateId === 'custom') {
+        showNotification('Не выбран кастомный шаблон для удаления');
+        return;
+    }
+    if (!confirm('Удалить этот шаблон разгрузки? Отменить действие будет нельзя.')) return;
+
+    try {
+        await Server.deleteLobbyTemplate(currentLobbyId, templateId);
+        clearTemplatesCache('vest');
+        allTemplatesCache = null;
+        // Сбрасываем выбранную модель
+        if (currentCharacterData.equipment?.vest) {
+            currentCharacterData.equipment.vest.model = null;
+        }
+        await renderEquipmentTab(currentCharacterData);
+        showNotification('Шаблон удалён', 'success');
     } catch (err) {
         showNotification(err.message);
     }
@@ -2680,9 +3104,7 @@ async function renderInventoryTab(data) {
                 <h5 style="margin: 0;">Подсумки</h5>
                 <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltPouch()" style="padding: 2px 8px;">➕</button>
             </div>
-            <div id="belt-pouches-container">
-                ${renderBeltPouches(eq.belt?.pouches || [], pouchTemplates)}
-            </div>
+            <div id="belt-pouches-container"></div>
             <div style="display: flex; align-items: center; margin-top: 15px;">
                 <h5 style="margin: 0;">Модификации пояса</h5>
                 <button type="button" class="btn btn-sm btn-secondary" onclick="addBeltModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
@@ -2697,15 +3119,16 @@ async function renderInventoryTab(data) {
             <div class="equipment-header">
                 <h4>Разгрузка</h4>
             </div>
-            <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
+            <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: flex-end;">
                 <div style="flex: 1;">
                     <label>Модель</label>
-                    <select name="equipment.vest.model" class="form-control" onchange="onVestModelChange(this)">
+                    <select name="equipment.vest.model" class="form-control" onchange="onVestModelChange(this)" style="margin-bottom: 0;">
                         <option value="">-- Выберите модель --</option>
                         <option value="custom" ${eq.vest?.model === 'custom' ? 'selected' : ''}>Своя (база)</option>
-                        ${vestTemplates.map(t => `<option value="${t.id}" ${eq.vest?.model === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
+                        ${vestTemplates.map(t => `<option value="${t.id}" ${eq.vest?.model == t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
                     </select>
                 </div>
+                ${window.isGM ? `<button type="button" class="btn btn-sm btn-danger" onclick="deleteVestTemplate()" style="height: 38px; margin-bottom: 0;" title="Удалить выбранный шаблон">🗑️</button>` : ''}
             </div>
             ${eq.vest?.model === 'custom' ? `
                 <div style="margin-bottom: 10px;">
@@ -2717,9 +3140,7 @@ async function renderInventoryTab(data) {
                 <h5 style="margin: 0;">Подсумки</h5>
                 ${eq.vest?.model === 'custom' ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addVestPouch()" style="padding: 2px 8px;">➕</button>` : ''}
             </div>
-            <div id="vest-pouches-container">
-                ${renderVestPouches(eq.vest?.pouches || [], pouchTemplates, eq.vest?.model === 'custom', eq.vest?.totalCapacity)}
-            </div>
+            <div id="vest-pouches-container"></div>
         </div>
 
         <h4 style="margin-top:20px;">Рюкзак</h4>
@@ -2735,12 +3156,22 @@ async function renderInventoryTab(data) {
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="backpack-container"></div>
-        <button type="button" class="btn btn-sm btn-primary" onclick="addBackpackItem()">+ Добавить в рюкзак</button>
+        <select id="backpack-add-template" class="form-control" style="margin-top:10px;" onchange="addBackpackItemFromTemplate(this.value)">
+            <option value="">-- Добавить предмет (выберите) --</option>
+        </select>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>
     `;
 
     container.innerHTML = html;
+    renderBeltPouchesNew(eq.belt?.pouches || [], pouchTemplates);
+    renderVestPouchesNew(eq.vest?.pouches || [], pouchTemplates, eq.vest?.model === 'custom', eq.vest?.totalCapacity);
     renderPockets(pockets, groupedByCategory);
-    renderBackpack(backpack, groupedByCategory);
+    const backpackItems = Array.isArray(inv.backpack)
+        ? inv.backpack.map(item => migrateOldItemToNew(item))
+        : [];
+    renderBackpackNew(backpackItems, groupedByCategory);
+    populateBackpackTemplateSelect();
+    recalculateInventoryTotals();
 
     container.addEventListener('input', (e) => {
         const target = e.target;
@@ -2750,6 +3181,272 @@ async function renderInventoryTab(data) {
             scheduleAutoSave();
         }
     });
+}
+
+// Получить предмет по пути (массив индексов/ключей)
+function getItemByPath(pathArray) {
+    let current = currentCharacterData;
+    for (let i = 0; i < pathArray.length; i++) {
+        const key = pathArray[i];
+        if (current === null || current === undefined) return null;
+
+        if (Array.isArray(current) && typeof key === 'number') {
+            current = current[key];
+        } else if (typeof current === 'object' && key in current) {
+            current = current[key];
+        } else {
+            return null;
+        }
+    }
+    return current;
+}
+
+// Обновить поле предмета по пути
+window.updateBackpackItemAtPath = function(pathStr, field, value) {
+    const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
+    const item = getItemByPath(path);
+    if (!item) return;
+
+    if (field === 'quantity') {
+        item.quantity = parseInt(value) || 1;
+    } else if (field === 'name') {
+        item.name = value;
+    } else {
+        item[field] = parseFloat(value) || 0;
+    }
+
+    recalculateInventoryTotals();
+    renderInventoryTab(currentCharacterData); // ← добавили перерисовку
+    scheduleAutoSave();
+};
+
+// Удалить предмет по пути
+window.removeBackpackItemAtPath = function(pathStr) {
+    const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
+    if (path.length === 0) return;
+
+    const parentPath = path.slice(0, -1);
+    const index = path[path.length - 1];
+    const parent = parentPath.length === 0 ? currentCharacterData : getItemByPath(parentPath);
+    if (!parent) return;
+
+    // Определяем массив, из которого удаляем
+    let array;
+    if (Array.isArray(parent)) {
+        array = parent;
+    } else if (parent.contents && Array.isArray(parent.contents)) {
+        array = parent.contents;
+    } else if (parent.backpack && Array.isArray(parent.backpack)) {
+        array = parent.backpack;
+    } else {
+        return;
+    }
+
+    if (index >= 0 && index < array.length) {
+        array.splice(index, 1);
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+    }
+};
+
+function renderBeltPouchesNew(pouches, pouchTemplates) {
+    const container = document.getElementById('belt-pouches-container');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!pouches || pouches.length === 0) {
+        container.innerHTML = '<p>Нет подсумков</p>';
+        return;
+    }
+    pouches.forEach((pouch, index) => {
+        renderPouchItem(pouch, index, ['equipment', 'belt', 'pouches', index], container, pouchTemplates);
+    });
+}
+
+function renderVestPouchesNew(pouches, pouchTemplates, isCustom, totalCapacity) {
+    const container = document.getElementById('vest-pouches-container');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!pouches || pouches.length === 0) {
+        container.innerHTML = '<p>Нет подсумков</p>';
+        return;
+    }
+    pouches.forEach((pouch, index) => {
+        renderVestPouchItem(pouch, index, ['equipment', 'vest', 'pouches', index], container, pouchTemplates, isCustom);
+    });
+}
+
+function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
+    const itemDiv = document.createElement('div');
+    itemDiv.className = 'container-item';
+    itemDiv.style.marginBottom = '8px';
+    itemDiv.style.padding = '8px';
+    itemDiv.style.border = '1px solid #666';
+    itemDiv.style.borderRadius = '4px';
+    itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
+
+    // Верхняя строка: выбор типа и удаление
+    const row = document.createElement('div');
+    row.style.display = 'grid';
+    row.style.gridTemplateColumns = '2fr 1fr auto';
+    row.style.gap = '10px';
+    row.style.alignItems = 'center';
+
+    const select = document.createElement('select');
+    select.className = 'form-control';
+    select.innerHTML = '<option value="">-- Выберите подсумок --</option>';
+    pouchTemplates.forEach(t => {
+        const option = document.createElement('option');
+        option.value = t.id;
+        option.textContent = t.name;
+        if (pouch.type == t.id) option.selected = true;
+        select.appendChild(option);
+    });
+    select.onchange = () => {
+        const template = pouchTemplates.find(t => t.id == select.value);
+        if (template) {
+            pouch.type = template.id;
+            pouch.capacity = template.volume || 0;
+            pouch.name = template.name;
+            renderInventoryTab(currentCharacterData);
+            recalculateInventoryTotals();
+            scheduleAutoSave();
+        }
+    };
+
+    const infoSpan = document.createElement('span');
+    const used = calculatePouchUsedVolume(pouch);
+    const internalLimit = pouch.internalVolume || pouch.capacity;
+    infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-sm btn-danger';
+    delBtn.textContent = '✕';
+    delBtn.onclick = () => {
+        const parentArray = currentCharacterData.equipment.belt.pouches;
+        parentArray.splice(index, 1);
+        renderInventoryTab(currentCharacterData);
+        recalculateInventoryTotals();
+        scheduleAutoSave();
+    };
+
+    row.appendChild(select);
+    row.appendChild(infoSpan);
+    row.appendChild(delBtn);
+    itemDiv.appendChild(row);
+
+    // Блок содержимого
+    const contentsDiv = document.createElement('div');
+    contentsDiv.className = 'container-contents';
+    contentsDiv.style.marginLeft = '20px';
+    contentsDiv.style.marginTop = '10px';
+    contentsDiv.style.paddingLeft = '10px';
+    contentsDiv.style.borderLeft = '2px dashed #666';
+
+    if (pouch.contents && pouch.contents.length > 0) {
+        pouch.contents.forEach((subItem, subIndex) => {
+            renderBackpackItem(subItem, subIndex, path.concat('contents'), contentsDiv);
+        });
+    }
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'btn btn-sm btn-secondary';
+    addBtn.textContent = '➕ Добавить внутрь';
+    addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv);
+    contentsDiv.appendChild(addBtn);
+
+    itemDiv.appendChild(contentsDiv);
+    parentContainer.appendChild(itemDiv);
+}
+
+function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates, isCustom) {
+    const itemDiv = document.createElement('div');
+    itemDiv.className = 'container-item';
+    itemDiv.style.marginBottom = '8px';
+    itemDiv.style.padding = '8px';
+    itemDiv.style.border = '1px solid #666';
+    itemDiv.style.borderRadius = '4px';
+    itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
+
+    const row = document.createElement('div');
+    row.style.display = 'grid';
+    row.style.gridTemplateColumns = isCustom ? '2fr 1fr auto' : '2fr auto';
+    row.style.gap = '10px';
+    row.style.alignItems = 'center';
+
+    const select = document.createElement('select');
+    select.className = 'form-control';
+    select.disabled = !isCustom;
+    select.innerHTML = '<option value="">-- Выберите подсумок --</option>';
+    pouchTemplates.forEach(t => {
+        const option = document.createElement('option');
+        option.value = t.id;
+        option.textContent = t.name;
+        if (pouch.type == t.id) option.selected = true;
+        select.appendChild(option);
+    });
+    select.onchange = () => {
+        if (!isCustom) return;
+        const template = pouchTemplates.find(t => t.id == select.value);
+        if (template) {
+            pouch.type = template.id;
+            pouch.capacity = template.volume || 0;
+            pouch.name = template.name;
+            renderInventoryTab(currentCharacterData);
+            recalculateInventoryTotals();
+            scheduleAutoSave();
+        }
+    };
+    row.appendChild(select);
+
+    const infoSpan = document.createElement('span');
+    const used = calculatePouchUsedVolume(pouch);
+    const internalLimit = pouch.internalVolume || pouch.capacity;
+    infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
+    row.appendChild(infoSpan);
+
+    if (isCustom) {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-sm btn-danger';
+        delBtn.textContent = '✕';
+        delBtn.disabled = !isCustom;
+        delBtn.onclick = () => {
+            if (!isCustom) return;
+            const parentArray = currentCharacterData.equipment.vest.pouches;
+            parentArray.splice(index, 1);
+            renderInventoryTab(currentCharacterData);
+            recalculateInventoryTotals();
+            scheduleAutoSave();
+        };
+        row.appendChild(delBtn);
+    }
+
+    itemDiv.appendChild(row);
+
+    // Содержимое
+    const contentsDiv = document.createElement('div');
+    contentsDiv.className = 'container-contents';
+    contentsDiv.style.marginLeft = '20px';
+    contentsDiv.style.marginTop = '10px';
+    contentsDiv.style.paddingLeft = '10px';
+    contentsDiv.style.borderLeft = '2px dashed #666';
+
+    if (pouch.contents && pouch.contents.length > 0) {
+        pouch.contents.forEach((subItem, subIndex) => {
+            renderBackpackItem(subItem, subIndex, path.concat('contents'), contentsDiv);
+        });
+    }
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'btn btn-sm btn-secondary';
+    addBtn.textContent = '➕ Добавить внутрь';
+    addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv);
+    contentsDiv.appendChild(addBtn);
+
+    itemDiv.appendChild(contentsDiv);
+    parentContainer.appendChild(itemDiv);
 }
 
 // ========== МОДАЛЬНОЕ ОКНО ДЛЯ СОЗДАНИЯ ПРЕДМЕТА В ИНВЕНТАРЕ ==========
@@ -2998,32 +3695,47 @@ window.saveInventoryItemTemplate = async function() {
 
 function recalculateInventoryTotals() {
     const inv = currentCharacterData.inventory || {};
-    const pockets = inv.pockets || [];
-    const backpack = inv.backpack || [];
+    const eq = currentCharacterData.equipment || {};
+
+    // Рюкзак
+    const backpackItems = Array.isArray(inv.backpack) ? inv.backpack.map(item => migrateOldItemToNew(item)) : [];
     const selectedBackpackId = inv.backpackModel ? parseInt(inv.backpackModel, 10) : null;
     const selectedBackpack = cachedBackpackTemplates.find(t => t.id === selectedBackpackId);
-    const backpackWeightReduction = selectedBackpack ? selectedBackpack.attributes?.weight_reduction || 0 : 0;
     const backpackLimit = selectedBackpack ? selectedBackpack.attributes?.limit || 0 : 0;
+    const backpackWeightReduction = selectedBackpack ? selectedBackpack.attributes?.weight_reduction || 0 : 0;
 
-    const pocketFill = pockets.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
-    const pocketFillSpan = document.querySelector('#pocket-fill-display');
-    if (pocketFillSpan) pocketFillSpan.textContent = pocketFill;
+    let totalWeight = 0;
+    let totalVolume = 0;
 
-    const backpackFill = backpack.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
-    const backpackFillSpan = document.querySelector('#backpack-fill-display');
-    if (backpackFillSpan) {
-        backpackFillSpan.textContent = `Заполнено: ${backpackFill} / ${backpackLimit}`;
-    }
+    // Вес и объём из рюкзака
+    backpackItems.forEach(item => {
+        totalWeight += getTotalWeight(item);
+        totalVolume += getTotalVolume(item);
+    });
 
-    const rawTotalWeight = pockets.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0) +
-                           backpack.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0);
-    const totalWeightSpan = document.querySelector('#total-weight-display');
-    if (totalWeightSpan) totalWeightSpan.textContent = rawTotalWeight;
+    // Карманы (пока по-старому)
+    const pockets = Array.isArray(inv.pockets) ? inv.pockets : [];
+    pockets.forEach(item => {
+        totalWeight += (item.weight || 0) * (item.quantity || 1);
+        totalVolume += (item.volume || 0) * (item.quantity || 1);
+    });
 
-    const movePenaltyFromWeight = Math.floor(rawTotalWeight / 5);
-    const movePenalty = Math.max(0, movePenaltyFromWeight - backpackWeightReduction);
-    const movePenaltySpan = document.querySelector('#move-penalty-display');
-    if (movePenaltySpan) movePenaltySpan.textContent = movePenalty;
+    // Учёт подсумков пояса и разгрузки
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    [...beltPouches, ...vestPouches].forEach(pouch => {
+        if (pouch.contents) {
+            pouch.contents.forEach(item => {
+                totalWeight += getTotalWeight(item);
+                totalVolume += getTotalVolume(item);
+            });
+        }
+    });
+
+    // Обновление DOM
+    document.querySelector('#total-weight-display').textContent = totalWeight.toFixed(1);
+    document.querySelector('#backpack-fill-display').textContent = `Заполнено: ${totalVolume.toFixed(1)} / ${backpackLimit}`;
+    // и т.д.
 }
 
 window.onBackpackModelChange = async function(select) {
@@ -3081,51 +3793,6 @@ function renderPockets(pockets, groupedByCategory) {
     });
 }
 
-function renderBackpack(backpack, groupedByCategory) {
-    const container = document.getElementById('backpack-container');
-    if (!container) return;
-    container.innerHTML = '';
-
-    backpack.forEach((item, index) => {
-        const hasTemplate = !!item.templateId;
-
-        const row = document.createElement('div');
-        row.style.display = 'grid';
-        row.style.gridTemplateColumns = '2fr 1fr 1fr 1fr auto';
-        row.style.gap = '5px';
-        row.style.marginBottom = '5px';
-        row.style.alignItems = 'center';
-
-        let nameCell;
-        if (!hasTemplate) {
-            const options = Object.entries(groupedByCategory).map(([cat, items]) => `
-                <optgroup label="${cat}">
-                    ${items.map(t => `<option value="${t.id}">${t.name}</option>`).join('')}
-                </optgroup>
-            `).join('');
-            nameCell = `
-                <select class="form-control" onchange="selectBackpackItem(${index}, this.value)" style="width: 100%;">
-                    <option value="">-- Выберите предмет --</option>
-                    ${options}
-                </select>
-            `;
-        } else {
-            nameCell = `<input type="text" class="form-control" name="inventory.backpack.${index}.name" value="${escapeHtml(item.name || '')}" placeholder="Название">`;
-        }
-
-        row.innerHTML = `
-            <div style="display: flex; flex-direction: column; gap: 2px;">
-                ${nameCell}
-            </div>
-            <input type="number" class="form-control number-input" name="inventory.backpack.${index}.weight" value="${item.weight || 0}" placeholder="Вес">
-            <input type="number" class="form-control number-input" name="inventory.backpack.${index}.volume" value="${item.volume || 0}" placeholder="Объём">
-            <input type="number" class="form-control number-input" name="inventory.backpack.${index}.quantity" value="${item.quantity || 1}" placeholder="Кол-во">
-            <button type="button" class="btn btn-sm btn-danger" onclick="removeBackpackItem(${index})">✕</button>
-        `;
-        container.appendChild(row);
-    });
-}
-
 window.selectPocketItem = async function(index, selectedId) {
     const id = parseInt(selectedId, 10);
     if (isNaN(id)) return;
@@ -3149,32 +3816,6 @@ window.selectPocketItem = async function(index, selectedId) {
     if (['armor', 'helmet', 'gas_mask'].includes(template.category)) {
         item.condition = '1. Целая';
     }
-    await renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-};
-
-window.selectBackpackItem = async function(index, selectedId) {
-    const id = parseInt(selectedId, 10);
-    if (isNaN(id)) return;
-
-    const allTemplates = await getAllItemTemplates();
-    const template = allTemplates.find(t => t.id === id);
-    if (!template) return;
-
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
-    const item = currentCharacterData.inventory.backpack[index];
-
-    item.name = template.name;
-    item.templateId = template.id;
-    item.category = template.category;
-    item.weight = template.effectiveWeight;
-    item.volume = template.effectiveVolume;
-
-    if (['armor', 'helmet', 'gas_mask'].includes(template.category)) {
-        item.condition = '1. Целая';
-    }
-
     await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
@@ -3236,6 +3877,187 @@ window.saveBackpackTemplate = async function() {
     } catch (err) {
         showNotification(err.message);
     }
+};
+
+function renderBackpackNew(items, groupedByCategory) {
+    const container = document.getElementById('backpack-container');
+    if (!container) return;
+    container.innerHTML = '';
+
+    items.forEach((item, index) => {
+        renderBackpackItem(item, index, [], container);
+    });
+}
+
+function renderBackpackItem(item, index, parentPath, parentContainer) {
+    const itemDiv = document.createElement('div');
+    itemDiv.className = 'container-item';
+    itemDiv.style.marginBottom = '5px';
+    itemDiv.style.padding = '5px';
+    itemDiv.style.border = '1px solid #444';
+    itemDiv.style.borderRadius = '4px';
+    itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
+
+    // Основная строка с предметом
+    const row = document.createElement('div');
+    row.style.display = 'grid';
+    row.style.gridTemplateColumns = '2fr 1fr 1fr 1fr auto';
+    row.style.gap = '5px';
+    row.style.alignItems = 'center';
+
+    let nameCell;
+    if (item.templateId) {
+        nameCell = `<strong>${escapeHtml(item.name)}</strong>`;
+    } else {
+        nameCell = `<input type="text" class="form-control" value="${escapeHtml(item.name)}" placeholder="Название" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'name', this.value)">`;
+    }
+
+    row.innerHTML = `
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+            ${nameCell}
+            ${item.isContainer ? '<span style="font-size:0.7rem;">📦 Контейнер</span>' : ''}
+        </div>
+        <input type="number" class="form-control number-input" value="${item.weight}" placeholder="Вес" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'weight', this.value)">
+        <input type="number" class="form-control number-input" value="${item.volume}" placeholder="Объём" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'volume', this.value)">
+        <input type="number" class="form-control number-input" value="${item.quantity}" placeholder="Кол-во" onchange="updateBackpackItemAtPath('${parentPath.concat(index).join(',')}', 'quantity', this.value)">
+        <button type="button" class="btn btn-sm btn-danger" onclick="removeBackpackItemAtPath('${parentPath.concat(index).join(',')}')">✕</button>
+    `;
+    itemDiv.appendChild(row);
+
+    // Если контейнер — показываем его содержимое и кнопку добавления
+    if (item.isContainer) {
+        const contentsDiv = document.createElement('div');
+        contentsDiv.style.marginLeft = '25px';
+        contentsDiv.style.marginTop = '8px';
+        contentsDiv.style.paddingLeft = '10px';
+        contentsDiv.style.borderLeft = '2px dashed #666';
+        contentsDiv.className = 'container-contents';
+
+        // Рендерим уже существующее содержимое
+        if (item.contents && item.contents.length > 0) {
+            item.contents.forEach((subItem, subIndex) => {
+                renderBackpackItem(subItem, subIndex, parentPath.concat(index, 'contents'), contentsDiv);
+            });
+        }
+
+        // Кнопка добавления внутрь
+        const addButton = document.createElement('button');
+        addButton.type = 'button';
+        addButton.className = 'btn btn-sm btn-secondary';
+        addButton.style.marginTop = '5px';
+        addButton.textContent = '➕ Добавить внутрь';
+        addButton.onclick = () => addItemToContainerDirect(item, contentsDiv);
+        contentsDiv.appendChild(addButton);
+
+        itemDiv.appendChild(contentsDiv);
+    }
+
+    parentContainer.appendChild(itemDiv);
+}
+
+window.addItemToContainerDirect = async function(containerItem, contentsDiv) {
+    // Удаляем предыдущий селект
+    const existingSelect = contentsDiv.querySelector('.inline-template-select');
+    if (existingSelect) existingSelect.remove();
+
+    const select = document.createElement('select');
+    select.className = 'form-control inline-template-select';
+    select.style.marginTop = '5px';
+    select.style.width = '100%';
+    select.innerHTML = '<option value="">-- Выберите предмет --</option>';
+
+    const allTemplates = await getAllItemTemplates();
+    const categories = {};
+    allTemplates.forEach(t => {
+        if (!categories[t.category]) categories[t.category] = [];
+        categories[t.category].push(t);
+    });
+
+    for (const [cat, templates] of Object.entries(categories)) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = getCategoryDisplay(cat);
+        templates.forEach(t => {
+            const option = document.createElement('option');
+            option.value = t.id;
+            option.textContent = `${t.name} (${t.effectiveWeight || t.weight} кг, ${t.effectiveVolume || t.volume} л)`;
+            optgroup.appendChild(option);
+        });
+        select.appendChild(optgroup);
+    }
+
+    select.onchange = async (e) => {
+        const templateId = e.target.value;
+        if (!templateId) {
+            select.remove();
+            return;
+        }
+        const template = allTemplates.find(t => t.id == templateId);
+        if (!template) {
+            select.remove();
+            return;
+        }
+        const newItem = createItemFromTemplate(template);
+        if (!containerItem.contents) containerItem.contents = [];
+        containerItem.contents.push(newItem);
+        recalculateInventoryTotals();
+        await renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        select.remove();
+    };
+
+    contentsDiv.appendChild(select);
+};
+
+async function populateBackpackTemplateSelect() {
+    const select = document.getElementById('backpack-add-template');
+    if (!select) return;
+
+    const allTemplates = await getAllItemTemplates();
+    select.innerHTML = '<option value="">-- Добавить предмет (выберите) --</option>';
+
+    const categories = {};
+    allTemplates.forEach(t => {
+        if (!categories[t.category]) categories[t.category] = [];
+        categories[t.category].push(t);
+    });
+
+    for (const [cat, templates] of Object.entries(categories)) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = getCategoryDisplay(cat);
+        templates.forEach(t => {
+            const option = document.createElement('option');
+            option.value = t.id;
+            option.textContent = `${t.name} (${t.effectiveWeight || t.weight} кг, ${t.effectiveVolume || t.volume} л)`;
+            optgroup.appendChild(option);
+        });
+        select.appendChild(optgroup);
+    }
+}
+
+window.updateBackpackItemField = function(index, field, value) {
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    let items = currentCharacterData.inventory.backpack;
+    if (!Array.isArray(items)) items = [];
+    if (index >= items.length) return;
+
+    const item = migrateOldItemToNew(items[index]);
+    if (field === 'quantity') {
+        item.quantity = parseInt(value) || 1;
+    } else if (field === 'name') {
+        item.name = value;
+    } else {
+        item[field] = parseFloat(value) || 0;
+    }
+    items[index] = item;
+    recalculateInventoryTotals();
+    scheduleAutoSave();
+};
+
+window.removeBackpackItemNew = function(index) {
+    if (!currentCharacterData.inventory?.backpack) return;
+    currentCharacterData.inventory.backpack.splice(index, 1);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
 };
 
 // ========== 7. ВКЛАДКА "ЗАМЕТКИ" ==========
@@ -3316,6 +4138,8 @@ export async function openCharacterSheet(characterId) {
     try {
         const character = await Server.getCharacter(characterId);
         currentCharacterData = character.data || {};
+
+        migratePouchesToNewFormat();
 
         function ensureSkillXp(data) {
             if (!data.skills) data.skills = {};
@@ -3528,21 +4352,63 @@ window.removePocketItem = function(index) {
     scheduleAutoSave();
 };
 
-window.addBackpackItem = function() {
-    updateDataFromFields();
+const originalAdd = window.addBackpackItemFromTemplate;
+window.addBackpackItemFromTemplate = async function(templateId) {
+    if (!templateId) return;
+
+    const allTemplates = await getAllItemTemplates();
+    const template = allTemplates.find(t => t.id == templateId);
+    if (!template) return;
+
+    const newItem = createItemFromTemplate(template);
+
+    // Определяем, куда добавлять
+    let targetArray;
+    if (window._tempContainerPath) {
+        const container = getItemByPath(window._tempContainerPath);
+        if (container && container.isContainer) {
+            if (!Array.isArray(container.contents)) container.contents = [];
+            targetArray = container.contents;
+        }
+        window._tempContainerPath = null;
+    } else {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!Array.isArray(currentCharacterData.inventory.backpack)) {
+            currentCharacterData.inventory.backpack = [];
+        }
+        targetArray = currentCharacterData.inventory.backpack;
+    }
+
+    targetArray.push(newItem);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    document.getElementById('backpack-add-template').value = '';
+};
+
+window.addBackpackItemManual = function() {
+    // Создаём пустой предмет нового формата
+    const newItem = {
+        id: generateItemId(),
+        templateId: null,
+        name: 'Новый предмет',
+        category: 'misc',
+        quantity: 1,
+        weight: 0,
+        volume: 0,
+        price: 0,
+        attributes: {},
+        installedModules: [],
+        contents: [],
+        isContainer: false,
+        isEquippable: false,
+        isStackable: false
+    };
+
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     if (!Array.isArray(currentCharacterData.inventory.backpack)) {
         currentCharacterData.inventory.backpack = [];
     }
-    currentCharacterData.inventory.backpack.push({ name: '', weight: 0, volume: 0, quantity: 1 });
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-};
-
-window.removeBackpackItem = function(index) {
-    updateDataFromFields();
-    if (!currentCharacterData.inventory?.backpack) return;
-    currentCharacterData.inventory.backpack.splice(index, 1);
+    currentCharacterData.inventory.backpack.push(newItem);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
