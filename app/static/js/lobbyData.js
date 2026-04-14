@@ -1,8 +1,8 @@
 // static/js/lobbyData.js
-import { getLobbyInfo, getChunks } from './api.js';
+import { Server } from './api.js';
 import { setMapDimensions, setTileClickCallback } from './lobby3d.js';
 import { setLobbyData, updateParticipantsList } from './ui.js';
-import AppState from './state.js';
+import AppState from './ui_interactions.js';
 import { applyWeather } from './weather.js';
 import { updateMapTileSize } from './markers.js';
 
@@ -14,7 +14,7 @@ export function initLobbyData(lobbyId) {
 
 export async function loadLobbyInfo() {
     try {
-        const lobby = await getLobbyInfo(currentLobbyId);
+        const lobby = await Server.getLobbyInfo(currentLobbyId);
         document.getElementById('lobby-name').textContent = lobby.name;
         setLobbyData(lobby.participants, lobby.gm_id);
         updateParticipantsList();
@@ -22,7 +22,6 @@ export async function loadLobbyInfo() {
         applyWeather(lobby.weather_settings || {});
         window.weatherSettings = lobby.weather_settings || {};
 
-        // Устанавливаем глобальную переменную isGM (важно!)
         window.isGM = (lobby.gm_id == localStorage.getItem('user_id'));
         AppState.setIsGM(window.isGM);
 
@@ -88,7 +87,7 @@ export async function loadAllChunks() {
 
 async function fetchChunk(cx, cy) {
     try {
-        const chunks = await getChunks(currentLobbyId, cx, cx, cy, cy);
+        const chunks = await Server.getChunks(currentLobbyId, cx, cx, cy, cy);
         if (chunks.length > 0) {
             const { addChunk } = await import('./lobby3d.js');
             addChunk(chunks[0].chunk_x, chunks[0].chunk_y, chunks[0].data);

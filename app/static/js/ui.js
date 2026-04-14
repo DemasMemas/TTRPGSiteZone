@@ -1,6 +1,6 @@
 // static/js/ui.js
 import { showNotification } from './utils.js';
-import { banUser, unbanUser, getBannedList, setCharacterVisibility } from './api.js';
+import { Server } from './api.js';
 import { loadLobbyCharacters } from './characters.js';
 
 export let lobbyParticipants = [];
@@ -55,7 +55,7 @@ export function updateParticipantsList() {
 async function banUserHandler(userId) {
     if (!confirm('Заблокировать этого участника?')) return;
     try {
-        await banUser(currentLobbyId, userId);
+        await Server.banUser(currentLobbyId, userId);
         lobbyParticipants = lobbyParticipants.filter(p => p.user_id !== userId);
         onlineUserIds.delete(userId);
         updateParticipantsList();
@@ -119,7 +119,7 @@ export function showSettingsTab(tab, btn) {
 
 async function loadBannedList() {
     try {
-        const banned = await getBannedList(currentLobbyId);
+        const banned = await Server.getBannedList(currentLobbyId);
         const content = document.getElementById('settings-content');
         if (banned.length === 0) {
             content.innerHTML = '<p>Нет забаненных пользователей</p>';
@@ -143,7 +143,7 @@ async function loadBannedList() {
 export async function unbanUserHandler(userId) {
     if (!confirm('Разбанить этого пользователя?')) return;
     try {
-        await unbanUser(currentLobbyId, userId);
+        await Server.unbanUser(currentLobbyId, userId);
         showNotification('Пользователь разбанен');
         loadBannedList();
     } catch (error) {
@@ -178,7 +178,7 @@ export async function saveVisibility() {
     const checkboxes = document.querySelectorAll('#visibility-participants-list input:checked');
     const visibleTo = Array.from(checkboxes).map(cb => parseInt(cb.value, 10));
     try {
-        await setCharacterVisibility(currentVisibilityCharacterId, visibleTo);
+        await Server.setCharacterVisibility(currentVisibilityCharacterId, visibleTo);
         showNotification('Видимость обновлена');
         closeVisibilityModal();
         loadLobbyCharacters();

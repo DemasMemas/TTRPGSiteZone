@@ -1,5 +1,5 @@
 // static/js/mapEdit.js
-import AppState from './state.js';
+import AppState from './ui_interactions.js';
 import {
     getHoveredTile,
     updateTileInChunk,
@@ -12,7 +12,7 @@ import {
     updatePreviewObject,
     removePreviewObject
 } from './lobby3d.js';
-import { updateTile, batchUpdateTiles } from './api.js';
+import { Server } from './api.js';
 import { showNotification } from './utils.js';
 
 const CHUNK_SIZE = 32;
@@ -95,7 +95,7 @@ function scheduleBatchUpdate() {
         if (pendingTileUpdates.length > 0) {
             const updatesCopy = pendingTileUpdates.slice();
             pendingTileUpdates = [];
-            batchUpdateTiles(currentLobbyId, updatesCopy).catch(err => {
+            Server.batchUpdateTiles(currentLobbyId, updatesCopy).catch(err => {
                 showNotification(err.message);
             });
         }
@@ -177,7 +177,7 @@ export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
     if (Object.keys(filteredUpdates).length === 0) return;
 
     try {
-        await updateTile(currentLobbyId, chunkX, chunkY, tileX, tileY, filteredUpdates);
+        await Server.updateTile(currentLobbyId, chunkX, chunkY, tileX, tileY, filteredUpdates);
         updateTileInChunk(chunkX, chunkY, tileX, tileY, filteredUpdates);
     } catch (error) {
         showNotification(error.message);

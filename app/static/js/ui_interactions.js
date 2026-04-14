@@ -1,5 +1,204 @@
-// static/js/hotkeys.js
-import AppState from './state.js';
+// static/js/ui_interactions.js
+// Объединённый модуль: глобальное состояние, горячие клавиши и перетаскивание панелей
+
+// ---------- Часть 1: Глобальное состояние (бывший state.js) ----------
+const AppState = {
+    // Режимы редактирования карты
+    editMode: false,
+    eraserMode: false,
+    currentTileType: 'grass',
+    brushRadius: 0,
+    tileHeight: 1.0,
+
+    // Данные комнаты
+    isGM: false,
+    lobbyId: null,
+    token: localStorage.getItem('access_token') || null,
+
+    // UI-состояния
+    settingsVisible: false,
+    participantsPanelCollapsed: false,
+
+    // Методы для изменения состояния
+    setEditMode(value) {
+        this.editMode = value;
+    },
+    setEraserMode(value) {
+        this.eraserMode = value;
+        window.eraserMode = value;
+    },
+    setCurrentTileType(value) {
+        this.currentTileType = value;
+        window.currentTileType = value;
+    },
+    setBrushRadius(value) {
+        this.brushRadius = value;
+        window.brushRadius = value;
+    },
+    setTileHeight(value) {
+        this.tileHeight = value;
+        window.tileHeight = value;
+    },
+    setIsGM(value) {
+        this.isGM = value;
+    },
+    setLobbyId(value) {
+        this.lobbyId = value;
+    },
+    setSettingsVisible(value) {
+        this.settingsVisible = value;
+    },
+    setParticipantsPanelCollapsed(value) {
+        this.participantsPanelCollapsed = value;
+    }
+};
+
+// Синхронизируем с глобальными переменными (для обратной совместимости)
+window.currentTileType = AppState.currentTileType;
+window.tileHeight = AppState.tileHeight;
+window.brushRadius = AppState.brushRadius;
+window.eraserMode = AppState.eraserMode;
+
+export default AppState;
+
+// ---------- Часть 2: Перетаскивание панелей (бывший draggable.js) ----------
+function savePanelState(panelId, state) {
+    const allState = JSON.parse(localStorage.getItem('panelStates') || '{}');
+    allState[panelId] = { ...allState[panelId], ...state };
+    localStorage.setItem('panelStates', JSON.stringify(allState));
+}
+
+function loadPanelState(panelId) {
+    const allState = JSON.parse(localStorage.getItem('panelStates') || '{}');
+    return allState[panelId] || null;
+}
+
+function makeDraggable(panel, handle, panelId) {
+    let startMouseX, startMouseY, startLeft, startTop, startWidth, startHeight;
+    let isDragging = false;
+
+    const onMouseDown = (e) => {
+        if (e.target.classList.contains('toggle-btn')) return;
+        e.preventDefault();
+
+        panel.style.transition = 'none';
+        const rect = panel.getBoundingClientRect();
+
+        panel.style.left = rect.left + 'px';
+        panel.style.top = rect.top + 'px';
+        panel.style.bottom = 'auto';
+        panel.style.right = 'auto';
+        panel.style.transform = 'none';
+
+        startMouseX = e.clientX;
+        startMouseY = e.clientY;
+        startLeft = rect.left;
+        startTop = rect.top;
+        startWidth = panel.offsetWidth;
+        startHeight = panel.offsetHeight;
+
+        isDragging = true;
+        panel.style.cursor = 'grabbing';
+    };
+
+    const onMouseMove = (e) => {
+        if (!isDragging) return;
+        e.preventDefault();
+
+        const dx = e.clientX - startMouseX;
+        const dy = e.clientY - startMouseY;
+
+        let newLeft = startLeft + dx;
+        let newTop = startTop + dy;
+
+        const winW = window.innerWidth;
+        const winH = window.innerHeight;
+
+        newLeft = Math.min(Math.max(newLeft, 0), winW - startWidth);
+        newTop = Math.min(Math.max(newTop, 0), winH - startHeight);
+
+        panel.style.left = newLeft + 'px';
+        panel.style.top = newTop + 'px';
+    };
+
+    const onMouseUp = () => {
+        if (isDragging) {
+            isDragging = false;
+            panel.style.cursor = '';
+            panel.style.transition = '';
+            const rect = panel.getBoundingClientRect();
+            savePanelState(panelId, {
+                position: { left: rect.left, top: rect.top }
+            });
+        }
+    };
+
+    handle.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+}
+
+function applyPosition(panel, pos) {
+    requestAnimationFrame(() => {
+        const winW = window.innerWidth;
+        const winH = window.innerHeight;
+        const panelW = panel.offsetWidth;
+        const panelH = panel.offsetHeight;
+
+        const left = Math.min(Math.max(pos.left, 0), winW - panelW);
+        const top = Math.min(Math.max(pos.top, 0), winH - panelH);
+
+        panel.style.left = left + 'px';
+        panel.style.top = top + 'px';
+        panel.style.bottom = 'auto';
+        panel.style.right = 'auto';
+        panel.style.transform = 'none';
+    });
+}
+
+export function initDraggablePanels() {
+    document.querySelectorAll('.draggable-panel').forEach(panel => {
+        const panelId = panel.id;
+        if (!panelId) {
+            console.warn('Draggable panel без id:', panel);
+            return;
+        }
+
+        const header = panel.querySelector('.panel-header');
+        if (!header) return;
+
+        let toggleBtn = header.querySelector('.toggle-btn');
+        if (!toggleBtn) {
+            toggleBtn = document.createElement('span');
+            toggleBtn.className = 'toggle-btn';
+            toggleBtn.innerHTML = '▼';
+            header.appendChild(toggleBtn);
+        }
+
+        toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            panel.classList.toggle('collapsed');
+            const collapsed = panel.classList.contains('collapsed');
+            toggleBtn.innerHTML = collapsed ? '▶' : '▼';
+            savePanelState(panelId, { collapsed });
+        });
+
+        const saved = loadPanelState(panelId);
+        if (saved) {
+            if (saved.collapsed) {
+                panel.classList.add('collapsed');
+                toggleBtn.innerHTML = '▶';
+            }
+            if (saved.position) {
+                applyPosition(panel, saved.position);
+            }
+        }
+
+        makeDraggable(panel, header, panelId);
+    });
+}
+
+// ---------- Часть 3: Горячие клавиши (бывший hotkeys.js) ----------
 import { setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, setEditMode, getEditMode } from './mapEdit.js';
 import { closeTileEditModal } from './mapEdit.js';
 import { closeVisibilityModal } from './ui.js';
@@ -70,7 +269,6 @@ export function initHotkeys() {
 }
 
 function handleKeyDown(e) {
-    // Отслеживаем нажатие Alt
     if (e.key === 'Alt') {
         altPressed = true;
         if (controls) controls.enableZoom = false;
@@ -104,7 +302,6 @@ function handleKeyDown(e) {
             if (typeof window.closeCharacterSheet === 'function') {
                 window.closeCharacterSheet();
             }
-            // Также можно закрыть окно создания, если оно открыто
             const createModal = document.getElementById('marker-create-modal');
             if (createModal && createModal.style.display === 'flex') {
                 createModal.style.display = 'none';
@@ -113,7 +310,7 @@ function handleKeyDown(e) {
         return;
     }
 
-    // Enter - отправить сообщение, если фокус в поле ввода сообщения
+    // Enter - отправить сообщение
     if (e.key === 'Enter' && isInput && target.id === 'message-input') {
         e.preventDefault();
         window.sendMessage();
@@ -231,13 +428,4 @@ function handleWheel(e) {
         AppState.setCurrentTileType(tileSelect.value);
         tileSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
-}
-
-function closeCustomModals() {
-    customModals.forEach(selector => {
-        const modal = document.querySelector(selector);
-        if (modal && modal.style.display === 'flex') {
-            modal.style.display = 'none';
-        }
-    });
 }

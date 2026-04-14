@@ -1,9 +1,29 @@
 // static/js/characterSheet.js
-import { getCharacter, updateCharacter } from './api.js';
+/*
+ * ===================================================================
+ *                    ЛИСТ ПЕРСОНАЖА (characterSheet.js)
+ * ===================================================================
+ *
+ * ОГЛАВЛЕНИЕ:
+ * 1. Состояние и утилиты (переменные, escapeHtml, setValueByPath, scheduleAutoSave)
+ * 2. Рендеринг листа и переключение вкладок (renderCharacterSheet, switchSheetTab)
+ * 3. Вкладка "Основное" (renderBasicTab) + предыстория, контейнеры
+ * 4. Вкладка "Навыки" (renderSkillsTab) + особые черты
+ * 5. Вкладка "Экипировка" (renderEquipmentTab) + оружие, броня, шлем, противогаз
+ * 6. Вкладка "Инвентарь" (renderInventoryTab) + карманы, пояс, разгрузка, рюкзак
+ * 7. Вкладка "Заметки" (renderNotesTab)
+ * 8. Вкладка "Настройки" (renderSettingsTab) + видимость, удаление
+ * 9. Публичные функции (openCharacterSheet, closeCharacterSheet, export/import)
+ * 10. Вспомогательные функции для UI (добавление/удаление предметов, оружия, модификаций)
+ * 11. Модальные окна создания кастомных шаблонов (сохранение в БД)
+ */
+
+import { Server } from './api.js';
 import { showNotification } from './utils.js';
 import { lobbyParticipants } from './ui.js';
 import { getSocket } from './socketHandlers.js';
 
+// ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
 let currentCharacterId = null;
 let currentCharacterData = null;
 let autoSaveTimer = null;
@@ -49,18 +69,7 @@ async function loadTemplatesForLobby(category, subcategory = null) {
     const cacheKey = `${currentLobbyId}_${category}_${subcategory || ''}`;
     if (templatesCache[cacheKey]) return templatesCache[cacheKey];
 
-    let url = `/lobbies/${currentLobbyId}/templates?category=${category}`;
-    if (subcategory) url += `&subcategory=${subcategory}`;
-
-    const token = localStorage.getItem('access_token');
-    const response = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${token}` }
-    });
-    if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.message || 'Failed to load templates');
-    }
-    const data = await response.json();
+    const data = await Server.getLobbyTemplates(currentLobbyId, category, subcategory);
     const all = [
         ...data.global.map(t => ({ ...t, source: 'global' })),
         ...data.local.map(t => ({ ...t, source: 'local' }))
@@ -329,7 +338,7 @@ function scheduleAutoSave() {
                     updates: { data: currentCharacterData }
                 });
             } else {
-                updateCharacter(currentCharacterId, { data: currentCharacterData })
+                Server.updateCharacter(currentCharacterId, { data: currentCharacterData })
                     .then(() => console.log('Auto-saved via HTTP'))
                     .catch(err => showNotification('Ошибка автосохранения: ' + err.message));
             }
@@ -337,7 +346,7 @@ function scheduleAutoSave() {
     }, AUTO_SAVE_DELAY);
 }
 
-// ========== РЕНДЕР ЛИСТА ==========
+// ========== 2. РЕНДЕРИНГ ЛИСТА И ВКЛАДКИ ==========
 async function renderCharacterSheet(characterName, data) {
     document.getElementById('character-sheet-name').textContent = characterName;
     const tabsContainer = document.getElementById('sheet-tabs');
@@ -409,7 +418,7 @@ function applyTemplateToObject(obj, template, mapping) {
     obj.templateId = template.id;
 }
 
-// ========== ВКЛАДКА ОСНОВНОЕ ==========
+// ========== 3. ВКЛАДКА "ОСНОВНОЕ" ==========
 async function renderBasicTab(data) {
     const container = document.getElementById('sheet-tab-basic');
     const basic = data.basic || {};
@@ -631,7 +640,7 @@ window.fillBackgroundFromTemplate = async function(select) {
     scheduleAutoSave();
 };
 
-// ========== МОДАЛЬНОЕ ОКНО ДЛЯ КАСТОМНОЙ ПРЕДЫСТОРИИ ==========
+// ========== 11. МОДАЛЬНЫЕ ОКНА ШАБЛОНОВ ==========
 window.openCreateBackgroundTemplateModal = function() {
     let modal = document.getElementById('create-background-template-modal');
     if (!modal) {
@@ -719,22 +728,15 @@ window.saveBackgroundTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('background');
         clearAllTemplatesCache();
         await renderBasicTab(currentCharacterData);
         document.getElementById('create-background-template-modal').style.display = 'none';
         showNotification('Шаблон предыстории создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
@@ -965,7 +967,7 @@ window.removeEffect = function(index) {
     scheduleAutoSave();
 };
 
-// ---------- Вкладка Навыки ----------
+// ========== 4. ВКЛАДКА "НАВЫКИ" ==========
 async function renderSkillsTab(data) {
     const container = document.getElementById('sheet-tab-skills');
     const skills = data.skills || {};
@@ -1241,26 +1243,19 @@ window.saveSpecialTraitTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('special_trait');
         await renderSkillsTab(currentCharacterData);
         document.getElementById('create-special-trait-template-modal').style.display = 'none';
         showNotification('Шаблон особой черты создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
 
-// ========== ВКЛАДКА ЭКИПИРОВКА ==========
+// ========== 5. ВКЛАДКА "ЭКИПИРОВКА" ==========
 async function renderEquipmentTab(data) {
     const container = document.getElementById('sheet-tab-equipment');
     const eq = data.equipment || {};
@@ -2223,22 +2218,15 @@ window.saveHelmetTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('helmet');
         clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-helmet-template-modal').style.display = 'none';
         showNotification('Шаблон шлема создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
@@ -2329,22 +2317,15 @@ window.saveGasMaskTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('gas_mask');
         clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-gasMask-template-modal').style.display = 'none';
         showNotification('Шаблон противогаза создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
@@ -2425,22 +2406,15 @@ window.saveArmorTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('armor');
         clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-armor-template-modal').style.display = 'none';
         showNotification('Шаблон брони создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
@@ -2546,22 +2520,15 @@ window.saveWeaponTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('weapon');
         clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-weapon-template-modal').style.display = 'none';
         showNotification('Шаблон оружия создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
@@ -2613,27 +2580,20 @@ window.saveVestTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearTemplatesCache('vest');
         clearAllTemplatesCache();
         await renderEquipmentTab(currentCharacterData);
         document.getElementById('create-vest-template-modal').style.display = 'none';
         showNotification('Шаблон разгрузки создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
 
-// ---------- Вкладка Инвентарь ----------
+// ========== 6. ВКЛАДКА "ИНВЕНТАРЬ" ==========
 async function renderInventoryTab(data) {
     const container = document.getElementById('sheet-tab-inventory');
     const inv = data.inventory || {};
@@ -2960,31 +2920,31 @@ window.saveInventoryItemTemplate = async function() {
     }
 
     let category, attributes;
-        if (currentItemCategory === 'consumable') {
-            category = 'consumable';
-            const effects = [];
-            const items = document.querySelectorAll('#consumable-effects-container .effect-item');
-            items.forEach(item => {
-                let type = '';
-                const categorySelect = item.querySelector('.effect-category');
-                const customInput = item.querySelector('.effect-custom-category');
-                if (customInput && customInput.value) {
-                    type = customInput.value;
-                } else if (categorySelect && categorySelect.value !== '__custom__') {
-                    type = categorySelect.value;
-                }
-                const value = item.querySelector('.effect-value').value;
-                if (type && value) {
-                    effects.push({ type, value });
-                }
-            });
-            attributes = {
-                weight: parseFloat(document.getElementById('consumable-weight').value) || 0,
-                volume: parseFloat(document.getElementById('consumable-volume').value) || 0,
-                uses: parseInt(document.getElementById('consumable-uses').value) || 1,
-                effects: effects
-            };
-        } else if (currentItemCategory === 'material') {
+    if (currentItemCategory === 'consumable') {
+        category = 'consumable';
+        const effects = [];
+        const items = document.querySelectorAll('#consumable-effects-container .effect-item');
+        items.forEach(item => {
+            let type = '';
+            const categorySelect = item.querySelector('.effect-category');
+            const customInput = item.querySelector('.effect-custom-category');
+            if (customInput && customInput.value) {
+                type = customInput.value;
+            } else if (categorySelect && categorySelect.value !== '__custom__') {
+                type = categorySelect.value;
+            }
+            const value = item.querySelector('.effect-value').value;
+            if (type && value) {
+                effects.push({ type, value });
+            }
+        });
+        attributes = {
+            weight: parseFloat(document.getElementById('consumable-weight').value) || 0,
+            volume: parseFloat(document.getElementById('consumable-volume').value) || 0,
+            uses: parseInt(document.getElementById('consumable-uses').value) || 1,
+            effects: effects
+        };
+    } else if (currentItemCategory === 'material') {
         category = 'crafting_material';
         attributes = {
             weight: parseFloat(document.getElementById('material-weight').value) || 0,
@@ -3025,22 +2985,13 @@ window.saveInventoryItemTemplate = async function() {
         attributes: attributes
     };
 
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
-        // Очищаем кеш для всех затронутых категорий
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearAllTemplatesCache();
         await renderInventoryTab(currentCharacterData);
         document.getElementById('create-inventory-item-modal').style.display = 'none';
         showNotification('Предмет создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
@@ -3275,26 +3226,19 @@ window.saveBackpackTemplate = async function() {
         volume: 0,
         attributes: attributes
     };
-    const response = await fetch(`/lobbies/${currentLobbyId}/templates`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (response.ok) {
+
+    try {
+        await Server.createLobbyTemplate(currentLobbyId, data);
         clearAllTemplatesCache();
         await renderInventoryTab(currentCharacterData);
         document.getElementById('create-backpack-template-modal').style.display = 'none';
         showNotification('Шаблон рюкзака создан', 'success');
-    } else {
-        const err = await response.json();
+    } catch (err) {
         showNotification(err.message);
     }
 };
 
-// ---------- Вкладка Заметки ----------
+// ========== 7. ВКЛАДКА "ЗАМЕТКИ" ==========
 function renderNotesTab(data) {
     const container = document.getElementById('sheet-tab-notes');
     container.innerHTML = `
@@ -3305,7 +3249,7 @@ function renderNotesTab(data) {
     `;
 }
 
-// ---------- Вкладка Настройки ----------
+// ========== 8. ВКЛАДКА "НАСТРОЙКИ" ==========
 function renderSettingsTab(data) {
     const container = document.getElementById('sheet-tab-settings');
     if (!container) return;
@@ -3350,31 +3294,27 @@ function renderSettingsTab(data) {
 window.applyVisibilityFromSheet = function() {
     const checkboxes = document.querySelectorAll('#visibility-settings-container input:checked');
     const visibleTo = Array.from(checkboxes).map(cb => parseInt(cb.value, 10));
-    import('./api.js').then(({ setCharacterVisibility }) => {
-        setCharacterVisibility(currentCharacterId, visibleTo)
-            .then(() => showNotification('Видимость обновлена', 'success'))
-            .catch(err => showNotification(err.message));
-    });
+    Server.setCharacterVisibility(currentCharacterId, visibleTo)
+        .then(() => showNotification('Видимость обновлена', 'success'))
+        .catch(err => showNotification(err.message));
 };
 
 window.deleteCharacterFromSheet = function() {
     if (!confirm('Удалить персонажа?')) return;
-    import('./api.js').then(({ deleteCharacter }) => {
-        deleteCharacter(currentCharacterId)
-            .then(() => {
-                showNotification('Персонаж удалён', 'success');
-                closeCharacterSheet();
-                import('./characters.js').then(module => module.loadLobbyCharacters());
-            })
-            .catch(err => showNotification(err.message));
-    });
+    Server.deleteCharacter(currentCharacterId)
+        .then(() => {
+            showNotification('Персонаж удалён', 'success');
+            closeCharacterSheet();
+            import('./characters.js').then(module => module.loadLobbyCharacters());
+        })
+        .catch(err => showNotification(err.message));
 };
 
-// ---------- Публичные функции ----------
+// ========== 9. ПУБЛИЧНЫЕ ФУНКЦИИ ==========
 export async function openCharacterSheet(characterId) {
     currentCharacterId = characterId;
     try {
-        const character = await getCharacter(characterId);
+        const character = await Server.getCharacter(characterId);
         currentCharacterData = character.data || {};
 
         function ensureSkillXp(data) {
@@ -3512,7 +3452,7 @@ window.rollSkill = function(skillPath, skillLabel) {
     }
 };
 
-// Функции добавления/удаления оружия и предметов
+// ========== 10. UI-ФУНКЦИИ ДОБАВЛЕНИЯ/УДАЛЕНИЯ ==========
 window.addWeapon = function() {
     updateDataFromFields();
     if (!currentCharacterData.weapons) currentCharacterData.weapons = [];

@@ -11,9 +11,8 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
  applyNameChange, applyRadiationChange, updateTileEditRadiation} from './mapEdit.js';
 import { hideObjectHighlight, camera } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
-import { exportMap } from './api.js';
-import { initDraggablePanels } from './draggable.js';
-import { initHotkeys } from './hotkeys.js';
+import { Server } from './api.js';
+import AppState, { initDraggablePanels, initHotkeys } from './ui_interactions.js';
 import { initWeather, applyWeather } from './weather.js';
 import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
@@ -152,7 +151,7 @@ window.pickTileForMarker = pickTileForMarker;
 // Экспорт карты
 window.exportMap = async () => {
     try {
-        const blob = await exportMap(currentLobbyId);
+        const blob = await Server.exportMap(currentLobbyId);
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;

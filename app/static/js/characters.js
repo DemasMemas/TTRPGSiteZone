@@ -1,18 +1,16 @@
 // static/js/characters.js
-import { getLobbyCharacters, createLobbyCharacter, deleteCharacter } from './api.js';
+import { Server } from './api.js';
 import { showNotification } from './utils.js';
 
 let currentLobbyId;
-let token;
 
-export function initCharacters(lobbyId, authToken) {
+export function initCharacters(lobbyId) {
     currentLobbyId = lobbyId;
-    token = authToken;
 }
 
 export async function loadLobbyCharacters() {
     try {
-        const characters = await getLobbyCharacters(currentLobbyId);
+        const characters = await Server.getLobbyCharacters(currentLobbyId);
         displayLobbyCharacters(characters);
     } catch (error) {
         console.error('Error loading characters', error);
@@ -39,7 +37,7 @@ function displayLobbyCharacters(characters) {
 
 export async function createCharacter(name, data) {
     try {
-        await createLobbyCharacter(currentLobbyId, name, data);
+        await Server.createLobbyCharacter(currentLobbyId, name, data);
         showNotification('Персонаж создан');
         loadLobbyCharacters();
     } catch (error) {

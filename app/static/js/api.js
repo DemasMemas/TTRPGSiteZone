@@ -3,7 +3,7 @@ import { getErrorMessage } from './utils.js';
 
 const token = localStorage.getItem('access_token');
 
-export async function apiFetch(url, options = {}) {
+async function apiFetch(url, options = {}) {
     const headers = {
         'Authorization': `Bearer ${token}`,
         ...options.headers,
@@ -16,85 +16,212 @@ export async function apiFetch(url, options = {}) {
     return response.json();
 }
 
-export async function getLobbyInfo(lobbyId) {
-    return apiFetch(`/lobbies/${lobbyId}`);
-}
+export const Server = {
+    // ----- Лобби (комнаты) -----
+    async getLobbyInfo(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}`);
+    },
 
-export async function getLobbyCharacters(lobbyId) {
-    return apiFetch(`/lobbies/${lobbyId}/characters`);
-}
+    async createLobby(name, mapType, chunksWidth, chunksHeight, importData = null) {
+        // Для импорта используется FormData, для обычного — JSON
+        if (mapType === 'imported' && importData) {
+            const formData = new FormData();
+            formData.append('name', name);
+            formData.append('map_type', 'imported');
+            formData.append('map_file', new Blob([JSON.stringify(importData)], { type: 'application/json' }), 'map.json');
+            const response = await fetch('/lobbies/', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` },
+                body: formData,
+            });
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(getErrorMessage(data) || 'Failed to create lobby');
+            }
+            return response.json();
+        } else {
+            return apiFetch('/lobbies/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, map_type: mapType, chunks_width: chunksWidth, chunks_height: chunksHeight }),
+            });
+        }
+    },
 
-export async function createLobbyCharacter(lobbyId, name, data = {}) {
-    return apiFetch(`/lobbies/${lobbyId}/characters`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, data }),
-    });
-}
+    async listLobbies() {
+        return apiFetch('/lobbies/');
+    },
 
-export async function getCharacter(characterId) {
-    return apiFetch(`/lobbies/characters/${characterId}`);
-}
+    async joinLobby(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}/join`, { method: 'POST' });
+    },
 
-export async function deleteCharacter(characterId) {
-    return apiFetch(`/lobbies/characters/${characterId}`, { method: 'DELETE' });
-}
+    async leaveLobby(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}/leave`, { method: 'POST' });
+    },
 
-export async function updateCharacter(characterId, updates) {
-    return apiFetch(`/lobbies/characters/${characterId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
-    });
-}
+    async deleteLobby(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}`, { method: 'DELETE' });
+    },
 
-export async function setCharacterVisibility(characterId, visibleTo) {
-    return apiFetch(`/lobbies/characters/${characterId}/visibility`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visible_to: visibleTo }),
-    });
-}
+    async joinByCode(code) {
+        return apiFetch('/lobbies/join_by_code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+        });
+    },
 
-export async function banUser(lobbyId, userId) {
-    return apiFetch(`/lobbies/${lobbyId}/ban/${userId}`, { method: 'POST' });
-}
+    async getMyLobbies(limit, offset) {
+        const params = new URLSearchParams();
+        if (limit !== undefined) params.set('limit', limit);
+        if (offset !== undefined) params.set('offset', offset);
+        return apiFetch(`/lobbies/my?${params}`);
+    },
 
-export async function unbanUser(lobbyId, userId) {
-    return apiFetch(`/lobbies/${lobbyId}/unban/${userId}`, { method: 'POST' });
-}
+    async getJoinedLobbies(limit, offset) {
+        const params = new URLSearchParams();
+        if (limit !== undefined) params.set('limit', limit);
+        if (offset !== undefined) params.set('offset', offset);
+        return apiFetch(`/lobbies/joined?${params}`);
+    },
 
-export async function getBannedList(lobbyId) {
-    return apiFetch(`/lobbies/${lobbyId}/banned`);
-}
+    // ----- Участники и баны -----
+    async banUser(lobbyId, userId) {
+        return apiFetch(`/lobbies/${lobbyId}/ban/${userId}`, { method: 'POST' });
+    },
 
-export async function updateTile(lobbyId, chunkX, chunkY, tileX, tileY, updates) {
-    return apiFetch(`/lobbies/${lobbyId}/chunks/${chunkX}/${chunkY}/tile/${tileX}/${tileY}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
-    });
-}
+    async unbanUser(lobbyId, userId) {
+        return apiFetch(`/lobbies/${lobbyId}/unban/${userId}`, { method: 'POST' });
+    },
 
-export async function batchUpdateTiles(lobbyId, updates) {
-    return apiFetch(`/lobbies/${lobbyId}/chunks/batch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
-    });
-}
+    async getBannedList(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}/banned`);
+    },
 
-export async function getChunks(lobbyId, minX, maxX, minY, maxY) {
-    return apiFetch(`/lobbies/${lobbyId}/chunks?min_chunk_x=${minX}&max_chunk_x=${maxX}&min_chunk_y=${minY}&max_chunk_y=${maxY}`);
-}
+    // ----- Персонажи -----
+    async getLobbyCharacters(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}/characters`);
+    },
 
-export async function exportMap(lobbyId) {
-    const response = await fetch(`/lobbies/${lobbyId}/export`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-    });
-    if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(getErrorMessage(data) || 'Export failed');
-    }
-    return response.blob();
-}
+    async createLobbyCharacter(lobbyId, name, data = {}) {
+        return apiFetch(`/lobbies/${lobbyId}/characters`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, data }),
+        });
+    },
+
+    async getCharacter(characterId) {
+        return apiFetch(`/lobbies/characters/${characterId}`);
+    },
+
+    async updateCharacter(characterId, updates) {
+        return apiFetch(`/lobbies/characters/${characterId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
+    },
+
+    async deleteCharacter(characterId) {
+        return apiFetch(`/lobbies/characters/${characterId}`, { method: 'DELETE' });
+    },
+
+    async setCharacterVisibility(characterId, visibleTo) {
+        return apiFetch(`/lobbies/characters/${characterId}/visibility`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ visible_to: visibleTo }),
+        });
+    },
+
+    // ----- Карта -----
+    async getChunks(lobbyId, minX, maxX, minY, maxY) {
+        return apiFetch(`/lobbies/${lobbyId}/chunks?min_chunk_x=${minX}&max_chunk_x=${maxX}&min_chunk_y=${minY}&max_chunk_y=${maxY}`);
+    },
+
+    async updateTile(lobbyId, chunkX, chunkY, tileX, tileY, updates) {
+        return apiFetch(`/lobbies/${lobbyId}/chunks/${chunkX}/${chunkY}/tile/${tileX}/${tileY}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
+    },
+
+    async batchUpdateTiles(lobbyId, updates) {
+        return apiFetch(`/lobbies/${lobbyId}/chunks/batch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
+    },
+
+    async exportMap(lobbyId) {
+        const response = await fetch(`/lobbies/${lobbyId}/export`, {
+            headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(getErrorMessage(data) || 'Export failed');
+        }
+        return response.blob();
+    },
+
+    // ----- Погода -----
+    async updateWeather(lobbyId, settings) {
+        return apiFetch(`/lobbies/${lobbyId}/weather`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(settings),
+        });
+    },
+
+    // ----- Шаблоны предметов -----
+    async getLobbyTemplates(lobbyId, category, subcategory = null) {
+        const params = new URLSearchParams({ category });
+        if (subcategory) params.set('subcategory', subcategory);
+        return apiFetch(`/lobbies/${lobbyId}/templates?${params}`);
+    },
+
+    async createLobbyTemplate(lobbyId, templateData) {
+        return apiFetch(`/lobbies/${lobbyId}/templates`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(templateData),
+        });
+    },
+
+    async updateLobbyTemplate(lobbyId, templateId, templateData) {
+        return apiFetch(`/lobbies/${lobbyId}/templates/${templateId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(templateData),
+        });
+    },
+
+    async deleteLobbyTemplate(lobbyId, templateId) {
+        return apiFetch(`/lobbies/${lobbyId}/templates/${templateId}`, { method: 'DELETE' });
+    },
+
+    // ----- Аутентификация (если нужно) -----
+    async register(username, email, password) {
+        return apiFetch('/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, email, password }),
+        });
+    },
+
+    async login(username, password) {
+        return apiFetch('/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+        });
+    },
+
+    async getProfile() {
+        return apiFetch('/auth/profile');
+    },
+};

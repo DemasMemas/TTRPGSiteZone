@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { scene, camera, renderer, controls, getHoveredTile } from './lobby3d.js';
 import { showNotification } from './utils.js';
-import AppState from './state.js';
+import AppState from './ui_interactions.js';
 
 let socket;
 let currentLobbyId;
