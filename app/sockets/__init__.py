@@ -1,4 +1,16 @@
 # app/sockets/__init__.py
+"""
+Обработчики WebSocket событий.
+
+- auth.py        : подключение, аутентификация, выход
+- chat.py        : отправка сообщений, команды /roll
+- dice.py        : броски навыков персонажа
+- markers.py     : создание, редактирование, перемещение маркеров на карте
+- character.py   : обновление данных персонажа в реальном времени
+- kick.py        : вспомогательная функция для кика пользователя
+- utils.py       : получение пользователя из JWT токена
+"""
+
 import logging
 from flask_socketio import emit
 from app.extensions import socketio

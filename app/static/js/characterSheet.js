@@ -42,21 +42,6 @@ const MATERIAL_OPTIONS = [
     'Кевлар',
     'Плита'
 ];
-const PREDEFINED_EFFECTS = [
-    { type: "Исцеление", value: "+5 HP" },
-    { type: "Исцеление", value: "+10 HP" },
-    { type: "Исцеление", value: "+20 HP" },
-    { type: "Урон", value: "-5 HP" },
-    { type: "Урон", value: "-10 HP" },
-    { type: "Защита", value: "+1 к броне" },
-    { type: "Защита", value: "+2 к броне" },
-    { type: "Характеристика", value: "Сила +1" },
-    { type: "Характеристика", value: "Ловкость +1" },
-    { type: "Характеристика", value: "Выносливость +1" },
-    { type: "Характеристика", value: "Интеллект +1" },
-    { type: "Радиация", value: "-10 рад" },
-    { type: "Радиация", value: "-20 рад" }
-];
 
 // Универсальная загрузка шаблонов по категории
 async function loadTemplatesForLobby(category, subcategory = null) {

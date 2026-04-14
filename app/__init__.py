@@ -1,4 +1,20 @@
 # app/__init__.py
+"""
+Главный модуль приложения TTRPG.
+
+Структура бэкенда:
+- auth/         : эндпоинты регистрации, логина, профиля
+- lobbies/      : все REST-эндпоинты для комнат (создание, карта, персонажи, шаблоны)
+- models/       : SQLAlchemy модели таблиц БД
+- schemas/      : Marshmallow схемы для валидации и сериализации
+- services/     : бизнес-логика (создание комнат, управление участниками, карта, персонажи)
+- sockets/      : обработчики WebSocket событий (чат, маркеры, игральные кости)
+- utils/        : вспомогательные функции и декораторы (@requires_participant, @requires_gm)
+- extensions.py : инициализация Flask-расширений (db, migrate, jwt, socketio)
+- config.py     : конфигурация приложения (development, production)
+- constants.py  : общие константы (CHUNK_SIZE, типы тайлов и аномалий)
+"""
+
 import logging
 import os
 from logging.handlers import RotatingFileHandler
