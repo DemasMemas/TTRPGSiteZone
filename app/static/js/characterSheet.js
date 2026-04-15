@@ -355,6 +355,17 @@ function scheduleAutoSave() {
     }, AUTO_SAVE_DELAY);
 }
 
+function forceSyncCharacter() {
+    const socket = getSocket();
+    if (socket && currentCharacterId) {
+        socket.emit('update_character_data', {
+            token: localStorage.getItem('access_token'),
+            character_id: currentCharacterId,
+            updates: { data: currentCharacterData }
+        });
+    }
+}
+
 // ========== УНИВЕРСАЛЬНАЯ МОДЕЛЬ ПРЕДМЕТА ==========
 function generateItemId() {
     return 'item_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -2505,6 +2516,7 @@ window.confirmEquipModule = function(weaponIndex, slotType) {
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
+    forceSyncCharacter();
     showNotification('Модуль установлен', 'success');
 };
 
@@ -2518,7 +2530,6 @@ window.unequipModuleFromWeapon = async function(weaponIndex, slotType) {
     const installedMod = weapon.installedModules[modIndex];
     weapon.installedModules.splice(modIndex, 1);
 
-    // Если есть templateId, загружаем шаблон и создаём полноценный предмет
     let restoredItem;
     if (installedMod.templateId) {
         const templates = await loadTemplatesForLobby('weapon_module');
@@ -2526,7 +2537,6 @@ window.unequipModuleFromWeapon = async function(weaponIndex, slotType) {
         if (template) {
             restoredItem = createItemFromTemplate(template);
         } else {
-            // Шаблон не найден — создаём базовый объект с templateId
             restoredItem = {
                 id: installedMod.id || generateItemId(),
                 templateId: installedMod.templateId,
@@ -2537,12 +2547,12 @@ window.unequipModuleFromWeapon = async function(weaponIndex, slotType) {
                 quantity: 1,
                 attributes: {
                     slot_type: slotType,
-                    modifiers: installedMod.modifiers
+                    modifiers: installedMod.modifiers,
+                    caliber: installedMod.caliber
                 }
             };
         }
     } else {
-        // Старые модули без templateId — создаём упрощённо
         restoredItem = {
             id: installedMod.id || generateItemId(),
             name: installedMod.name,
@@ -2562,11 +2572,10 @@ window.unequipModuleFromWeapon = async function(weaponIndex, slotType) {
     if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
     currentCharacterData.inventory.backpack.push(restoredItem);
 
-    // Перерисовываем активную вкладку
-    const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
+    forceSyncCharacter();
     showNotification('Модуль снят и помещён в рюкзак', 'success');
 };
 
@@ -2592,14 +2601,10 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
         });
     };
 
-    // Рюкзак
     collectMagazines(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
-    // Карманы
     collectMagazines(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
-    // Подсумки пояса
     const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
     beltPouches.forEach((pouch, i) => collectMagazines(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
-    // Подсумки разгрузки
     const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
     vestPouches.forEach((pouch, i) => collectMagazines(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
 
@@ -2608,38 +2613,47 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
         return;
     }
 
-    let modal = document.getElementById('magazine-select-modal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'magazine-select-modal';
-        modal.className = 'modal';
-        modal.innerHTML = `
-            <div class="modal-content">
-                <span class="close" onclick="document.getElementById('magazine-select-modal').style.display='none'">&times;</span>
-                <h3>Выберите магазин</h3>
-                <select id="magazine-select" class="form-control"></select>
-                <div class="form-actions"><button class="btn btn-primary" onclick="confirmEquipMagazine(${weaponIndex})">Установить</button></div>
-            </div>`;
-        document.body.appendChild(modal);
-    }
-    const select = document.getElementById('magazine-select');
-    select.innerHTML = '';
+    // Всегда удаляем старое модальное окно, если оно есть
+    const oldModal = document.getElementById('magazine-select-modal');
+    if (oldModal) oldModal.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'magazine-select-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="document.getElementById('magazine-select-modal').remove()">&times;</span>
+            <h3>Выберите магазин</h3>
+            <select id="magazine-select" class="form-control"></select>
+            <div class="form-actions">
+                <button class="btn btn-primary" id="confirm-magazine-btn">Установить</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('magazine-select-modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const select = modal.querySelector('#magazine-select');
     inventoryMagazines.forEach((entry, idx) => {
         const opt = document.createElement('option');
         opt.value = idx;
-        opt.textContent = `${entry.item.name} (${entry.item.attributes?.capacity || 30} патр.)`;
+        opt.textContent = `${entry.item.name} (${entry.item.ammo?.reduce((s,a)=>s+a.quantity,0) || 0} патр.)`;
         select.appendChild(opt);
     });
-    modal._magazineList = inventoryMagazines;
+
+    // Кнопка подтверждения использует актуальный weaponIndex и список
+    modal.querySelector('#confirm-magazine-btn').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = inventoryMagazines[idx];
+        modal.remove();
+        confirmEquipMagazineDirect(weaponIndex, selected);
+    };
+
     modal.style.display = 'flex';
 };
 
-window.confirmEquipMagazine = function(weaponIndex) {
-    const modal = document.getElementById('magazine-select-modal');
-    const select = document.getElementById('magazine-select');
-    const selected = modal._magazineList[select.value];
-    if (!selected) return;
-
+function confirmEquipMagazineDirect(weaponIndex, selected) {
     const weapon = currentCharacterData.weapons[weaponIndex];
     if (!weapon) return;
 
@@ -2661,14 +2675,21 @@ window.confirmEquipMagazine = function(weaponIndex) {
             weight: 0,
             volume: 0.2,
             quantity: 1,
-            currentAmmo: oldMag.currentAmmo || 0,
+            ammo: oldMag.ammo ? oldMag.ammo.map(a => ({ ...a })) : [],
+            emptyWeight: oldMag.emptyWeight || 0,
+            loadedWeight: oldMag.loadedWeight || 0,
             attributes: {
                 caliber: oldMag.caliber,
                 capacity: oldMag.capacity,
-                emptyWeight: oldMag.emptyWeight || 0,
-                loadedWeight: oldMag.loadedWeight || 0
+                emptyWeight: oldMag.emptyWeight,
+                loadedWeight: oldMag.loadedWeight
             }
         };
+        Object.defineProperty(oldItem, 'currentAmmo', {
+            get() { return this.ammo.reduce((sum, a) => sum + a.quantity, 0); },
+            enumerable: true
+        });
+        updateMagazineWeight(oldItem);
         restoreItemToPath(oldItem, selected.path);
     }
 
@@ -2681,18 +2702,17 @@ window.confirmEquipMagazine = function(weaponIndex) {
         capacity: selected.item.attributes?.capacity || 30,
         emptyWeight: selected.item.emptyWeight || 0,
         loadedWeight: selected.item.loadedWeight || 0,
-        ammo: selected.item.ammo ? selected.item.ammo.map(a => ({ ...a })) : [], // копируем массив
+        ammo: selected.item.ammo ? selected.item.ammo.map(a => ({ ...a })) : [],
         sourcePath: selected.path
     };
-    updateMagazineWeight(weapon.installedMagazine);
     weapon.ammo = weapon.installedMagazine.ammo.reduce((sum, a) => sum + a.quantity, 0);
 
-    modal.style.display = 'none';
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
+    forceSyncCharacter();
     showNotification('Магазин установлен', 'success');
-};
+}
 
 window.unequipMagazineFromWeapon = function(weaponIndex) {
     const weapon = currentCharacterData.weapons[weaponIndex];
@@ -2733,6 +2753,7 @@ window.unequipMagazineFromWeapon = function(weaponIndex) {
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
+    forceSyncCharacter();
     showNotification('Магазин снят', 'success');
 };
 
@@ -2761,8 +2782,11 @@ window.reloadFixedMagazine = async function(weaponIndex) {
     const collectLoaders = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'magazine' && item.isLoader && item.attributes?.caliber === caliber && (item.currentAmmo || 0) > 0) {
-                loaderItems.push({ item, path: path.concat(idx) });
+            if (item.category === 'magazine' && item.isLoader && item.attributes?.caliber === caliber) {
+                const total = item.ammo ? item.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
+                if (total > 0) {
+                    loaderItems.push({ item, path: path.concat(idx) });
+                }
             }
             if (item.contents) collectLoaders(item.contents, path.concat(idx, 'contents'));
         });
@@ -2797,39 +2821,40 @@ window.reloadFixedMagazine = async function(weaponIndex) {
 
     // Создаём модальное окно с двумя секциями
     let modal = document.getElementById('fixed-reload-modal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'fixed-reload-modal';
-        modal.className = 'modal';
-        modal.innerHTML = `
-            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
-                <span class="close" onclick="document.getElementById('fixed-reload-modal').style.display='none'">&times;</span>
-                <h3>Выберите способ зарядки</h3>
-                <div id="loader-section" style="margin-bottom:15px;">
-                    <h4>Спидлоадеры/ленты</h4>
-                    <select id="loader-select" class="form-control" size="3"></select>
-                </div>
-                <div id="ammo-section">
-                    <h4>Патроны</h4>
-                    <select id="fixed-ammo-select" class="form-control" size="5"></select>
-                </div>
-                <div class="form-actions" style="margin-top:15px;">
-                    <button class="btn btn-primary" onclick="confirmFixedReload(${weaponIndex})">Зарядить</button>
-                    <button class="btn btn-secondary" onclick="document.getElementById('fixed-reload-modal').style.display='none'">Отмена</button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(modal);
-    }
+    if (modal) modal.remove();
 
-    const loaderSelect = document.getElementById('loader-select');
-    const loaderSection = document.getElementById('loader-section');
+    modal = document.createElement('div');
+    modal.id = 'fixed-reload-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+            <span class="close" onclick="document.getElementById('fixed-reload-modal').remove()">&times;</span>
+            <h3>Выберите способ зарядки</h3>
+            <div id="loader-section" style="margin-bottom:15px;">
+                <h4>Спидлоадеры/ленты</h4>
+                <select id="loader-select" class="form-control" size="3"></select>
+            </div>
+            <div id="ammo-section">
+                <h4>Патроны</h4>
+                <select id="fixed-ammo-select" class="form-control" size="5"></select>
+            </div>
+            <div class="form-actions" style="margin-top:15px;">
+                <button class="btn btn-primary" id="confirm-fixed-reload-btn">Зарядить</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('fixed-reload-modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const loaderSelect = modal.querySelector('#loader-select');
+    const loaderSection = modal.querySelector('#loader-section');
     loaderSelect.innerHTML = '';
     if (loaderItems.length > 0) {
         loaderItems.forEach((entry, idx) => {
+            const total = entry.item.ammo.reduce((sum, a) => sum + a.quantity, 0);
             const opt = document.createElement('option');
             opt.value = idx;
-            opt.textContent = `${entry.item.name} (${entry.item.currentAmmo || 0} патр.)`;
+            opt.textContent = `${entry.item.name} (${total} патр.)`;
             loaderSelect.appendChild(opt);
         });
         loaderSection.style.display = 'block';
@@ -2837,7 +2862,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
         loaderSection.style.display = 'none';
     }
 
-    const ammoSelect = document.getElementById('fixed-ammo-select');
+    const ammoSelect = modal.querySelector('#fixed-ammo-select');
     ammoSelect.innerHTML = '';
     ammoItems.forEach((entry, idx) => {
         const opt = document.createElement('option');
@@ -2846,9 +2871,77 @@ window.reloadFixedMagazine = async function(weaponIndex) {
         ammoSelect.appendChild(opt);
     });
 
-    modal._loaderList = loaderItems;
-    modal._ammoList = ammoItems;
-    modal._weaponIndex = weaponIndex;
+    // Кнопка подтверждения с замыканием нужных данных
+    modal.querySelector('#confirm-fixed-reload-btn').onclick = async () => {
+        const selectedLoaderIdx = loaderSelect.value;
+        const selectedAmmoIdx = ammoSelect.value;
+
+        const maxAmmo = weaponTemplate.attributes?.magazine_size || 0;
+        const currentAmmo = weapon.ammo || 0;
+        const needed = maxAmmo - currentAmmo;
+        if (needed <= 0) {
+            showNotification('Магазин уже полон');
+            modal.remove();
+            return;
+        }
+
+        // Приоритет: спидлоадер
+        if (selectedLoaderIdx !== '' && loaderItems.length > 0) {
+            const selected = loaderItems[selectedLoaderIdx];
+            const loader = selected.item;
+            const totalInLoader = loader.ammo.reduce((sum, a) => sum + a.quantity, 0);
+            const toTake = Math.min(needed, totalInLoader);
+
+            // Уменьшаем патроны в спидлоадере
+            let remaining = toTake;
+            for (let i = loader.ammo.length - 1; i >= 0 && remaining > 0; i--) {
+                const ammoEntry = loader.ammo[i];
+                const takeFromThis = Math.min(ammoEntry.quantity, remaining);
+                ammoEntry.quantity -= takeFromThis;
+                remaining -= takeFromThis;
+                if (ammoEntry.quantity <= 0) {
+                    loader.ammo.splice(i, 1);
+                }
+            }
+            weapon.ammo = currentAmmo + toTake;
+            updateMagazineWeight(loader);
+
+            modal.remove();
+            renderEquipmentTab(currentCharacterData);
+            renderInventoryTab(currentCharacterData);
+            scheduleAutoSave();
+            forceSyncCharacter();
+            showNotification(`Заряжено ${toTake} патронов из спидлоадера`, 'success');
+            return;
+        }
+
+        // Иначе патроны
+        if (selectedAmmoIdx !== '' && ammoItems.length > 0) {
+            const selected = ammoItems[selectedAmmoIdx];
+            const ammoItem = selected.item;
+            const available = ammoItem.quantity || 1;
+            const toTake = Math.min(needed, available);
+
+            weapon.ammo = currentAmmo + toTake;
+            ammoItem.quantity -= toTake;
+            if (ammoItem.quantity <= 0) {
+                removeItemByPath(selected.path);
+            } else {
+                updateAmmoWeight(ammoItem);
+            }
+
+            modal.remove();
+            renderEquipmentTab(currentCharacterData);
+            renderInventoryTab(currentCharacterData);
+            scheduleAutoSave();
+            forceSyncCharacter();
+            showNotification(`Заряжено ${toTake} патронов (${ammoItem.name})`, 'success');
+            return;
+        }
+
+        showNotification('Выберите спидлоадер или патроны');
+    };
+
     modal.style.display = 'flex';
 };
 
@@ -2889,6 +2982,7 @@ window.confirmFixedReload = async function(weaponIndex) {
         renderEquipmentTab(currentCharacterData);
         renderInventoryTab(currentCharacterData);
         scheduleAutoSave();
+        forceSyncCharacter();
         showNotification(`Заряжено ${toTake} патронов из спидлоадера`, 'success');
         return;
     }
@@ -2912,6 +3006,7 @@ window.confirmFixedReload = async function(weaponIndex) {
         renderEquipmentTab(currentCharacterData);
         renderInventoryTab(currentCharacterData);
         scheduleAutoSave();
+        forceSyncCharacter();
         showNotification(`Заряжено ${toTake} патронов (${ammoItem.name})`, 'success');
         return;
     }
@@ -3015,6 +3110,7 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
 
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
+    forceSyncCharacter();
 };
 
 window.reloadMagazineFromInventory = async function(pathStr) {
@@ -3113,6 +3209,7 @@ window.confirmReloadMagazine = function(pathStr) {
     modal.style.display = 'none';
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
+    forceSyncCharacter();
     showNotification(`Заряжено ${toTake} патронов (${ammoItem.name})`, 'success');
 };
 
@@ -5755,25 +5852,19 @@ export async function openCharacterSheet(characterId) {
             socket.off('character_data_updated');
             socket.on('character_data_updated', (data) => {
                 if (data.character_id === currentCharacterId && data.updated_by !== parseInt(localStorage.getItem('user_id'))) {
-                    if (data.updates.data) {
-                        currentCharacterData = data.updates.data;
-                    } else {
-                        Object.assign(currentCharacterData, data.updates);
-                    }
+                    currentCharacterData = data.updates.data || currentCharacterData;
+
+                    // Принудительно обновляем инвентарь и экипировку (они всегда в DOM)
+                    renderInventoryTab(currentCharacterData);
+                    renderEquipmentTab(currentCharacterData);
+
+                    // Обновляем активную вкладку для немедленного отображения
                     const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
-                    if (activeTab) {
-                        switch (activeTab) {
-                            case 'basic': renderBasicTab(currentCharacterData); break;
-                            case 'skills': renderSkillsTab(currentCharacterData); break;
-                            case 'equipment': renderEquipmentTab(currentCharacterData); break;
-                            case 'inventory': renderInventoryTab(currentCharacterData); break;
-                            case 'settings': renderSettingsTab(currentCharacterData); break;
-                            case 'notes': renderNotesTab(currentCharacterData); break;
-                        }
-                    } else {
-                        const nameEl = document.getElementById('character-sheet-name').textContent;
-                        renderCharacterSheet(nameEl, currentCharacterData);
-                    }
+                    if (activeTab === 'basic') renderBasicTab(currentCharacterData);
+                    else if (activeTab === 'skills') renderSkillsTab(currentCharacterData);
+                    else if (activeTab === 'settings') renderSettingsTab(currentCharacterData);
+                    else if (activeTab === 'notes') renderNotesTab(currentCharacterData);
+
                     showNotification('Данные персонажа обновлены', 'system', 'bottom-left');
                 }
             });
