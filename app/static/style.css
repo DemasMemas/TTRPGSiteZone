@@ -965,3 +965,13 @@ input[type=range]::-webkit-slider-thumb {
     padding: 10px;
   }
 }
+
+#templates-manager-modal .tab-btn {
+    margin-right: 5px;
+    padding: 6px 12px;
+}
+#templates-manager-modal table th {
+    text-align: left;
+    padding: 5px;
+    border-bottom: 2px solid #666;
+}

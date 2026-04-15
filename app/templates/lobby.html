@@ -56,6 +56,7 @@
             <button class="menu-item theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Переключить тему">🌓</button>
             <button class="menu-item edit-toggle" id="edit-toggle" style="display:none;" onclick="toggleEditMode()" title="Режим редактирования карты">✏️</button>
             <button class="menu-item settings-btn" id="settings-btn" style="display:none;" onclick="toggleSettings()" title="Настройки комнаты">⚙️</button>
+            <button class="menu-item" id="templates-manager-btn" style="display:none;" onclick="openTemplatesManager()" title="Управление шаблонами">📁</button>
             <button class="menu-item exit-btn" onclick="leaveLobby()" title="Покинуть комнату">✕</button>
         </div>
         <div id="settings-panel" class="settings-panel" style="display:none;">
@@ -398,6 +399,24 @@
                     </div>
                 </form>
             </div>
+        </div>
+    </div>
+
+    <div id="templates-modal" class="modal" style="display:none;">
+        <div class="modal-content" style="width: 800px; max-height: 80vh; overflow-y: auto;">
+            <span class="close" onclick="closeTemplatesManager()">&times;</span>
+            <h3>Управление шаблонами</h3>
+            <div class="settings-tabs">
+                <button class="tab-btn active" data-cat="weapon">Оружие</button>
+                <button class="tab-btn" data-cat="armor">Броня</button>
+                <button class="tab-btn" data-cat="helmet">Шлемы</button>
+                <button class="tab-btn" data-cat="gas_mask">Противогазы</button>
+                <button class="tab-btn" data-cat="backpack">Рюкзаки</button>
+                <button class="tab-btn" data-cat="vest">Разгрузки</button>
+                <button class="tab-btn" data-cat="weapon_module">Модули</button>
+                <button class="tab-btn" data-cat="magazine">Магазины</button>
+            </div>
+            <div id="templates-list" style="margin-top: 15px;"></div>
         </div>
     </div>
 
