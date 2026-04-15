@@ -6039,7 +6039,6 @@ window.addBackpackItemFromTemplate = async function(templateId) {
 };
 
 window.addBackpackItemManual = function() {
-    // Создаём пустой предмет нового формата
     const newItem = {
         id: generateItemId(),
         templateId: null,
