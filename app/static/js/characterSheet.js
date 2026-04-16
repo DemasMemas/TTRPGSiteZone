@@ -1820,7 +1820,17 @@ async function renderEquipmentTab(data) {
                     const erg = installed.ergonomics_penalty || 0;
                     const cha = installed.charisma_penalty || 0;
                     const prot = installed.protection?.physical || 0;
-                    info = `${escapeHtml(installed.name)} (точность ${acc}, эргон. ${erg}, харизма ${cha}, прочность ${installed.durability || 0}/${installed.maxDurability || 0}, физ. защита ${prot})`;
+                    const dur = installed.durability || 0;
+                    const maxDur = installed.maxDurability || 0;
+                    info = `${escapeHtml(installed.name)} (точность ${acc}, эргон. ${erg}, харизма ${cha}, прочность ${dur}/${maxDur}, физ. защита ${prot})`;
+                    return `
+                        <div style="margin-left:15px; display:flex; align-items:center; gap:10px; margin-top:5px;">
+                            <span style="width:100px;">${slot.label}:</span>
+                            <span style="flex:1;">${info}</span>
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="openVisorModificationsModal('${slot.type}')">⚙️</button>
+                            <button type="button" class="btn btn-sm btn-danger" onclick="unequipHelmetModule('${slot.type}')">Снять</button>
+                        </div>
+                    `;
                 } else {
                     info = escapeHtml(installed.name);
                 }
@@ -3509,6 +3519,7 @@ window.equipHelmetModule = async function(slotType) {
             ergonomics_penalty: mod.attributes?.ergonomics_penalty,
             charisma_penalty: mod.attributes?.charisma_penalty,
             protection: mod.attributes?.protection || { physical: 0 },
+            modifications: mod.modifications || [],
             sourcePath: selected.path
         });
 
@@ -3539,6 +3550,7 @@ window.unequipHelmetModule = async function(slotType) {
         weight: mod.weight || 0.2,
         volume: mod.volume || 0.3,
         quantity: 1,
+        modifications: mod.modifications || [],
         attributes: {
             slot_type: slotType,
             durability: mod.durability,
@@ -3555,6 +3567,101 @@ window.unequipHelmetModule = async function(slotType) {
     scheduleAutoSave();
     forceSyncCharacter();
     showNotification('Модуль снят', 'success');
+};
+
+window.openVisorModificationsModal = async function(slotType) {
+    const helmet = currentCharacterData.equipment?.helmet;
+    if (!helmet || !helmet.installedModules) {
+        showNotification('Шлем или забрало не найдены');
+        return;
+    }
+    const visor = helmet.installedModules.find(m => m.slotType === slotType);
+    if (!visor) {
+        showNotification('Забрало не установлено');
+        return;
+    }
+
+    const modTemplates = await loadTemplatesForLobby('modification');
+
+    const oldModal = document.getElementById('visor-modifications-modal');
+    if (oldModal) oldModal.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'visor-modifications-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Модификации забрала</h3>
+            <div id="installed-mods-list"></div>
+            <hr>
+            <h4>Добавить модификацию</h4>
+            <select id="visor-mod-select" class="form-control">
+                <option value="">-- Выберите --</option>
+                ${modTemplates.map(t => `<option value="${t.id}">${t.name}</option>`).join('')}
+            </select>
+            <div class="form-actions" style="margin-top:15px;">
+                <button class="btn btn-primary" id="add-mod-btn">Добавить</button>
+                <button class="btn btn-secondary" id="close-modal-btn">Закрыть</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const installedList = modal.querySelector('#installed-mods-list');
+    const select = modal.querySelector('#visor-mod-select');
+    const addBtn = modal.querySelector('#add-mod-btn');
+    const closeBtn = modal.querySelector('#close-modal-btn');
+
+    function renderInstalled() {
+        const installed = visor.modifications || [];
+        installedList.innerHTML = installed.length ? installed.map((mod, idx) => `
+            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px;">
+                <span style="flex:1;">${escapeHtml(mod.name)}</span>
+                <button type="button" class="btn btn-sm btn-danger" data-mod-index="${idx}">✕</button>
+            </div>
+        `).join('') : '<p>Нет установленных модификаций</p>';
+
+        installedList.querySelectorAll('[data-mod-index]').forEach(btn => {
+            btn.onclick = () => {
+                const idx = parseInt(btn.dataset.modIndex, 10);
+                visor.modifications.splice(idx, 1);
+                renderInstalled(); // обновляем список
+                scheduleAutoSave();
+                forceSyncCharacter();
+                showNotification('Модификация удалена', 'success');
+            };
+        });
+    }
+
+    renderInstalled();
+
+    addBtn.onclick = async () => {
+        const templateId = select.value;
+        if (!templateId) return;
+
+        const template = modTemplates.find(t => t.id == templateId);
+        if (!template) return;
+
+        if (!visor.modifications) visor.modifications = [];
+        visor.modifications.push({
+            id: generateItemId(),
+            templateId: template.id,
+            name: template.name,
+            attributes: { ...template.attributes }
+        });
+
+        renderInstalled(); // обновляем список
+        select.value = '';  // сбрасываем выбор
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification(`Модификация "${template.name}" добавлена`, 'success');
+    };
+
+    closeBtn.onclick = () => modal.remove();
+    modal.querySelector('.close').onclick = () => modal.remove();
+
+    modal.style.display = 'flex';
 };
 
 window.selectWeaponModel = async function(index) {
@@ -5836,7 +5943,103 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
         }
     }
 
+    const hasProt = item.durability !== null && item.durability !== undefined;
+    const hasMods = item.modifications && item.modifications.length > 0;
+    const hasEffects = item.attributes?.effects && item.attributes.effects.length > 0;
+    const hasMagazineDetails = item.category === 'magazine' && item.ammo?.length;
+    if (hasProt || hasMods || hasEffects || hasMagazineDetails) {
+        const infoBtn = document.createElement('button');
+        infoBtn.type = 'button';
+        infoBtn.className = 'btn btn-sm btn-secondary';
+        infoBtn.textContent = 'ⓘ';
+        infoBtn.title = 'Свойства';
+        infoBtn.style.marginLeft = '5px';
+        infoBtn.style.padding = '2px 6px';
+        infoBtn.style.fontSize = '0.8rem';
+        infoBtn.onclick = (e) => {
+            e.stopPropagation();
+            showItemDetailsModal(item);
+        };
+        nameWrapper.appendChild(infoBtn);
+    }
+
     parentContainer.appendChild(itemDiv);
+}
+
+// Универсальное окно свойств предмета
+function showItemDetailsModal(item) {
+    if (!item) {
+        console.warn('showItemDetailsModal: item is undefined');
+        return;
+    }
+
+    let html = `<h3>${escapeHtml(item.name)}</h3>`;
+    html += '<hr>';
+
+    // Прочность
+    if (item.durability != null && item.maxDurability != null) {
+        html += `<p><strong>Прочность:</strong> ${item.durability} / ${item.maxDurability}</p>`;
+    }
+
+    // Защита
+    if (item.protection) {
+        const prot = item.protection;
+        html += '<p><strong>Защита:</strong> ';
+        html += `Физ: ${prot.physical || 0}, Хим: ${prot.chemical || 0}, Терм: ${prot.thermal || 0}, Элек: ${prot.electric || 0}, Рад: ${prot.radiation || 0}`;
+        html += '</p>';
+    }
+
+    // Эффекты (если есть)
+    if (item.attributes?.effects && Array.isArray(item.attributes.effects)) {
+        html += '<p><strong>Эффекты:</strong><ul>';
+        item.attributes.effects.forEach(eff => {
+            html += `<li>${escapeHtml(eff.type)}: ${escapeHtml(eff.value)}</li>`;
+        });
+        html += '</ul></p>';
+    }
+
+    // Модификации
+    if (item.modifications && item.modifications.length > 0) {
+        html += '<p><strong>Модификации:</strong><ul>';
+        item.modifications.forEach(mod => {
+            html += `<li>${escapeHtml(mod.name)}</li>`;
+        });
+        html += '</ul></p>';
+    }
+
+    // Для магазина покажем патроны
+    if (item.category === 'magazine' && item.ammo) {
+        const total = item.ammo.reduce((sum, a) => sum + a.quantity, 0);
+        const cap = item.attributes?.capacity || 0;
+        html += `<p><strong>Патроны:</strong> ${total} / ${cap}`;
+        if (item.ammo.length > 0) {
+            html += '<ul>';
+            item.ammo.forEach(a => {
+                html += `<li>${escapeHtml(a.name)}: ${a.quantity}</li>`;
+            });
+            html += '</ul>';
+        }
+        html += '</p>';
+    }
+
+    // Закрываем старое окно, если есть
+    const oldModal = document.getElementById('item-details-modal');
+    if (oldModal) oldModal.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'item-details-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 500px;">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            ${html}
+            <div class="form-actions" style="margin-top:15px;">
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Закрыть</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.style.display = 'flex';
 }
 
 async function addItemToContainerDirect(containerItem, contentsDiv, containerPath) {
