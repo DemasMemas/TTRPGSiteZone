@@ -113,7 +113,9 @@ function getCategoryDisplay(cat) {
         'pouch': 'Подсумки',
         'weapon_module': 'Оружейные модули',
         'magazine': 'Магазины',
-        'ammo': 'Патроны'
+        'ammo': 'Патроны',
+        'gas_mask_module': 'Фильтры противогазов',
+        'helmet_module': 'Модули шлемов'
     };
     return map[cat] || cat;
 }
@@ -124,7 +126,7 @@ async function getAllItemTemplates(forceRefresh = false) {
     const categories = [
         'weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
         'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch',
-        'weapon_module', 'magazine', 'ammo'
+        'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module'
     ];
 
     let all = [];
@@ -1740,21 +1742,13 @@ async function renderEquipmentTab(data) {
     const armor = eq.armor || {};
     const weapons = data.weapons || [];
 
-    // Инициализация массивов модификаций
     if (!helmet.modifications) helmet.modifications = [];
     if (!gasMask.modifications) gasMask.modifications = [];
     if (!armor.modifications) armor.modifications = [];
 
     const materialOptions = ['Текстиль', 'Композит', 'Кевлар', 'Плита'];
-    const conditionOptions = [
-        '1. Целая',
-        '2. Немного повреждена',
-        '3. Повреждена',
-        '4. Сильно повреждена',
-        '5. Поломана'
-    ];
+    const conditionOptions = ['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'];
 
-    // Загрузка шаблонов
     let weaponTemplates = [], helmetTemplates = [], gasMaskTemplates = [], armorTemplates = [];
     let modificationTemplates = [], containerTemplates = [];
     try {
@@ -1768,7 +1762,6 @@ async function renderEquipmentTab(data) {
         console.error('Failed to load templates', e);
     }
 
-    // Группировка модификаций по типу
     const helmetModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'helmet');
     const gasMaskModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'gas_mask');
     const armorModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'armor');
@@ -1776,7 +1769,6 @@ async function renderEquipmentTab(data) {
     const weaponModuleTemplates = modificationTemplates.filter(t => t.attributes?.type === 'weapon_module' || t.attributes?.category === 'module');
     const weaponModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'weapon_modification' || t.attributes?.category === 'modification');
 
-    // Группировка по подкатегориям
     function groupByCategory(templates) {
         const grouped = {};
         templates.forEach(t => {
@@ -1792,7 +1784,6 @@ async function renderEquipmentTab(data) {
     const groupedArmorMods = groupByCategory(armorModTemplates);
     const groupedPdaMods = groupByCategory(pdaModTemplates);
 
-    // Вспомогательная функция для генерации сетки защиты
     function protectionGrid(prefix, prot) {
         prot = prot || {};
         return `
@@ -1807,24 +1798,54 @@ async function renderEquipmentTab(data) {
         `;
     }
 
-    // Формирование HTML
+    function renderSlots(item, templates, type) {
+        if (!item.templateId) return '';
+        const template = templates.find(t => t.id == item.templateId);
+        if (!template?.attributes?.slots?.length) return '';
+        return template.attributes.slots.map(slot => {
+            const installed = (item.installedModules || []).find(m => m.slotType === slot.type);
+            let info = '';
+            if (installed) {
+                if (slot.type === 'filter') {
+                    const dur = installed.durability || 0;
+                    const maxDur = installed.maxDurability || 0;
+                    info = `${escapeHtml(installed.name)} (прочность ${dur}/${maxDur})`;
+                } else if (slot.type === 'nvg') {
+                    const acc = installed.accuracy_penalty || 0;
+                    const aware = installed.awareness_penalty || 0;
+                    info = `${escapeHtml(installed.name)} (точность ${acc}, вним. ${aware})`;
+                } else {
+                    info = escapeHtml(installed.name);
+                }
+            }
+            const unequipFunc = type === 'helmet' ? 'unequipHelmetModule' : 'unequipGasMaskModule';
+            const equipFunc = type === 'helmet' ? 'equipHelmetModule' : 'equipGasMaskModule';
+            return `
+                <div style="margin-left:15px; display:flex; align-items:center; gap:10px; margin-top:5px;">
+                    <span style="width:100px;">${slot.label}:</span>
+                    ${installed ? `
+                        <span style="flex:1;">${info}</span>
+                        <button type="button" class="btn btn-sm btn-danger" onclick="${unequipFunc}('${slot.type}')">Снять</button>
+                    ` : `
+                        <button type="button" class="btn btn-sm btn-primary" onclick="${equipFunc}('${slot.type}')">Установить</button>
+                    `}
+                </div>
+            `;
+        }).join('');
+    }
+
     let html = `
-        <!-- Оружие -->
         <div class="equipment-group">
-            <div class="equipment-header">
-                <h4>Оружие</h4>
-                <span class="protection-header"></span>
-            </div>
-            <div class="equipment-row" style="flex-direction: column; align-items: stretch;">
+            <div class="equipment-header"><h4>Оружие</h4></div>
+            <div class="equipment-row" style="flex-direction:column;">
                 <div id="weapons-container"></div>
-                <button type="button" class="btn btn-sm" onclick="addWeapon()" style="align-self: flex-start; margin-top: 10px;">+ Добавить оружие</button>
+                <button type="button" class="btn btn-sm" onclick="addWeapon()" style="align-self:flex-start;margin-top:10px;">+ Добавить оружие</button>
             </div>
         </div>
 
-        <!-- Шлем (двухблочная структура) -->
+        <!-- Шлем -->
         <div class="equipment-group">
             <div class="equipment-row">
-                <!-- Блок основных параметров -->
                 <div class="equipment-main-block">
                     <div class="block-header">
                         <h4>Шлем</h4>
@@ -1838,60 +1859,35 @@ async function renderEquipmentTab(data) {
                                 ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number">
-                            <label>Прочность</label>
-                            <input type="number" class="number-input form-control" name="equipment.helmet.maxDurability" value="${helmet.maxDurability || 1}">
-                        </div>
-                        <div class="field-group field-select">
-                            <label>Состояние</label>
-                            <select name="equipment.helmet.condition" class="form-control">
-                                ${conditionOptions.map(opt => `<option value="${opt}" ${helmet.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Стадия</label>
-                            <input type="number" class="number-input form-control" name="equipment.helmet.currentDurability" value="${helmet.currentDurability || 1}">
-                        </div>
-                        <div class="field-group field-select">
-                            <label>Материал</label>
-                            <select name="equipment.helmet.material" class="form-control">
-                                ${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Точность</label>
-                            <input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}">
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Эргономика</label>
-                            <input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}">
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Харизма</label>
-                            <input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}">
-                        </div>
+                        <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input form-control" name="equipment.helmet.maxDurability" value="${helmet.maxDurability || 1}"></div>
+                        <div class="field-group field-select"><label>Состояние</label><select name="equipment.helmet.condition" class="form-control">${conditionOptions.map(opt => `<option value="${opt}" ${helmet.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input form-control" name="equipment.helmet.currentDurability" value="${helmet.currentDurability || 1}"></div>
+                        <div class="field-group field-select"><label>Материал</label><select name="equipment.helmet.material" class="form-control">${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
                     </div>
                 </div>
-                <!-- Блок защиты -->
                 <div class="equipment-protection-block">
-                    <div class="block-header">
-                        <h5>Защита</h5>
-                    </div>
+                    <div class="block-header"><h5>Защита</h5></div>
                     ${protectionGrid('equipment.helmet', helmet.protection)}
                 </div>
             </div>
+            ${renderSlots(helmet, helmetTemplates, 'helmet') ? `
+                <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
+                    ${renderSlots(helmet, helmetTemplates, 'helmet')}
+                </div>
+            ` : ''}
             <div class="modifications-block">
-                <div style="display: flex; align-items: center;">
-                    <h5 style="margin: 0;">Модификации шлема</h5>
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="addHelmetModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                <div style="display:flex; align-items:center;">
+                    <h5 style="margin:0;">Модификации шлема</h5>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="addHelmetModification()" style="padding:2px 8px;">➕</button>
                 </div>
-                <div id="helmet-modifications-container">
-                    ${renderHelmetModifications(helmet.modifications, groupedHelmetMods)}
-                </div>
+                <div id="helmet-modifications-container">${renderHelmetModifications(helmet.modifications, groupedHelmetMods)}</div>
             </div>
         </div>
 
-        <!-- Противогаз (двухблочная структура) -->
+        <!-- Противогаз -->
         <div class="equipment-group">
             <div class="equipment-row">
                 <div class="equipment-main-block">
@@ -1907,67 +1903,36 @@ async function renderEquipmentTab(data) {
                                 ${gasMaskTemplates.map(t => `<option value="${t.id}" ${gasMask.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-checkbox">
-                            <label>Надет</label>
-                            <input type="checkbox" name="equipment.gasMask.isWorn" ${gasMask.isWorn ? 'checked' : ''}>
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Прочность</label>
-                            <input type="number" class="number-input form-control" name="equipment.gasMask.maxDurability" value="${gasMask.maxDurability || 1}">
-                        </div>
-                        <div class="field-group field-select">
-                            <label>Состояние</label>
-                            <select name="equipment.gasMask.condition" class="form-control">
-                                ${conditionOptions.map(opt => `<option value="${opt}" ${gasMask.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Стадия</label>
-                            <input type="number" class="number-input form-control" name="equipment.gasMask.currentDurability" value="${gasMask.currentDurability || 1}">
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Фильтр</label>
-                            <input type="number" class="number-input form-control" name="equipment.gasMask.filterRemaining" value="${gasMask.filterRemaining || 0}">
-                        </div>
-                        <div class="field-group field-select">
-                            <label>Материал</label>
-                            <select name="equipment.gasMask.material" class="form-control">
-                                ${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Точность</label>
-                            <input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}">
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Эргономика</label>
-                            <input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}">
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Харизма</label>
-                            <input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}">
-                        </div>
+                        <div class="field-group field-checkbox"><label>Надет</label><input type="checkbox" name="equipment.gasMask.isWorn" ${gasMask.isWorn ? 'checked' : ''}></div>
+                        <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input form-control" name="equipment.gasMask.maxDurability" value="${gasMask.maxDurability || 1}"></div>
+                        <div class="field-group field-select"><label>Состояние</label><select name="equipment.gasMask.condition" class="form-control">${conditionOptions.map(opt => `<option value="${opt}" ${gasMask.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input form-control" name="equipment.gasMask.currentDurability" value="${gasMask.currentDurability || 1}"></div>
+                        <div class="field-group field-select"><label>Материал</label><select name="equipment.gasMask.material" class="form-control">${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block">
-                    <div class="block-header">
-                        <h5>Защита</h5>
-                    </div>
+                    <div class="block-header"><h5>Защита</h5></div>
                     ${protectionGrid('equipment.gasMask', gasMask.protection)}
                 </div>
             </div>
+            ${renderSlots(gasMask, gasMaskTemplates, 'gasMask') ? `
+                <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
+                    ${renderSlots(gasMask, gasMaskTemplates, 'gasMask')}
+                </div>
+            ` : ''}
             <div class="modifications-block">
-                <div style="display: flex; align-items: center;">
-                    <h5 style="margin: 0;">Модификации противогаза</h5>
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="addGasMaskModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                <div style="display:flex; align-items:center;">
+                    <h5 style="margin:0;">Модификации противогаза</h5>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="addGasMaskModification()" style="padding:2px 8px;">➕</button>
                 </div>
-                <div id="gasMask-modifications-container">
-                    ${renderGasMaskModifications(gasMask.modifications, groupedGasMaskMods)}
-                </div>
+                <div id="gasMask-modifications-container">${renderGasMaskModifications(gasMask.modifications, groupedGasMaskMods)}</div>
             </div>
         </div>
 
-        <!-- Броня (двухблочная структура) -->
+        <!-- Броня -->
         <div class="equipment-group">
             <div class="equipment-row">
                 <div class="equipment-main-block">
@@ -1983,68 +1948,38 @@ async function renderEquipmentTab(data) {
                                 ${armorTemplates.map(t => `<option value="${t.id}" ${armor.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number">
-                            <label>Прочность</label>
-                            <input type="number" class="number-input form-control" name="equipment.armor.maxDurability" value="${armor.maxDurability || 1}">
-                        </div>
-                        <div class="field-group field-select">
-                            <label>Состояние</label>
-                            <select name="equipment.armor.condition" class="form-control">
-                                ${conditionOptions.map(opt => `<option value="${opt}" ${armor.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Стадия</label>
-                            <input type="number" class="number-input form-control" name="equipment.armor.currentDurability" value="${armor.currentDurability || 1}">
-                        </div>
-                        <div class="field-group field-select">
-                            <label>Материал</label>
-                            <select name="equipment.armor.material" class="form-control">
-                                ${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Перемещение</label>
-                            <input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}">
-                        </div>
-                        <div class="field-group field-number">
-                            <label>Контейнеры</label>
-                            <input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}">
-                        </div>
+                        <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input form-control" name="equipment.armor.maxDurability" value="${armor.maxDurability || 1}"></div>
+                        <div class="field-group field-select"><label>Состояние</label><select name="equipment.armor.condition" class="form-control">${conditionOptions.map(opt => `<option value="${opt}" ${armor.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input form-control" name="equipment.armor.currentDurability" value="${armor.currentDurability || 1}"></div>
+                        <div class="field-group field-select"><label>Материал</label><select name="equipment.armor.material" class="form-control">${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number"><label>Перемещение</label><input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Контейнеры</label><input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block">
-                    <div class="block-header">
-                        <h5>Защита</h5>
-                    </div>
+                    <div class="block-header"><h5>Защита</h5></div>
                     ${protectionGrid('equipment.armor', armor.protection)}
                 </div>
             </div>
             <div class="modifications-block">
-                <div style="display: flex; align-items: center;">
-                    <h5 style="margin: 0;">Модификации брони</h5>
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="addArmorModification()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                <div style="display:flex; align-items:center;">
+                    <h5 style="margin:0;">Модификации брони</h5>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="addArmorModification()" style="padding:2px 8px;">➕</button>
                 </div>
-                <div id="armor-modifications-container">
-                    ${renderArmorModifications(armor.modifications, groupedArmorMods)}
-                </div>
+                <div id="armor-modifications-container">${renderArmorModifications(armor.modifications, groupedArmorMods)}</div>
             </div>
         </div>
 
         <div class="equipment-group">
-            <div style="display: flex; align-items: center;">
-                <h4 style="margin: 0;">Модификации КПК</h4>
-                <button type="button" class="btn btn-sm btn-secondary" onclick="addPdaItem()" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+            <div style="display:flex; align-items:center;">
+                <h4 style="margin:0;">Модификации КПК</h4>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="addPdaItem()" style="padding:2px 8px;">➕</button>
             </div>
-            <div id="pda-modifications-container">
-                ${renderPdaModifications(data.modifications?.pda?.items || [], groupedPdaMods)}
-            </div>
+            <div id="pda-modifications-container">${renderPdaModifications(data.modifications?.pda?.items || [], groupedPdaMods)}</div>
         </div>
     `;
 
     container.innerHTML = html;
-
-    // Рендер оружия (асинхронный)
     await renderWeapons(weapons, weaponTemplates, weaponModuleTemplates, weaponModTemplates);
 }
 
@@ -2311,7 +2246,6 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
             if (weaponTemplate && weaponTemplate.attributes && weaponTemplate.attributes.slots) {
                 const slots = weaponTemplate.attributes.slots;
                 const installed = Array.isArray(weapon.installedModules) ? weapon.installedModules : [];
-                slotsHtml = `<div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;"><strong>Слоты:</strong>`;
                 slots.forEach(slot => {
                     const installedMod = installed.find(mod => mod.slotType === slot.type);
                     slotsHtml += `<div style="margin-left: 15px; display: flex; align-items: center; gap: 10px; margin-top: 5px;">`;
@@ -3255,7 +3189,7 @@ window.unloadMagazineToInventory = async function(pathStr) {
 function updateMagazineWeight(mag) {
     const totalAmmo = mag.ammo ? mag.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
     mag.weight = (totalAmmo > 0) ? (mag.loadedWeight || 0.25) : (mag.emptyWeight || 0);
-}
+};
 
 function addAmmoToMagazine(mag, ammoItem, count) {
     if (!mag.ammo) mag.ammo = [];
@@ -3270,7 +3204,289 @@ function addAmmoToMagazine(mag, ammoItem, count) {
         });
     }
     updateMagazineWeight(mag);
-}
+};
+
+window.equipGasMaskModule = async function(slotType) {
+    const gasMask = currentCharacterData.equipment?.gasMask;
+    if (!gasMask || !gasMask.templateId) {
+        showNotification('Противогаз должен быть основан на шаблоне');
+        return;
+    }
+
+    const inventoryModules = [];
+    const collect = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((item, idx) => {
+            if (item.category === 'gas_mask_module' && item.attributes?.slot_type === slotType) {
+                inventoryModules.push({ item, path: path.concat(idx) });
+            }
+            if (item.contents) collect(item.contents, path.concat(idx, 'contents'));
+        });
+    };
+    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
+
+    if (inventoryModules.length === 0) {
+        showNotification('Нет подходящих фильтров в инвентаре');
+        return;
+    }
+
+    const oldModal = document.getElementById('gas-mask-module-modal');
+    if (oldModal) oldModal.remove();
+    const modal = document.createElement('div');
+    modal.id = 'gas-mask-module-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Выберите фильтр</h3>
+            <select id="gas-mask-module-select" class="form-control"></select>
+            <div class="form-actions">
+                <button class="btn btn-primary" id="confirm-gas-mask-module">Установить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const select = modal.querySelector('#gas-mask-module-select');
+    inventoryModules.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        const dur = entry.item.attributes?.durability || 0;
+        const maxDur = entry.item.attributes?.max_durability || 0;
+        opt.textContent = `${entry.item.name} (прочность ${dur}/${maxDur})`;
+        select.appendChild(opt);
+    });
+    modal.querySelector('#confirm-gas-mask-module').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = inventoryModules[idx];
+        const mod = selected.item;
+        modal.remove();
+
+        if (!removeItemByPath(selected.path)) {
+            showNotification('Не удалось найти фильтр в инвентаре');
+            return;
+        }
+
+        if (!gasMask.installedModules) gasMask.installedModules = [];
+        // Если уже есть фильтр, возвращаем старый в рюкзак (пока без пути, позже можно доработать)
+        const existingIdx = gasMask.installedModules.findIndex(m => m.slotType === 'filter');
+        if (existingIdx !== -1) {
+            const oldMod = gasMask.installedModules[existingIdx];
+            gasMask.installedModules.splice(existingIdx, 1);
+            const oldItem = {
+                id: oldMod.id, templateId: oldMod.templateId, name: oldMod.name,
+                category: 'gas_mask_module', weight: 0.1, volume: 0.2, quantity: 1,
+                attributes: { slot_type: 'filter', durability: oldMod.durability, max_durability: oldMod.maxDurability }
+            };
+            currentCharacterData.inventory.backpack.push(oldItem);
+        }
+
+        gasMask.installedModules.push({
+            id: mod.id,
+            templateId: mod.templateId,
+            name: mod.name,
+            slotType: 'filter',
+            durability: mod.attributes?.durability || 0,
+            maxDurability: mod.attributes?.max_durability || 0,
+            sourcePath: selected.path
+        });
+
+        renderEquipmentTab(currentCharacterData);
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Фильтр установлен', 'success');
+    };
+    modal.style.display = 'flex';
+};
+
+window.unequipGasMaskModule = async function(slotType) {
+    const gasMask = currentCharacterData.equipment?.gasMask;
+    if (!gasMask || !gasMask.installedModules) return;
+    const idx = gasMask.installedModules.findIndex(m => m.slotType === slotType);
+    if (idx === -1) return;
+    const mod = gasMask.installedModules[idx];
+    gasMask.installedModules.splice(idx, 1);
+
+    const path = mod.sourcePath || ['inventory', 'backpack'];
+    const restored = {
+        id: mod.id,
+        templateId: mod.templateId,
+        name: mod.name,
+        category: 'gas_mask_module',
+        weight: 0.1,
+        volume: 0.2,
+        quantity: 1,
+        attributes: { slot_type: 'filter', durability: mod.durability, max_durability: mod.maxDurability }
+    };
+    restoreItemToPath(restored, path);
+
+    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Фильтр снят', 'success');
+};
+
+window.equipHelmetModule = async function(slotType) {
+    const helmet = currentCharacterData.equipment?.helmet;
+    if (!helmet || !helmet.templateId) {
+        showNotification('Шлем должен быть основан на шаблоне');
+        return;
+    }
+
+    const category = slotType === 'filter' ? 'gas_mask_module' : 'helmet_module';
+
+    const inventoryModules = [];
+    const collect = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((item, idx) => {
+            if (item.category === category && item.attributes?.slot_type === slotType) {
+                inventoryModules.push({ item, path: path.concat(idx) });
+            }
+            if (item.contents) collect(item.contents, path.concat(idx, 'contents'));
+        });
+    };
+    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
+
+    if (inventoryModules.length === 0) {
+        showNotification(`Нет подходящих модулей для слота ${slotType} в инвентаре`);
+        return;
+    }
+
+    const oldModal = document.getElementById('helmet-module-modal');
+    if (oldModal) oldModal.remove();
+    const modal = document.createElement('div');
+    modal.id = 'helmet-module-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Выберите модуль</h3>
+            <select id="helmet-module-select" class="form-control"></select>
+            <div class="form-actions">
+                <button class="btn btn-primary" id="confirm-helmet-module">Установить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const select = modal.querySelector('#helmet-module-select');
+    inventoryModules.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        const item = entry.item;
+        let info = '';
+        if (slotType === 'filter') {
+            const dur = item.attributes?.durability || 0;
+            const maxDur = item.attributes?.max_durability || 0;
+            info = ` (прочность ${dur}/${maxDur})`;
+        } else if (slotType === 'nvg') {
+            const acc = item.attributes?.accuracy_penalty || 0;
+            const aware = item.attributes?.awareness_penalty || 0;
+            info = ` (точность ${acc}, внимательность ${aware})`;
+        }
+        opt.textContent = item.name + info;
+        select.appendChild(opt);
+    });
+    modal.querySelector('#confirm-helmet-module').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = inventoryModules[idx];
+        const mod = selected.item;
+        modal.remove();
+
+        if (!removeItemByPath(selected.path)) {
+            showNotification('Не удалось найти модуль в инвентаре');
+            return;
+        }
+
+        if (!helmet.installedModules) helmet.installedModules = [];
+        const existingIdx = helmet.installedModules.findIndex(m => m.slotType === slotType);
+        if (existingIdx !== -1) {
+            const oldMod = helmet.installedModules[existingIdx];
+            helmet.installedModules.splice(existingIdx, 1);
+            const oldItem = {
+                id: oldMod.id, templateId: oldMod.templateId, name: oldMod.name,
+                category: category, weight: 0.2, volume: 0.3, quantity: 1,
+                attributes: {
+                    slot_type: slotType,
+                    durability: oldMod.durability,
+                    max_durability: oldMod.maxDurability,
+                    accuracy_penalty: oldMod.accuracy_penalty,
+                    awareness_penalty: oldMod.awareness_penalty
+                }
+            };
+            currentCharacterData.inventory.backpack.push(oldItem);
+        }
+
+        // Сохраняем ВСЕ значимые поля из модуля
+        helmet.installedModules.push({
+            id: mod.id,
+            templateId: mod.templateId,
+            name: mod.name,
+            slotType: slotType,
+            durability: mod.attributes?.durability,
+            maxDurability: mod.attributes?.max_durability,
+            accuracy_penalty: mod.attributes?.accuracy_penalty,
+            awareness_penalty: mod.attributes?.awareness_penalty,
+            sourcePath: selected.path
+        });
+
+        renderEquipmentTab(currentCharacterData);
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Модуль установлен', 'success');
+    };
+    modal.style.display = 'flex';
+};
+
+window.unequipHelmetModule = async function(slotType) {
+    const helmet = currentCharacterData.equipment?.helmet;
+    if (!helmet || !helmet.installedModules) return;
+    const idx = helmet.installedModules.findIndex(m => m.slotType === slotType);
+    if (idx === -1) return;
+    const mod = helmet.installedModules[idx];
+    helmet.installedModules.splice(idx, 1);
+
+    const category = slotType === 'filter' ? 'gas_mask_module' : 'helmet_module';
+    const path = mod.sourcePath || ['inventory', 'backpack'];
+    const restored = {
+        id: mod.id,
+        templateId: mod.templateId,
+        name: mod.name,
+        category: category,
+        weight: 0.2,
+        volume: 0.3,
+        quantity: 1,
+        attributes: {
+            slot_type: slotType,
+            durability: mod.durability,
+            max_durability: mod.maxDurability,
+            accuracy_penalty: mod.accuracy_penalty,
+            awareness_penalty: mod.awareness_penalty
+        }
+    };
+    restoreItemToPath(restored, path);
+
+    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Модуль снят', 'success');
+};
 
 window.selectWeaponModel = async function(index) {
     const select = document.getElementById(`weapon-model-select-${index}`);
@@ -3322,6 +3538,7 @@ window.fillHelmetFromPreset = async function(select) {
         'protection': 'protection'
     };
     applyTemplateToObject(helmet, template, mapping);
+    helmet.templateId = template.id;   // <-- обязательно
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.helmet = helmet;
     await renderEquipmentTab(currentCharacterData);
@@ -3347,6 +3564,7 @@ window.fillGasMaskFromPreset = async function(select) {
         'protection': 'protection'
     };
     applyTemplateToObject(gasMask, template, mapping);
+    gasMask.templateId = template.id;   // <-- ВОТ ЭТУ СТРОКУ ДОБАВЬТЕ
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.gasMask = gasMask;
     await renderEquipmentTab(currentCharacterData);
@@ -3567,8 +3785,8 @@ window.openCreateHelmetTemplateModal = function(template = null) {
                 <div class="form-group"><label>Точность (штраф)</label><input type="number" id="helmet-accuracyPenalty" class="form-control number-input" value="0"></div>
                 <div class="form-group"><label>Эргономика (штраф)</label><input type="number" id="helmet-ergonomicsPenalty" class="form-control number-input" value="0"></div>
                 <div class="form-group"><label>Харизма (бонус)</label><input type="number" id="helmet-charismaBonus" class="form-control number-input" value="0"></div>
-                <div class="form-group"><label>Вес</label><input type="number" id="helmet-weight" class="form-control number-input" value="0" step="0.1"></div>
-                <div class="form-group"><label>Объём</label><input type="number" id="helmet-volume" class="form-control number-input" value="0" step="0.1"></div>
+                <div class="form-group"><label>Вес (кг)</label><input type="number" id="helmet-weight" class="form-control number-input" value="0" step="0.1"></div>
+                <div class="form-group"><label>Объём (л)</label><input type="number" id="helmet-volume" class="form-control number-input" value="0" step="0.1"></div>
                 <div class="form-group"><label>Защита</label>
                     <div style="display: grid; grid-template-columns: repeat(5,1fr); gap:5px;">
                         <div><label>Физ</label><input type="number" id="helmet-physical" class="form-control number-input" value="0"></div>
@@ -3577,6 +3795,14 @@ window.openCreateHelmetTemplateModal = function(template = null) {
                         <div><label>Элек</label><input type="number" id="helmet-electric" class="form-control number-input" value="0"></div>
                         <div><label>Рад</label><input type="number" id="helmet-radiation" class="form-control number-input" value="0"></div>
                     </div>
+                </div>
+                <hr>
+                <h4>Слоты</h4>
+                <div class="form-group">
+                    <label><input type="checkbox" id="helmet-has-nvg-slot"> Крепление для ПНВ</label>
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="helmet-has-filter-slot"> Слот для фильтра (противогазо-шлем)</label>
                 </div>
                 <div class="form-actions"><button class="btn btn-primary" onclick="saveHelmetTemplate()">Сохранить</button><button class="btn btn-secondary" onclick="document.getElementById('create-helmet-template-modal').style.display='none'">Отмена</button></div>
             </div>`;
@@ -3598,6 +3824,9 @@ window.openCreateHelmetTemplateModal = function(template = null) {
         document.getElementById('helmet-thermal').value = prot.thermal || 0;
         document.getElementById('helmet-electric').value = prot.electric || 0;
         document.getElementById('helmet-radiation').value = prot.radiation || 0;
+        const slots = template.attributes?.slots || [];
+        document.getElementById('helmet-has-nvg-slot').checked = slots.some(s => s.type === 'nvg');
+        document.getElementById('helmet-has-filter-slot').checked = slots.some(s => s.type === 'filter');
     } else {
         document.getElementById('helmet-template-id').value = '';
     }
@@ -3608,6 +3837,11 @@ window.saveHelmetTemplate = async function() {
     const id = document.getElementById('helmet-template-id').value;
     const name = document.getElementById('helmet-name').value.trim();
     if (!name) { showNotification('Введите название'); return; }
+
+    const slots = [];
+    if (document.getElementById('helmet-has-nvg-slot').checked) slots.push({ type: 'nvg', label: 'ПНВ', maxItems: 1 });
+    if (document.getElementById('helmet-has-filter-slot').checked) slots.push({ type: 'filter', label: 'Фильтр', maxItems: 1 });
+
     const attributes = {
         material: document.getElementById('helmet-material').value,
         max_durability: parseInt(document.getElementById('helmet-maxDurability').value) || 1,
@@ -3620,7 +3854,8 @@ window.saveHelmetTemplate = async function() {
             thermal: parseInt(document.getElementById('helmet-thermal').value) || 0,
             electric: parseInt(document.getElementById('helmet-electric').value) || 0,
             radiation: parseInt(document.getElementById('helmet-radiation').value) || 0
-        }
+        },
+        slots: slots
     };
     const data = {
         name, category: 'helmet', subcategory: null, price: 0,
@@ -3668,10 +3903,6 @@ window.openCreateGasMaskTemplateModal = function(template = null) {
                     <input type="number" id="gasMask-maxDurability" class="form-control number-input" value="1">
                 </div>
                 <div class="form-group">
-                    <label>Ёмкость фильтра</label>
-                    <input type="number" id="gasMask-filterCapacity" class="form-control number-input" value="0">
-                </div>
-                <div class="form-group">
                     <label>Точность (штраф)</label>
                     <input type="number" id="gasMask-accuracyPenalty" class="form-control number-input" value="0">
                 </div>
@@ -3715,7 +3946,6 @@ window.openCreateGasMaskTemplateModal = function(template = null) {
         document.getElementById('gasMask-name').value = template.name || '';
         document.getElementById('gasMask-material').value = template.attributes?.material || 'Текстиль';
         document.getElementById('gasMask-maxDurability').value = template.attributes?.max_durability || 1;
-        document.getElementById('gasMask-filterCapacity').value = template.attributes?.filter_capacity || 0;
         document.getElementById('gasMask-accuracyPenalty').value = template.attributes?.accuracy_penalty || 0;
         document.getElementById('gasMask-ergonomicsPenalty').value = template.attributes?.ergonomics_penalty || 0;
         document.getElementById('gasMask-charismaBonus').value = template.attributes?.charisma_bonus || 0;
@@ -3742,7 +3972,6 @@ window.saveGasMaskTemplate = async function() {
     const attributes = {
         material: document.getElementById('gasMask-material').value,
         max_durability: parseInt(document.getElementById('gasMask-maxDurability').value) || 1,
-        filter_capacity: parseInt(document.getElementById('gasMask-filterCapacity').value) || 0,
         accuracy_penalty: parseInt(document.getElementById('gasMask-accuracyPenalty').value) || 0,
         ergonomics_penalty: parseInt(document.getElementById('gasMask-ergonomicsPenalty').value) || 0,
         charisma_bonus: parseInt(document.getElementById('gasMask-charismaBonus').value) || 0,
@@ -3752,7 +3981,8 @@ window.saveGasMaskTemplate = async function() {
             thermal: parseInt(document.getElementById('gasMask-thermal').value) || 0,
             electric: parseInt(document.getElementById('gasMask-electric').value) || 0,
             radiation: parseInt(document.getElementById('gasMask-radiation').value) || 0
-        }
+        },
+        slots: [{ type: 'filter', label: 'Фильтр', maxItems: 1 }]   // ← слот всегда есть
     };
 
     const data = {
@@ -5622,7 +5852,7 @@ window.removeBackpackItemNew = function(index) {
 };
 
 function removeItemFromInventory(itemId) {
-    // Поиск и удаление из рюкзака
+    // Поиск по ID в рюкзаке (с вложенностью)
     const backpack = currentCharacterData.inventory?.backpack;
     if (Array.isArray(backpack)) {
         for (let i = 0; i < backpack.length; i++) {
@@ -5633,6 +5863,22 @@ function removeItemFromInventory(itemId) {
             if (backpack[i].contents && removeFromArrayById(backpack[i].contents, itemId)) {
                 return true;
             }
+        }
+    }
+
+    // Поиск в карманах (старый формат без id, ищем по templateId?)
+    const pockets = currentCharacterData.inventory?.pockets;
+    if (Array.isArray(pockets)) {
+        for (let i = 0; i < pockets.length; i++) {
+            const pocketItem = pockets[i];
+            // Если у предмета есть id и он совпадает
+            if (pocketItem.id === itemId) {
+                pockets.splice(i, 1);
+                return true;
+            }
+            // Для старых предметов без id — проверяем templateId?
+            // Но нам нужно удалить конкретный экземпляр, поэтому будем полагаться на id.
+            // Если id нет, значит предмет не мигрирован. Пропускаем.
         }
     }
 
