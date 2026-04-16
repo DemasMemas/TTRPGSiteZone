@@ -113,7 +113,6 @@ function getCategoryDisplay(cat) {
         'consumable': 'Расходники',
         'crafting_material': 'Материалы',
         'artifact': 'Артефакты',
-        'modification': 'Модификации',
         'backpack': 'Рюкзаки',
         'vest': 'Разгрузки',
         'pouch': 'Подсумки',
@@ -132,7 +131,7 @@ async function getAllItemTemplates(forceRefresh = false) {
 
     const categories = [
         'weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
-        'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch',
+        'consumable', 'crafting_material', 'artifact', 'backpack', 'vest', 'pouch',
         'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module', 'visor'
     ];
 
@@ -5282,38 +5281,151 @@ window.updateBackpackItemAtPath = function(pathStr, field, value) {
     scheduleAutoSave();
 };
 
-// Удалить предмет по пути
 window.removeBackpackItemAtPath = function(pathStr) {
     const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
     if (path.length === 0) return;
 
-    // Находим родительский массив и индекс
-    let parent = currentCharacterData;
+    // 1. Удаление из данных
+    let parentData = currentCharacterData;
     for (let i = 0; i < path.length - 1; i++) {
         const key = path[i];
-        if (Array.isArray(parent) && typeof key === 'number') {
-            parent = parent[key];
-        } else if (typeof parent === 'object' && key in parent) {
-            parent = parent[key];
+        if (Array.isArray(parentData) && typeof key === 'number') {
+            parentData = parentData[key];
+        } else if (typeof parentData === 'object' && key in parentData) {
+            parentData = parentData[key];
         } else {
             return;
         }
     }
     const index = path[path.length - 1];
-    if (!Array.isArray(parent)) return;
+    if (!Array.isArray(parentData)) return;
+    parentData.splice(index, 1);
 
-    // Удаляем из данных
-    parent.splice(index, 1);
-
-    // Удаляем DOM-элемент
+    // 2. Удаление из DOM и обновление путей
     const itemDiv = document.querySelector(`[data-path="${pathStr}"]`);
-    if (itemDiv) itemDiv.remove();
+    if (!itemDiv) {
+        renderInventoryTab(currentCharacterData);
+        recalculateInventoryTotals();
+        scheduleAutoSave();
+        forceSyncCharacter();
+        return;
+    }
 
-    // Обновляем итоги и сохраняем
+    const containerDiv = itemDiv.parentNode;
+    const containerPath = path.slice(0, -1);
+    itemDiv.remove();
+
+    // Обновляем data-path у оставшихся элементов в контейнере
+    const remainingItems = Array.from(containerDiv.children).filter(el => el.hasAttribute('data-path'));
+    remainingItems.forEach((el, idx) => {
+        const newPath = containerPath.concat(idx).join(',');
+        el.dataset.path = newPath;
+        updateHandlersInElement(el, containerPath, idx);
+    });
+
+    if (containerDiv.classList.contains('container-contents')) {
+        updatePouchVolumeFromContentsDiv(containerDiv);
+    }
+
     recalculateInventoryTotals();
     scheduleAutoSave();
-    forceSyncCharacter();   // чтобы другие клиенты сразу увидели
+    forceSyncCharacter();
 };
+
+async function addItemToContainerDirect(containerItem, contentsDiv, containerPath) {
+    const existingSelect = contentsDiv.querySelector('.inline-template-select');
+    if (existingSelect) existingSelect.remove();
+
+    const select = document.createElement('select');
+    select.className = 'form-control inline-template-select';
+    select.style.marginTop = '5px';
+    select.style.width = '100%';
+    select.innerHTML = '<option value="">-- Выберите предмет --</option>';
+
+    const allTemplates = await getAllItemTemplates();
+    const categories = {};
+    allTemplates.forEach(t => {
+        if (!categories[t.category]) categories[t.category] = [];
+        categories[t.category].push(t);
+    });
+
+    for (const [cat, templates] of Object.entries(categories)) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = getCategoryDisplay(cat);
+        templates.forEach(t => {
+            const option = document.createElement('option');
+            option.value = t.id;
+            option.textContent = `${t.name} (${t.effectiveWeight || t.weight} кг, ${t.effectiveVolume || t.volume} л)`;
+            optgroup.appendChild(option);
+        });
+        select.appendChild(optgroup);
+    }
+
+    select.onchange = async (e) => {
+        const templateId = e.target.value;
+        if (!templateId) { select.remove(); return; }
+        const template = allTemplates.find(t => t.id == templateId);
+        if (!template) { select.remove(); return; }
+
+        const newItem = createItemFromTemplate(template);
+        if (!Array.isArray(containerItem.contents)) containerItem.contents = [];
+        containerItem.contents.push(newItem);
+
+        // Удаляем старые элементы содержимого (кроме кнопки и селекта)
+        const children = Array.from(contentsDiv.children);
+        for (let child of children) {
+            if (!child.classList.contains('inline-template-select') && !child.matches('button')) {
+                child.remove();
+            }
+        }
+
+        // Перерисовываем содержимое
+        containerItem.contents.forEach((subItem, subIndex) => {
+            renderBackpackItem(subItem, subIndex, containerPath, contentsDiv);
+        });
+
+        const addBtn = contentsDiv.querySelector('button');
+        if (addBtn && contentsDiv.lastChild !== addBtn) {
+            contentsDiv.appendChild(addBtn);
+        }
+
+        select.remove();
+        updatePouchVolumeFromContentsDiv(contentsDiv);
+        recalculateInventoryTotals();
+        scheduleAutoSave();
+    };
+
+    const addButton = contentsDiv.querySelector('button');
+    if (addButton && addButton.parentNode === contentsDiv) {
+        contentsDiv.insertBefore(select, addButton);
+    } else {
+        contentsDiv.appendChild(select);
+    }
+}
+
+function updateHandlersInElement(element, basePath, index) {
+    const newPath = basePath.concat(index).join(',');
+    // Кнопка удаления (крестик)
+    const delBtn = element.querySelector('.btn-danger');
+    if (delBtn) {
+        delBtn.onclick = () => removeBackpackItemAtPath(newPath);
+    }
+    // Поля ввода (вес, объём, количество, название)
+    element.querySelectorAll('input').forEach(input => {
+        const placeholder = input.placeholder;
+        let field = null;
+        if (placeholder === 'Вес') field = 'weight';
+        else if (placeholder === 'Объём') field = 'volume';
+        else if (placeholder === 'Кол-во') field = 'quantity';
+        else if (input.type === 'text') field = 'name';
+
+        if (field) {
+            input.onchange = (e) => updateBackpackItemAtPath(newPath, field, e.target.value);
+        }
+    });
+    // Кнопки сворачивания и добавления внутрь используют замыкания с путём, их трогать не нужно — они продолжат работать,
+    // так как ссылаются на объект item, а не на путь в виде строки.
+}
 
 function renderBeltPouchesNew(pouches, pouchTemplates) {
     const container = document.getElementById('belt-pouches-container');
@@ -5393,6 +5505,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
     row.appendChild(leftWrapper);
 
     const infoSpan = document.createElement('span');
+    infoSpan.dataset.volumeInfo = '';
     const used = calculatePouchUsedVolume(pouch);
     const internalLimit = pouch.internalVolume || pouch.capacity;
     infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
@@ -5501,8 +5614,8 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     leftWrapper.appendChild(select);
     row.appendChild(leftWrapper);
 
-    // Информация о заполненности
     const infoSpan = document.createElement('span');
+    infoSpan.dataset.volumeInfo = '';
     const used = calculatePouchUsedVolume(pouch);
     const internalLimit = pouch.internalVolume || pouch.capacity;
     infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
@@ -5561,6 +5674,24 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     };
 
     parentContainer.appendChild(itemDiv);
+}
+
+function updatePouchVolumeFromContentsDiv(contentsDiv) {
+    const pouchDiv = contentsDiv.closest('.container-item');
+    if (!pouchDiv) return;
+    const infoSpan = pouchDiv.querySelector('span[data-volume-info]');
+    if (!infoSpan) return;
+
+    // Получаем путь из data-path
+    const pathStr = pouchDiv.dataset.path;
+    if (!pathStr) return;
+    const containerPath = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
+    const pouch = getItemByPath(containerPath);
+    if (!pouch) return;
+
+    const used = calculatePouchUsedVolume(pouch);
+    const internalLimit = pouch.internalVolume || pouch.capacity;
+    infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
 }
 
 // ========== МОДАЛЬНОЕ ОКНО ДЛЯ СОЗДАНИЯ ПРЕДМЕТА В ИНВЕНТАРЕ ==========
@@ -5811,7 +5942,7 @@ function recalculateInventoryTotals() {
     const inv = currentCharacterData.inventory || {};
     const eq = currentCharacterData.equipment || {};
 
-    // Рюкзак
+    // Рюкзак – только его собственное содержимое
     const backpackItems = Array.isArray(inv.backpack) ? inv.backpack.map(item => migrateOldItemToNew(item)) : [];
     const selectedBackpackId = inv.backpackModel ? parseInt(inv.backpackModel, 10) : null;
     const selectedBackpack = cachedBackpackTemplates.find(t => t.id === selectedBackpackId);
@@ -5827,16 +5958,17 @@ function recalculateInventoryTotals() {
         totalVolume += getTotalVolume(item);
     });
 
-    // Карманы – теперь с учётом вложенности
+    // Карманы – отдельно, не прибавляем к рюкзаку
     const pockets = Array.isArray(inv.pockets) ? inv.pockets.map(item => migrateOldItemToNew(item)) : [];
     pockets.forEach(item => {
         totalWeight += getTotalWeight(item);
         totalVolume += getTotalVolume(item);
     });
 
-    // Учёт подсумков пояса и разгрузки
-    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
-    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    // Подсумки пояса и разгрузки – их содержимое добавляем к общему весу/объёму,
+    // но не к объёму рюкзака
+    const beltPouches = eq.belt?.pouches || [];
+    const vestPouches = eq.vest?.pouches || [];
     [...beltPouches, ...vestPouches].forEach(pouch => {
         if (pouch.contents) {
             pouch.contents.forEach(item => {
@@ -5846,13 +5978,15 @@ function recalculateInventoryTotals() {
         }
     });
 
-    // Обновляем отображение
+    // Обновляем отображение общего веса и объёма
     const totalWeightSpan = document.getElementById('total-weight-display');
     if (totalWeightSpan) totalWeightSpan.textContent = totalWeight.toFixed(1);
 
+    // Обновляем заполненность рюкзака (только из его содержимого)
     const backpackFillSpan = document.getElementById('backpack-fill-display');
     if (backpackFillSpan) {
-        backpackFillSpan.textContent = `Заполнено: ${totalVolume.toFixed(1)} / ${backpackLimit}`;
+        const backpackVolume = backpackItems.reduce((sum, item) => sum + getTotalVolume(item), 0);
+        backpackFillSpan.textContent = `Заполнено: ${backpackVolume.toFixed(1)} / ${backpackLimit}`;
     }
 
     const movePenaltyFromWeight = Math.floor(totalWeight / 5);
@@ -6266,79 +6400,6 @@ function showItemDetailsModal(item) {
     `;
     document.body.appendChild(modal);
     modal.style.display = 'flex';
-}
-
-async function addItemToContainerDirect(containerItem, contentsDiv, containerPath) {
-    // Удаляем предыдущий селект
-    const existingSelect = contentsDiv.querySelector('.inline-template-select');
-    if (existingSelect) existingSelect.remove();
-
-    const select = document.createElement('select');
-    select.className = 'form-control inline-template-select';
-    select.style.marginTop = '5px';
-    select.style.width = '100%';
-    select.innerHTML = '<option value="">-- Выберите предмет --</option>';
-
-    const allTemplates = await getAllItemTemplates();
-    const categories = {};
-    allTemplates.forEach(t => {
-        if (!categories[t.category]) categories[t.category] = [];
-        categories[t.category].push(t);
-    });
-
-    for (const [cat, templates] of Object.entries(categories)) {
-        const optgroup = document.createElement('optgroup');
-        optgroup.label = getCategoryDisplay(cat);
-        templates.forEach(t => {
-            const option = document.createElement('option');
-            option.value = t.id;
-            option.textContent = `${t.name} (${t.effectiveWeight || t.weight} кг, ${t.effectiveVolume || t.volume} л)`;
-            optgroup.appendChild(option);
-        });
-        select.appendChild(optgroup);
-    }
-
-    select.onchange = async (e) => {
-        const templateId = e.target.value;
-        if (!templateId) { select.remove(); return; }
-        const template = allTemplates.find(t => t.id == templateId);
-        if (!template) { select.remove(); return; }
-
-        const newItem = createItemFromTemplate(template);
-        if (!Array.isArray(containerItem.contents)) containerItem.contents = [];
-        containerItem.contents.push(newItem);
-
-        // Удаляем все элементы содержимого кроме кнопки и селекта
-        const children = Array.from(contentsDiv.children);
-        for (let child of children) {
-            if (!child.classList.contains('inline-template-select') && !child.matches('button')) {
-                child.remove();
-            }
-        }
-
-        // Перерисовываем всё содержимое с правильными путями
-        containerItem.contents.forEach((subItem, subIndex) => {
-            renderBackpackItem(subItem, subIndex, containerPath, contentsDiv);
-        });
-
-        // Находим кнопку добавления (она осталась)
-        const addBtn = contentsDiv.querySelector('button');
-        if (addBtn && contentsDiv.lastChild !== addBtn) {
-            contentsDiv.appendChild(addBtn);
-        }
-
-        select.remove();
-        recalculateInventoryTotals();
-        scheduleAutoSave();
-    };
-
-    // Вставляем селект перед кнопкой "Добавить внутрь"
-    const addButton = contentsDiv.querySelector('button');
-    if (addButton && addButton.parentNode === contentsDiv) {
-        contentsDiv.insertBefore(select, addButton);
-    } else {
-        contentsDiv.appendChild(select);
-    }
 }
 
 async function populateBackpackTemplateSelect() {
