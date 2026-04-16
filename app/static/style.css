@@ -975,3 +975,34 @@ input[type=range]::-webkit-slider-thumb {
     padding: 5px;
     border-bottom: 2px solid #666;
 }
+
+.equipment-zones-block {
+    background: rgba(255,255,255,0.03);
+    border-radius: 8px;
+    padding: 10px;
+    border: 1px solid var(--panel-border, #444);
+}
+
+.equipment-zones-block .block-header {
+    text-align: center !important;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--panel-border, #666);
+    padding-bottom: 5px;
+    justify-content: center !important;
+}
+
+.equipment-zones-block .block-header h5 {
+    text-align: center !important;
+}
+
+.equipment-zones-block .zones-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px 10px;
+}
+
+.equipment-zones-block .zone-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}

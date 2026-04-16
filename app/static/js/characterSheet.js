@@ -115,7 +115,8 @@ function getCategoryDisplay(cat) {
         'magazine': 'Магазины',
         'ammo': 'Патроны',
         'gas_mask_module': 'Фильтры противогазов',
-        'helmet_module': 'Модули шлемов'
+        'helmet_module': 'Модули шлемов',
+        'visor': 'Забрала'
     };
     return map[cat] || cat;
 }
@@ -126,7 +127,7 @@ async function getAllItemTemplates(forceRefresh = false) {
     const categories = [
         'weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
         'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch',
-        'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module'
+        'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module', 'visor'
     ];
 
     let all = [];
@@ -1208,14 +1209,14 @@ async function loadTemplatesForManager(category) {
     container.innerHTML = 'Загрузка...';
     try {
         const data = await Server.getLobbyTemplates(currentLobbyId, category);
-        const templates = data.local; // только кастомные
+        const templates = data.local;
         if (!templates.length) {
             container.innerHTML = '<p>Нет кастомных шаблонов</p>';
             return;
         }
-        let html = '<table style="width:100%">';
+        let html = '<table style="width:100%"><tr><th>ID</th><th>Название</th><th>Подкатегория</th><th></th></tr>';
         templates.forEach(t => {
-            html += `<tr><td>${escapeHtml(t.name)}</td><td>${t.subcategory || ''}</td>
+            html += `<tr><td>${t.id}</td><td>${escapeHtml(t.name)}</td><td>${t.subcategory || ''}</td>
             <td>
                 <button class="btn-sm btn-primary" onclick="editTemplate(${t.id}, '${category}')">✏️</button>
                 <button class="btn-sm btn-danger" onclick="deleteTemplate(${t.id}, '${category}')">🗑️</button>
@@ -1814,6 +1815,12 @@ async function renderEquipmentTab(data) {
                     const acc = installed.accuracy_penalty || 0;
                     const aware = installed.awareness_penalty || 0;
                     info = `${escapeHtml(installed.name)} (точность ${acc}, вним. ${aware})`;
+                } else if (slot.type === 'visor') {
+                    const acc = installed.accuracy_penalty || 0;
+                    const erg = installed.ergonomics_penalty || 0;
+                    const cha = installed.charisma_penalty || 0;
+                    const prot = installed.protection?.physical || 0;
+                    info = `${escapeHtml(installed.name)} (точность ${acc}, эргон. ${erg}, харизма ${cha}, прочность ${installed.durability || 0}/${installed.maxDurability || 0}, физ. защита ${prot})`;
                 } else {
                     info = escapeHtml(installed.name);
                 }
@@ -1843,10 +1850,11 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Шлем -->
+        <!-- Шлем (трёхколоночная структура) -->
         <div class="equipment-group">
-            <div class="equipment-row">
-                <div class="equipment-main-block">
+            <div class="equipment-row" style="display: flex; gap: 10px;">
+                <!-- Левая колонка: параметры -->
+                <div class="equipment-main-block" style="flex: 2;">
                     <div class="block-header">
                         <h4>Шлем</h4>
                         ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateHelmetTemplateModal()">➕ Создать кастом</button>` : ''}
@@ -1868,16 +1876,37 @@ async function renderEquipmentTab(data) {
                         <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
                     </div>
                 </div>
-                <div class="equipment-protection-block">
+
+                <!-- Средняя колонка: защита -->
+                <div class="equipment-protection-block" style="flex: 1;">
                     <div class="block-header"><h5>Защита</h5></div>
                     ${protectionGrid('equipment.helmet', helmet.protection)}
                 </div>
+
+                <!-- Правая колонка: зоны защиты -->
+                <div class="equipment-zones-block" style="flex: 1;">
+                    <div class="block-header"><h5>Зоны защиты</h5></div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px; text-align: center;">
+                        ${(() => {
+                            const template = helmetTemplates.find(t => t.id == helmet.templateId);
+                            if (!template?.attributes?.protection_zones?.length) return '<span style="color:#aaa; grid-column: span 2;">Не указаны</span>';
+                            const zoneNames = { crown: 'Темя', back: 'Затылок', ears: 'Уши', face: 'Забрало' };
+                            return template.attributes.protection_zones.map(z =>
+                                `<div>${zoneNames[z] || z}</div>`
+                            ).join('');
+                        })()}
+                    </div>
+                </div>
             </div>
+
+            <!-- Слоты -->
             ${renderSlots(helmet, helmetTemplates, 'helmet') ? `
                 <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
                     ${renderSlots(helmet, helmetTemplates, 'helmet')}
                 </div>
             ` : ''}
+
+            <!-- Модификации -->
             <div class="modifications-block">
                 <div style="display:flex; align-items:center;">
                     <h5 style="margin:0;">Модификации шлема</h5>
@@ -1932,10 +1961,11 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Броня -->
+        <!-- Броня (трёхколоночная структура) -->
         <div class="equipment-group">
-            <div class="equipment-row">
-                <div class="equipment-main-block">
+            <div class="equipment-row" style="display: flex; gap: 10px;">
+                <!-- Левая колонка: параметры -->
+                <div class="equipment-main-block" style="flex: 2;">
                     <div class="block-header">
                         <h4>Броня</h4>
                         ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateArmorTemplateModal()">➕ Создать кастом</button>` : ''}
@@ -1956,11 +1986,28 @@ async function renderEquipmentTab(data) {
                         <div class="field-group field-number"><label>Контейнеры</label><input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}"></div>
                     </div>
                 </div>
-                <div class="equipment-protection-block">
+
+                <!-- Средняя колонка: защита -->
+                <div class="equipment-protection-block" style="flex: 1;">
                     <div class="block-header"><h5>Защита</h5></div>
                     ${protectionGrid('equipment.armor', armor.protection)}
                 </div>
+
+                <!-- Правая колонка: зоны защиты -->
+                <div class="equipment-zones-block" style="flex: 1;">
+                    <div class="block-header"><h5>Зоны защиты</h5></div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px; text-align: center;">
+                        ${(() => {
+                            const template = armorTemplates.find(t => t.id == armor.templateId);
+                            if (!template?.attributes?.protection_zones?.length) return '<span style="color:#aaa; grid-column: span 2;">Не указаны</span>';
+                            const zoneNames = { torso: 'Торс', arms: 'Руки', legs: 'Ноги', head: 'Голова' };
+                            return template.attributes.protection_zones.map(z => `<div>${zoneNames[z] || z}</div>`).join('');
+                        })()}
+                    </div>
+                </div>
             </div>
+
+            <!-- Модификации -->
             <div class="modifications-block">
                 <div style="display:flex; align-items:center;">
                     <h5 style="margin:0;">Модификации брони</h5>
@@ -3341,7 +3388,7 @@ window.equipHelmetModule = async function(slotType) {
         return;
     }
 
-    const category = slotType === 'filter' ? 'gas_mask_module' : 'helmet_module';
+    const category = slotType === 'filter' ? 'gas_mask_module' : (slotType === 'visor' ? 'visor' : 'helmet_module');
 
     const inventoryModules = [];
     const collect = (items, path) => {
@@ -3405,6 +3452,16 @@ window.equipHelmetModule = async function(slotType) {
         if (idx === '') return;
         const selected = inventoryModules[idx];
         const mod = selected.item;
+
+        if (slotType === 'visor') {
+            const compatible = mod.attributes?.compatible_helmets || [];
+            if (compatible.length > 0 && !compatible.includes(helmet.templateId)) {
+                showNotification('Это забрало не подходит к данному шлему');
+                modal.remove();
+                return;
+            }
+        }
+
         modal.remove();
 
         if (!removeItemByPath(selected.path)) {
@@ -3418,14 +3475,20 @@ window.equipHelmetModule = async function(slotType) {
             const oldMod = helmet.installedModules[existingIdx];
             helmet.installedModules.splice(existingIdx, 1);
             const oldItem = {
-                id: oldMod.id, templateId: oldMod.templateId, name: oldMod.name,
-                category: category, weight: 0.2, volume: 0.3, quantity: 1,
+                id: oldMod.id,
+                templateId: oldMod.templateId,
+                name: oldMod.name,
+                category: category,
+                weight: oldMod.weight || 0.2,
+                volume: oldMod.volume || 0.3,
+                quantity: 1,
                 attributes: {
                     slot_type: slotType,
                     durability: oldMod.durability,
                     max_durability: oldMod.maxDurability,
                     accuracy_penalty: oldMod.accuracy_penalty,
-                    awareness_penalty: oldMod.awareness_penalty
+                    awareness_penalty: oldMod.awareness_penalty,
+                    physical_protection: oldMod.protection || { physical: 0 }
                 }
             };
             currentCharacterData.inventory.backpack.push(oldItem);
@@ -3437,10 +3500,15 @@ window.equipHelmetModule = async function(slotType) {
             templateId: mod.templateId,
             name: mod.name,
             slotType: slotType,
+            weight: mod.weight,
+            volume: mod.volume,
             durability: mod.attributes?.durability,
             maxDurability: mod.attributes?.max_durability,
             accuracy_penalty: mod.attributes?.accuracy_penalty,
             awareness_penalty: mod.attributes?.awareness_penalty,
+            ergonomics_penalty: mod.attributes?.ergonomics_penalty,
+            charisma_penalty: mod.attributes?.charisma_penalty,
+            protection: mod.attributes?.protection || { physical: 0 },
             sourcePath: selected.path
         });
 
@@ -3461,22 +3529,23 @@ window.unequipHelmetModule = async function(slotType) {
     const mod = helmet.installedModules[idx];
     helmet.installedModules.splice(idx, 1);
 
-    const category = slotType === 'filter' ? 'gas_mask_module' : 'helmet_module';
+    const category = slotType === 'filter' ? 'gas_mask_module' : (slotType === 'visor' ? 'visor' : 'helmet_module');
     const path = mod.sourcePath || ['inventory', 'backpack'];
     const restored = {
         id: mod.id,
         templateId: mod.templateId,
         name: mod.name,
         category: category,
-        weight: 0.2,
-        volume: 0.3,
+        weight: mod.weight || 0.2,
+        volume: mod.volume || 0.3,
         quantity: 1,
         attributes: {
             slot_type: slotType,
             durability: mod.durability,
             max_durability: mod.maxDurability,
             accuracy_penalty: mod.accuracy_penalty,
-            awareness_penalty: mod.awareness_penalty
+            awareness_penalty: mod.awareness_penalty,
+            protection: mod.protection || { physical: 0 }
         }
     };
     restoreItemToPath(restored, path);
@@ -3785,8 +3854,8 @@ window.openCreateHelmetTemplateModal = function(template = null) {
                 <div class="form-group"><label>Точность (штраф)</label><input type="number" id="helmet-accuracyPenalty" class="form-control number-input" value="0"></div>
                 <div class="form-group"><label>Эргономика (штраф)</label><input type="number" id="helmet-ergonomicsPenalty" class="form-control number-input" value="0"></div>
                 <div class="form-group"><label>Харизма (бонус)</label><input type="number" id="helmet-charismaBonus" class="form-control number-input" value="0"></div>
-                <div class="form-group"><label>Вес (кг)</label><input type="number" id="helmet-weight" class="form-control number-input" value="0" step="0.1"></div>
-                <div class="form-group"><label>Объём (л)</label><input type="number" id="helmet-volume" class="form-control number-input" value="0" step="0.1"></div>
+                <div class="form-group"><label>Вес</label><input type="number" id="helmet-weight" class="form-control number-input" value="0" step="0.1"></div>
+                <div class="form-group"><label>Объём</label><input type="number" id="helmet-volume" class="form-control number-input" value="0" step="0.1"></div>
                 <div class="form-group"><label>Защита</label>
                     <div style="display: grid; grid-template-columns: repeat(5,1fr); gap:5px;">
                         <div><label>Физ</label><input type="number" id="helmet-physical" class="form-control number-input" value="0"></div>
@@ -3797,12 +3866,23 @@ window.openCreateHelmetTemplateModal = function(template = null) {
                     </div>
                 </div>
                 <hr>
+                <h4>Зоны защиты</h4>
+                <div class="form-group">
+                    <label><input type="checkbox" id="helmet-zone-crown"> Теменная часть</label><br>
+                    <label><input type="checkbox" id="helmet-zone-back"> Затылок</label><br>
+                    <label><input type="checkbox" id="helmet-zone-ears"> Уши</label><br>
+                    <label><input type="checkbox" id="helmet-zone-face"> Забрало / Лицо</label>
+                </div>
+                <hr>
                 <h4>Слоты</h4>
                 <div class="form-group">
                     <label><input type="checkbox" id="helmet-has-nvg-slot"> Крепление для ПНВ</label>
                 </div>
                 <div class="form-group">
                     <label><input type="checkbox" id="helmet-has-filter-slot"> Слот для фильтра (противогазо-шлем)</label>
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="helmet-has-visor-slot"> Слот для забрала</label>
                 </div>
                 <div class="form-actions"><button class="btn btn-primary" onclick="saveHelmetTemplate()">Сохранить</button><button class="btn btn-secondary" onclick="document.getElementById('create-helmet-template-modal').style.display='none'">Отмена</button></div>
             </div>`;
@@ -3824,9 +3904,15 @@ window.openCreateHelmetTemplateModal = function(template = null) {
         document.getElementById('helmet-thermal').value = prot.thermal || 0;
         document.getElementById('helmet-electric').value = prot.electric || 0;
         document.getElementById('helmet-radiation').value = prot.radiation || 0;
+        const zones = template.attributes?.protection_zones || [];
+        document.getElementById('helmet-zone-crown').checked = zones.includes('crown');
+        document.getElementById('helmet-zone-back').checked = zones.includes('back');
+        document.getElementById('helmet-zone-ears').checked = zones.includes('ears');
+        document.getElementById('helmet-zone-face').checked = zones.includes('face');
         const slots = template.attributes?.slots || [];
         document.getElementById('helmet-has-nvg-slot').checked = slots.some(s => s.type === 'nvg');
         document.getElementById('helmet-has-filter-slot').checked = slots.some(s => s.type === 'filter');
+        document.getElementById('helmet-has-visor-slot').checked = slots.some(s => s.type === 'visor');
     } else {
         document.getElementById('helmet-template-id').value = '';
     }
@@ -3841,6 +3927,13 @@ window.saveHelmetTemplate = async function() {
     const slots = [];
     if (document.getElementById('helmet-has-nvg-slot').checked) slots.push({ type: 'nvg', label: 'ПНВ', maxItems: 1 });
     if (document.getElementById('helmet-has-filter-slot').checked) slots.push({ type: 'filter', label: 'Фильтр', maxItems: 1 });
+    if (document.getElementById('helmet-has-visor-slot').checked) slots.push({ type: 'visor', label: 'Забрало', maxItems: 1 });
+
+    const protectionZones = [];
+    if (document.getElementById('helmet-zone-crown').checked) protectionZones.push('crown');
+    if (document.getElementById('helmet-zone-back').checked) protectionZones.push('back');
+    if (document.getElementById('helmet-zone-ears').checked) protectionZones.push('ears');
+    if (document.getElementById('helmet-zone-face').checked) protectionZones.push('face');
 
     const attributes = {
         material: document.getElementById('helmet-material').value,
@@ -3855,6 +3948,7 @@ window.saveHelmetTemplate = async function() {
             electric: parseInt(document.getElementById('helmet-electric').value) || 0,
             radiation: parseInt(document.getElementById('helmet-radiation').value) || 0
         },
+        protection_zones: protectionZones,
         slots: slots
     };
     const data = {
@@ -4046,6 +4140,14 @@ window.openCreateArmorTemplateModal = function(template = null) {
                         <div><label>Рад</label><input type="number" id="armor-radiation" class="form-control number-input" value="0"></div>
                     </div>
                 </div>
+                <hr>
+                <h4>Зоны защиты</h4>
+                <div class="form-group">
+                    <label><input type="checkbox" id="armor-zone-torso"> Торс</label><br>
+                    <label><input type="checkbox" id="armor-zone-arms"> Руки</label><br>
+                    <label><input type="checkbox" id="armor-zone-legs"> Ноги</label><br>
+                    <label><input type="checkbox" id="armor-zone-head"> Голова</label>
+                </div>
                 <div class="form-actions"><button class="btn btn-primary" onclick="saveArmorTemplate()">Сохранить</button><button class="btn btn-secondary" onclick="document.getElementById('create-armor-template-modal').style.display='none'">Отмена</button></div>
             </div>`;
         document.body.appendChild(modal);
@@ -4065,6 +4167,11 @@ window.openCreateArmorTemplateModal = function(template = null) {
         document.getElementById('armor-thermal').value = prot.thermal || 0;
         document.getElementById('armor-electric').value = prot.electric || 0;
         document.getElementById('armor-radiation').value = prot.radiation || 0;
+        const zones = template.attributes?.protection_zones || [];
+        document.getElementById('armor-zone-torso').checked = zones.includes('torso');
+        document.getElementById('armor-zone-arms').checked = zones.includes('arms');
+        document.getElementById('armor-zone-legs').checked = zones.includes('legs');
+        document.getElementById('armor-zone-head').checked = zones.includes('head');
     } else {
         document.getElementById('armor-template-id').value = '';
     }
@@ -4075,6 +4182,11 @@ window.saveArmorTemplate = async function() {
     const id = document.getElementById('armor-template-id').value;
     const name = document.getElementById('armor-name').value.trim();
     if (!name) { showNotification('Введите название'); return; }
+    const protectionZones = [];
+    if (document.getElementById('armor-zone-torso').checked) protectionZones.push('torso');
+    if (document.getElementById('armor-zone-arms').checked) protectionZones.push('arms');
+    if (document.getElementById('armor-zone-legs').checked) protectionZones.push('legs');
+    if (document.getElementById('armor-zone-head').checked) protectionZones.push('head');
     const attributes = {
         material: document.getElementById('armor-material').value,
         max_durability: parseInt(document.getElementById('armor-maxDurability').value) || 1,
@@ -4086,7 +4198,8 @@ window.saveArmorTemplate = async function() {
             thermal: parseInt(document.getElementById('armor-thermal').value) || 0,
             electric: parseInt(document.getElementById('armor-electric').value) || 0,
             radiation: parseInt(document.getElementById('armor-radiation').value) || 0
-        }
+        },
+        protection_zones: protectionZones
     };
     const data = {
         name, category: 'armor', subcategory: null, price: 0,
