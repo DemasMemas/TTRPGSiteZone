@@ -65,6 +65,12 @@ const MATERIAL_OPTIONS = [
     'Кевлар',
     'Плита'
 ];
+const MATERIAL_COEFFICIENTS = {
+    'Текстиль': 0.5,
+    'Композит': 1,
+    'Кевлар': 1.5,
+    'Плита': 2
+};
 
 // Универсальная загрузка шаблонов по категории
 async function loadTemplatesForLobby(category, subcategory = null) {
@@ -1737,6 +1743,8 @@ window.saveSpecialTraitTemplate = async function() {
 // ========== 5. ВКЛАДКА "ЭКИПИРОВКА" ==========
 async function renderEquipmentTab(data) {
     const container = document.getElementById('sheet-tab-equipment');
+    if (!container) return;
+
     const eq = data.equipment || {};
     const helmet = eq.helmet || {};
     const gasMask = eq.gasMask || {};
@@ -1860,14 +1868,16 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Шлем (трёхколоночная структура) -->
+        <!-- Шлем -->
         <div class="equipment-group">
             <div class="equipment-row" style="display: flex; gap: 10px;">
-                <!-- Левая колонка: параметры -->
                 <div class="equipment-main-block" style="flex: 2;">
                     <div class="block-header">
                         <h4>Шлем</h4>
-                        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateHelmetTemplateModal()">➕ Создать кастом</button>` : ''}
+                        <div style="display: flex; gap: 10px;">
+                            ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateHelmetTemplateModal()">➕ Создать кастом</button>` : ''}
+                            ${helmet.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipHelmet()">Снять</button>` : ''}
+                        </div>
                     </div>
                     <div class="fields-container">
                         <div class="field-group field-name">
@@ -1877,23 +1887,37 @@ async function renderEquipmentTab(data) {
                                 ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input form-control" name="equipment.helmet.maxDurability" value="${helmet.maxDurability || 1}"></div>
-                        <div class="field-group field-select"><label>Состояние</label><select name="equipment.helmet.condition" class="form-control">${conditionOptions.map(opt => `<option value="${opt}" ${helmet.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
-                        <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input form-control" name="equipment.helmet.currentDurability" value="${helmet.currentDurability || 1}"></div>
-                        <div class="field-group field-select"><label>Материал</label><select name="equipment.helmet.material" class="form-control">${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number">
+                            <label>Прочность</label>
+                            <input type="number" class="number-input form-control" name="equipment.helmet.durability" value="${helmet.durability || 0}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Стадия</label>
+                            <select name="equipment.armor.stage" class="form-control" onchange="updateArmorStageFromSelect(this, 'helmet')">
+                                ${['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'].map((name, idx) =>
+                                    `<option value="${idx+1}" ${helmet.stage == (idx+1) ? 'selected' : ''}>${name}</option>`
+                                ).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number" style="min-width: 120px;">
+                            <label>Прочность стадии</label>
+                            <input type="number" class="number-input form-control" value="${calculateStageDurability(helmet.durability || 0, helmet.material || 'Текстиль')}" readonly disabled>
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Материал</label>
+                            <select name="equipment.helmet.material" class="form-control">
+                                ${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
                         <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
                     </div>
                 </div>
-
-                <!-- Средняя колонка: защита -->
                 <div class="equipment-protection-block" style="flex: 1;">
                     <div class="block-header"><h5>Защита</h5></div>
                     ${protectionGrid('equipment.helmet', helmet.protection)}
                 </div>
-
-                <!-- Правая колонка: зоны защиты -->
                 <div class="equipment-zones-block" style="flex: 1;">
                     <div class="block-header"><h5>Зоны защиты</h5></div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px; text-align: center;">
@@ -1901,22 +1925,16 @@ async function renderEquipmentTab(data) {
                             const template = helmetTemplates.find(t => t.id == helmet.templateId);
                             if (!template?.attributes?.protection_zones?.length) return '<span style="color:#aaa; grid-column: span 2;">Не указаны</span>';
                             const zoneNames = { crown: 'Темя', back: 'Затылок', ears: 'Уши', face: 'Забрало' };
-                            return template.attributes.protection_zones.map(z =>
-                                `<div>${zoneNames[z] || z}</div>`
-                            ).join('');
+                            return template.attributes.protection_zones.map(z => `<div>${zoneNames[z] || z}</div>`).join('');
                         })()}
                     </div>
                 </div>
             </div>
-
-            <!-- Слоты -->
             ${renderSlots(helmet, helmetTemplates, 'helmet') ? `
                 <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
                     ${renderSlots(helmet, helmetTemplates, 'helmet')}
                 </div>
             ` : ''}
-
-            <!-- Модификации -->
             <div class="modifications-block">
                 <div style="display:flex; align-items:center;">
                     <h5 style="margin:0;">Модификации шлема</h5>
@@ -1932,7 +1950,10 @@ async function renderEquipmentTab(data) {
                 <div class="equipment-main-block">
                     <div class="block-header">
                         <h4>Противогаз</h4>
-                        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateGasMaskTemplateModal()">➕ Создать кастом</button>` : ''}
+                        <div style="display: flex; gap: 10px;">
+                            ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateGasMaskTemplateModal()">➕ Создать кастом</button>` : ''}
+                            ${gasMask.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipGasMask()">Снять</button>` : ''}
+                        </div>
                     </div>
                     <div class="fields-container">
                         <div class="field-group field-name">
@@ -1943,10 +1964,28 @@ async function renderEquipmentTab(data) {
                             </select>
                         </div>
                         <div class="field-group field-checkbox"><label>Надет</label><input type="checkbox" name="equipment.gasMask.isWorn" ${gasMask.isWorn ? 'checked' : ''}></div>
-                        <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input form-control" name="equipment.gasMask.maxDurability" value="${gasMask.maxDurability || 1}"></div>
-                        <div class="field-group field-select"><label>Состояние</label><select name="equipment.gasMask.condition" class="form-control">${conditionOptions.map(opt => `<option value="${opt}" ${gasMask.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
-                        <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input form-control" name="equipment.gasMask.currentDurability" value="${gasMask.currentDurability || 1}"></div>
-                        <div class="field-group field-select"><label>Материал</label><select name="equipment.gasMask.material" class="form-control">${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number">
+                            <label>Прочность</label>
+                            <input type="number" class="number-input form-control" name="equipment.gasMask.durability" value="${gasMask.durability || 0}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Стадия</label>
+                            <select name="equipment.armor.stage" class="form-control" onchange="updateArmorStageFromSelect(this, 'gasMask')">
+                                ${['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'].map((name, idx) =>
+                                    `<option value="${idx+1}" ${gasMask.stage == (idx+1) ? 'selected' : ''}>${name}</option>`
+                                ).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number" style="min-width: 120px;">
+                            <label>Прочность стадии</label>
+                            <input type="number" class="number-input form-control" value="${calculateStageDurability(gasMask.durability || 0, gasMask.material || 'Текстиль')}" readonly disabled>
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Материал</label>
+                            <select name="equipment.gasMask.material" class="form-control">
+                                ${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
                         <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
@@ -1971,14 +2010,16 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <!-- Броня (трёхколоночная структура) -->
+        <!-- Броня -->
         <div class="equipment-group">
             <div class="equipment-row" style="display: flex; gap: 10px;">
-                <!-- Левая колонка: параметры -->
                 <div class="equipment-main-block" style="flex: 2;">
                     <div class="block-header">
                         <h4>Броня</h4>
-                        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateArmorTemplateModal()">➕ Создать кастом</button>` : ''}
+                        <div style="display: flex; gap: 10px;">
+                            ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateArmorTemplateModal()">➕ Создать кастом</button>` : ''}
+                            ${armor.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipArmor()">Снять</button>` : ''}
+                        </div>
                     </div>
                     <div class="fields-container">
                         <div class="field-group field-name">
@@ -1988,22 +2029,36 @@ async function renderEquipmentTab(data) {
                                 ${armorTemplates.map(t => `<option value="${t.id}" ${armor.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number"><label>Прочность</label><input type="number" class="number-input form-control" name="equipment.armor.maxDurability" value="${armor.maxDurability || 1}"></div>
-                        <div class="field-group field-select"><label>Состояние</label><select name="equipment.armor.condition" class="form-control">${conditionOptions.map(opt => `<option value="${opt}" ${armor.condition === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
-                        <div class="field-group field-number"><label>Стадия</label><input type="number" class="number-input form-control" name="equipment.armor.currentDurability" value="${armor.currentDurability || 1}"></div>
-                        <div class="field-group field-select"><label>Материал</label><select name="equipment.armor.material" class="form-control">${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}</select></div>
+                        <div class="field-group field-number">
+                            <label>Прочность</label>
+                            <input type="number" class="number-input form-control" name="equipment.armor.durability" value="${armor.durability || 0}">
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Стадия</label>
+                            <select name="equipment.armor.stage" class="form-control" onchange="updateArmorStageFromSelect(this, 'armor')">
+                                ${['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'].map((name, idx) =>
+                                    `<option value="${idx+1}" ${armor.stage == (idx+1) ? 'selected' : ''}>${name}</option>`
+                                ).join('')}
+                            </select>
+                        </div>
+                        <div class="field-group field-number" style="min-width: 120px;">
+                            <label>Прочность стадии</label>
+                            <input type="number" class="number-input form-control" value="${calculateStageDurability(armor.durability || 0, armor.material || 'Текстиль')}" readonly disabled>
+                        </div>
+                        <div class="field-group field-select">
+                            <label>Материал</label>
+                            <select name="equipment.armor.material" class="form-control">
+                                ${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                            </select>
+                        </div>
                         <div class="field-group field-number"><label>Перемещение</label><input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Контейнеры</label><input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}"></div>
                     </div>
                 </div>
-
-                <!-- Средняя колонка: защита -->
                 <div class="equipment-protection-block" style="flex: 1;">
                     <div class="block-header"><h5>Защита</h5></div>
                     ${protectionGrid('equipment.armor', armor.protection)}
                 </div>
-
-                <!-- Правая колонка: зоны защиты -->
                 <div class="equipment-zones-block" style="flex: 1;">
                     <div class="block-header"><h5>Зоны защиты</h5></div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px; text-align: center;">
@@ -2016,8 +2071,6 @@ async function renderEquipmentTab(data) {
                     </div>
                 </div>
             </div>
-
-            <!-- Модификации -->
             <div class="modifications-block">
                 <div style="display:flex; align-items:center;">
                     <h5 style="margin:0;">Модификации брони</h5>
@@ -2394,6 +2447,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     <div id="modifications-${index}">${modificationsHtml}</div>
                 </div>
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})" style="margin-top:10px;">Удалить оружие</button>
+                <button type="button" class="btn btn-sm btn-warning" onclick="unequipWeapon(${index})" style="margin-top:10px; margin-left:5px;">Снять</button>
             </div>
         `);
     }
@@ -3706,15 +3760,19 @@ window.fillHelmetFromPreset = async function(select) {
 
     const helmet = currentCharacterData.equipment?.helmet || {};
     const mapping = {
-        'maxDurability': 'max_durability',
-        'material': 'material',
         'accuracyPenalty': 'accuracy_penalty',
         'ergonomicsPenalty': 'ergonomics_penalty',
         'charismaBonus': 'charisma_bonus',
         'protection': 'protection'
     };
     applyTemplateToObject(helmet, template, mapping);
-    helmet.templateId = template.id;   // <-- обязательно
+    helmet.templateId = template.id;
+    helmet.name = template.name;
+    helmet.weight = template.weight;
+    helmet.volume = template.volume;
+
+    initArmorStagedDurability(helmet, template);
+
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.helmet = helmet;
     await renderEquipmentTab(currentCharacterData);
@@ -3731,16 +3789,20 @@ window.fillGasMaskFromPreset = async function(select) {
 
     const gasMask = currentCharacterData.equipment?.gasMask || {};
     const mapping = {
-        'maxDurability': 'max_durability',
-        'filterRemaining': 'filter_capacity',
-        'material': 'material',
         'accuracyPenalty': 'accuracy_penalty',
         'ergonomicsPenalty': 'ergonomics_penalty',
         'charismaBonus': 'charisma_bonus',
         'protection': 'protection'
     };
     applyTemplateToObject(gasMask, template, mapping);
-    gasMask.templateId = template.id;   // <-- ВОТ ЭТУ СТРОКУ ДОБАВЬТЕ
+    gasMask.templateId = template.id;
+    gasMask.name = template.name;
+    gasMask.weight = template.weight;
+    gasMask.volume = template.volume;
+    gasMask.isWorn = gasMask.isWorn || false;
+
+    initArmorStagedDurability(gasMask, template);
+
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.gasMask = gasMask;
     await renderEquipmentTab(currentCharacterData);
@@ -3757,17 +3819,176 @@ window.fillArmorFromPreset = async function(select) {
 
     const armor = currentCharacterData.equipment?.armor || {};
     const mapping = {
-        'maxDurability': 'max_durability',
-        'material': 'material',
         'movementPenalty': 'movement_penalty',
         'containerSlots': 'container_slots',
         'protection': 'protection'
     };
     applyTemplateToObject(armor, template, mapping);
+    armor.templateId = template.id;
+    armor.name = template.name;
+    armor.weight = template.weight;
+    armor.volume = template.volume;
+
+    initArmorStagedDurability(armor, template);
+
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.armor = armor;
     await renderEquipmentTab(currentCharacterData);
     scheduleAutoSave();
+};
+
+window.updateArmorStageFromSelect = function(select, type) {
+    const newStage = parseInt(select.value, 10);
+    const item = currentCharacterData.equipment[type];
+    if (!item) return;
+    item.stage = newStage;
+    const stageNames = ['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'];
+    item.condition = stageNames[newStage - 1];
+    item.stageDurability = calculateStageDurability(item.durability || 0, item.material || 'Текстиль');
+    renderEquipmentTab(currentCharacterData);
+    scheduleAutoSave();
+};
+
+window.unequipArmor = async function() {
+    const armor = currentCharacterData.equipment?.armor;
+    if (!armor || !armor.templateId) {
+        showNotification('Броня не надета');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('armor');
+    const template = templates.find(t => t.id === armor.templateId);
+    if (!template) {
+        showNotification('Шаблон брони не найден');
+        return;
+    }
+    const restoredItem = createItemFromTemplate(template);
+    restoredItem.durability = armor.durability;
+    restoredItem.maxDurability = armor.maxDurability;
+    restoredItem.material = armor.material;
+    restoredItem.stage = armor.stage;
+    restoredItem.condition = armor.condition;
+    restoredItem.protection = { ...armor.protection };
+    restoredItem.modifications = armor.modifications || [];
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+    delete currentCharacterData.equipment.armor;
+    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Броня снята', 'success');
+};
+
+window.unequipHelmet = async function() {
+    const helmet = currentCharacterData.equipment?.helmet;
+    if (!helmet || !helmet.templateId) {
+        showNotification('Шлем не надет');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('helmet');
+    const template = templates.find(t => t.id === helmet.templateId);
+    if (!template) {
+        showNotification('Шаблон шлема не найден');
+        return;
+    }
+    const restoredItem = createItemFromTemplate(template);
+    restoredItem.durability = helmet.durability;
+    restoredItem.maxDurability = helmet.maxDurability;
+    restoredItem.material = helmet.material;
+    restoredItem.stage = helmet.stage;
+    restoredItem.condition = helmet.condition;
+    restoredItem.protection = { ...helmet.protection };
+    restoredItem.modifications = helmet.modifications || [];
+    restoredItem.installedModules = helmet.installedModules || [];
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+    delete currentCharacterData.equipment.helmet;
+    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Шлем снят', 'success');
+};
+
+window.unequipGasMask = async function() {
+    const gasMask = currentCharacterData.equipment?.gasMask;
+    if (!gasMask || !gasMask.templateId) {
+        showNotification('Противогаз не надет');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('gas_mask');
+    const template = templates.find(t => t.id === gasMask.templateId);
+    if (!template) {
+        showNotification('Шаблон противогаза не найден');
+        return;
+    }
+    const restoredItem = createItemFromTemplate(template);
+    restoredItem.durability = gasMask.durability;
+    restoredItem.maxDurability = gasMask.maxDurability;
+    restoredItem.material = gasMask.material;
+    restoredItem.stage = gasMask.stage;
+    restoredItem.condition = gasMask.condition;
+    restoredItem.protection = { ...gasMask.protection };
+    restoredItem.modifications = gasMask.modifications || [];
+    restoredItem.installedModules = gasMask.installedModules || [];
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+    delete currentCharacterData.equipment.gasMask;
+    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Противогаз снят', 'success');
+};
+
+window.unequipWeapon = async function(weaponIndex) {
+    const weapon = currentCharacterData.weapons[weaponIndex];
+    if (!weapon) {
+        showNotification('Оружие не найдено');
+        return;
+    }
+    if (!weapon.templateId) {
+        showNotification('Оружие должно быть основано на шаблоне');
+        return;
+    }
+
+    const templates = await loadTemplatesForLobby('weapon');
+    const template = templates.find(t => t.id == weapon.templateId);
+    if (!template) {
+        showNotification('Шаблон оружия не найден');
+        return;
+    }
+
+    const restoredItem = createItemFromTemplate(template);
+    // Копируем текущие характеристики
+    restoredItem.durability = weapon.durability || weapon.attributes?.durability || 100;
+    restoredItem.maxDurability = weapon.maxDurability || weapon.attributes?.max_durability || 100;
+    restoredItem.ammo = weapon.ammo;
+    restoredItem.modifications = weapon.modifications || [];
+    restoredItem.installedModules = weapon.installedModules || [];
+    restoredItem.installedMagazine = weapon.installedMagazine ? { ...weapon.installedMagazine } : null;
+
+    // Удаляем магазин из оружия (если он есть)
+    if (weapon.installedMagazine) {
+        // Магазин уже будет внутри restoredItem.installedMagazine
+    }
+
+    // Добавляем в рюкзак
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+
+    // Удаляем оружие из экипировки
+    currentCharacterData.weapons.splice(weaponIndex, 1);
+
+    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Оружие снято', 'success');
 };
 
 // Функции добавления/удаления модификаций
@@ -5066,6 +5287,7 @@ window.removeBackpackItemAtPath = function(pathStr) {
     const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
     if (path.length === 0) return;
 
+    // Находим родительский массив и индекс
     let parent = currentCharacterData;
     for (let i = 0; i < path.length - 1; i++) {
         const key = path[i];
@@ -5080,13 +5302,17 @@ window.removeBackpackItemAtPath = function(pathStr) {
     const index = path[path.length - 1];
     if (!Array.isArray(parent)) return;
 
+    // Удаляем из данных
     parent.splice(index, 1);
 
+    // Удаляем DOM-элемент
     const itemDiv = document.querySelector(`[data-path="${pathStr}"]`);
     if (itemDiv) itemDiv.remove();
 
+    // Обновляем итоги и сохраняем
     recalculateInventoryTotals();
     scheduleAutoSave();
+    forceSyncCharacter();   // чтобы другие клиенты сразу увидели
 };
 
 function renderBeltPouchesNew(pouches, pouchTemplates) {
@@ -6299,6 +6525,24 @@ window.addPocketItemManual = function() {
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
+
+function calculateStageDurability(baseDurability, material) {
+    const coefficient = MATERIAL_COEFFICIENTS[material] || 1;
+    return Math.floor(10 * coefficient * baseDurability);
+}
+
+function initArmorStagedDurability(armor, template) {
+    const baseDur = template.attributes?.max_durability || 100;
+    armor.durability = baseDur;                          // текущая прочность (она же максимальная при создании)
+    armor.maxDurability = baseDur;                       // сохраняем исходную максимальную
+    armor.material = template.attributes?.material || 'Текстиль';
+    armor.stage = 1;                                     // стадия (1-5)
+    armor.stageDurability = calculateStageDurability(armor.durability, armor.material);
+    armor.currentStageDurability = armor.stageDurability; // пока не используется, но для будущего
+
+    const stageNames = ['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'];
+    armor.condition = stageNames[armor.stage - 1];
+}
 
 // ========== 7. ВКЛАДКА "ЗАМЕТКИ" ==========
 function renderNotesTab(data) {
