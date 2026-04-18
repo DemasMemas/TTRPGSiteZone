@@ -1123,6 +1123,10 @@ window.openCreateMagazineTemplateModal = function(template = null) {
                 <div class="form-group"><label>Объём</label><input type="number" id="magazine-volume" class="form-control number-input" value="0" step="0.1"></div>
                 <div class="form-group"><label>Цена</label><input type="number" id="magazine-price" class="form-control number-input" value="0"></div>
                 <div class="form-group"><label><input type="checkbox" id="magazine-is-loader"> Это спидлоадер / лента</label></div>
+                <div class="form-group">
+                    <label>Совместимые ID оружия (через запятую)</label>
+                    <input type="text" id="magazine-compatible-weapons" class="form-control" placeholder="Например: 100,102">
+                </div>
                 <div class="form-actions"><button class="btn btn-primary" onclick="saveMagazineTemplate()">Сохранить</button><button class="btn btn-secondary" onclick="document.getElementById('create-magazine-template-modal').style.display='none'">Отмена</button></div>
             </div>`;
         document.body.appendChild(modal);
@@ -1137,6 +1141,8 @@ window.openCreateMagazineTemplateModal = function(template = null) {
         document.getElementById('magazine-volume').value = template.volume || 0;
         document.getElementById('magazine-price').value = template.price || 0;
         document.getElementById('magazine-is-loader').checked = template.attributes?.isLoader || false;
+        const compatible = template.attributes?.compatible_weapons || [];
+        document.getElementById('magazine-compatible-weapons').value = compatible.join(',');
     } else {
         document.getElementById('magazine-template-id').value = '';
     }
@@ -1147,17 +1153,22 @@ window.saveMagazineTemplate = async function() {
     const id = document.getElementById('magazine-template-id').value;
     const name = document.getElementById('magazine-name').value.trim();
     if (!name) { showNotification('Введите название'); return; }
+
+    const compatibleStr = document.getElementById('magazine-compatible-weapons').value.trim();
+    const compatible_weapons = compatibleStr ? compatibleStr.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)) : [];
+
     const data = {
         name, category: 'magazine', subcategory: null,
         price: parseInt(document.getElementById('magazine-price').value) || 0,
         volume: parseFloat(document.getElementById('magazine-volume').value) || 0,
-        weight: 0, // не используется, вес берётся из attributes
+        weight: 0,
         attributes: {
             caliber: document.getElementById('magazine-caliber').value.trim(),
             capacity: parseInt(document.getElementById('magazine-capacity').value) || 30,
             emptyWeight: parseFloat(document.getElementById('magazine-empty-weight').value) || 0,
             loadedWeight: parseFloat(document.getElementById('magazine-loaded-weight').value) || 0,
-            isLoader: document.getElementById('magazine-is-loader').checked
+            isLoader: document.getElementById('magazine-is-loader').checked,
+            compatible_weapons: compatible_weapons
         }
     };
     try {
@@ -2458,99 +2469,115 @@ window.equipModuleToWeapon = async function(weaponIndex, slotType) {
         return;
     }
 
-    // Загружаем шаблон оружия для проверки калибра
     const weaponTemplates = await loadTemplatesForLobby('weapon');
     const weaponTemplate = weaponTemplates.find(t => t.id == weapon.templateId);
     const weaponCaliber = weaponTemplate?.attributes?.caliber;
 
-    // Собираем все модули из инвентаря (рюкзак + подсумки)
     const inventoryModules = [];
-
-    const collectModules = (items) => {
+    const collectModules = (items, path) => {
         if (!Array.isArray(items)) return;
-        items.forEach(item => {
+        items.forEach((item, idx) => {
             if (item.category === 'weapon_module' && item.attributes?.slot_type === slotType) {
-                // Проверка калибра для слота "Ствол"
                 if (slotType === 'barrel' && weaponCaliber) {
                     const moduleCaliber = item.attributes?.caliber;
                     if (moduleCaliber && moduleCaliber !== weaponCaliber) return;
                 }
-                inventoryModules.push(item);
+                inventoryModules.push({ item, path: path.concat(idx) });
             }
-            if (item.contents) collectModules(item.contents);
+            if (item.contents) collectModules(item.contents, path.concat(idx, 'contents'));
         });
     };
 
-    collectModules(currentCharacterData.inventory?.backpack);
-
-    // Собираем из подсумков пояса
+    collectModules(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collectModules(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
     const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
-    beltPouches.forEach(pouch => collectModules(pouch.contents));
-
-    // Собираем из подсумков разгрузки
+    beltPouches.forEach((pouch, i) => collectModules(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
     const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
-    vestPouches.forEach(pouch => collectModules(pouch.contents));
+    vestPouches.forEach((pouch, i) => collectModules(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
 
     if (inventoryModules.length === 0) {
         showNotification('Нет подходящих модулей в инвентаре');
         return;
     }
 
-    // Создаём модальное окно выбора
     let modal = document.getElementById('module-select-modal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'module-select-modal';
-        modal.className = 'modal';
-        modal.innerHTML = `
-            <div class="modal-content">
-                <span class="close" onclick="document.getElementById('module-select-modal').style.display='none'">&times;</span>
-                <h3>Выберите модуль</h3>
-                <select id="module-select" class="form-control"></select>
-                <div class="form-actions" style="margin-top:15px;">
-                    <button class="btn btn-primary" onclick="window.confirmEquipModule(${weaponIndex}, '${slotType}')">Установить</button>
-                    <button class="btn btn-secondary" onclick="document.getElementById('module-select-modal').style.display='none'">Отмена</button>
-                </div>
+    if (modal) modal.remove();
+    modal = document.createElement('div');
+    modal.id = 'module-select-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="document.getElementById('module-select-modal').remove()">&times;</span>
+            <h3>Выберите модуль</h3>
+            <select id="module-select" class="form-control"></select>
+            <div class="form-actions" style="margin-top:15px;">
+                <button class="btn btn-primary" id="confirm-module-btn">Установить</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('module-select-modal').remove()">Отмена</button>
             </div>
-        `;
-        document.body.appendChild(modal);
-    }
+        </div>
+    `;
+    document.body.appendChild(modal);
 
     const select = document.getElementById('module-select');
-    select.innerHTML = '';
-    inventoryModules.forEach((mod, idx) => {
+    inventoryModules.forEach((entry, idx) => {
         const opt = document.createElement('option');
         opt.value = idx;
-        opt.textContent = `${mod.name} (${mod.weight} кг, ${mod.volume} л)`;
+        opt.textContent = `${entry.item.name} (${entry.item.weight} кг, ${entry.item.volume} л)`;
         select.appendChild(opt);
     });
 
-    modal._moduleList = inventoryModules;
+    modal.querySelector('#confirm-module-btn').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = inventoryModules[idx];
+        modal.remove();
+
+        if (!removeItemByPath(selected.path)) {
+            showNotification('Не удалось найти модуль в инвентаре');
+            return;
+        }
+
+        if (!weapon.installedModules) weapon.installedModules = [];
+        weapon.installedModules.push({
+            id: selected.item.id,
+            templateId: selected.item.templateId,
+            name: selected.item.name,
+            slotType: slotType,
+            modifiers: selected.item.attributes?.modifiers || {}
+        });
+
+        renderEquipmentTab(currentCharacterData);
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Модуль установлен', 'success');
+    };
+
     modal.style.display = 'flex';
 };
 
 window.confirmEquipModule = function(weaponIndex, slotType) {
     const modal = document.getElementById('module-select-modal');
     const select = document.getElementById('module-select');
-    const mod = modal._moduleList[select.value];
-    if (!mod) return;
+    const selected = modal._moduleList[select.value];
+    if (!selected) return;
 
     const weapon = currentCharacterData.weapons[weaponIndex];
     if (!weapon.installedModules) weapon.installedModules = [];
 
-    // Удаляем модуль из инвентаря
-    if (!removeItemFromInventory(mod.id)) {
+    // Удаляем модуль из инвентаря по пути
+    if (!removeItemByPath(selected.path)) {
         showNotification('Не удалось найти модуль в инвентаре');
         return;
     }
 
     // Добавляем в установленные
     weapon.installedModules.push({
-        id: mod.id,
-        templateId: mod.templateId,
-        name: mod.name,
+        id: selected.item.id,
+        templateId: selected.item.templateId,
+        name: selected.item.name,
         slotType: slotType,
-        modifiers: mod.attributes?.modifiers || {}
+        modifiers: selected.item.attributes?.modifiers || {}
     });
 
     modal.style.display = 'none';
@@ -2583,8 +2610,8 @@ window.unequipModuleFromWeapon = async function(weaponIndex, slotType) {
                 templateId: installedMod.templateId,
                 name: installedMod.name,
                 category: 'weapon_module',
-                weight: 0.5,
-                volume: 0.2,
+                weight: installedMod.weight || 0.5,
+                volume: installedMod.volume || 0.2,
                 quantity: 1,
                 attributes: {
                     slot_type: slotType,
@@ -2598,8 +2625,8 @@ window.unequipModuleFromWeapon = async function(weaponIndex, slotType) {
             id: installedMod.id || generateItemId(),
             name: installedMod.name,
             category: 'weapon_module',
-            weight: 0.5,
-            volume: 0.2,
+            weight: installedMod.weight || 0.5,
+            volume: installedMod.volume || 0.2,
             quantity: 1,
             attributes: {
                 slot_type: slotType,
@@ -2608,16 +2635,20 @@ window.unequipModuleFromWeapon = async function(weaponIndex, slotType) {
         };
     }
 
-    // Кладём в рюкзак
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
-    currentCharacterData.inventory.backpack.push(restoredItem);
+    const path = installedMod.sourcePath;
+    let restored = false;
+    if (path) restored = restoreItemToPath(restoredItem, path);
+    if (!restored) {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+        currentCharacterData.inventory.backpack.push(restoredItem);
+    }
 
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
     forceSyncCharacter();
-    showNotification('Модуль снят и помещён в рюкзак', 'success');
+    showNotification('Модуль снят', 'success');
 };
 
 window.equipMagazineToWeapon = async function(weaponIndex) {
@@ -2635,7 +2666,11 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
             if (item.category === 'magazine') {
+                // Проверка калибра
                 if (weaponCaliber && item.attributes?.caliber && item.attributes.caliber !== weaponCaliber) return;
+                // Проверка совместимости по списку оружий (если список не пуст)
+                const compatible = item.attributes?.compatible_weapons;
+                if (compatible && compatible.length > 0 && !compatible.includes(weapon.templateId)) return;
                 inventoryMagazines.push({ item, path: path.concat(idx) });
             }
             if (item.contents) collectMagazines(item.contents, path.concat(idx, 'contents'));
@@ -2697,6 +2732,16 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
 function confirmEquipMagazineDirect(weaponIndex, selected) {
     const weapon = currentCharacterData.weapons[weaponIndex];
     if (!weapon) return;
+
+    // Проверка совместимости по списку оружий
+    const compatible = selected.item.attributes?.compatible_weapons;
+    if (compatible && compatible.length > 0) {
+        const weaponTemplateId = Number(weapon.templateId);
+        if (!compatible.includes(weaponTemplateId)) {
+            showNotification('Этот магазин не подходит к данному оружию');
+            return;
+        }
+    }
 
     const oldMag = weapon.installedMagazine;
 
@@ -2767,8 +2812,8 @@ window.unequipMagazineFromWeapon = function(weaponIndex) {
         templateId: mag.templateId,
         name: mag.name,
         category: 'magazine',
-        weight: 0,
-        volume: 0.2,
+        weight: mag.weight || 0,
+        volume: mag.volume || 0.2,
         quantity: 1,
         ammo: mag.ammo ? mag.ammo.map(a => ({ ...a })) : [],
         emptyWeight: mag.emptyWeight || 0,
@@ -2780,16 +2825,20 @@ window.unequipMagazineFromWeapon = function(weaponIndex) {
             loadedWeight: mag.loadedWeight
         }
     };
-
-    // Добавим геттер для совместимости
     Object.defineProperty(restoredItem, 'currentAmmo', {
         get() { return this.ammo.reduce((sum, a) => sum + a.quantity, 0); },
         enumerable: true
     });
     updateMagazineWeight(restoredItem);
 
-    const path = mag.sourcePath || ['inventory', 'backpack'];
-    restoreItemToPath(restoredItem, path);
+    const path = mag.sourcePath;
+    let restored = false;
+    if (path) restored = restoreItemToPath(restoredItem, path);
+    if (!restored) {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+        currentCharacterData.inventory.backpack.push(restoredItem);
+    }
 
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
@@ -3421,18 +3470,29 @@ window.unequipGasMaskModule = async function(slotType) {
     const mod = gasMask.installedModules[idx];
     gasMask.installedModules.splice(idx, 1);
 
-    const path = mod.sourcePath || ['inventory', 'backpack'];
     const restored = {
         id: mod.id,
         templateId: mod.templateId,
         name: mod.name,
         category: 'gas_mask_module',
-        weight: 0.1,
-        volume: 0.2,
+        weight: mod.weight || 0.1,
+        volume: mod.volume || 0.2,
         quantity: 1,
-        attributes: { slot_type: 'filter', durability: mod.durability, max_durability: mod.maxDurability }
+        attributes: {
+            slot_type: slotType,
+            durability: mod.durability,
+            max_durability: mod.maxDurability
+        }
     };
-    restoreItemToPath(restored, path);
+
+    const path = mod.sourcePath;
+    let restoredFlag = false;
+    if (path) restoredFlag = restoreItemToPath(restored, path);
+    if (!restoredFlag) {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+        currentCharacterData.inventory.backpack.push(restored);
+    }
 
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
@@ -3593,7 +3653,6 @@ window.unequipHelmetModule = async function(slotType) {
     helmet.installedModules.splice(idx, 1);
 
     const category = slotType === 'filter' ? 'gas_mask_module' : (slotType === 'visor' ? 'visor' : 'helmet_module');
-    const path = mod.sourcePath || ['inventory', 'backpack'];
     const restored = {
         id: mod.id,
         templateId: mod.templateId,
@@ -3612,7 +3671,17 @@ window.unequipHelmetModule = async function(slotType) {
             protection: mod.protection || { physical: 0 }
         }
     };
-    restoreItemToPath(restored, path);
+
+    const path = mod.sourcePath;
+    let restoredFlag = false;
+    if (path) {
+        restoredFlag = restoreItemToPath(restored, path);
+    }
+    if (!restoredFlag) {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+        currentCharacterData.inventory.backpack.push(restored);
+    }
 
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
@@ -4296,7 +4365,8 @@ window.equipToBeltFromInventory = async function(itemPath) {
             modifications: item.modifications,
             installedModules: item.installedModules
             // добавьте другие важные поля при необходимости
-        }
+        },
+        sourcePath: itemPath
     };
 
     renderInventoryTab(currentCharacterData);
@@ -4323,12 +4393,18 @@ window.unequipFromBelt = async function() {
     const restoredItem = createItemFromTemplate(template);
     Object.assign(restoredItem, stored.savedAttributes || {});
 
-    // Добавляем в рюкзак
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
-    currentCharacterData.inventory.backpack.push(restoredItem);
+    // Пытаемся вернуть в исходный контейнер (если путь сохранён), иначе в рюкзак
+    const path = stored.sourcePath;
+    let restored = false;
+    if (path) {
+        restored = restoreItemToPath(restoredItem, path);
+    }
+    if (!restored) {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+        currentCharacterData.inventory.backpack.push(restoredItem);
+    }
 
-    // Очищаем слот пояса
     delete belt.storedItem;
 
     renderInventoryTab(currentCharacterData);
