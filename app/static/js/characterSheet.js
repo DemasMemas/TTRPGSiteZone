@@ -1371,8 +1371,9 @@ window.deleteTemplate = async function(id, category) {
 };
 
 window.editTemplate = async function(templateId, category) {
-    const templates = await loadTemplatesForLobby(category);
-    const template = templates.find(t => t.id === templateId);
+    // Загружаем шаблоны напрямую с сервера, минуя кеш с миллионом
+    const data = await Server.getLobbyTemplates(currentLobbyId, category);
+    const template = data.local.find(t => t.id === templateId);
     if (!template) { showNotification('Шаблон не найден'); return; }
 
     switch (category) {
@@ -1384,6 +1385,7 @@ window.editTemplate = async function(templateId, category) {
         case 'vest': openCreateVestTemplateModal(template); break;
         case 'weapon_module': openCreateModuleTemplateModal(template); break;
         case 'magazine': openCreateMagazineTemplateModal(template); break;
+        case 'melee_weapon': openCreateMeleeWeaponTemplateModal(template); break; // если будет модалка
         default: showNotification('Редактирование не поддерживается');
     }
 };
