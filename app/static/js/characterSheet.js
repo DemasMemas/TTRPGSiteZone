@@ -122,7 +122,9 @@ function getCategoryDisplay(cat) {
         'gas_mask_module': 'Фильтры противогазов',
         'helmet_module': 'Модули шлемов',
         'visor': 'Забрала',
-        'belt': 'Пояс'
+        'belt': 'Пояс',
+        'grenade': 'Гранаты',
+        'device': 'Приборы'
     };
     return map[cat] || cat;
 }
@@ -133,7 +135,8 @@ async function getAllItemTemplates(forceRefresh = false) {
     const categories = [
         'weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
         'consumable', 'crafting_material', 'artifact', 'backpack', 'vest', 'pouch',
-        'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module', 'visor', 'belt'
+        'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module', 'visor', 'belt',
+        'grenade', 'device'
     ];
 
     let all = [];
@@ -378,6 +381,78 @@ function forceSyncCharacter() {
 // ========== УНИВЕРСАЛЬНАЯ МОДЕЛЬ ПРЕДМЕТА ==========
 function generateItemId() {
     return 'item_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// ========== УНИВЕРСАЛЬНЫЕ ФУНКЦИИ РАБОТЫ СО СЛОТАМИ ==========
+
+// Получить доступные слоты предмета на основе его шаблона.
+function getItemSlots(item) {
+    if (!item.templateId) return [];
+    // Используем глобальный кеш шаблонов (заполняется в getAllItemTemplates)
+    const templates = allTemplatesCache || [];
+    const template = templates.find(t => t.id === item.templateId);
+    return template?.attributes?.slots || [];
+}
+
+// Восстановить предмет по сохранённому пути.
+function restoreItemToPath(item, path) {
+    let parent = currentCharacterData;
+    for (let i = 0; i < path.length - 1; i++) {
+        const key = path[i];
+        if (Array.isArray(parent) && typeof key === 'number') parent = parent[key];
+        else if (typeof parent === 'object' && key in parent) parent = parent[key];
+        else return false;
+    }
+    const lastKey = path[path.length - 1];
+    if (Array.isArray(parent)) {
+        parent.splice(lastKey, 0, item);
+        return true;
+    }
+    return false;
+}
+
+// Добавить предмет в рюкзак (fallback).
+function addToBackpack(item) {
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(item);
+}
+
+// Универсальная установка модуля в слот.
+function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, slotType) {
+    if (!targetItem.installedModules) targetItem.installedModules = [];
+
+    // Обработка стопки
+    if (moduleItem.quantity > 1) {
+        // Создаём копию с quantity = 1
+        moduleItem = { ...moduleItem, quantity: 1 };
+        // Уменьшаем количество в исходной стопке
+        const originalItem = getItemByPath(modulePath);
+        if (originalItem) {
+            originalItem.quantity -= 1;
+            if (originalItem.category === 'ammo') updateAmmoWeight(originalItem);
+        }
+    } else {
+        // Удаляем модуль из инвентаря
+        if (!removeItemByPath(modulePath)) {
+            return false;
+        }
+    }
+
+    // Замена старого модуля
+    const existingIndex = targetItem.installedModules.findIndex(m => m.slotType === slotType);
+    if (existingIndex !== -1) {
+        const oldMod = targetItem.installedModules[existingIndex];
+        targetItem.installedModules.splice(existingIndex, 1);
+        if (!restoreItemToPath(oldMod, modulePath)) {
+            addToBackpack(oldMod);
+        }
+    }
+
+    moduleItem.sourcePath = modulePath;
+    moduleItem.slotType = slotType;
+    targetItem.installedModules.push(moduleItem);
+    return true;
 }
 
 /**
@@ -1802,58 +1877,6 @@ async function renderEquipmentTab(data) {
         `;
     }
 
-    function renderSlots(item, templates, type) {
-        if (!item.templateId) return '';
-        const template = templates.find(t => t.id == item.templateId);
-        if (!template?.attributes?.slots?.length) return '';
-        return template.attributes.slots.map(slot => {
-            const installed = (item.installedModules || []).find(m => m.slotType === slot.type);
-            let info = '';
-            if (installed) {
-                if (slot.type === 'filter') {
-                    const dur = installed.durability || 0;
-                    const maxDur = installed.maxDurability || 0;
-                    info = `${escapeHtml(installed.name)} (прочность ${dur}/${maxDur})`;
-                } else if (slot.type === 'nvg') {
-                    const acc = installed.accuracy_penalty || 0;
-                    const aware = installed.awareness_penalty || 0;
-                    info = `${escapeHtml(installed.name)} (точность ${acc}, вним. ${aware})`;
-                } else if (slot.type === 'visor') {
-                    const acc = installed.accuracy_penalty || 0;
-                    const erg = installed.ergonomics_penalty || 0;
-                    const cha = installed.charisma_penalty || 0;
-                    const prot = installed.protection?.physical || 0;
-                    const dur = installed.durability || 0;
-                    const maxDur = installed.maxDurability || 0;
-                    info = `${escapeHtml(installed.name)} (точность ${acc}, эргон. ${erg}, харизма ${cha}, прочность ${dur}/${maxDur}, физ. защита ${prot})`;
-                    return `
-                        <div style="margin-left:15px; display:flex; align-items:center; gap:10px; margin-top:5px;">
-                            <span style="width:100px;">${slot.label}:</span>
-                            <span style="flex:1;">${info}</span>
-                            <button type="button" class="btn btn-sm btn-secondary" onclick="openVisorModificationsModal('${slot.type}')">⚙️</button>
-                            <button type="button" class="btn btn-sm btn-danger" onclick="unequipHelmetModule('${slot.type}')">Снять</button>
-                        </div>
-                    `;
-                } else {
-                    info = escapeHtml(installed.name);
-                }
-            }
-            const unequipFunc = type === 'helmet' ? 'unequipHelmetModule' : 'unequipGasMaskModule';
-            const equipFunc = type === 'helmet' ? 'equipHelmetModule' : 'equipGasMaskModule';
-            return `
-                <div style="margin-left:15px; display:flex; align-items:center; gap:10px; margin-top:5px;">
-                    <span style="width:100px;">${slot.label}:</span>
-                    ${installed ? `
-                        <span style="flex:1;">${info}</span>
-                        <button type="button" class="btn btn-sm btn-danger" onclick="${unequipFunc}('${slot.type}')">Снять</button>
-                    ` : `
-                        <button type="button" class="btn btn-sm btn-primary" onclick="${equipFunc}('${slot.type}')">Установить</button>
-                    `}
-                </div>
-            `;
-        }).join('');
-    }
-
     let html = `
         <div class="equipment-group">
             <div class="equipment-header"><h4>Оружие</h4></div>
@@ -1929,9 +1952,9 @@ async function renderEquipmentTab(data) {
                     </div>
                 </div>
             </div>
-            ${renderSlots(helmet, helmetTemplates, 'helmet') ? `
+            ${renderSlotsUniversal(helmet, ['equipment', 'helmet']) ? `
                 <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
-                    ${renderSlots(helmet, helmetTemplates, 'helmet')}
+                    ${renderSlotsUniversal(helmet, ['equipment', 'helmet'])}
                 </div>
             ` : ''}
             <div class="modifications-block">
@@ -1999,9 +2022,9 @@ async function renderEquipmentTab(data) {
                     ${protectionGrid('equipment.gasMask', gasMask.protection)}
                 </div>
             </div>
-            ${renderSlots(gasMask, gasMaskTemplates, 'gasMask') ? `
+            ${renderSlotsUniversal(gasMask, ['equipment', 'gasMask']) ? `
                 <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
-                    ${renderSlots(gasMask, gasMaskTemplates, 'gasMask')}
+                    ${renderSlotsUniversal(gasMask, ['equipment', 'gasMask'])}
                 </div>
             ` : ''}
             <div class="modifications-block">
@@ -2098,6 +2121,85 @@ async function renderEquipmentTab(data) {
 
     container.innerHTML = html;
     await renderWeapons(weapons, weaponTemplates, weaponModuleTemplates, weaponModTemplates);
+}
+
+/**
+ * Рекурсивно отрендерить слоты предмета и установленные модули.
+ * @param {Object} item - предмет
+ * @param {Array} itemPath - путь к предмету в данных (массив, например ['equipment','helmet'])
+ * @param {number} depth - уровень вложенности (для отступов)
+ * @returns {string} HTML
+ */
+function renderSlotsUniversal(item, itemPath, depth = 0) {
+    const slots = getItemSlots(item);
+    if (!slots.length) return '';
+
+    const allTemplates = allTemplatesCache || [];
+    const indent = depth * 20;
+
+    let html = '';
+    for (const slot of slots) {
+        const pathJson = JSON.stringify(itemPath).replace(/'/g, "\\'");
+        const installed = (item.installedModules || []).find(m => m.slotType === slot.type);
+        let slotContent = '';
+
+        if (installed) {
+            let info = escapeHtml(installed.name);
+            if (slot.type === 'filter') {
+                const dur = installed.durability || 0;
+                const maxDur = installed.maxDurability || 0;
+                info = `${info} (прочность ${dur}/${maxDur})`;
+            } else if (slot.type === 'nvg') {
+                const acc = installed.attributes?.accuracy_penalty ?? installed.accuracy_penalty ?? 0;
+                const aware = installed.attributes?.awareness_penalty ?? installed.awareness_penalty ?? 0;
+                info = `${info} (точность ${acc}, вним. ${aware}`;
+                const battery = (installed.installedModules || []).find(m => m.slotType === 'battery');
+                if (battery) {
+                    info += `, заряд ${battery.attributes?.power ?? '?'}%`;
+                }
+                info += `)`;
+            } else if (slot.type === 'visor') {
+                const acc = installed.attributes?.accuracy_penalty ?? installed.accuracy_penalty ?? 0;
+                const erg = installed.attributes?.ergonomics_penalty ?? installed.ergonomics_penalty ?? 0;
+                const cha = installed.attributes?.charisma_penalty ?? installed.charisma_penalty ?? 0;
+                const prot = installed.protection?.physical ?? 0;
+                const dur = installed.durability ?? 0;
+                const maxDur = installed.maxDurability ?? 0;
+                info = `${info} (точность ${acc}, эргон. ${erg}, харизма ${cha}, прочность ${dur}/${maxDur}, физ. защита ${prot})`;
+            } else if (slot.type === 'battery') {
+                const power = installed.attributes?.power;
+                info = `${info} (заряд ${power !== undefined ? power : '?'}%)`;
+            }
+
+            const uninstallBtn = `<button type="button" class="btn btn-sm btn-danger" onclick="window.uninstallModuleFromSlot('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">Снять</button>`;
+            const configBtn = (slot.type === 'visor') ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openVisorModificationsModal('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">⚙️</button>` : '';
+
+            slotContent = `
+                <div style="margin-left:${indent}px; display:flex; align-items:center; gap:10px; margin-top:5px;">
+                    <span style="width:100px;">${slot.label}:</span>
+                    <span style="flex:1;">${info}</span>
+                    ${configBtn}
+                    ${uninstallBtn}
+                </div>
+            `;
+
+            // Рекурсивно отображаем слоты установленного модуля
+            const installedIndex = (item.installedModules || []).findIndex(m => m.slotType === slot.type);
+            const subPath = itemPath.concat(['installedModules', installedIndex]);
+            slotContent += renderSlotsUniversal(installed, subPath, depth + 1);
+        } else {
+            const installBtn = `<button type="button" class="btn btn-sm btn-primary" onclick="window.installModuleFromSlot('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">Установить</button>`;
+            slotContent = `
+                <div style="margin-left:${indent}px; display:flex; align-items:center; gap:10px; margin-top:5px;">
+                    <span style="width:100px;">${slot.label}:</span>
+                    ${installBtn}
+                </div>
+            `;
+        }
+
+        html += slotContent;
+    }
+    return html;
 }
 
 function renderBeltPouches(pouches, pouchTemplates) {
@@ -2356,13 +2458,14 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
             `;
         }
 
-        // ===== СЛОТЫ ДЛЯ МОДУЛЕЙ (НОВОЕ) =====
+        // Слоты для модулей
         let slotsHtml = '';
         if (weapon.templateId) {
             const weaponTemplate = weaponTemplates.find(t => t.id == weapon.templateId);
             if (weaponTemplate && weaponTemplate.attributes && weaponTemplate.attributes.slots) {
                 const slots = weaponTemplate.attributes.slots;
                 const installed = Array.isArray(weapon.installedModules) ? weapon.installedModules : [];
+                slotsHtml = `<div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;"><strong>Слоты:</strong>`;
                 slots.forEach(slot => {
                     const installedMod = installed.find(mod => mod.slotType === slot.type);
                     slotsHtml += `<div style="margin-left: 15px; display: flex; align-items: center; gap: 10px; margin-top: 5px;">`;
@@ -2379,13 +2482,13 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
             }
         }
 
+        // Магазин
         let magazineHtml = '';
         if (weapon.templateId) {
             const weaponTemplate = weaponTemplates.find(t => t.id == weapon.templateId);
             const hasFixedMagazine = weaponTemplate?.attributes?.fixedMagazine || false;
 
             if (hasFixedMagazine) {
-                // Несъёмный магазин – показываем текущий боезапас
                 const maxAmmo = weaponTemplate.attributes?.magazine_size || 0;
                 magazineHtml = `<div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
                     <strong>Патроны (несъёмный магазин):</strong>
@@ -2396,7 +2499,6 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     </div>
                 </div>`;
             } else {
-                // Обычный сменный магазин
                 const installedMag = weapon.installedMagazine;
                 magazineHtml = `<div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
                     <strong>Магазин:</strong>
@@ -2407,9 +2509,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     if (installedMag.ammo && installedMag.ammo.length > 0) {
                         const nextAmmo = installedMag.ammo[0];
                         ammoBreakdown = `<br><small>Состав: ${installedMag.ammo.map(a => `${a.name} (${a.quantity})`).join(', ')}`;
-                        if (nextAmmo) {
-                            ammoBreakdown += `<br>▶ Следующий: ${nextAmmo.name}`;
-                        }
+                        if (nextAmmo) ammoBreakdown += `<br>▶ Следующий: ${nextAmmo.name}`;
                         ammoBreakdown += '</small>';
                     }
                     magazineHtml += `<span>${escapeHtml(installedMag.name)} (${totalAmmo}/${installedMag.capacity || 30})${ammoBreakdown}</span>`;
@@ -2418,6 +2518,21 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     magazineHtml += `<button type="button" class="btn btn-sm btn-primary" onclick="equipMagazineToWeapon(${index})">Установить магазин</button>`;
                 }
                 magazineHtml += `</div></div>`;
+            }
+        }
+
+        // Кнопка выстрела
+        const useWeaponBtn = `<button type="button" class="btn btn-sm btn-success" onclick="useWeaponFromEquipment(${index})" style="margin-left: 5px;" title="Выстрелить">🔫 Выстрел</button>`;
+
+        // Кнопка подствольного гранатомёта
+        let grenadeLauncherHtml = '';
+        const launcher = weapon.installedModules?.find(m => m.slotType === 'handguard' && m.attributes?.type === 'grenade_launcher');
+        if (launcher) {
+            const isLoaded = launcher.loaded || false;
+            if (isLoaded) {
+                grenadeLauncherHtml = `<button type="button" class="btn btn-sm btn-warning" onclick="fireGrenadeLauncher(${index})" style="margin-left: 5px;" title="Выстрел из подствольника">💣 Выстрел ГП</button>`;
+            } else {
+                grenadeLauncherHtml = `<button type="button" class="btn btn-sm btn-secondary" onclick="reloadGrenadeLauncher(${index})" style="margin-left: 5px;" title="Зарядить подствольник">➕ Зарядить ГП</button>`;
             }
         }
 
@@ -2446,6 +2561,11 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 ${fieldsHtml}
                 ${slotsHtml}
                 ${magazineHtml}
+                <div style="margin-top:10px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+                    ${useWeaponBtn}
+                    ${grenadeLauncherHtml}
+                    <button type="button" class="btn btn-sm btn-danger" onclick="unequipWeapon(${index})" style="margin-left: auto;">Снять</button>
+                </div>
                 <div style="margin-top:10px;">
                     <div style="display: flex; align-items: center;">
                         <label style="margin: 0;">Модификации</label>
@@ -2454,7 +2574,6 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     <div id="modifications-${index}">${modificationsHtml}</div>
                 </div>
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})" style="margin-top:10px;">Удалить оружие</button>
-                <button type="button" class="btn btn-sm btn-warning" onclick="unequipWeapon(${index})" style="margin-top:10px; margin-left:5px;">Снять</button>
             </div>
         `);
     }
@@ -2478,6 +2597,7 @@ window.equipModuleToWeapon = async function(weaponIndex, slotType) {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
             if (item.category === 'weapon_module' && item.attributes?.slot_type === slotType) {
+                // Проверка калибра для слота "Ствол"
                 if (slotType === 'barrel' && weaponCaliber) {
                     const moduleCaliber = item.attributes?.caliber;
                     if (moduleCaliber && moduleCaliber !== weaponCaliber) return;
@@ -2532,6 +2652,18 @@ window.equipModuleToWeapon = async function(weaponIndex, slotType) {
         const selected = inventoryModules[idx];
         modal.remove();
 
+        // Проверка совместимости для подствольного гранатомёта
+        if (slotType === 'handguard' && selected.item.attributes?.type === 'grenade_launcher') {
+            const allowedCategories = selected.item.attributes?.compatible_weapon_categories;
+            if (allowedCategories && allowedCategories.length > 0) {
+                const weaponSubcategory = weaponTemplate?.subcategory;
+                if (!weaponSubcategory || !allowedCategories.includes(weaponSubcategory)) {
+                    showNotification('Этот подствольник можно установить только на штурмовые винтовки');
+                    return;
+                }
+            }
+        }
+
         if (!removeItemByPath(selected.path)) {
             showNotification('Не удалось найти модуль в инвентаре');
             return;
@@ -2543,7 +2675,8 @@ window.equipModuleToWeapon = async function(weaponIndex, slotType) {
             templateId: selected.item.templateId,
             name: selected.item.name,
             slotType: slotType,
-            modifiers: selected.item.attributes?.modifiers || {}
+            modifiers: selected.item.attributes?.modifiers || {},
+            attributes: selected.item.attributes
         });
 
         renderEquipmentTab(currentCharacterData);
@@ -3362,336 +3495,9 @@ function addAmmoToMagazine(mag, ammoItem, count) {
     updateMagazineWeight(mag);
 };
 
-window.equipGasMaskModule = async function(slotType) {
-    const gasMask = currentCharacterData.equipment?.gasMask;
-    if (!gasMask || !gasMask.templateId) {
-        showNotification('Противогаз должен быть основан на шаблоне');
-        return;
-    }
-
-    const inventoryModules = [];
-    const collect = (items, path) => {
-        if (!Array.isArray(items)) return;
-        items.forEach((item, idx) => {
-            if (item.category === 'gas_mask_module' && item.attributes?.slot_type === slotType) {
-                inventoryModules.push({ item, path: path.concat(idx) });
-            }
-            if (item.contents) collect(item.contents, path.concat(idx, 'contents'));
-        });
-    };
-    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
-    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
-    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
-    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
-    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
-    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
-
-    if (inventoryModules.length === 0) {
-        showNotification('Нет подходящих фильтров в инвентаре');
-        return;
-    }
-
-    const oldModal = document.getElementById('gas-mask-module-modal');
-    if (oldModal) oldModal.remove();
-    const modal = document.createElement('div');
-    modal.id = 'gas-mask-module-modal';
-    modal.className = 'modal';
-    modal.innerHTML = `
-        <div class="modal-content">
-            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
-            <h3>Выберите фильтр</h3>
-            <select id="gas-mask-module-select" class="form-control"></select>
-            <div class="form-actions">
-                <button class="btn btn-primary" id="confirm-gas-mask-module">Установить</button>
-                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-    const select = modal.querySelector('#gas-mask-module-select');
-    inventoryModules.forEach((entry, idx) => {
-        const opt = document.createElement('option');
-        opt.value = idx;
-        const dur = entry.item.attributes?.durability || 0;
-        const maxDur = entry.item.attributes?.max_durability || 0;
-        opt.textContent = `${entry.item.name} (прочность ${dur}/${maxDur})`;
-        select.appendChild(opt);
-    });
-    modal.querySelector('#confirm-gas-mask-module').onclick = () => {
-        const idx = select.value;
-        if (idx === '') return;
-        const selected = inventoryModules[idx];
-        const mod = selected.item;
-        modal.remove();
-
-        if (!removeItemByPath(selected.path)) {
-            showNotification('Не удалось найти фильтр в инвентаре');
-            return;
-        }
-
-        if (!gasMask.installedModules) gasMask.installedModules = [];
-        // Если уже есть фильтр, возвращаем старый в рюкзак (пока без пути, позже можно доработать)
-        const existingIdx = gasMask.installedModules.findIndex(m => m.slotType === 'filter');
-        if (existingIdx !== -1) {
-            const oldMod = gasMask.installedModules[existingIdx];
-            gasMask.installedModules.splice(existingIdx, 1);
-            const oldItem = {
-                id: oldMod.id, templateId: oldMod.templateId, name: oldMod.name,
-                category: 'gas_mask_module', weight: 0.1, volume: 0.2, quantity: 1,
-                attributes: { slot_type: 'filter', durability: oldMod.durability, max_durability: oldMod.maxDurability }
-            };
-            currentCharacterData.inventory.backpack.push(oldItem);
-        }
-
-        gasMask.installedModules.push({
-            id: mod.id,
-            templateId: mod.templateId,
-            name: mod.name,
-            slotType: 'filter',
-            durability: mod.attributes?.durability || 0,
-            maxDurability: mod.attributes?.max_durability || 0,
-            sourcePath: selected.path
-        });
-
-        renderEquipmentTab(currentCharacterData);
-        renderInventoryTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification('Фильтр установлен', 'success');
-    };
-    modal.style.display = 'flex';
-};
-
-window.unequipGasMaskModule = async function(slotType) {
-    const gasMask = currentCharacterData.equipment?.gasMask;
-    if (!gasMask || !gasMask.installedModules) return;
-    const idx = gasMask.installedModules.findIndex(m => m.slotType === slotType);
-    if (idx === -1) return;
-    const mod = gasMask.installedModules[idx];
-    gasMask.installedModules.splice(idx, 1);
-
-    const restored = {
-        id: mod.id,
-        templateId: mod.templateId,
-        name: mod.name,
-        category: 'gas_mask_module',
-        weight: mod.weight || 0.1,
-        volume: mod.volume || 0.2,
-        quantity: 1,
-        attributes: {
-            slot_type: slotType,
-            durability: mod.durability,
-            max_durability: mod.maxDurability
-        }
-    };
-
-    const path = mod.sourcePath;
-    let restoredFlag = false;
-    if (path) restoredFlag = restoreItemToPath(restored, path);
-    if (!restoredFlag) {
-        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
-        currentCharacterData.inventory.backpack.push(restored);
-    }
-
-    renderEquipmentTab(currentCharacterData);
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification('Фильтр снят', 'success');
-};
-
-window.equipHelmetModule = async function(slotType) {
-    const helmet = currentCharacterData.equipment?.helmet;
-    if (!helmet || !helmet.templateId) {
-        showNotification('Шлем должен быть основан на шаблоне');
-        return;
-    }
-
-    const category = slotType === 'filter' ? 'gas_mask_module' : (slotType === 'visor' ? 'visor' : 'helmet_module');
-
-    const inventoryModules = [];
-    const collect = (items, path) => {
-        if (!Array.isArray(items)) return;
-        items.forEach((item, idx) => {
-            if (item.category === category && item.attributes?.slot_type === slotType) {
-                inventoryModules.push({ item, path: path.concat(idx) });
-            }
-            if (item.contents) collect(item.contents, path.concat(idx, 'contents'));
-        });
-    };
-    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
-    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
-    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
-    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
-    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
-    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
-
-    if (inventoryModules.length === 0) {
-        const slotNames = { filter: 'фильтров', nvg: 'ПНВ', visor: 'забрал' };
-        const slotName = slotNames[slotType] || slotType;
-        showNotification(`Нет подходящих ${slotName} в инвентаре`);
-        return;
-    }
-
-    const oldModal = document.getElementById('helmet-module-modal');
-    if (oldModal) oldModal.remove();
-    const modal = document.createElement('div');
-    modal.id = 'helmet-module-modal';
-    modal.className = 'modal';
-    modal.innerHTML = `
-        <div class="modal-content">
-            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
-            <h3>Выберите модуль</h3>
-            <select id="helmet-module-select" class="form-control"></select>
-            <div class="form-actions">
-                <button class="btn btn-primary" id="confirm-helmet-module">Установить</button>
-                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-    const select = modal.querySelector('#helmet-module-select');
-    inventoryModules.forEach((entry, idx) => {
-        const opt = document.createElement('option');
-        opt.value = idx;
-        const item = entry.item;
-        let info = '';
-        if (slotType === 'filter') {
-            const dur = item.attributes?.durability || 0;
-            const maxDur = item.attributes?.max_durability || 0;
-            info = ` (прочность ${dur}/${maxDur})`;
-        } else if (slotType === 'nvg') {
-            const acc = item.attributes?.accuracy_penalty || 0;
-            const aware = item.attributes?.awareness_penalty || 0;
-            info = ` (точность ${acc}, внимательность ${aware})`;
-        }
-        opt.textContent = item.name + info;
-        select.appendChild(opt);
-    });
-    modal.querySelector('#confirm-helmet-module').onclick = () => {
-        const idx = select.value;
-        if (idx === '') return;
-        const selected = inventoryModules[idx];
-        const mod = selected.item;
-
-        if (slotType === 'visor') {
-            const compatible = mod.attributes?.compatible_helmets || [];
-            if (compatible.length > 0 && !compatible.includes(helmet.templateId)) {
-                showNotification('Это забрало не подходит к данному шлему');
-                modal.remove();
-                return;
-            }
-        }
-
-        modal.remove();
-
-        if (!removeItemByPath(selected.path)) {
-            showNotification('Не удалось найти модуль в инвентаре');
-            return;
-        }
-
-        if (!helmet.installedModules) helmet.installedModules = [];
-        const existingIdx = helmet.installedModules.findIndex(m => m.slotType === slotType);
-        if (existingIdx !== -1) {
-            const oldMod = helmet.installedModules[existingIdx];
-            helmet.installedModules.splice(existingIdx, 1);
-            const oldItem = {
-                id: oldMod.id,
-                templateId: oldMod.templateId,
-                name: oldMod.name,
-                category: category,
-                weight: oldMod.weight || 0.2,
-                volume: oldMod.volume || 0.3,
-                quantity: 1,
-                attributes: {
-                    slot_type: slotType,
-                    durability: oldMod.durability,
-                    max_durability: oldMod.maxDurability,
-                    accuracy_penalty: oldMod.accuracy_penalty,
-                    awareness_penalty: oldMod.awareness_penalty,
-                    physical_protection: oldMod.protection || { physical: 0 }
-                }
-            };
-            currentCharacterData.inventory.backpack.push(oldItem);
-        }
-
-        // Сохраняем ВСЕ значимые поля из модуля
-        helmet.installedModules.push({
-            id: mod.id,
-            templateId: mod.templateId,
-            name: mod.name,
-            slotType: slotType,
-            weight: mod.weight,
-            volume: mod.volume,
-            durability: mod.attributes?.durability,
-            maxDurability: mod.attributes?.max_durability,
-            accuracy_penalty: mod.attributes?.accuracy_penalty,
-            awareness_penalty: mod.attributes?.awareness_penalty,
-            ergonomics_penalty: mod.attributes?.ergonomics_penalty,
-            charisma_penalty: mod.attributes?.charisma_penalty,
-            protection: mod.attributes?.protection || { physical: 0 },
-            modifications: mod.modifications || [],
-            sourcePath: selected.path
-        });
-
-        renderEquipmentTab(currentCharacterData);
-        renderInventoryTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification('Модуль установлен', 'success');
-    };
-    modal.style.display = 'flex';
-};
-
-window.unequipHelmetModule = async function(slotType) {
-    const helmet = currentCharacterData.equipment?.helmet;
-    if (!helmet || !helmet.installedModules) return;
-    const idx = helmet.installedModules.findIndex(m => m.slotType === slotType);
-    if (idx === -1) return;
-    const mod = helmet.installedModules[idx];
-    helmet.installedModules.splice(idx, 1);
-
-    const category = slotType === 'filter' ? 'gas_mask_module' : (slotType === 'visor' ? 'visor' : 'helmet_module');
-    const restored = {
-        id: mod.id,
-        templateId: mod.templateId,
-        name: mod.name,
-        category: category,
-        weight: mod.weight || 0.2,
-        volume: mod.volume || 0.3,
-        quantity: 1,
-        modifications: mod.modifications || [],
-        attributes: {
-            slot_type: slotType,
-            durability: mod.durability,
-            max_durability: mod.maxDurability,
-            accuracy_penalty: mod.accuracy_penalty,
-            awareness_penalty: mod.awareness_penalty,
-            protection: mod.protection || { physical: 0 }
-        }
-    };
-
-    const path = mod.sourcePath;
-    let restoredFlag = false;
-    if (path) {
-        restoredFlag = restoreItemToPath(restored, path);
-    }
-    if (!restoredFlag) {
-        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
-        currentCharacterData.inventory.backpack.push(restored);
-    }
-
-    renderEquipmentTab(currentCharacterData);
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification('Модуль снят', 'success');
-};
-
-window.openVisorModificationsModal = async function(slotType) {
-    const helmet = currentCharacterData.equipment?.helmet;
+window.openVisorModificationsModal = async function(itemPathStr, slotType) {
+    const targetPath = JSON.parse(itemPathStr);
+    const helmet = getItemByPath(targetPath);
     if (!helmet || !helmet.installedModules) {
         showNotification('Шлем или забрало не найдены');
         return;
@@ -3938,7 +3744,7 @@ window.equipArmorFromInventory = async function(itemPath) {
         movementPenalty: item.movementPenalty || template.attributes?.movement_penalty || 0,
         containerSlots: item.containerSlots || template.attributes?.container_slots || 0,
         modifications: item.modifications || [],
-        installedModules: item.installedModules || []
+        installedModules: item.installedModules ? [...item.installedModules] : []
     };
     initArmorStagedDurability(armorToEquip, template);
     if (item.durability !== undefined) {
@@ -4001,7 +3807,7 @@ window.equipHelmetFromInventory = async function(itemPath) {
         ergonomicsPenalty: item.ergonomicsPenalty || template.attributes?.ergonomics_penalty || 0,
         charismaBonus: item.charismaBonus || template.attributes?.charisma_bonus || 0,
         modifications: item.modifications || [],
-        installedModules: item.installedModules || []
+        installedModules: item.installedModules ? [...item.installedModules] : []
     };
     initArmorStagedDurability(helmetToEquip, template);
     if (item.durability !== undefined) {
@@ -4065,7 +3871,7 @@ window.equipGasMaskFromInventory = async function(itemPath) {
         ergonomicsPenalty: item.ergonomicsPenalty || template.attributes?.ergonomics_penalty || 0,
         charismaBonus: item.charismaBonus || template.attributes?.charisma_bonus || 0,
         modifications: item.modifications || [],
-        installedModules: item.installedModules || [],
+        installedModules: item.installedModules ? [...item.installedModules] : [],
         isWorn: item.isWorn || false
     };
     initArmorStagedDurability(gasMaskToEquip, template);
@@ -4140,7 +3946,7 @@ window.equipWeaponFromInventory = async function(itemPath) {
         caliber: item.caliber || template.attributes?.caliber,
         magazine_size: item.magazine_size || template.attributes?.magazine_size || 0,
         modifications: item.modifications || [],
-        installedModules: item.installedModules || [],
+        installedModules: item.installedModules ? [...item.installedModules] : [],
         installedMagazine: item.installedMagazine || null,
         ammo: item.ammo || 0
     };
@@ -4637,6 +4443,607 @@ window.unequipDetector = async function() {
     forceSyncCharacter();
     showNotification('Детектор аномалий снят', 'success');
 };
+
+window.useWeaponFromEquipment = function(weaponIndex) {
+    const weapon = currentCharacterData.weapons[weaponIndex];
+    if (!weapon) return;
+
+    // Проверяем тип магазина
+    const weaponTemplateId = weapon.templateId;
+    let hasFixedMagazine = false;
+    if (weaponTemplateId) {
+        // Можно загрузить шаблон, но проще проверить weapon.installedMagazine
+        hasFixedMagazine = !weapon.installedMagazine && weapon.attributes?.fixedMagazine;
+    }
+
+    if (hasFixedMagazine) {
+        // Несъёмный магазин
+        if (weapon.ammo <= 0) {
+            showNotification('Нет патронов');
+            return;
+        }
+        weapon.ammo -= 1;
+        showNotification(`Выстрел из ${weapon.name}. Осталось патронов: ${weapon.ammo}`, 'system');
+    } else {
+        // Съёмный магазин
+        const mag = weapon.installedMagazine;
+        if (!mag || !mag.ammo || mag.ammo.length === 0) {
+            showNotification('Нет магазина или патронов');
+            return;
+        }
+        // Уменьшаем последний тип патронов (LIFO)
+        const last = mag.ammo[mag.ammo.length - 1];
+        last.quantity -= 1;
+        if (last.quantity <= 0) {
+            mag.ammo.pop();
+        }
+        weapon.ammo = mag.ammo.reduce((sum, a) => sum + a.quantity, 0);
+        updateMagazineWeight(mag);
+        showNotification(`Выстрел из ${weapon.name}. Осталось патронов: ${weapon.ammo}`, 'system');
+    }
+
+    renderEquipmentTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+};
+
+window.fireGrenadeLauncher = async function(weaponIndex) {
+    const weapon = currentCharacterData.weapons[weaponIndex];
+    const launcher = weapon.installedModules?.find(m => m.attributes?.type === 'grenade_launcher');
+    if (!launcher) {
+        showNotification('Подствольный гранатомёт не установлен');
+        return;
+    }
+
+    if (!launcher.loaded || !launcher.loadedGrenade) {
+        showNotification('Подствольник не заряжен');
+        return;
+    }
+
+    const grenade = launcher.loadedGrenade;
+    showNotification(`Выстрел из подствольного гранатомёта (${launcher.name}). Эффект: ${grenade.attributes?.effect || 'взрыв'}`, 'system');
+
+    // Сбрасываем состояние
+    launcher.loaded = false;
+    launcher.loadedGrenade = null;
+
+    renderEquipmentTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+};
+
+window.reloadGrenadeLauncher = async function(weaponIndex) {
+    const weapon = currentCharacterData.weapons[weaponIndex];
+    const launcher = weapon.installedModules?.find(m => m.attributes?.type === 'grenade_launcher');
+    if (!launcher) {
+        showNotification('Подствольный гранатомёт не установлен');
+        return;
+    }
+
+    const caliber = launcher.attributes?.caliber;
+    if (!caliber) {
+        showNotification('Неизвестный калибр гранатомёта');
+        return;
+    }
+
+    // Ищем гранату подходящего калибра
+    const grenadeItems = [];
+    const collectGrenades = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((item, idx) => {
+            if (item.category === 'grenade' && item.attributes?.caliber === caliber && item.quantity > 0) {
+                grenadeItems.push({ item, path: path.concat(idx) });
+            }
+            if (item.contents) collectGrenades(item.contents, path.concat(idx, 'contents'));
+        });
+    };
+    collectGrenades(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collectGrenades(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    beltPouches.forEach((pouch, i) => collectGrenades(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    vestPouches.forEach((pouch, i) => collectGrenades(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
+
+    if (grenadeItems.length === 0) {
+        showNotification(`Нет гранат калибра ${caliber}`);
+        return;
+    }
+
+    // Модальное окно выбора гранаты (аналогично выбору магазина)
+    const oldModal = document.getElementById('grenade-select-modal');
+    if (oldModal) oldModal.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'grenade-select-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Выберите гранату</h3>
+            <select id="grenade-select" class="form-control"></select>
+            <div class="form-actions">
+                <button class="btn btn-primary" id="confirm-grenade-btn">Зарядить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const select = modal.querySelector('#grenade-select');
+    grenadeItems.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        opt.textContent = entry.item.name;
+        select.appendChild(opt);
+    });
+
+    modal.querySelector('#confirm-grenade-btn').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = grenadeItems[idx];
+        const grenade = selected.item;
+        modal.remove();
+
+        // Удаляем гранату из инвентаря
+        if (!removeItemByPath(selected.path)) {
+            showNotification('Не удалось найти гранату в инвентаре');
+            return;
+        }
+
+        // Сохраняем гранату в состоянии гранатомёта
+        launcher.loaded = true;
+        launcher.loadedGrenade = {
+            id: grenade.id,
+            templateId: grenade.templateId,
+            name: grenade.name,
+            attributes: grenade.attributes
+        };
+
+        renderEquipmentTab(currentCharacterData);
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Подствольник заряжен', 'success');
+    };
+
+    modal.style.display = 'flex';
+};
+
+// Использование предмета из инвентаря (для расходников, гранат и т.д.)
+async function useItem(item, itemPath) {
+    if (item.category === 'consumable') {
+        await useConsumable(item, itemPath);
+    } else if (item.category === 'grenade') {
+        await useGrenade(item, itemPath);
+    } else if (item.category === 'device') {
+        // Если устройство имеет батарею и разряжено, предложить зарядить
+        if (item.attributes?.power !== undefined && item.attributes.power < 100) {
+            await rechargeDevice(item, itemPath);
+        } else {
+            toggleDevice(item, itemPath);
+        }
+    } else {
+        showNotification('Невозможно использовать этот предмет');
+    }
+}
+
+async function useConsumable(item, itemPath) {
+    const effects = item.attributes?.effects || [];
+    if (effects.length === 0) {
+        showNotification('Предмет не имеет эффектов');
+        return;
+    }
+    effects.forEach(eff => applyEffect(eff));
+    item.quantity -= 1;
+    if (item.quantity <= 0) {
+        removeItemByPath(itemPath);
+    }
+    showNotification(`${item.name} использован`, 'success');
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+}
+
+async function useGrenade(item, itemPath) {
+    if (item.attributes?.caliber) {
+        showNotification('Эту гранату нельзя метнуть вручную — она для гранатомёта');
+        return;
+    }
+
+    showNotification(`Вы метнули ${item.name}. Эффект: ${item.attributes?.effect || 'взрыв'}`, 'system');
+    item.quantity -= 1;
+    if (item.quantity <= 0) {
+        removeItemByPath(itemPath);
+    }
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+}
+
+function toggleDevice(item, itemPath) {
+    if (item.attributes?.isActive === undefined) item.attributes.isActive = false;
+
+    if (!item.attributes.isActive) {
+        const battery = (item.installedModules || []).find(m => m.slotType === 'battery');
+        if (!battery) {
+            showNotification('Нет батарейки');
+            return;
+        }
+        const currentCharge = battery.attributes?.power ?? 0;
+        if (currentCharge <= 0) {
+            showNotification('Батарейка разряжена');
+            return;
+        }
+        battery.attributes.power = Math.max(0, currentCharge - 1);
+    }
+
+    item.attributes.isActive = !item.attributes.isActive;
+
+    const itemDiv = document.querySelector(`[data-path="${itemPath.join(',')}"]`);
+    if (itemDiv) {
+        const useBtn = itemDiv.querySelector('button.btn-success');
+        if (useBtn) {
+            useBtn.textContent = item.attributes.isActive ? '⏹' : '▶';
+            useBtn.title = item.attributes.isActive ? 'Выключить' : 'Включить';
+        }
+        const slotDiv = itemDiv.querySelector('div[style*="background: rgba(0,0,0,0.1)"]');
+        if (slotDiv) {
+            const infoSpan = slotDiv.querySelector('span[style*="flex: 1"]');
+            if (infoSpan) {
+                const battery = (item.installedModules || []).find(m => m.slotType === 'battery');
+                if (battery) {
+                    infoSpan.textContent = `${battery.name} (заряд ${battery.attributes.power}%)`;
+                }
+            }
+        }
+    }
+
+    showNotification(`${item.name} ${item.attributes.isActive ? 'включен' : 'выключен'}`, 'success');
+    scheduleAutoSave();
+    forceSyncCharacter();
+}
+
+async function rechargeDevice(item, itemPath) {
+    if (item.attributes?.power === undefined) {
+        showNotification('Это устройство не имеет батареи');
+        return;
+    }
+    if (item.attributes.power >= 100) {
+        showNotification('Батарея уже полностью заряжена');
+        return;
+    }
+
+    // Ищем батарейки в инвентаре
+    const batteryItems = [];
+    const collectBatteries = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((it, idx) => {
+            if (it.category === 'device' && it.subcategory === 'battery' && it.quantity > 0) {
+                batteryItems.push({ item: it, path: path.concat(idx) });
+            }
+            if (it.contents) collectBatteries(it.contents, path.concat(idx, 'contents'));
+        });
+    };
+    collectBatteries(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collectBatteries(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    beltPouches.forEach((pouch, i) => collectBatteries(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    vestPouches.forEach((pouch, i) => collectBatteries(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
+
+    if (batteryItems.length === 0) {
+        showNotification('Нет батареек в инвентаре');
+        return;
+    }
+
+    // Создаём модальное окно выбора
+    const oldModal = document.getElementById('recharge-battery-modal');
+    if (oldModal) oldModal.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'recharge-battery-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Выберите батарейку для зарядки</h3>
+            <select id="recharge-battery-select" class="form-control" size="5"></select>
+            <div class="form-actions" style="margin-top:15px;">
+                <button class="btn btn-primary" id="confirm-recharge-battery">Зарядить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const select = modal.querySelector('#recharge-battery-select');
+    batteryItems.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        opt.textContent = `${entry.item.name} (заряд ${entry.item.attributes?.power ?? '?'}%, ${entry.item.quantity} шт.)`;
+        select.appendChild(opt);
+    });
+
+    modal.querySelector('#confirm-recharge-battery').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = batteryItems[idx];
+        const battery = selected.item;
+        modal.remove();
+
+        // Заряжаем устройство
+        item.attributes.power = 100;
+
+        // Расходуем одну батарейку
+        battery.quantity -= 1;
+        const batteryPath = selected.path;
+        if (battery.quantity <= 0) {
+            removeItemByPath(batteryPath);
+        }
+
+        // Обновляем UI точечно
+        // 1. Слоты устройства
+        const deviceDiv = document.querySelector(`[data-path="${itemPath.join(',')}"]`);
+        if (deviceDiv) {
+            const slotsContainer = deviceDiv.querySelector('.item-slots-container');
+            const newSlotsHtml = renderSlotsUniversal(item, itemPath, 1);
+            if (slotsContainer) {
+                slotsContainer.outerHTML = newSlotsHtml;
+            } else if (newSlotsHtml) {
+                deviceDiv.insertAdjacentHTML('beforeend', newSlotsHtml);
+            }
+        }
+
+        // 2. Стопка батареек
+        if (battery.quantity > 0) {
+            const batteryDiv = document.querySelector(`[data-path="${batteryPath.join(',')}"]`);
+            if (batteryDiv) {
+                const qtyInput = batteryDiv.querySelector('input[placeholder="Кол-во"]');
+                if (qtyInput) qtyInput.value = battery.quantity;
+            }
+        } else {
+            const batteryDiv = document.querySelector(`[data-path="${batteryPath.join(',')}"]`);
+            if (batteryDiv) {
+                const parent = batteryDiv.parentNode;
+                batteryDiv.remove();
+                const remaining = Array.from(parent.children).filter(el => el.hasAttribute('data-path'));
+                remaining.forEach((el, idx) => {
+                    const newPath = batteryPath.slice(0, -1).concat(idx).join(',');
+                    el.dataset.path = newPath;
+                    updateHandlersInElement(el, batteryPath.slice(0, -1), idx);
+                });
+                if (parent.classList.contains('container-contents')) {
+                    updatePouchVolumeFromContentsDiv(parent);
+                }
+            }
+        }
+
+        recalculateInventoryTotals();
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification(`${item.name} заряжен`, 'success');
+    };
+
+    modal.style.display = 'flex';
+}
+
+window.equipDeviceModule = async function(device, devicePath, slotType) {
+    // Ищем батарейки в инвентаре
+    const batteries = [];
+    const collect = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((it, idx) => {
+            if (it.category === 'device' && it.subcategory === 'battery' && it.quantity > 0) {
+                batteries.push({ item: it, path: path.concat(idx) });
+            }
+            if (it.contents) collect(it.contents, path.concat(idx, 'contents'));
+        });
+    };
+    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
+
+    if (batteries.length === 0) {
+        showNotification('Нет батареек в инвентаре');
+        return;
+    }
+
+    const oldModal = document.getElementById('equip-battery-modal');
+    if (oldModal) oldModal.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.id = 'equip-battery-modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Выберите батарейку</h3>
+            <select id="battery-select" class="form-control" size="5"></select>
+            <div class="form-actions">
+                <button class="btn btn-primary" id="confirm-battery">Установить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const select = modal.querySelector('#battery-select');
+    batteries.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        opt.textContent = `${entry.item.name} (заряд ${entry.item.attributes?.power ?? '?'}%, ${entry.item.quantity} шт.)`;
+        select.appendChild(opt);
+    });
+
+    modal.querySelector('#confirm-battery').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = batteries[idx];
+        const battery = selected.item;
+        modal.remove();
+
+        // Уменьшаем количество в стопке
+        battery.quantity -= 1;
+        const batteryPath = selected.path;
+        let batteryRemoved = false;
+        if (battery.quantity <= 0) {
+            removeItemByPath(batteryPath);
+            batteryRemoved = true;
+        }
+
+        // Создаём копию батарейки с quantity = 1 для установки
+        const batteryToInstall = {
+            ...battery,
+            quantity: 1,
+            id: generateItemId(), // новый ID
+            attributes: { ...battery.attributes } // копируем атрибуты
+        };
+
+        // Если в слоте уже есть батарейка, снимаем её (возвращаем в инвентарь)
+        if (!device.installedModules) device.installedModules = [];
+        const existingIdx = device.installedModules.findIndex(m => m.slotType === slotType);
+        if (existingIdx !== -1) {
+            const old = device.installedModules[existingIdx];
+            device.installedModules.splice(existingIdx, 1);
+            // Возвращаем старую батарейку в то же место, откуда взяли новую
+            restoreItemToPath(old, batteryPath);
+        }
+
+        device.installedModules.push({
+            ...batteryToInstall,
+            slotType: slotType,
+            sourcePath: batteryPath // сохраняем путь для возврата
+        });
+
+        // Обновляем DOM: контейнер слотов устройства
+        const deviceDiv = document.querySelector(`[data-path="${devicePath.join(',')}"]`);
+        if (deviceDiv) {
+            const slotsContainer = deviceDiv.querySelector('.item-slots-container');
+            if (slotsContainer) {
+                const newSlotsHtml = renderSlotsUniversal(device, devicePath, 1);
+                slotsContainer.outerHTML = newSlotsHtml || '';
+            }
+        }
+
+        const batteryDiv = document.querySelector(`[data-path="${selected.path.join(',')}"]`);
+        if (batteryDiv) {
+            const qtyInput = batteryDiv.querySelector('input[data-field="quantity"]');
+            if (qtyInput) {
+                qtyInput.value = battery.quantity;
+            }
+            if (battery.quantity === 0) {
+                batteryDiv.remove();
+            }
+        }
+
+        recalculateInventoryTotals();
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Батарейка установлена', 'success');
+    };
+
+    modal.style.display = 'flex';
+};
+
+window.unequipDeviceModule = function(device, devicePath, slotType) {
+    const idx = (device.installedModules || []).findIndex(m => m.slotType === slotType);
+    if (idx === -1) return;
+    const mod = device.installedModules[idx];
+    device.installedModules.splice(idx, 1);
+
+    // Восстанавливаем батарейку
+    let restoredItem;
+    const templateId = mod.templateId;
+    if (templateId) {
+        const allTemplates = allTemplatesCache || [];
+        const template = allTemplates.find(t => t.id === templateId);
+        if (template) {
+            restoredItem = createItemFromTemplate(template);
+            restoredItem.durability = mod.durability;
+            restoredItem.maxDurability = mod.maxDurability;
+            restoredItem.installedModules = mod.installedModules || [];
+            restoredItem.attributes = { ...mod.attributes };
+        } else {
+            restoredItem = { ...mod, quantity: 1 };
+        }
+    } else {
+        restoredItem = { ...mod, quantity: 1 };
+    }
+
+    const sourcePath = mod.sourcePath;
+    let restored = false;
+    if (sourcePath) {
+        restored = restoreItemToPath(restoredItem, sourcePath);
+    }
+    if (!restored) {
+        addToBackpack(restoredItem);
+    }
+
+    // Обновляем DOM: контейнер слотов устройства
+    const deviceDiv = document.querySelector(`[data-path="${devicePath.join(',')}"]`);
+    if (deviceDiv) {
+        const slotsContainer = deviceDiv.querySelector('.item-slots-container');
+        if (slotsContainer) {
+            const newSlotsHtml = renderSlotsUniversal(device, devicePath, 1);
+            slotsContainer.outerHTML = newSlotsHtml || '';
+        }
+    }
+
+    if (sourcePath) {
+        const containerPath = sourcePath.slice(0, -1);
+        const index = sourcePath[sourcePath.length - 1];
+        const containerData = getItemByPath(containerPath);
+        if (Array.isArray(containerData)) {
+            const containerDiv = document.querySelector(`[data-path="${containerPath.join(',')}"]`);
+            if (containerDiv) {
+                const parentForItems = containerDiv.classList.contains('container-contents')
+                    ? containerDiv
+                    : containerDiv.querySelector('.container-contents') || containerDiv;
+                const allTemplates = allTemplatesCache || [];
+                // Вставляем батарейку на нужную позицию
+                const existingItems = Array.from(parentForItems.children).filter(el => el.hasAttribute('data-path'));
+                if (index < existingItems.length) {
+                    const refNode = existingItems[index];
+                    const newItemDiv = document.createElement('div');
+                    renderBackpackItem(restoredItem, index, containerPath, newItemDiv, allTemplates);
+                    parentForItems.insertBefore(newItemDiv.firstChild, refNode);
+                } else {
+                    renderBackpackItem(restoredItem, index, containerPath, parentForItems, allTemplates);
+                }
+            }
+        }
+    } else {
+        // fallback: если путь не сохранён, добавляем в конец рюкзака
+        const backpackContainer = document.getElementById('backpack-container');
+        if (backpackContainer) {
+            const allTemplates = allTemplatesCache || [];
+            const backpackItems = currentCharacterData.inventory?.backpack || [];
+            const index = backpackItems.length - 1;
+            renderBackpackItem(restoredItem, index, ['inventory', 'backpack'], backpackContainer, allTemplates);
+        }
+    }
+
+
+    recalculateInventoryTotals();
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Батарейка снята', 'success');
+};
+
+function applyEffect(effect) {
+    const health = currentCharacterData.health || {};
+    if (effect.type === 'heal') {
+        health.current = (health.current || 0) + parseInt(effect.value);
+        if (health.current > health.max) health.current = health.max;
+    } else if (effect.type === 'radiation') {
+        health.radiation = (health.radiation || 0) - parseInt(effect.value);
+        if (health.radiation < 0) health.radiation = 0;
+    }
+    currentCharacterData.health = health;
+}
 
 // Функции добавления/удаления модификаций
 window.addHelmetModification = function() {
@@ -5838,22 +6245,22 @@ async function renderInventoryTab(data) {
 
     container.innerHTML = html;
     if (eq.belt?.templateId) {
-        renderBeltPouchesNew(eq.belt.pouches || [], pouchTemplates);
+        renderBeltPouchesNew(eq.belt.pouches || [], pouchTemplates, allTemplates);
     }
     if (eq.vest?.templateId) {
-        renderVestPouchesNew(eq.vest.pouches || [], pouchTemplates, eq.vest.model === 'custom', eq.vest.totalCapacity);
+        renderVestPouchesNew(eq.vest.pouches || [], pouchTemplates, eq.vest.model === 'custom', eq.vest.totalCapacity, allTemplates);
     }
     const pocketsContainer = document.getElementById('pockets-container');
     if (pocketsContainer) {
         pocketsContainer.innerHTML = '';
         pockets.forEach((item, index) => {
-            renderBackpackItem(migrateOldItemToNew(item), index, ['inventory', 'pockets'], pocketsContainer);
+            renderBackpackItem(migrateOldItemToNew(item), index, ['inventory', 'pockets'], pocketsContainer, allTemplates);
         });
     }
     const backpackItems = Array.isArray(inv.backpack)
         ? inv.backpack.map(item => migrateOldItemToNew(item))
         : [];
-    renderBackpackNew(backpackItems, groupedByCategory);
+    renderBackpackNew(backpackItems, groupedByCategory, allTemplates);
     populateBackpackTemplateSelect();
     populatePocketsTemplateSelect();
     recalculateInventoryTotals();
@@ -5896,22 +6303,6 @@ function removeItemByPath(path) {
     const lastKey = path[path.length - 1];
     if (Array.isArray(parent) && typeof lastKey === 'number') {
         parent.splice(lastKey, 1);
-        return true;
-    }
-    return false;
-}
-
-function restoreItemToPath(item, path) {
-    let parent = currentCharacterData;
-    for (let i = 0; i < path.length - 1; i++) {
-        const key = path[i];
-        if (Array.isArray(parent) && typeof key === 'number') parent = parent[key];
-        else if (typeof parent === 'object' && key in parent) parent = parent[key];
-        else return false;
-    }
-    const lastKey = path[path.length - 1];
-    if (Array.isArray(parent)) {
-        parent.splice(lastKey, 0, item);
         return true;
     }
     return false;
@@ -6029,7 +6420,6 @@ async function addItemToContainerDirect(containerItem, contentsDiv, containerPat
         if (!Array.isArray(containerItem.contents)) containerItem.contents = [];
         containerItem.contents.push(newItem);
 
-        // Удаляем старые элементы содержимого (кроме кнопки и селекта)
         const children = Array.from(contentsDiv.children);
         for (let child of children) {
             if (!child.classList.contains('inline-template-select') && !child.matches('button')) {
@@ -6037,9 +6427,9 @@ async function addItemToContainerDirect(containerItem, contentsDiv, containerPat
             }
         }
 
-        // Перерисовываем содержимое
+        // При перерисовке используем загруженные allTemplates
         containerItem.contents.forEach((subItem, subIndex) => {
-            renderBackpackItem(subItem, subIndex, containerPath, contentsDiv);
+            renderBackpackItem(subItem, subIndex, containerPath, contentsDiv, allTemplates);
         });
 
         const addBtn = contentsDiv.querySelector('button');
@@ -6048,7 +6438,6 @@ async function addItemToContainerDirect(containerItem, contentsDiv, containerPat
         }
 
         select.remove();
-        updatePouchVolumeFromContentsDiv(contentsDiv);
         recalculateInventoryTotals();
         scheduleAutoSave();
     };
@@ -6085,7 +6474,7 @@ function updateHandlersInElement(element, basePath, index) {
     // так как ссылаются на объект item, а не на путь в виде строки.
 }
 
-function renderBeltPouchesNew(pouches, pouchTemplates) {
+function renderBeltPouchesNew(pouches, pouchTemplates, allTemplates) {
     const container = document.getElementById('belt-pouches-container');
     if (!container) return;
     container.innerHTML = '';
@@ -6094,11 +6483,11 @@ function renderBeltPouchesNew(pouches, pouchTemplates) {
         return;
     }
     pouches.forEach((pouch, index) => {
-        renderPouchItem(pouch, index, ['equipment', 'belt', 'pouches', index], container, pouchTemplates);
+        renderPouchItem(pouch, index, ['equipment', 'belt', 'pouches', index], container, pouchTemplates, allTemplates);
     });
 }
 
-function renderVestPouchesNew(pouches, pouchTemplates, isCustom, totalCapacity) {
+function renderVestPouchesNew(pouches, pouchTemplates, isCustom, totalCapacity, allTemplates) {
     const container = document.getElementById('vest-pouches-container');
     if (!container) return;
     container.innerHTML = '';
@@ -6107,11 +6496,11 @@ function renderVestPouchesNew(pouches, pouchTemplates, isCustom, totalCapacity) 
         return;
     }
     pouches.forEach((pouch, index) => {
-        renderVestPouchItem(pouch, index, ['equipment', 'vest', 'pouches', index], container, pouchTemplates, isCustom);
+        renderVestPouchItem(pouch, index, ['equipment', 'vest', 'pouches', index], container, pouchTemplates, isCustom, allTemplates);
     });
 }
 
-function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
+function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, allTemplates) {
     const itemDiv = document.createElement('div');
     itemDiv.className = 'container-item';
     itemDiv.style.marginBottom = '8px';
@@ -6192,7 +6581,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
 
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
-            renderBackpackItem(subItem, subIndex, path.concat('contents'), contentsDiv);
+            renderBackpackItem(subItem, subIndex, path.concat('contents'), contentsDiv, allTemplates);
         });
     }
 
@@ -6215,10 +6604,23 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates) {
         }
     };
 
+    // Универсальное отображение слотов предмета
+    if (getItemSlots(pouch).length > 0) {
+        const slotsHtml = renderSlotsUniversal(pouch, path, 1);
+        if (slotsHtml) {
+            const slotsDiv = document.createElement('div');
+            slotsDiv.className = 'item-slots-container';
+            slotsDiv.style.marginTop = '8px';
+            slotsDiv.style.marginLeft = '20px';
+            slotsDiv.innerHTML = slotsHtml;
+            itemDiv.appendChild(slotsDiv);
+        }
+    }
+
     parentContainer.appendChild(itemDiv);
 }
 
-function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates, isCustom) {
+function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates, isCustom, allTemplates) {
     const itemDiv = document.createElement('div');
     itemDiv.className = 'container-item';
     itemDiv.style.marginBottom = '8px';
@@ -6308,7 +6710,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
 
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
-            renderBackpackItem(subItem, subIndex, path.concat('contents'), contentsDiv);
+            renderBackpackItem(subItem, subIndex, path.concat('contents'), contentsDiv, allTemplates);
         });
     }
 
@@ -6755,17 +7157,17 @@ window.saveBackpackTemplate = async function() {
     } catch (e) { showNotification(e.message); }
 };
 
-function renderBackpackNew(items, groupedByCategory) {
+function renderBackpackNew(items, groupedByCategory, allTemplates) {
     const container = document.getElementById('backpack-container');
     if (!container) return;
     container.innerHTML = '';
 
     items.forEach((item, index) => {
-        renderBackpackItem(item, index, ['inventory', 'backpack'], container);
+        renderBackpackItem(item, index, ['inventory', 'backpack'], container, allTemplates);
     });
 }
 
-function renderBackpackItem(item, index, parentPath, parentContainer) {
+function renderBackpackItem(item, index, parentPath, parentContainer, allTemplates) {
     const itemDiv = document.createElement('div');
     itemDiv.style.marginBottom = '5px';
     itemDiv.style.padding = '5px';
@@ -6782,7 +7184,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
     row.style.gap = '5px';
     row.style.alignItems = 'center';
 
-    // ===== Ячейка названия =====
+    // Ячейка названия
     let nameCell;
     if (item.templateId) {
         nameCell = document.createElement('strong');
@@ -6832,7 +7234,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
         nameWrapper.appendChild(infoBtn);
     }
 
-    // ===== Поля ввода =====
+    // Поля ввода
     const weightInput = document.createElement('input');
     weightInput.type = 'number';
     weightInput.className = 'form-control number-input';
@@ -6849,9 +7251,10 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
     qtyInput.type = 'number';
     qtyInput.className = 'form-control number-input';
     qtyInput.value = item.quantity || 1;
+    qtyInput.setAttribute('data-field', 'quantity');
     qtyInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'quantity', e.target.value);
 
-    // ===== Контейнер для кнопок действий =====
+    // Контейнер для кнопок действий
     const actionsDiv = document.createElement('div');
     actionsDiv.style.display = 'flex';
     actionsDiv.style.gap = '5px';
@@ -6906,7 +7309,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
         actionsDiv.appendChild(equipBtn);
     }
 
-    // Кнопка "На пояс" для шлемов и противогазов
+    // Кнопка "На пояс"
     if (item.category === 'helmet' || item.category === 'gas_mask') {
         const beltBtn = document.createElement('button');
         beltBtn.type = 'button';
@@ -6925,7 +7328,28 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
         actionsDiv.appendChild(beltBtn);
     }
 
-    // ===== Собираем строку =====
+    // Кнопка "Использовать" (кроме батареек)
+    const usableCategories = ['consumable', 'grenade', 'device'];
+    const isBattery = (item.category === 'device' && item.subcategory === 'battery');
+    if ((usableCategories.includes(item.category) || item.attributes?.usable) && !isBattery) {
+        const useBtn = document.createElement('button');
+        useBtn.type = 'button';
+        useBtn.className = 'btn btn-sm btn-success';
+        useBtn.textContent = '▶';
+        useBtn.title = 'Использовать';
+        useBtn.style.width = '28px';
+        useBtn.style.height = '28px';
+        useBtn.style.padding = '0';
+        useBtn.style.fontSize = '14px';
+        useBtn.style.lineHeight = '1';
+        useBtn.onclick = (e) => {
+            e.stopPropagation();
+            useItem(item, itemPath);
+        };
+        actionsDiv.appendChild(useBtn);
+    }
+
+    // Собираем строку
     row.appendChild(nameWrapper);
     row.appendChild(weightInput);
     row.appendChild(volumeInput);
@@ -6933,7 +7357,19 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
     row.appendChild(actionsDiv);
     itemDiv.appendChild(row);
 
-    // ===== Магазин: отображение патронов =====
+    if (getItemSlots(item).length > 0) {
+        const slotsHtml = renderSlotsUniversal(item, itemPath, 1);
+        if (slotsHtml) {
+            const slotsDiv = document.createElement('div');
+            slotsDiv.className = 'item-slots-container';
+            slotsDiv.style.marginTop = '8px';
+            slotsDiv.style.marginLeft = '20px';
+            slotsDiv.innerHTML = slotsHtml;
+            itemDiv.appendChild(slotsDiv);
+        }
+    }
+
+    // Магазин: отображение патронов
     if (item.category === 'magazine') {
         const cap = item.attributes?.capacity || 30;
         const total = item.ammo ? item.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
@@ -6956,7 +7392,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
         itemDiv.appendChild(ammoControls);
     }
 
-    // ===== Контейнер (содержимое) =====
+    // Контейнер (содержимое)
     if (item.isContainer) {
         const contentsDiv = document.createElement('div');
         contentsDiv.className = 'container-contents';
@@ -6968,7 +7404,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer) {
 
         if (item.contents && item.contents.length > 0) {
             item.contents.forEach((subItem, subIndex) => {
-                renderBackpackItem(subItem, subIndex, itemPath.concat('contents'), contentsDiv);
+                renderBackpackItem(subItem, subIndex, itemPath.concat('contents'), contentsDiv, allTemplates);
             });
         }
 
@@ -7383,6 +7819,7 @@ export async function openCharacterSheet(characterId) {
         currentCharacterData.ownerId = character.owner_id;
         currentCharacterData.ownerUsername = character.owner_username;
         currentCharacterData.visible_to = character.visible_to || [];
+        await getAllItemTemplates();
         await renderCharacterSheet(character.name, currentCharacterData);
         document.getElementById('character-sheet-modal').style.display = 'flex';
 
@@ -7486,6 +7923,180 @@ window.rollSkill = function(skillPath, skillLabel) {
             message: message
         });
     }
+};
+
+// ========== УНИВЕРСАЛЬНЫЕ ОБЁРТКИ ДЛЯ СЛОТОВ ==========
+
+// Запрос на установку модуля в слот – показывает модальное окно выбора.
+window.universalInstallModulePrompt = async function(targetPath, slotType) {
+    const targetItem = getItemByPath(targetPath);
+    if (!targetItem) {
+        showNotification('Целевой предмет не найден');
+        return;
+    }
+
+    // Сбор подходящих модулей из инвентаря (любая категория, важен slot_type)
+    const candidateModules = [];
+    const collect = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((it, idx) => {
+            // Определяем, подходит ли предмет по типу слота
+            let matches = false;
+            if (slotType === 'battery') {
+                // Батарейка: категория device, подкатегория battery
+                matches = (it.category === 'device' && it.subcategory === 'battery');
+            } else if (slotType === 'filter') {
+                // Фильтр: категория gas_mask_module, атрибут slot_type === 'filter'
+                matches = (it.category === 'gas_mask_module' && it.attributes?.slot_type === 'filter');
+            } else {
+                // Остальные модули: проверяем slot_type в корне или в attributes
+                matches = (it.slot_type === slotType) || (it.attributes?.slot_type === slotType);
+            }
+            if (matches) {
+                candidateModules.push({ item: it, path: path.concat(idx) });
+            }
+            if (it.contents) collect(it.contents, path.concat(idx, 'contents'));
+        });
+    };
+
+    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
+
+    if (candidateModules.length === 0) {
+        showNotification('Нет подходящих модулей в инвентаре');
+        return;
+    }
+
+    // Создаём модальное окно выбора
+    const oldModal = document.getElementById('universal-module-select-modal');
+    if (oldModal) oldModal.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'universal-module-select-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Выберите модуль</h3>
+            <select id="universal-module-select" class="form-control" size="5"></select>
+            <div class="form-actions" style="margin-top:15px;">
+                <button class="btn btn-primary" id="confirm-universal-module">Установить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const select = modal.querySelector('#universal-module-select');
+    candidateModules.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        let desc = entry.item.name;
+        if (slotType === 'filter') {
+            const dur = entry.item.attributes?.durability || 0;
+            const maxDur = entry.item.attributes?.max_durability || 0;
+            desc += ` (прочность ${dur}/${maxDur})`;
+        } else if (slotType === 'battery') {
+            const power = entry.item.attributes?.power;
+            desc += ` (заряд ${power !== undefined ? power : '?'}%)`;
+        }
+        opt.textContent = desc;
+        select.appendChild(opt);
+    });
+
+    modal.querySelector('#confirm-universal-module').onclick = () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = candidateModules[idx];
+        modal.remove();
+
+        if (universalInstallModule(targetItem, targetPath, selected.item, selected.path, slotType)) {
+            renderInventoryTab(currentCharacterData);
+            renderEquipmentTab(currentCharacterData);
+            scheduleAutoSave();
+            forceSyncCharacter();
+            showNotification('Модуль установлен', 'success');
+        } else {
+            showNotification('Не удалось установить модуль');
+        }
+    };
+
+    modal.style.display = 'flex';
+};
+
+// Снятие модуля по строковому пути.
+window.universalUninstallModuleByPath = function(targetPath, slotType) {
+    const targetItem = getItemByPath(targetPath);
+    if (!targetItem) {
+        showNotification('Предмет не найден');
+        return;
+    }
+
+    if (universalUninstallModule(targetItem, targetPath, slotType)) {
+        renderInventoryTab(currentCharacterData);
+        renderEquipmentTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Модуль снят', 'success');
+    } else {
+        showNotification('Не удалось снять модуль');
+    }
+};
+
+function universalUninstallModule(targetItem, targetPath, slotType) {
+    if (!targetItem.installedModules) return false;
+    const index = targetItem.installedModules.findIndex(m => m.slotType === slotType);
+    if (index === -1) return false;
+
+    const moduleItem = targetItem.installedModules[index];
+    targetItem.installedModules.splice(index, 1);
+
+    let restoredItem;
+    const templateId = moduleItem.templateId;
+    if (templateId) {
+        const allTemplates = allTemplatesCache || [];
+        const template = allTemplates.find(t => t.id === templateId);
+        if (template) {
+            restoredItem = createItemFromTemplate(template);
+            restoredItem.durability = moduleItem.durability;
+            restoredItem.maxDurability = moduleItem.maxDurability;
+            restoredItem.installedModules = moduleItem.installedModules ? [...moduleItem.installedModules] : [];
+            if (moduleItem.attributes) {
+                restoredItem.attributes = { ...moduleItem.attributes };
+            }
+            if (moduleItem.attributes?.power !== undefined) {
+                restoredItem.attributes.power = moduleItem.attributes.power;
+            }
+        } else {
+            restoredItem = { ...moduleItem };
+        }
+    } else {
+        restoredItem = { ...moduleItem };
+    }
+
+    const sourcePath = moduleItem.sourcePath;
+    let restored = false;
+    if (sourcePath) {
+        restored = restoreItemToPath(restoredItem, sourcePath);
+    }
+    if (!restored) {
+        addToBackpack(restoredItem);
+    }
+    return true;
+}
+
+window.installModuleFromSlot = function(jsonPath, slotType) {
+    const targetPath = JSON.parse(jsonPath);
+    universalInstallModulePrompt(targetPath, slotType);
+};
+
+window.uninstallModuleFromSlot = function(jsonPath, slotType) {
+    const targetPath = JSON.parse(jsonPath);
+    universalUninstallModuleByPath(targetPath, slotType);
 };
 
 // ========== 10. UI-ФУНКЦИИ ДОБАВЛЕНИЯ/УДАЛЕНИЯ ==========
