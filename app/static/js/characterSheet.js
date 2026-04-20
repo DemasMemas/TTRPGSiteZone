@@ -7957,6 +7957,10 @@ export function closeCharacterSheet() {
     document.getElementById('character-sheet-modal').style.display = 'none';
     currentCharacterId = null;
     currentCharacterData = null;
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    draggedItem = null;
+    draggedItemPath = null;
 }
 
 export function exportCharacter() {
@@ -8116,6 +8120,7 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
             // Перерисовать контейнер-источник
             const sourceContainerPath = selected.path.slice(0, -1);
             await rerenderContainer(sourceContainerPath);
+            await renderEquipmentTab(currentCharacterData);
             recalculateInventoryTotals();
             updatePlateProtectionDisplay();
             scheduleAutoSave();
@@ -8184,6 +8189,7 @@ window.universalUninstallModuleByPath = async function(targetPath, slotType) {
         }
         // Перерисовать рюкзак (куда вернули модуль)
         await rerenderContainer(['inventory', 'backpack']);
+        await renderEquipmentTab(currentCharacterData);
         recalculateInventoryTotals();
         updatePlateProtectionDisplay();
         scheduleAutoSave();
