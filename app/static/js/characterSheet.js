@@ -2590,7 +2590,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     const totalAmmo = installedMag.ammo ? installedMag.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
                     let ammoBreakdown = '';
                     if (installedMag.ammo && installedMag.ammo.length > 0) {
-                        const nextAmmo = installedMag.ammo[0];
+                        const nextAmmo = installedMag.ammo[installedMag.ammo.length - 1];
                         ammoBreakdown = `<br><small>Состав: ${installedMag.ammo.map(a => `${a.name} (${a.quantity})`).join(', ')}`;
                         if (nextAmmo) ammoBreakdown += `<br>▶ Следующий: ${nextAmmo.name}`;
                         ammoBreakdown += '</small>';
@@ -4732,7 +4732,7 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
         return;
     }
 
-    // Модальное окно выбора гранаты (аналогично выбору магазина)
+    // Модальное окно выбора гранаты
     const oldModal = document.getElementById('grenade-select-modal');
     if (oldModal) oldModal.remove();
 
@@ -4756,7 +4756,7 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
     grenadeItems.forEach((entry, idx) => {
         const opt = document.createElement('option');
         opt.value = idx;
-        opt.textContent = entry.item.name;
+        opt.textContent = `${entry.item.name} (${entry.item.quantity} шт.)`;
         select.appendChild(opt);
     });
 
@@ -4767,23 +4767,32 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
         const grenade = selected.item;
         modal.remove();
 
-        // Удаляем гранату из инвентаря
-        if (!removeItemByPath(selected.path)) {
-            showNotification('Не удалось найти гранату в инвентаре');
-            return;
+        // Обработка стопки: если гранат больше 1, создаём копию и уменьшаем исходную
+        let grenadeToUse;
+        if (grenade.quantity > 1) {
+            grenade.quantity -= 1;
+            grenadeToUse = { ...grenade, quantity: 1 };
+        } else {
+            grenadeToUse = grenade;
+            if (!removeItemByPath(selected.path)) {
+                showNotification('Не удалось найти гранату в инвентаре');
+                return;
+            }
         }
 
         // Сохраняем гранату в состоянии гранатомёта
         launcher.loaded = true;
         launcher.loadedGrenade = {
-            id: grenade.id,
-            templateId: grenade.templateId,
-            name: grenade.name,
-            attributes: grenade.attributes
+            id: grenadeToUse.id,
+            templateId: grenadeToUse.templateId,
+            name: grenadeToUse.name,
+            attributes: grenadeToUse.attributes
         };
 
-        renderEquipmentTab(currentCharacterData);
+        // Обновляем UI: перерисовываем только инвентарь, так как изменилось количество
         renderInventoryTab(currentCharacterData);
+        // Также обновляем экипировку, чтобы кнопка сменилась на "Выстрел ГП"
+        renderEquipmentTab(currentCharacterData);
         scheduleAutoSave();
         forceSyncCharacter();
         showNotification('Подствольник заряжен', 'success');
