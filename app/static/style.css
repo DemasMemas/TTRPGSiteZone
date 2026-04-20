@@ -1011,3 +1011,11 @@ input[type=range]::-webkit-slider-thumb {
     background-color: rgba(0, 255, 0, 0.1) !important;
     border: 2px dashed #4caf50 !important;
 }
+
+.item-name {
+    cursor: grab;
+    user-select: none;
+}
+.item-name:active {
+    cursor: grabbing;
+}

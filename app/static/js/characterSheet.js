@@ -486,12 +486,10 @@ function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, 
             if (originalItem.category === 'ammo') updateAmmoWeight(originalItem);
         }
     } else {
-        if (!removeItemByPath(modulePath)) {
-            return false;
-        }
+        if (!removeItemByPath(modulePath)) return false;
     }
 
-    // Замена старого модуля – всегда возвращаем старый модуль в рюкзак
+    // Замена старого модуля – всегда в рюкзак
     const existingIndex = targetItem.installedModules.findIndex(m => m.slotType === slotType);
     if (existingIndex !== -1) {
         const oldMod = targetItem.installedModules[existingIndex];
@@ -2198,7 +2196,6 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
         const installed = (item.installedModules || []).find(m => m.slotType === slot.type);
 
         if (installed) {
-            // --- Установлен модуль ---
             let info = escapeHtml(installed.name);
             if (slot.type === 'filter') {
                 const dur = installed.durability || 0;
@@ -2250,7 +2247,6 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
             const subPath = itemPath.concat(['installedModules', installedIndex]);
             html += renderSlotsUniversal(installed, subPath, depth + 1);
         } else {
-            // --- Свободный слот ---
             const installBtn = `<button type="button" class="btn btn-sm btn-primary" onclick="window.installModuleFromSlot('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">Установить</button>`;
             html += `
                 <div style="margin-left:${indent}px; display:flex; align-items:center; gap:10px; margin-top:5px;">
@@ -2259,8 +2255,7 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
                 </div>
             `;
         }
-    } // конец for
-
+    }
     return `<div class="item-slots-container">${html}</div>`;
 }
 
@@ -7234,25 +7229,6 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     const itemPath = parentPath.concat(index);
     itemDiv.dataset.path = itemPath.join(',');
 
-    // === DRAG-AND-DROP ===
-    itemDiv.draggable = true;
-    itemDiv.setAttribute('data-item-category', item.category);
-    itemDiv.addEventListener('dragstart', (e) => {
-        let target = e.target;
-        while (target && target !== itemDiv) {
-            if (target.matches && target.matches('input, select, button, textarea, .btn, [contenteditable="true"]')) {
-                e.preventDefault();
-                e.stopPropagation();
-                return false;
-            }
-            target = target.parentElement;
-        }
-        draggedItem = item;
-        draggedItemPath = itemPath;
-        e.dataTransfer.setData('text/plain', itemPath.join(','));
-        e.dataTransfer.effectAllowed = 'move';
-    });
-
     // Если предмет — контейнер, делаем его drop-целью (закрытый контейнер)
     if (item.isContainer) {
         setupDropTarget(itemDiv, itemPath.concat('contents'), item);
@@ -7264,7 +7240,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     row.style.gap = '5px';
     row.style.alignItems = 'center';
 
-    // Ячейка названия
+    // --- Ячейка названия (drag zone) ---
     let nameCell;
     if (item.templateId) {
         nameCell = document.createElement('strong');
@@ -7293,7 +7269,32 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     }
     nameWrapper.appendChild(nameCell);
 
-    // Кнопка свойств (ⓘ)
+    // ОБЁРТКА ДЛЯ ПЕРЕТАСКИВАНИЯ
+    const nameDragZone = document.createElement('span');
+    nameDragZone.className = 'item-name';
+    nameDragZone.style.display = 'flex';
+    nameDragZone.style.alignItems = 'center';
+    nameDragZone.style.cursor = 'grab';
+    nameDragZone.draggable = true;   // перетаскивается именно эта область
+
+    // Обработчик dragstart для зоны названия
+    nameDragZone.addEventListener('dragstart', (e) => {
+        // Запрещаем перетаскивание, если кликнули на кнопке или на инпуте
+        if (e.target.closest('button') || e.target.closest('input')) {
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+        }
+        draggedItem = item;
+        draggedItemPath = itemPath;
+        e.dataTransfer.setData('text/plain', itemPath.join(','));
+        e.dataTransfer.effectAllowed = 'move';
+        e.stopPropagation(); // чтобы событие не поднималось к itemDiv
+    });
+
+    nameDragZone.appendChild(nameWrapper);
+
+    // Кнопка свойств (ⓘ) – добавляем в ту же зону, но она не вызовет drag
     const hasProt = item.durability !== null && item.durability !== undefined;
     const hasMods = item.modifications && item.modifications.length > 0;
     const hasEffects = item.attributes?.effects && item.attributes.effects.length > 0;
@@ -7311,22 +7312,26 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             e.stopPropagation();
             showItemDetailsModal(item);
         };
-        nameWrapper.appendChild(infoBtn);
+        nameDragZone.appendChild(infoBtn);
     }
 
-    // Поля ввода
+    row.appendChild(nameDragZone);
+
+    // --- Вес ---
     const weightInput = document.createElement('input');
     weightInput.type = 'number';
     weightInput.className = 'form-control number-input';
     weightInput.value = item.weight || 0;
     weightInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'weight', e.target.value);
 
+    // --- Объём ---
     const volumeInput = document.createElement('input');
     volumeInput.type = 'number';
     volumeInput.className = 'form-control number-input';
     volumeInput.value = item.volume || 0;
     volumeInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'volume', e.target.value);
 
+    // --- Количество ---
     const qtyInput = document.createElement('input');
     qtyInput.type = 'number';
     qtyInput.className = 'form-control number-input';
@@ -7334,29 +7339,29 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     qtyInput.setAttribute('data-field', 'quantity');
     qtyInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'quantity', e.target.value);
 
-    // Отключение draggable при взаимодействии с инпутами
+    // Отключаем временно draggable у родителя при взаимодействии с инпутами (чтобы не мешать редактированию)
     const disableDragForInput = (input) => {
         if (!input) return;
         input.addEventListener('mousedown', (e) => {
             e.stopPropagation();
-            itemDiv.draggable = false;
+            nameDragZone.draggable = false;
         });
-        input.addEventListener('mouseup', () => { itemDiv.draggable = true; });
-        input.addEventListener('mouseleave', () => { itemDiv.draggable = true; });
+        input.addEventListener('mouseup', () => { nameDragZone.draggable = true; });
+        input.addEventListener('mouseleave', () => { nameDragZone.draggable = true; });
     };
     disableDragForInput(weightInput);
     disableDragForInput(volumeInput);
     disableDragForInput(qtyInput);
     if (nameCell.tagName === 'INPUT') disableDragForInput(nameCell);
 
-    // Контейнер для кнопок действий
+    // --- Кнопки действий ---
     const actionsDiv = document.createElement('div');
     actionsDiv.style.display = 'flex';
     actionsDiv.style.gap = '5px';
     actionsDiv.style.alignItems = 'center';
     actionsDiv.style.justifyContent = 'flex-end';
 
-    // Кнопка удаления
+    // Удаление
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'btn btn-sm btn-danger';
@@ -7369,7 +7374,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     delBtn.onclick = () => removeBackpackItemAtPath(itemPath.join(','));
     actionsDiv.appendChild(delBtn);
 
-    // Кнопка "Надеть"
+    // Надеть
     const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon'];
     if (item.isEquippable || equippableCategories.includes(item.category)) {
         const equipBtn = document.createElement('button');
@@ -7385,28 +7390,19 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         equipBtn.onclick = (e) => {
             e.stopPropagation();
             const category = item.category;
-            if (category === 'armor') {
-                equipArmorFromInventory(itemPath);
-            } else if (category === 'helmet') {
-                equipHelmetFromInventory(itemPath);
-            } else if (category === 'gas_mask') {
-                equipGasMaskFromInventory(itemPath);
-            } else if (category === 'weapon') {
-                equipWeaponFromInventory(itemPath);
-            } else if (category === 'belt') {
-                equipBeltFromInventory(itemPath);
-            } else if (category === 'vest') {
-                equipVestFromInventory(itemPath);
-            } else if (category === 'detector') {
-                equipDetectorFromInventory(itemPath);
-            } else if (category === 'melee_weapon') {
-                equipMeleeWeaponFromInventory(itemPath);
-            }
+            if (category === 'armor') equipArmorFromInventory(itemPath);
+            else if (category === 'helmet') equipHelmetFromInventory(itemPath);
+            else if (category === 'gas_mask') equipGasMaskFromInventory(itemPath);
+            else if (category === 'weapon') equipWeaponFromInventory(itemPath);
+            else if (category === 'belt') equipBeltFromInventory(itemPath);
+            else if (category === 'vest') equipVestFromInventory(itemPath);
+            else if (category === 'detector') equipDetectorFromInventory(itemPath);
+            else if (category === 'melee_weapon') equipMeleeWeaponFromInventory(itemPath);
         };
         actionsDiv.appendChild(equipBtn);
     }
 
-    // Кнопка "На пояс"
+    // На пояс
     if (item.category === 'helmet' || item.category === 'gas_mask') {
         const beltBtn = document.createElement('button');
         beltBtn.type = 'button';
@@ -7425,7 +7421,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         actionsDiv.appendChild(beltBtn);
     }
 
-    // Кнопка "Использовать"
+    // Использовать
     const usableCategories = ['consumable', 'grenade', 'device'];
     const isBattery = (item.category === 'device' && item.subcategory === 'battery');
     if ((usableCategories.includes(item.category) || item.attributes?.usable) && !isBattery) {
@@ -7446,7 +7442,6 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         actionsDiv.appendChild(useBtn);
     }
 
-    row.appendChild(nameWrapper);
     row.appendChild(weightInput);
     row.appendChild(volumeInput);
     row.appendChild(qtyInput);
@@ -7493,7 +7488,6 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     if (item.isContainer) {
         const template = allTemplates?.find(t => t.id === item.templateId);
         const hasArmorPlateSlot = template?.attributes?.slots?.some(s => s.type === 'armor_plate');
-
         if (!hasArmorPlateSlot) {
             const contentsDiv = document.createElement('div');
             contentsDiv.className = 'container-contents';
@@ -7518,7 +7512,6 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             contentsDiv.appendChild(addBtn);
 
             setupDropTarget(contentsDiv, itemPath.concat('contents'), item);
-
             itemDiv.appendChild(contentsDiv);
             itemDiv._contentsDiv = contentsDiv;
 
@@ -8112,7 +8105,7 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
 
         const success = universalInstallModule(targetItem, targetPath, selected.item, selected.path, slotType);
         if (success) {
-            // Обновить слоты целевого предмета (удалить старый блок, вставить новый)
+            // Обновить слоты – удалить старый блок, вставить новый
             const targetDiv = document.querySelector(`[data-path="${targetPath.join(',')}"]`);
             if (targetDiv) {
                 const oldSlots = targetDiv.querySelector('.item-slots-container');
@@ -8120,11 +8113,9 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
                 const newSlotsHtml = renderSlotsUniversal(targetItem, targetPath, 1);
                 if (newSlotsHtml) targetDiv.insertAdjacentHTML('beforeend', newSlotsHtml);
             }
-
-            // Перерисовать контейнер-источник (откуда взяли модуль)
+            // Перерисовать контейнер-источник
             const sourceContainerPath = selected.path.slice(0, -1);
             await rerenderContainer(sourceContainerPath);
-
             recalculateInventoryTotals();
             updatePlateProtectionDisplay();
             scheduleAutoSave();
@@ -8183,7 +8174,7 @@ window.universalUninstallModuleByPath = async function(targetPath, slotType) {
 
     const restoredItem = universalUninstallModule(targetItem, targetPath, slotType);
     if (restoredItem) {
-        // Обновить слоты целевого предмета
+        // Обновить слоты – удалить старый блок, вставить новый
         const targetDiv = document.querySelector(`[data-path="${targetPath.join(',')}"]`);
         if (targetDiv) {
             const oldSlots = targetDiv.querySelector('.item-slots-container');
@@ -8191,10 +8182,8 @@ window.universalUninstallModuleByPath = async function(targetPath, slotType) {
             const newSlotsHtml = renderSlotsUniversal(targetItem, targetPath, 1);
             if (newSlotsHtml) targetDiv.insertAdjacentHTML('beforeend', newSlotsHtml);
         }
-
         // Перерисовать рюкзак (куда вернули модуль)
         await rerenderContainer(['inventory', 'backpack']);
-
         recalculateInventoryTotals();
         updatePlateProtectionDisplay();
         scheduleAutoSave();
@@ -8291,8 +8280,6 @@ async function rerenderContainer(containerPath, parentElement = null) {
 
     const wasCollapsed = (!isPockets && !isBackpack) ? (containerDiv.style.display === 'none') : false;
     const allTemplates = await getAllItemTemplates();
-
-    // Сохраняем родителя для восстановления иконки
     const parentItem = (!isPockets && !isBackpack) ? containerDiv.closest('.container-item') : null;
 
     containerDiv.innerHTML = '';
@@ -8492,9 +8479,11 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
         const targetContainer = containerItem || getItemByPath(containerPath);
         if (!targetContainer) return;
 
-        if (isDescendant(containerPath, draggedItemPath)) {
+        if (containerPath.length > draggedItemPath.length &&
+            containerPath.slice(0, draggedItemPath.length).every((v, i) => v === draggedItemPath[i])) {
             showNotification('Нельзя поместить контейнер в самого себя');
-            draggedItem = null; draggedItemPath = null;
+            draggedItem = null;
+            draggedItemPath = null;
             return;
         }
 
@@ -8507,34 +8496,21 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
             return;
         }
 
+        // Удаляем предмет из источника
         if (!removeItemByPath(draggedItemPath)) {
             showNotification('Ошибка при удалении предмета из источника');
             draggedItem = null; draggedItemPath = null;
             return;
         }
 
+        // Добавляем в целевой контейнер
         if (!Array.isArray(targetContainer.contents)) targetContainer.contents = [];
         targetContainer.contents.push(draggedItem);
 
-        const sourceDiv = document.querySelector(`[data-path="${draggedItemPath.join(',')}"]`);
-        if (sourceDiv) sourceDiv.remove();
-
-        let parentForItems;
-        if (containerDiv.classList.contains('container-contents')) {
-            parentForItems = containerDiv;
-        } else {
-            parentForItems = containerDiv.querySelector('.container-contents') || containerDiv;
-        }
-
-        parentForItems.innerHTML = '';
-        const allTemplates = allTemplatesCache || [];
-        targetContainer.contents.forEach((subItem, idx) => {
-            renderBackpackItem(subItem, idx, containerPath, parentForItems, allTemplates);
-        });
-
-        if (containerDiv.classList.contains('container-contents')) {
-            updatePouchVolumeFromContentsDiv(containerDiv);
-        }
+        // Перерисовываем и исходный, и целевой контейнеры
+        const sourceContainerPath = draggedItemPath.slice(0, -1);
+        await rerenderContainer(sourceContainerPath);
+        await rerenderContainer(containerPath);
 
         recalculateInventoryTotals();
         scheduleAutoSave();
