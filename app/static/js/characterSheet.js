@@ -30,6 +30,18 @@ let currentCharacterData = null;
 let autoSaveTimer = null;
 const AUTO_SAVE_DELAY = 500;
 
+// ========== DRAG-AND-DROP ==========
+let draggedItem = null;
+let draggedItemPath = null;
+
+function isDescendant(containerPath, itemPath) {
+    if (containerPath.length >= itemPath.length) return false;
+    for (let i = 0; i < containerPath.length; i++) {
+        if (containerPath[i] !== itemPath[i]) return false;
+    }
+    return true;
+}
+
 let vestTemplateEditorPouches = [];
 
 // Кеш шаблонов для текущей комнаты
@@ -399,7 +411,6 @@ function getItemSlots(item) {
 function getEffectiveTorsoProtection() {
     const eq = currentCharacterData.equipment || {};
     const vest = eq.vest;
-    console.log('Vest:', vest);
     if (!vest || !vest.pouches) return null;
 
     const allTemplates = allTemplatesCache || [];
@@ -407,11 +418,8 @@ function getEffectiveTorsoProtection() {
         if (!pouch.type) return false;
         const template = allTemplates.find(t => t.id === pouch.type);
         const hasSlot = template?.attributes?.slots?.some(s => s.type === 'armor_plate');
-        console.log('Pouch type:', pouch.type, 'has armor_plate slot:', hasSlot);
         return hasSlot;
     });
-
-    console.log('Plate pouches found:', platePouches.length);
 
     if (platePouches.length === 0) return null;
 
@@ -427,7 +435,6 @@ function getEffectiveTorsoProtection() {
 
     const front = getPlateProtection(frontPouch);
     const back = getPlateProtection(backPouch);
-    console.log('Front protection:', front, 'Back protection:', back);
 
     return { front, back };
 }
@@ -472,29 +479,26 @@ function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, 
 
     // Обработка стопки
     if (moduleItem.quantity > 1) {
-        // Создаём копию с quantity = 1
         moduleItem = { ...moduleItem, quantity: 1 };
-        // Уменьшаем количество в исходной стопке
         const originalItem = getItemByPath(modulePath);
         if (originalItem) {
             originalItem.quantity -= 1;
             if (originalItem.category === 'ammo') updateAmmoWeight(originalItem);
         }
     } else {
-        // Удаляем модуль из инвентаря
         if (!removeItemByPath(modulePath)) {
             return false;
         }
     }
 
-    // Замена старого модуля
+    // Замена старого модуля – всегда возвращаем старый модуль в рюкзак
     const existingIndex = targetItem.installedModules.findIndex(m => m.slotType === slotType);
     if (existingIndex !== -1) {
         const oldMod = targetItem.installedModules[existingIndex];
         targetItem.installedModules.splice(existingIndex, 1);
-        if (!restoreItemToPath(oldMod, modulePath)) {
-            addToBackpack(oldMod);
-        }
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+        currentCharacterData.inventory.backpack.push(oldMod);
     }
 
     moduleItem.sourcePath = modulePath;
@@ -2039,7 +2043,6 @@ async function renderEquipmentTab(data) {
                                 ${gasMaskTemplates.map(t => `<option value="${t.id}" ${gasMask.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-checkbox"><label>Надет</label><input type="checkbox" name="equipment.gasMask.isWorn" ${gasMask.isWorn ? 'checked' : ''}></div>
                         <div class="field-group field-number">
                             <label>Прочность</label>
                             <input type="number" class="number-input form-control" name="equipment.gasMask.durability" value="${gasMask.durability || 0}">
@@ -2188,16 +2191,14 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
     const slots = getItemSlots(item);
     if (!slots.length) return '';
 
-    const allTemplates = allTemplatesCache || [];
     const indent = depth * 20;
-
     let html = '';
+
     for (const slot of slots) {
-        const pathJson = JSON.stringify(itemPath).replace(/'/g, "\\'");
         const installed = (item.installedModules || []).find(m => m.slotType === slot.type);
-        let slotContent = '';
 
         if (installed) {
+            // --- Установлен модуль ---
             let info = escapeHtml(installed.name);
             if (slot.type === 'filter') {
                 const dur = installed.durability || 0;
@@ -2208,9 +2209,7 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
                 const aware = installed.attributes?.awareness_penalty ?? installed.awareness_penalty ?? 0;
                 info = `${info} (точность ${acc}, вним. ${aware}`;
                 const battery = (installed.installedModules || []).find(m => m.slotType === 'battery');
-                if (battery) {
-                    info += `, заряд ${battery.attributes?.power ?? '?'}%`;
-                }
+                if (battery) info += `, заряд ${battery.attributes?.power ?? '?'}%`;
                 info += `)`;
             } else if (slot.type === 'visor') {
                 const acc = installed.attributes?.accuracy_penalty ?? installed.accuracy_penalty ?? 0;
@@ -2238,7 +2237,7 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
             const uninstallBtn = `<button type="button" class="btn btn-sm btn-danger" onclick="window.uninstallModuleFromSlot('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">Снять</button>`;
             const configBtn = (slot.type === 'visor') ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openVisorModificationsModal('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">⚙️</button>` : '';
 
-            slotContent = `
+            html += `
                 <div style="margin-left:${indent}px; display:flex; align-items:center; gap:10px; margin-top:5px;">
                     <span style="width:100px;">${slot.label}:</span>
                     <span style="flex:1;">${info}</span>
@@ -2247,23 +2246,22 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
                 </div>
             `;
 
-            // Рекурсивно отображаем слоты установленного модуля
             const installedIndex = (item.installedModules || []).findIndex(m => m.slotType === slot.type);
             const subPath = itemPath.concat(['installedModules', installedIndex]);
-            slotContent += renderSlotsUniversal(installed, subPath, depth + 1);
+            html += renderSlotsUniversal(installed, subPath, depth + 1);
         } else {
+            // --- Свободный слот ---
             const installBtn = `<button type="button" class="btn btn-sm btn-primary" onclick="window.installModuleFromSlot('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">Установить</button>`;
-            slotContent = `
+            html += `
                 <div style="margin-left:${indent}px; display:flex; align-items:center; gap:10px; margin-top:5px;">
                     <span style="width:100px;">${slot.label}:</span>
                     ${installBtn}
                 </div>
             `;
         }
+    } // конец for
 
-        html += slotContent;
-    }
-    return html;
+    return `<div class="item-slots-container">${html}</div>`;
 }
 
 function renderBeltPouches(pouches, pouchTemplates) {
@@ -5019,214 +5017,6 @@ async function rechargeDevice(item, itemPath) {
     modal.style.display = 'flex';
 }
 
-window.equipDeviceModule = async function(device, devicePath, slotType) {
-    // Ищем батарейки в инвентаре
-    const batteries = [];
-    const collect = (items, path) => {
-        if (!Array.isArray(items)) return;
-        items.forEach((it, idx) => {
-            if (it.category === 'device' && it.subcategory === 'battery' && it.quantity > 0) {
-                batteries.push({ item: it, path: path.concat(idx) });
-            }
-            if (it.contents) collect(it.contents, path.concat(idx, 'contents'));
-        });
-    };
-    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
-    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
-    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
-    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
-    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
-    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
-
-    if (batteries.length === 0) {
-        showNotification('Нет батареек в инвентаре');
-        return;
-    }
-
-    const oldModal = document.getElementById('equip-battery-modal');
-    if (oldModal) oldModal.remove();
-
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.id = 'equip-battery-modal';
-    modal.innerHTML = `
-        <div class="modal-content">
-            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
-            <h3>Выберите батарейку</h3>
-            <select id="battery-select" class="form-control" size="5"></select>
-            <div class="form-actions">
-                <button class="btn btn-primary" id="confirm-battery">Установить</button>
-                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-
-    const select = modal.querySelector('#battery-select');
-    batteries.forEach((entry, idx) => {
-        const opt = document.createElement('option');
-        opt.value = idx;
-        opt.textContent = `${entry.item.name} (заряд ${entry.item.attributes?.power ?? '?'}%, ${entry.item.quantity} шт.)`;
-        select.appendChild(opt);
-    });
-
-    modal.querySelector('#confirm-battery').onclick = () => {
-        const idx = select.value;
-        if (idx === '') return;
-        const selected = batteries[idx];
-        const battery = selected.item;
-        modal.remove();
-
-        // Уменьшаем количество в стопке
-        battery.quantity -= 1;
-        const batteryPath = selected.path;
-        let batteryRemoved = false;
-        if (battery.quantity <= 0) {
-            removeItemByPath(batteryPath);
-            batteryRemoved = true;
-        }
-
-        // Создаём копию батарейки с quantity = 1 для установки
-        const batteryToInstall = {
-            ...battery,
-            quantity: 1,
-            id: generateItemId(), // новый ID
-            attributes: { ...battery.attributes } // копируем атрибуты
-        };
-
-        // Если в слоте уже есть батарейка, снимаем её (возвращаем в инвентарь)
-        if (!device.installedModules) device.installedModules = [];
-        const existingIdx = device.installedModules.findIndex(m => m.slotType === slotType);
-        if (existingIdx !== -1) {
-            const old = device.installedModules[existingIdx];
-            device.installedModules.splice(existingIdx, 1);
-            // Возвращаем старую батарейку в то же место, откуда взяли новую
-            restoreItemToPath(old, batteryPath);
-        }
-
-        device.installedModules.push({
-            ...batteryToInstall,
-            slotType: slotType,
-            sourcePath: batteryPath // сохраняем путь для возврата
-        });
-
-        // Обновляем DOM: контейнер слотов устройства
-        const deviceDiv = document.querySelector(`[data-path="${devicePath.join(',')}"]`);
-        if (deviceDiv) {
-            const slotsContainer = deviceDiv.querySelector('.item-slots-container');
-            if (slotsContainer) {
-                const newSlotsHtml = renderSlotsUniversal(device, devicePath, 1);
-                slotsContainer.outerHTML = newSlotsHtml || '';
-            }
-        }
-
-        const batteryDiv = document.querySelector(`[data-path="${selected.path.join(',')}"]`);
-        if (batteryDiv) {
-            const qtyInput = batteryDiv.querySelector('input[data-field="quantity"]');
-            if (qtyInput) {
-                qtyInput.value = battery.quantity;
-            }
-            if (battery.quantity === 0) {
-                batteryDiv.remove();
-            }
-        }
-
-        recalculateInventoryTotals();
-        updatePlateProtectionDisplay();
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification('Батарейка установлена', 'success');
-    };
-
-    modal.style.display = 'flex';
-};
-
-window.unequipDeviceModule = function(device, devicePath, slotType) {
-    const idx = (device.installedModules || []).findIndex(m => m.slotType === slotType);
-    if (idx === -1) return;
-    const mod = device.installedModules[idx];
-    device.installedModules.splice(idx, 1);
-
-    // Восстанавливаем батарейку
-    let restoredItem;
-    const templateId = mod.templateId;
-    if (templateId) {
-        const allTemplates = allTemplatesCache || [];
-        const template = allTemplates.find(t => t.id === templateId);
-        if (template) {
-            restoredItem = createItemFromTemplate(template);
-            restoredItem.durability = mod.durability;
-            restoredItem.maxDurability = mod.maxDurability;
-            restoredItem.installedModules = mod.installedModules || [];
-            restoredItem.attributes = { ...mod.attributes };
-        } else {
-            restoredItem = { ...mod, quantity: 1 };
-        }
-    } else {
-        restoredItem = { ...mod, quantity: 1 };
-    }
-
-    const sourcePath = mod.sourcePath;
-    let restored = false;
-    if (sourcePath) {
-        restored = restoreItemToPath(restoredItem, sourcePath);
-    }
-    if (!restored) {
-        addToBackpack(restoredItem);
-    }
-
-    // Обновляем DOM: контейнер слотов устройства
-    const deviceDiv = document.querySelector(`[data-path="${devicePath.join(',')}"]`);
-    if (deviceDiv) {
-        const slotsContainer = deviceDiv.querySelector('.item-slots-container');
-        if (slotsContainer) {
-            const newSlotsHtml = renderSlotsUniversal(device, devicePath, 1);
-            slotsContainer.outerHTML = newSlotsHtml || '';
-        }
-    }
-
-    if (sourcePath) {
-        const containerPath = sourcePath.slice(0, -1);
-        const index = sourcePath[sourcePath.length - 1];
-        const containerData = getItemByPath(containerPath);
-        if (Array.isArray(containerData)) {
-            const containerDiv = document.querySelector(`[data-path="${containerPath.join(',')}"]`);
-            if (containerDiv) {
-                const parentForItems = containerDiv.classList.contains('container-contents')
-                    ? containerDiv
-                    : containerDiv.querySelector('.container-contents') || containerDiv;
-                const allTemplates = allTemplatesCache || [];
-                // Вставляем батарейку на нужную позицию
-                const existingItems = Array.from(parentForItems.children).filter(el => el.hasAttribute('data-path'));
-                if (index < existingItems.length) {
-                    const refNode = existingItems[index];
-                    const newItemDiv = document.createElement('div');
-                    renderBackpackItem(restoredItem, index, containerPath, newItemDiv, allTemplates);
-                    parentForItems.insertBefore(newItemDiv.firstChild, refNode);
-                } else {
-                    renderBackpackItem(restoredItem, index, containerPath, parentForItems, allTemplates);
-                }
-            }
-        }
-    } else {
-        // fallback: если путь не сохранён, добавляем в конец рюкзака
-        const backpackContainer = document.getElementById('backpack-container');
-        if (backpackContainer) {
-            const allTemplates = allTemplatesCache || [];
-            const backpackItems = currentCharacterData.inventory?.backpack || [];
-            const index = backpackItems.length - 1;
-            renderBackpackItem(restoredItem, index, ['inventory', 'backpack'], backpackContainer, allTemplates);
-        }
-    }
-
-
-    recalculateInventoryTotals();
-    updatePlateProtectionDisplay();
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification('Батарейка снята', 'success');
-};
-
 function applyEffect(effect) {
     const health = currentCharacterData.health || {};
     if (effect.type === 'heal') {
@@ -6464,6 +6254,12 @@ async function renderInventoryTab(data) {
         ? inv.backpack.map(item => migrateOldItemToNew(item))
         : [];
     renderBackpackNew(backpackItems, groupedByCategory, allTemplates);
+
+    const pocketsContainerEl = document.getElementById('pockets-container');
+    const backpackContainerEl = document.getElementById('backpack-container');
+    if (pocketsContainerEl) setupDropTarget(pocketsContainerEl, ['inventory', 'pockets'], { capacity: pocketMaxVolume, contents: pockets });
+    if (backpackContainerEl) setupDropTarget(backpackContainerEl, ['inventory', 'backpack'], { capacity: backpackLimit, contents: backpack });
+
     populateBackpackTemplateSelect();
     populatePocketsTemplateSelect();
     recalculateInventoryTotals();
@@ -6612,6 +6408,8 @@ async function addItemToContainerDirect(containerItem, contentsDiv, containerPat
         });
         select.appendChild(optgroup);
     }
+
+    updatePouchVolumeFromContentsDiv(contentsDiv);
 
     select.onchange = async (e) => {
         const templateId = e.target.value;
@@ -6798,6 +6596,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
     contentsDiv.style.paddingLeft = '10px';
     contentsDiv.style.borderLeft = '2px dashed #666';
     contentsDiv.style.display = 'none';
+    contentsDiv.setAttribute('data-container-path', path.concat('contents').join(','));
 
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
@@ -6816,6 +6615,8 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
         addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv, path.concat('contents'));
         contentsDiv.appendChild(addBtn);
     }
+
+    setupDropTarget(contentsDiv, path.concat('contents'), pouch);
 
     itemDiv.appendChild(contentsDiv);
 
@@ -6841,6 +6642,8 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
             itemDiv.appendChild(slotsDiv);
         }
     }
+
+    setupDropTarget(itemDiv, path, pouch);
 
     parentContainer.appendChild(itemDiv);
 }
@@ -6932,6 +6735,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     contentsDiv.style.paddingLeft = '10px';
     contentsDiv.style.borderLeft = '2px dashed #666';
     contentsDiv.style.display = 'none';
+    contentsDiv.setAttribute('data-container-path', path.concat('contents').join(','));
 
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
@@ -6950,6 +6754,8 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
         addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv, path.concat('contents'));
         contentsDiv.appendChild(addBtn);
     }
+
+    setupDropTarget(contentsDiv, path.concat('contents'), pouch);
 
     itemDiv.appendChild(contentsDiv);
 
@@ -6974,6 +6780,8 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
             itemDiv.appendChild(slotsDiv);
         }
     }
+
+    setupDropTarget(itemDiv, path, pouch);
 
     parentContainer.appendChild(itemDiv);
 }
@@ -7426,6 +7234,30 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     const itemPath = parentPath.concat(index);
     itemDiv.dataset.path = itemPath.join(',');
 
+    // === DRAG-AND-DROP ===
+    itemDiv.draggable = true;
+    itemDiv.setAttribute('data-item-category', item.category);
+    itemDiv.addEventListener('dragstart', (e) => {
+        let target = e.target;
+        while (target && target !== itemDiv) {
+            if (target.matches && target.matches('input, select, button, textarea, .btn, [contenteditable="true"]')) {
+                e.preventDefault();
+                e.stopPropagation();
+                return false;
+            }
+            target = target.parentElement;
+        }
+        draggedItem = item;
+        draggedItemPath = itemPath;
+        e.dataTransfer.setData('text/plain', itemPath.join(','));
+        e.dataTransfer.effectAllowed = 'move';
+    });
+
+    // Если предмет — контейнер, делаем его drop-целью (закрытый контейнер)
+    if (item.isContainer) {
+        setupDropTarget(itemDiv, itemPath.concat('contents'), item);
+    }
+
     const row = document.createElement('div');
     row.style.display = 'grid';
     row.style.gridTemplateColumns = '2fr 1fr 1fr 1fr auto';
@@ -7502,6 +7334,21 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     qtyInput.setAttribute('data-field', 'quantity');
     qtyInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'quantity', e.target.value);
 
+    // Отключение draggable при взаимодействии с инпутами
+    const disableDragForInput = (input) => {
+        if (!input) return;
+        input.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            itemDiv.draggable = false;
+        });
+        input.addEventListener('mouseup', () => { itemDiv.draggable = true; });
+        input.addEventListener('mouseleave', () => { itemDiv.draggable = true; });
+    };
+    disableDragForInput(weightInput);
+    disableDragForInput(volumeInput);
+    disableDragForInput(qtyInput);
+    if (nameCell.tagName === 'INPUT') disableDragForInput(nameCell);
+
     // Контейнер для кнопок действий
     const actionsDiv = document.createElement('div');
     actionsDiv.style.display = 'flex';
@@ -7523,7 +7370,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     actionsDiv.appendChild(delBtn);
 
     // Кнопка "Надеть"
-    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'melee_weapon', 'belt', 'vest', 'detector'];
+    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon'];
     if (item.isEquippable || equippableCategories.includes(item.category)) {
         const equipBtn = document.createElement('button');
         equipBtn.type = 'button';
@@ -7555,7 +7402,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             } else if (category === 'melee_weapon') {
                 equipMeleeWeaponFromInventory(itemPath);
             }
-        }
+        };
         actionsDiv.appendChild(equipBtn);
     }
 
@@ -7578,7 +7425,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         actionsDiv.appendChild(beltBtn);
     }
 
-    // Кнопка "Использовать" (кроме батареек)
+    // Кнопка "Использовать"
     const usableCategories = ['consumable', 'grenade', 'device'];
     const isBattery = (item.category === 'device' && item.subcategory === 'battery');
     if ((usableCategories.includes(item.category) || item.attributes?.usable) && !isBattery) {
@@ -7599,7 +7446,6 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         actionsDiv.appendChild(useBtn);
     }
 
-    // Собираем строку
     row.appendChild(nameWrapper);
     row.appendChild(weightInput);
     row.appendChild(volumeInput);
@@ -7607,7 +7453,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     row.appendChild(actionsDiv);
     itemDiv.appendChild(row);
 
-    // Универсальное отображение слотов предмета (батарейки, бронеплиты и т.д.)
+    // Слоты предмета
     if (getItemSlots(item).length > 0) {
         const slotsHtml = renderSlotsUniversal(item, itemPath, 1);
         if (slotsHtml) {
@@ -7620,7 +7466,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         }
     }
 
-    // Магазин: отображение патронов
+    // Магазин
     if (item.category === 'magazine') {
         const cap = item.attributes?.capacity || 30;
         const total = item.ammo ? item.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
@@ -7643,9 +7489,8 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         itemDiv.appendChild(ammoControls);
     }
 
-    // Контейнер (содержимое) – показывается для обычных контейнеров
+    // Содержимое контейнера
     if (item.isContainer) {
-        // Для подсумков с бронеплитами не показываем кнопку "Добавить внутрь" и содержимое
         const template = allTemplates?.find(t => t.id === item.templateId);
         const hasArmorPlateSlot = template?.attributes?.slots?.some(s => s.type === 'armor_plate');
 
@@ -7657,6 +7502,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             contentsDiv.style.paddingLeft = '10px';
             contentsDiv.style.borderLeft = '2px dashed #666';
             contentsDiv.style.display = 'none';
+            contentsDiv.setAttribute('data-container-path', itemPath.concat('contents').join(','));
 
             if (item.contents && item.contents.length > 0) {
                 item.contents.forEach((subItem, subIndex) => {
@@ -7670,6 +7516,8 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             addBtn.textContent = '➕ Добавить внутрь';
             addBtn.onclick = () => addItemToContainerDirect(item, contentsDiv, itemPath.concat('contents'));
             contentsDiv.appendChild(addBtn);
+
+            setupDropTarget(contentsDiv, itemPath.concat('contents'), item);
 
             itemDiv.appendChild(contentsDiv);
             itemDiv._contentsDiv = contentsDiv;
@@ -8184,7 +8032,6 @@ window.rollSkill = function(skillPath, skillLabel) {
 
 // ========== УНИВЕРСАЛЬНЫЕ ОБЁРТКИ ДЛЯ СЛОТОВ ==========
 
-// Запрос на установку модуля в слот – показывает модальное окно выбора.
 window.universalInstallModulePrompt = async function(targetPath, slotType) {
     const targetItem = getItemByPath(targetPath);
     if (!targetItem) {
@@ -8192,26 +8039,19 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
         return;
     }
 
-    // Сбор подходящих модулей из инвентаря (любая категория, важен slot_type)
     const candidateModules = [];
     const collect = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((it, idx) => {
-            // Определяем, подходит ли предмет по типу слота
             let matches = false;
             if (slotType === 'battery') {
-                // Батарейка: категория device, подкатегория battery
                 matches = (it.category === 'device' && it.subcategory === 'battery');
             } else if (slotType === 'filter') {
-                // Фильтр: категория gas_mask_module, атрибут slot_type === 'filter'
                 matches = (it.category === 'gas_mask_module' && it.attributes?.slot_type === 'filter');
             } else {
-                // Остальные модули: проверяем slot_type в корне или в attributes
                 matches = (it.slot_type === slotType) || (it.attributes?.slot_type === slotType);
             }
-            if (matches) {
-                candidateModules.push({ item: it, path: path.concat(idx) });
-            }
+            if (matches) candidateModules.push({ item: it, path: path.concat(idx) });
             if (it.contents) collect(it.contents, path.concat(idx, 'contents'));
         });
     };
@@ -8228,7 +8068,6 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
         return;
     }
 
-    // Создаём модальное окно выбора
     const oldModal = document.getElementById('universal-module-select-modal');
     if (oldModal) oldModal.remove();
 
@@ -8265,15 +8104,29 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
         select.appendChild(opt);
     });
 
-    modal.querySelector('#confirm-universal-module').onclick = () => {
+    modal.querySelector('#confirm-universal-module').onclick = async function() {
         const idx = select.value;
         if (idx === '') return;
         const selected = candidateModules[idx];
         modal.remove();
 
-        if (universalInstallModule(targetItem, targetPath, selected.item, selected.path, slotType)) {
-            renderInventoryTab(currentCharacterData);
-            renderEquipmentTab(currentCharacterData);
+        const success = universalInstallModule(targetItem, targetPath, selected.item, selected.path, slotType);
+        if (success) {
+            // Обновить слоты целевого предмета (удалить старый блок, вставить новый)
+            const targetDiv = document.querySelector(`[data-path="${targetPath.join(',')}"]`);
+            if (targetDiv) {
+                const oldSlots = targetDiv.querySelector('.item-slots-container');
+                if (oldSlots) oldSlots.remove();
+                const newSlotsHtml = renderSlotsUniversal(targetItem, targetPath, 1);
+                if (newSlotsHtml) targetDiv.insertAdjacentHTML('beforeend', newSlotsHtml);
+            }
+
+            // Перерисовать контейнер-источник (откуда взяли модуль)
+            const sourceContainerPath = selected.path.slice(0, -1);
+            await rerenderContainer(sourceContainerPath);
+
+            recalculateInventoryTotals();
+            updatePlateProtectionDisplay();
             scheduleAutoSave();
             forceSyncCharacter();
             showNotification('Модуль установлен', 'success');
@@ -8285,29 +8138,10 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
     modal.style.display = 'flex';
 };
 
-// Снятие модуля по строковому пути.
-window.universalUninstallModuleByPath = function(targetPath, slotType) {
-    const targetItem = getItemByPath(targetPath);
-    if (!targetItem) {
-        showNotification('Предмет не найден');
-        return;
-    }
-
-    if (universalUninstallModule(targetItem, targetPath, slotType)) {
-        renderInventoryTab(currentCharacterData);
-        renderEquipmentTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification('Модуль снят', 'success');
-    } else {
-        showNotification('Не удалось снять модуль');
-    }
-};
-
 function universalUninstallModule(targetItem, targetPath, slotType) {
-    if (!targetItem.installedModules) return false;
+    if (!targetItem.installedModules) return null;
     const index = targetItem.installedModules.findIndex(m => m.slotType === slotType);
-    if (index === -1) return false;
+    if (index === -1) return null;
 
     const moduleItem = targetItem.installedModules[index];
     targetItem.installedModules.splice(index, 1);
@@ -8323,12 +8157,7 @@ function universalUninstallModule(targetItem, targetPath, slotType) {
             restoredItem.maxDurability = moduleItem.maxDurability;
             restoredItem.installedModules = moduleItem.installedModules ? [...moduleItem.installedModules] : [];
             restoredItem.modifications = moduleItem.modifications ? [...moduleItem.modifications] : [];
-            if (moduleItem.attributes) {
-                restoredItem.attributes = { ...moduleItem.attributes };
-            }
-            if (moduleItem.attributes?.power !== undefined) {
-                restoredItem.attributes.power = moduleItem.attributes.power;
-            }
+            if (moduleItem.attributes) restoredItem.attributes = { ...moduleItem.attributes };
         } else {
             restoredItem = { ...moduleItem };
         }
@@ -8336,16 +8165,45 @@ function universalUninstallModule(targetItem, targetPath, slotType) {
         restoredItem = { ...moduleItem };
     }
 
-    const sourcePath = moduleItem.sourcePath;
-    let restored = false;
-    if (sourcePath) {
-        restored = restoreItemToPath(restoredItem, sourcePath);
-    }
-    if (!restored) {
-        addToBackpack(restoredItem);
-    }
-    return true;
+    // Всегда кладём в рюкзак
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+
+    restoredItem.sourcePath = null;
+    return restoredItem;
 }
+
+window.universalUninstallModuleByPath = async function(targetPath, slotType) {
+    const targetItem = getItemByPath(targetPath);
+    if (!targetItem) {
+        showNotification('Предмет не найден');
+        return;
+    }
+
+    const restoredItem = universalUninstallModule(targetItem, targetPath, slotType);
+    if (restoredItem) {
+        // Обновить слоты целевого предмета
+        const targetDiv = document.querySelector(`[data-path="${targetPath.join(',')}"]`);
+        if (targetDiv) {
+            const oldSlots = targetDiv.querySelector('.item-slots-container');
+            if (oldSlots) oldSlots.remove();
+            const newSlotsHtml = renderSlotsUniversal(targetItem, targetPath, 1);
+            if (newSlotsHtml) targetDiv.insertAdjacentHTML('beforeend', newSlotsHtml);
+        }
+
+        // Перерисовать рюкзак (куда вернули модуль)
+        await rerenderContainer(['inventory', 'backpack']);
+
+        recalculateInventoryTotals();
+        updatePlateProtectionDisplay();
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Модуль снят', 'success');
+    } else {
+        showNotification('Не удалось снять модуль');
+    }
+};
 
 window.installModuleFromSlot = function(jsonPath, slotType) {
     const targetPath = JSON.parse(jsonPath);
@@ -8369,6 +8227,108 @@ function updatePlateProtectionDisplay() {
             vestDiv.innerHTML = ''; // или скрыть
         }
     }
+}
+
+// Добавить где-нибудь после функции getItemByPath (например, перед universalInstallModulePrompt)
+
+/**
+ * Перерисовать содержимое контейнера (массива items) по его пути.
+ * @param {Array} containerPath - путь к контейнеру в currentCharacterData
+ * @param {HTMLElement} [parentElement] - если известен, иначе найдёт по data-path
+ */
+async function rerenderContainer(containerPath, parentElement = null) {
+    const container = getItemByPath(containerPath);
+    if (!container) return;
+
+    let itemsArray = null;
+    const lastKey = containerPath[containerPath.length - 1];
+    if (typeof lastKey === 'string' && (lastKey === 'contents' || lastKey === 'backpack' || lastKey === 'pockets')) {
+        itemsArray = container;
+    } else if (Array.isArray(container)) {
+        itemsArray = container;
+    } else if (container && typeof container === 'object' && Array.isArray(container.contents)) {
+        itemsArray = container.contents;
+    } else {
+        return;
+    }
+
+    const isPockets = (containerPath.length === 2 && containerPath[0] === 'inventory' && containerPath[1] === 'pockets');
+    const isBackpack = (containerPath.length === 2 && containerPath[0] === 'inventory' && containerPath[1] === 'backpack');
+
+    let containerDiv = parentElement;
+    if (!containerDiv) {
+        if (isPockets) {
+            containerDiv = document.getElementById('pockets-container');
+        } else if (isBackpack) {
+            containerDiv = document.getElementById('backpack-container');
+        } else {
+            // Ищем элемент с data-container-path и классом container-contents
+            const candidates = document.querySelectorAll(`[data-container-path="${containerPath.join(',')}"]`);
+            for (const el of candidates) {
+                if (el.classList.contains('container-contents')) {
+                    containerDiv = el;
+                    break;
+                }
+            }
+            if (!containerDiv) {
+                const anyElement = document.querySelector(`[data-container-path="${containerPath.join(',')}"]`);
+                if (anyElement) {
+                    containerDiv = anyElement.querySelector('.container-contents');
+                }
+            }
+            if (!containerDiv && containerPath.length > 0) {
+                const parentPath = containerPath.slice(0, -1);
+                const parentDiv = document.querySelector(`[data-path="${parentPath.join(',')}"]`);
+                if (parentDiv) {
+                    containerDiv = parentDiv.querySelector('.container-contents');
+                }
+            }
+        }
+    }
+
+    if (!containerDiv) return;
+    if (!isPockets && !isBackpack && !containerDiv.classList.contains('container-contents')) return;
+
+    const wasCollapsed = (!isPockets && !isBackpack) ? (containerDiv.style.display === 'none') : false;
+    const allTemplates = await getAllItemTemplates();
+
+    // Сохраняем родителя для восстановления иконки
+    const parentItem = (!isPockets && !isBackpack) ? containerDiv.closest('.container-item') : null;
+
+    containerDiv.innerHTML = '';
+    itemsArray.forEach((item, idx) => {
+        renderBackpackItem(item, idx, containerPath, containerDiv, allTemplates);
+    });
+
+    // Кнопка добавления (только для подсумков)
+    if (!isPockets && !isBackpack) {
+        let isArmorPlateSlot = false;
+        if (containerPath.includes('pouches')) {
+            const pouchPath = containerPath.slice(0, containerPath.indexOf('pouches') + 2);
+            const pouchItem = getItemByPath(pouchPath);
+            if (pouchItem && pouchItem.attributes?.slots?.some(s => s.type === 'armor_plate')) {
+                isArmorPlateSlot = true;
+            }
+        }
+        if (!isArmorPlateSlot) {
+            const addBtn = document.createElement('button');
+            addBtn.type = 'button';
+            addBtn.className = 'btn btn-sm btn-secondary';
+            addBtn.textContent = '➕ Добавить внутрь';
+            addBtn.onclick = () => addItemToContainerDirect(container, containerDiv, containerPath);
+            containerDiv.appendChild(addBtn);
+        }
+    }
+
+    if (wasCollapsed) containerDiv.style.display = 'none';
+    if (parentItem && parentItem._toggleIcon) {
+        parentItem._toggleIcon.textContent = wasCollapsed ? '▶' : '▼';
+    }
+
+    if (!isPockets && !isBackpack) {
+        updatePouchVolumeFromContentsDiv(containerDiv);
+    }
+    setupDropTarget(containerDiv, containerPath, container);
 }
 
 // ========== 10. UI-ФУНКЦИИ ДОБАВЛЕНИЯ/УДАЛЕНИЯ ==========
@@ -8507,5 +8467,83 @@ window.removePdaItem = function(index) {
     renderEquipmentTab(currentCharacterData);
     scheduleAutoSave();
 };
+
+function setupDropTarget(containerDiv, containerPath, containerItem) {
+    if (!containerDiv) return;
+    containerDiv.classList.add('drop-target');
+    containerDiv.setAttribute('data-container-path', containerPath.join(','));
+
+    containerDiv.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        containerDiv.classList.add('drag-over');
+    });
+
+    containerDiv.addEventListener('dragleave', () => {
+        containerDiv.classList.remove('drag-over');
+    });
+
+    containerDiv.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        containerDiv.classList.remove('drag-over');
+
+        if (!draggedItem || !draggedItemPath) return;
+
+        const targetContainer = containerItem || getItemByPath(containerPath);
+        if (!targetContainer) return;
+
+        if (isDescendant(containerPath, draggedItemPath)) {
+            showNotification('Нельзя поместить контейнер в самого себя');
+            draggedItem = null; draggedItemPath = null;
+            return;
+        }
+
+        const newVolume = getTotalVolume(draggedItem);
+        const currentUsed = calculatePouchUsedVolume(targetContainer);
+        const limit = targetContainer.capacity || targetContainer.volume || 0;
+        if (currentUsed + newVolume > limit) {
+            showNotification('Недостаточно места в контейнере');
+            draggedItem = null; draggedItemPath = null;
+            return;
+        }
+
+        if (!removeItemByPath(draggedItemPath)) {
+            showNotification('Ошибка при удалении предмета из источника');
+            draggedItem = null; draggedItemPath = null;
+            return;
+        }
+
+        if (!Array.isArray(targetContainer.contents)) targetContainer.contents = [];
+        targetContainer.contents.push(draggedItem);
+
+        const sourceDiv = document.querySelector(`[data-path="${draggedItemPath.join(',')}"]`);
+        if (sourceDiv) sourceDiv.remove();
+
+        let parentForItems;
+        if (containerDiv.classList.contains('container-contents')) {
+            parentForItems = containerDiv;
+        } else {
+            parentForItems = containerDiv.querySelector('.container-contents') || containerDiv;
+        }
+
+        parentForItems.innerHTML = '';
+        const allTemplates = allTemplatesCache || [];
+        targetContainer.contents.forEach((subItem, idx) => {
+            renderBackpackItem(subItem, idx, containerPath, parentForItems, allTemplates);
+        });
+
+        if (containerDiv.classList.contains('container-contents')) {
+            updatePouchVolumeFromContentsDiv(containerDiv);
+        }
+
+        recalculateInventoryTotals();
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Предмет перемещён', 'success');
+
+        draggedItem = null;
+        draggedItemPath = null;
+    });
+}
 
 window.getAllItemTemplates = getAllItemTemplates;
