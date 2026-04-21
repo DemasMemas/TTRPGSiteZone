@@ -8992,6 +8992,16 @@ function updatePlateProtectionDisplay() {
  * @param {HTMLElement} [parentElement] - если известен, иначе найдёт по data-path
  */
 async function rerenderContainer(containerPath, parentElement = null) {
+    const pouchesIndex = containerPath.indexOf('pouches');
+    if (pouchesIndex !== -1 &&
+        pouchesIndex + 1 < containerPath.length &&
+        typeof containerPath[pouchesIndex + 1] === 'number' &&
+        containerPath[containerPath.length - 1] !== 'contents') {
+        const contentsPath = containerPath.concat('contents');
+        await rerenderContainer(contentsPath, parentElement);
+        return;
+    }
+
     const container = getItemByPath(containerPath);
     if (!container) return;
 
