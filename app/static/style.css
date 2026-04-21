@@ -1019,3 +1019,31 @@ input[type=range]::-webkit-slider-thumb {
 .item-name:active {
     cursor: grabbing;
 }
+
+/* Поля характеристик */
+.equipment-group .fields-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 8px;
+}
+.field-group label {
+    display: block;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+@media (max-width: 800px) {
+    .field-group label { white-space: normal; }
+}
+
+/* Косметическая экипировка – компактная сетка */
+.cosmetic-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 15px;
+    margin-top: 10px;
+}
+@media (min-width: 1000px) {
+    .cosmetic-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}

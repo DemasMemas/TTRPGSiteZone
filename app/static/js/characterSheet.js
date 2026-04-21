@@ -139,6 +139,10 @@ function getCategoryDisplay(cat) {
         'grenade': 'Гранаты',
         'device': 'Приборы',
         'armor_plate': 'Бронеплиты',
+        'headphones': 'Наушники',
+        'glasses': 'Очки',
+        'gloves': 'Перчатки',
+        'jewelry': 'Бижутерия'
     };
     return map[cat] || cat;
 }
@@ -150,7 +154,7 @@ async function getAllItemTemplates(forceRefresh = false) {
         'weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
         'consumable', 'crafting_material', 'artifact', 'backpack', 'vest', 'pouch',
         'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module', 'visor', 'belt',
-        'grenade', 'device', 'armor_plate', 'melee_weapon'
+        'grenade', 'device', 'armor_plate', 'melee_weapon', 'headphones', 'glasses', 'gloves', 'jewelry'
     ];
 
     let all = [];
@@ -875,8 +879,6 @@ async function renderBasicTab(data) {
         </div>
         ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateBackgroundTemplateModal()" style="margin-top:10px;">➕ Создать кастомную предысторию</button>` : ''}
 
-        <hr>
-        <h4>Снаряжение</h4>
         <div style="display: grid; grid-template-columns: 120px 1fr 1fr; gap: 20px; margin-bottom: 15px; align-items: start;">
             <!-- Деньги -->
             <div style="display: flex; flex-direction: column; gap: 5px;">
@@ -2140,10 +2142,119 @@ async function renderEquipmentTab(data) {
             ${eq.detector ? renderSlotsUniversal(eq.detector, ['equipment', 'detector']) : ''}
         </div>
 
+        <!-- Косметическая экипировка -->
+        <div class="equipment-group">
+            <h4>Косметическая экипировка</h4>
+            <!-- Первая строка: наушники, очки, перчатки (3 колонки) -->
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px;">
+                <!-- Наушники -->
+                <div>
+                    <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <h5>Наушники</h5>
+                        ${eq.headphones?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipHeadphones()">Снять</button>` : ''}
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 5px;">
+                        ${eq.headphones ? `
+                            <div><strong>${escapeHtml(eq.headphones.name)}</strong></div>
+                            <div><label>Коэф. оглушения</label> <input type="number" class="form-control number-input" name="equipment.headphones.deafeningCoef" value="${eq.headphones.deafeningCoef || 0}" step="0.1" style="width: 100%; min-width: 180px;"></div>
+                            <div><label>Поглощение шума</label> <input type="number" class="form-control number-input" name="equipment.headphones.noiseAbsorption" value="${eq.headphones.noiseAbsorption || 0}" style="width: 100%; min-width: 180px;"></div>
+                            <div><label>Бонус внимания (слух)</label> <input type="number" class="form-control number-input" name="equipment.headphones.awarenessBonus" value="${eq.headphones.awarenessBonus || 0}" style="width: 100%; min-width: 180px;"></div>
+                        ` : '<em>Не надеты</em>'}
+                    </div>
+                </div>
+                <!-- Очки -->
+                <div>
+                    <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <h5>Очки</h5>
+                        ${eq.glasses?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipGlasses()">Снять</button>` : ''}
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 5px;">
+                        ${eq.glasses ? `
+                            <div><strong>${escapeHtml(eq.glasses.name)}</strong></div>
+                            <div><label>Бонус харизмы</label> <input type="number" class="form-control number-input" name="equipment.glasses.charismaBonus" value="${eq.glasses.charismaBonus || 0}" step="0.1" style="width: 100%; min-width: 180px;"></div>
+                            <div><label>Защита от ослепления</label> <input type="number" class="form-control number-input" name="equipment.glasses.flashProtection" value="${eq.glasses.flashProtection || 1}" step="0.05" style="width: 100%; min-width: 180px;"></div>
+                            <div><label>Физ. защита глаз (%)</label> <input type="number" class="form-control number-input" name="equipment.glasses.eyePhysicalProtection" value="${eq.glasses.eyePhysicalProtection || 0}" style="width: 100%; min-width: 180px;"></div>
+                        ` : '<em>Не надеты</em>'}
+                    </div>
+                </div>
+                <!-- Перчатки -->
+                <div>
+                    <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <h5>Перчатки</h5>
+                        ${eq.gloves?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipGloves()">Снять</button>` : ''}
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 5px;">
+                        ${eq.gloves ? `
+                            <div><strong>${escapeHtml(eq.gloves.name)}</strong></div>
+                            <div><label>Бонус харизмы</label> <input type="number" class="form-control number-input" name="equipment.gloves.charismaBonus" value="${eq.gloves.charismaBonus || 0}" step="0.1" style="width: 100%; min-width: 180px;"></div>
+                            <div><label>Эффект</label> <input type="text" class="form-control" name="equipment.gloves.effect" value="${escapeHtml(eq.gloves.effect || '')}" style="width: 100%; min-width: 180px;"></div>
+                        ` : '<em>Не надеты</em>'}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Вторая строка: бижутерия (5 слотов в строку с переносом) -->
+            <div style="margin-top: 10px;">
+                <h5>Бижутерия</h5>
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 15px;">
+                    <!-- Кольцо -->
+                    <div>
+                        <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;"><strong>Кольцо</strong> ${eq.ring?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipRing()">Снять</button>` : ''}</div>
+                        <div style="margin-top: 5px;">
+                            ${eq.ring ? `
+                                <div><strong>${escapeHtml(eq.ring.name)}</strong></div>
+                                <div><label>Бонус харизмы</label> <input type="number" class="form-control number-input" name="equipment.ring.charismaBonus" value="${eq.ring.charismaBonus || 0}" step="0.1" style="width: 100%;"></div>
+                            ` : '<em>Не надето</em>'}
+                        </div>
+                    </div>
+                    <!-- Амулет -->
+                    <div>
+                        <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;"><strong>Амулет/Цепочка</strong> ${eq.necklace?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipNecklace()">Снять</button>` : ''}</div>
+                        <div style="margin-top: 5px;">
+                            ${eq.necklace ? `
+                                <div><strong>${escapeHtml(eq.necklace.name)}</strong></div>
+                                <div><label>Бонус харизмы</label> <input type="number" class="form-control number-input" name="equipment.necklace.charismaBonus" value="${eq.necklace.charismaBonus || 0}" step="0.1" style="width: 100%;"></div>
+                            ` : '<em>Не надето</em>'}
+                        </div>
+                    </div>
+                    <!-- Серьги -->
+                    <div>
+                        <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;"><strong>Серьги</strong> ${eq.earrings?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipEarrings()">Снять</button>` : ''}</div>
+                        <div style="margin-top: 5px;">
+                            ${eq.earrings ? `
+                                <div><strong>${escapeHtml(eq.earrings.name)}</strong></div>
+                                <div><label>Бонус харизмы</label> <input type="number" class="form-control number-input" name="equipment.earrings.charismaBonus" value="${eq.earrings.charismaBonus || 0}" step="0.1" style="width: 100%;"></div>
+                            ` : '<em>Не надето</em>'}
+                        </div>
+                    </div>
+                    <!-- Браслет 1 -->
+                    <div>
+                        <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;"><strong>Браслет 1</strong> ${eq.bracelet1?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipBracelet(1)">Снять</button>` : ''}</div>
+                        <div style="margin-top: 5px;">
+                            ${eq.bracelet1 ? `
+                                <div><strong>${escapeHtml(eq.bracelet1.name)}</strong></div>
+                                <div><label>Бонус харизмы</label> <input type="number" class="form-control number-input" name="equipment.bracelet1.charismaBonus" value="${eq.bracelet1.charismaBonus || 0}" step="0.1" style="width: 100%;"></div>
+                            ` : '<em>Не надет</em>'}
+                        </div>
+                    </div>
+                    <!-- Браслет 2 -->
+                    <div>
+                        <div class="block-header" style="display: flex; justify-content: space-between; align-items: center;"><strong>Браслет 2</strong> ${eq.bracelet2?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipBracelet(2)">Снять</button>` : ''}</div>
+                        <div style="margin-top: 5px;">
+                            ${eq.bracelet2 ? `
+                                <div><strong>${escapeHtml(eq.bracelet2.name)}</strong></div>
+                                <div><label>Бонус харизмы</label> <input type="number" class="form-control number-input" name="equipment.bracelet2.charismaBonus" value="${eq.bracelet2.charismaBonus || 0}" step="0.1" style="width: 100%;"></div>
+                            ` : '<em>Не надет</em>'}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="equipment-group">
             <div style="display:flex; align-items:center;">
                 <h4 style="margin:0;">Модификации КПК</h4>
-                <button type="button" class="btn btn-sm btn-danger" onclick="addPdaItem()" style="padding:2px 8px;">➕</button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="addPdaItem()" style="padding:2px 8px;">➕</button>
             </div>
             <div id="pda-modifications-container">${renderPdaModifications(data.modifications?.pda?.items || [], groupedPdaMods)}</div>
         </div>
@@ -4459,6 +4570,456 @@ window.equipToBeltFromInventory = async function(itemPath) {
     scheduleAutoSave();
     forceSyncCharacter();
     showNotification(`${item.name} помещён на пояс`, 'success');
+};
+
+window.equipHeadphonesFromInventory = async function(itemPath) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'headphones') {
+        showNotification('Этот предмет нельзя надеть как наушники');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('headphones');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) {
+        showNotification('Шаблон наушников не найден');
+        return;
+    }
+    const headphonesToEquip = {
+        templateId: template.id,
+        name: template.name,
+        deafeningCoef: item.deafeningCoef ?? template.attributes?.deafening_coef ?? 0,
+        noiseAbsorption: item.noiseAbsorption ?? template.attributes?.noise_absorption ?? 0,
+        awarenessBonus: item.awarenessBonus ?? template.attributes?.awareness_bonus ?? 0,
+    };
+    if (!removeItemByPath(itemPath)) {
+        showNotification('Не удалось найти предмет в инвентаре');
+        return;
+    }
+    // Снимаем старые наушники, если были
+    const oldHeadphones = currentCharacterData.equipment?.headphones;
+    if (oldHeadphones && oldHeadphones.templateId) {
+        const oldTemplates = await loadTemplatesForLobby('headphones');
+        const oldTemplate = oldTemplates.find(t => t.id === oldHeadphones.templateId);
+        if (oldTemplate) {
+            const oldItem = createItemFromTemplate(oldTemplate);
+            oldItem.deafeningCoef = oldHeadphones.deafeningCoef;
+            oldItem.noiseAbsorption = oldHeadphones.noiseAbsorption;
+            oldItem.awarenessBonus = oldHeadphones.awarenessBonus;
+            restoreItemToPath(oldItem, itemPath);
+        }
+    }
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment.headphones = headphonesToEquip;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Наушники надеты', 'success');
+};
+
+window.unequipHeadphones = async function() {
+    const headphones = currentCharacterData.equipment?.headphones;
+    if (!headphones || !headphones.templateId) {
+        showNotification('Наушники не надеты');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('headphones');
+    const template = templates.find(t => t.id === headphones.templateId);
+    if (!template) {
+        showNotification('Шаблон наушников не найден');
+        return;
+    }
+    const restoredItem = createItemFromTemplate(template);
+    restoredItem.deafeningCoef = headphones.deafeningCoef;
+    restoredItem.noiseAbsorption = headphones.noiseAbsorption;
+    restoredItem.awarenessBonus = headphones.awarenessBonus;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+    delete currentCharacterData.equipment.headphones;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Наушники сняты', 'success');
+};
+
+window.equipGlassesFromInventory = async function(itemPath) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'glasses') {
+        showNotification('Этот предмет нельзя надеть как очки');
+        return;
+    }
+    // Проверка совместимости с противогазом
+    if (item.attributes?.incompatible_with_gasmask && currentCharacterData.equipment?.gasMask) {
+        showNotification('Нельзя надеть эти очки вместе с противогазом');
+        return;
+    }
+    // Проверка совместимости с забралом шлема
+    if (item.attributes?.incompatible_with_visor) {
+        const helmet = currentCharacterData.equipment?.helmet;
+        if (helmet && helmet.installedModules?.some(m => m.slotType === 'visor')) {
+            showNotification('Нельзя надеть эти очки вместе со шлемом, имеющим забрало');
+            return;
+        }
+    }
+    const templates = await loadTemplatesForLobby('glasses');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) {
+        showNotification('Шаблон очков не найден');
+        return;
+    }
+    const glassesToEquip = {
+        templateId: template.id,
+        name: template.name,
+        charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
+        flashProtection: item.flashProtection ?? template.attributes?.flash_protection ?? 1,
+        eyePhysicalProtection: item.eyePhysicalProtection ?? template.attributes?.eye_physical_protection ?? 0,
+    };
+    if (!removeItemByPath(itemPath)) {
+        showNotification('Не удалось найти предмет в инвентаре');
+        return;
+    }
+    const oldGlasses = currentCharacterData.equipment?.glasses;
+    if (oldGlasses && oldGlasses.templateId) {
+        const oldTemplates = await loadTemplatesForLobby('glasses');
+        const oldTemplate = oldTemplates.find(t => t.id === oldGlasses.templateId);
+        if (oldTemplate) {
+            const oldItem = createItemFromTemplate(oldTemplate);
+            oldItem.charismaBonus = oldGlasses.charismaBonus;
+            oldItem.flashProtection = oldGlasses.flashProtection;
+            oldItem.eyePhysicalProtection = oldGlasses.eyePhysicalProtection;
+            restoreItemToPath(oldItem, itemPath);
+        }
+    }
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment.glasses = glassesToEquip;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Очки надеты', 'success');
+};
+
+window.unequipGlasses = async function() {
+    const glasses = currentCharacterData.equipment?.glasses;
+    if (!glasses || !glasses.templateId) {
+        showNotification('Очки не надеты');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('glasses');
+    const template = templates.find(t => t.id === glasses.templateId);
+    if (!template) {
+        showNotification('Шаблон очков не найден');
+        return;
+    }
+    const restoredItem = createItemFromTemplate(template);
+    restoredItem.charismaBonus = glasses.charismaBonus;
+    restoredItem.flashProtection = glasses.flashProtection;
+    restoredItem.eyePhysicalProtection = glasses.eyePhysicalProtection;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+    delete currentCharacterData.equipment.glasses;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Очки сняты', 'success');
+};
+
+window.equipGlovesFromInventory = async function(itemPath) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'gloves') {
+        showNotification('Этот предмет нельзя надеть как перчатки');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('gloves');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) {
+        showNotification('Шаблон перчаток не найден');
+        return;
+    }
+    const glovesToEquip = {
+        templateId: template.id,
+        name: template.name,
+        charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
+        effect: item.effect ?? template.attributes?.effect ?? '',
+    };
+    if (!removeItemByPath(itemPath)) {
+        showNotification('Не удалось найти предмет в инвентаре');
+        return;
+    }
+    const oldGloves = currentCharacterData.equipment?.gloves;
+    if (oldGloves && oldGloves.templateId) {
+        const oldTemplates = await loadTemplatesForLobby('gloves');
+        const oldTemplate = oldTemplates.find(t => t.id === oldGloves.templateId);
+        if (oldTemplate) {
+            const oldItem = createItemFromTemplate(oldTemplate);
+            oldItem.charismaBonus = oldGloves.charismaBonus;
+            oldItem.effect = oldGloves.effect;
+            restoreItemToPath(oldItem, itemPath);
+        }
+    }
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment.gloves = glovesToEquip;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Перчатки надеты', 'success');
+};
+
+window.unequipGloves = async function() {
+    const gloves = currentCharacterData.equipment?.gloves;
+    if (!gloves || !gloves.templateId) {
+        showNotification('Перчатки не надеты');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('gloves');
+    const template = templates.find(t => t.id === gloves.templateId);
+    if (!template) {
+        showNotification('Шаблон перчаток не найден');
+        return;
+    }
+    const restoredItem = createItemFromTemplate(template);
+    restoredItem.charismaBonus = gloves.charismaBonus;
+    restoredItem.effect = gloves.effect;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restoredItem);
+    delete currentCharacterData.equipment.gloves;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Перчатки сняты', 'success');
+};
+
+// Кольцо
+window.equipRingFromInventory = async function(itemPath) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'jewelry' || item.subcategory !== 'ring') {
+        showNotification('Этот предмет нельзя надеть как кольцо');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) { showNotification('Шаблон не найден'); return; }
+    const toEquip = {
+        templateId: template.id,
+        name: template.name,
+        charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
+    };
+    if (!removeItemByPath(itemPath)) return;
+    const old = currentCharacterData.equipment?.ring;
+    if (old && old.templateId) restoreItemToPath(old, itemPath);
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment.ring = toEquip;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave(); forceSyncCharacter();
+    showNotification('Кольцо надето', 'success');
+};
+
+window.unequipRing = async function() {
+    const item = currentCharacterData.equipment?.ring;
+    if (!item || !item.templateId) { showNotification('Кольцо не надето'); return; }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) { showNotification('Шаблон не найден'); return; }
+    const restored = createItemFromTemplate(template);
+    restored.charismaBonus = item.charismaBonus;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restored);
+    delete currentCharacterData.equipment.ring;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave(); forceSyncCharacter();
+    showNotification('Кольцо снято', 'success');
+};
+
+// Амулет / цепочка
+window.equipNecklaceFromInventory = async function(itemPath) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'jewelry' || (item.subcategory !== 'necklace' && item.subcategory !== 'amulet')) {
+        showNotification('Этот предмет нельзя надеть как амулет или цепочку');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) {
+        showNotification('Шаблон не найден');
+        return;
+    }
+    const toEquip = {
+        templateId: template.id,
+        name: template.name,
+        subcategory: item.subcategory || template.subcategory,
+        charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
+    };
+    toEquip.charismaBonus = parseFloat(toEquip.charismaBonus) || 0;
+
+    if (!removeItemByPath(itemPath)) {
+        showNotification('Не удалось найти предмет в инвентаре');
+        return;
+    }
+    const old = currentCharacterData.equipment?.necklace;
+    if (old && old.templateId) {
+        const oldTemplates = await loadTemplatesForLobby('jewelry');
+        const oldTemplate = oldTemplates.find(t => t.id === old.templateId);
+        if (oldTemplate) {
+            const oldItem = createItemFromTemplate(oldTemplate);
+            oldItem.charismaBonus = old.charismaBonus || 0;
+            restoreItemToPath(oldItem, itemPath);
+        }
+    }
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment.necklace = toEquip;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Амулет/цепочка надеты', 'success');
+};
+
+window.unequipNecklace = async function() {
+    const item = currentCharacterData.equipment?.necklace;
+    if (!item || !item.templateId) {
+        showNotification('Амулет/цепочка не надеты');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) {
+        showNotification('Шаблон не найден');
+        return;
+    }
+    const restored = createItemFromTemplate(template);
+    restored.charismaBonus = item.charismaBonus || 0;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restored);
+    delete currentCharacterData.equipment.necklace;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Амулет/цепочка сняты', 'success');
+};
+
+// Серьги
+window.equipEarringsFromInventory = async function(itemPath) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'jewelry' || item.subcategory !== 'earrings') {
+        showNotification('Этот предмет нельзя надеть как серьги');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) {
+        showNotification('Шаблон не найден');
+        return;
+    }
+    const toEquip = {
+        templateId: template.id,
+        name: template.name,
+        subcategory: item.subcategory,
+        charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
+    };
+    toEquip.charismaBonus = parseFloat(toEquip.charismaBonus) || 0;
+
+    if (!removeItemByPath(itemPath)) {
+        showNotification('Не удалось найти предмет в инвентаре');
+        return;
+    }
+    const old = currentCharacterData.equipment?.earrings;
+    if (old && old.templateId) {
+        const oldTemplates = await loadTemplatesForLobby('jewelry');
+        const oldTemplate = oldTemplates.find(t => t.id === old.templateId);
+        if (oldTemplate) {
+            const oldItem = createItemFromTemplate(oldTemplate);
+            oldItem.charismaBonus = old.charismaBonus || 0;
+            restoreItemToPath(oldItem, itemPath);
+        }
+    }
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment.earrings = toEquip;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Серьги надеты', 'success');
+};
+
+window.unequipEarrings = async function() {
+    const item = currentCharacterData.equipment?.earrings;
+    if (!item || !item.templateId) {
+        showNotification('Серьги не надеты');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) {
+        showNotification('Шаблон не найден');
+        return;
+    }
+    const restored = createItemFromTemplate(template);
+    restored.charismaBonus = item.charismaBonus || 0;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restored);
+    delete currentCharacterData.equipment.earrings;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Серьги сняты', 'success');
+};
+
+// Браслет (с номером слота)
+window.equipBraceletFromInventory = async function(itemPath, slotNumber) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'jewelry' || item.subcategory !== 'bracelet') {
+        showNotification('Этот предмет нельзя надеть как браслет');
+        return;
+    }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) { showNotification('Шаблон не найден'); return; }
+    const toEquip = {
+        templateId: template.id,
+        name: template.name,
+        charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
+    };
+    if (!removeItemByPath(itemPath)) return;
+    const old = currentCharacterData.equipment?.[`bracelet${slotNumber}`];
+    if (old && old.templateId) restoreItemToPath(old, itemPath);
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment[`bracelet${slotNumber}`] = toEquip;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave(); forceSyncCharacter();
+    showNotification(`Браслет ${slotNumber} надет`, 'success');
+};
+
+window.unequipBracelet = async function(slotNumber) {
+    const item = currentCharacterData.equipment?.[`bracelet${slotNumber}`];
+    if (!item || !item.templateId) { showNotification(`Браслет ${slotNumber} не надет`); return; }
+    const templates = await loadTemplatesForLobby('jewelry');
+    const template = templates.find(t => t.id === item.templateId);
+    if (!template) { showNotification('Шаблон не найден'); return; }
+    const restored = createItemFromTemplate(template);
+    restored.charismaBonus = item.charismaBonus;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(restored);
+    delete currentCharacterData.equipment[`bracelet${slotNumber}`];
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave(); forceSyncCharacter();
+    showNotification(`Браслет ${slotNumber} снят`, 'success');
 };
 
 window.unequipFromBelt = async function() {
@@ -7516,7 +8077,8 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     actionsDiv.appendChild(delBtn);
 
     // Надеть
-    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon', 'device'];
+    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon',
+    'device', 'headphones', 'glasses', 'gloves', 'jewelry'];
     if (item.isEquippable || equippableCategories.includes(item.category)) {
         const equipBtn = document.createElement('button');
         equipBtn.type = 'button';
@@ -7539,6 +8101,22 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             else if (category === 'vest') equipVestFromInventory(itemPath);
             else if (category === 'device') equipDetectorFromInventory(itemPath);
             else if (category === 'melee_weapon') equipMeleeWeaponFromInventory(itemPath);
+            else if (category === 'headphones') equipHeadphonesFromInventory(itemPath);
+            else if (category === 'glasses') equipGlassesFromInventory(itemPath);
+            else if (category === 'gloves') equipGlovesFromInventory(itemPath);
+            else if (category === 'jewelry') {
+                const sub = item.subcategory;
+                if (sub === 'ring') equipRingFromInventory(itemPath);
+                else if (sub === 'necklace' || sub === 'amulet') equipNecklaceFromInventory(itemPath);
+                else if (sub === 'earrings') equipEarringsFromInventory(itemPath);
+                else if (sub === 'bracelet') {
+                    const eq = currentCharacterData.equipment || {};
+                    if (!eq.bracelet1?.templateId) equipBraceletFromInventory(itemPath, 1);
+                    else if (!eq.bracelet2?.templateId) equipBraceletFromInventory(itemPath, 2);
+                    else showNotification('Оба слота браслетов заняты');
+                }
+                else showNotification('Неизвестный тип бижутерии');
+            }
         };
         actionsDiv.appendChild(equipBtn);
     }
@@ -8142,21 +8720,60 @@ window.rollSkill = function(skillPath, skillLabel) {
         skillObj = skillObj[part];
     }
     if (!skillObj) return;
-    const base = skillObj.base;
+
+    let base = skillObj.base;
+    let bonus = skillObj.bonus || 0;
+
+    // Модификатор от базового значения навыка (по D&D правилам: (base-10)/2)
     const selfMod = typeof base === 'number' ? Math.floor((base - 10) / 2) : 0;
+
+    // Харизма для социальных навыков (кроме самой харизмы)
     let charismaMod = 0;
     if (skillPath.startsWith('social.') && skillPath !== 'social.charisma') {
         const charisma = currentCharacterData.skills?.social?.charisma;
         const charismaBase = charisma?.base;
         charismaMod = typeof charismaBase === 'number' ? Math.floor((charismaBase - 10) / 2) : 0;
     }
-    const bonus = skillObj.bonus || 0;
+
+    // Бонус от экипировки
+    let equipmentBonus = 0;
+    const eq = currentCharacterData.equipment || {};
+
+    // --- Бонус к Харизме (от очков, перчаток, бижутерии) ---
+    if (skillPath === 'social.charisma') {
+        let eqBonus = 0;
+        const eq = currentCharacterData.equipment || {};
+        if (eq.glasses?.charismaBonus) eqBonus += eq.glasses.charismaBonus;
+        if (eq.gloves?.charismaBonus) eqBonus += eq.gloves.charismaBonus;
+        if (eq.ring?.charismaBonus) eqBonus += eq.ring.charismaBonus;
+        if (eq.necklace?.charismaBonus) eqBonus += eq.necklace.charismaBonus;
+        if (eq.earrings?.charismaBonus) eqBonus += eq.earrings.charismaBonus;
+        if (eq.bracelet1?.charismaBonus) eqBonus += eq.bracelet1.charismaBonus;
+        if (eq.bracelet2?.charismaBonus) eqBonus += eq.bracelet2.charismaBonus;
+        equipmentBonus += eqBonus;
+    }
+
+    // --- Бонус к Внимательности (от наушников и детектора) ---
+    if (skillPath === 'physical.awareness') {
+        if (eq.headphones?.awarenessBonus) equipmentBonus += eq.headphones.awarenessBonus;
+        if (eq.detector?.bonus) equipmentBonus += eq.detector.bonus;
+    }
+
+    // Можно добавить другие бонусы по необходимости (например, от артефактов, контейнеров и т.д.)
+
+    // Итоговый бонус: собственный бонус навыка + модификатор от базы + харизма + экипировка
+    const totalBonus = bonus + selfMod + charismaMod + equipmentBonus;
+
     const dice = Math.floor(Math.random() * 20) + 1;
-    const total = dice + selfMod + charismaMod + bonus;
+    const total = dice + totalBonus;
+
     let modStr = `модификатор навыка = ${selfMod}`;
     if (charismaMod !== 0) modStr += ` + харизма = ${charismaMod}`;
-    if (bonus !== 0) modStr += ` + бонус = ${bonus}`;
+    if (bonus !== 0) modStr += ` + бонус навыка = ${bonus}`;
+    if (equipmentBonus !== 0) modStr += ` + экипировка = ${equipmentBonus}`;
+
     showNotification(`🎲 ${skillLabel}: бросок к20 = ${dice}, ${modStr}, итог = ${total}`, 'system');
+
     const socket = getSocket();
     if (socket && currentLobbyId) {
         const message = `🎲 ${skillLabel}: бросок к20 = ${dice}, ${modStr}, итог = **${total}**`;
