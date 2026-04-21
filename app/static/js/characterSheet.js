@@ -528,7 +528,7 @@ function createItemFromTemplate(template, quantity = 1) {
         installedModules: [],
         contents: [],
         isContainer: template.category === 'container' || template.category === 'backpack' || template.category === 'pouch',
-        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask'].includes(template.category),
+        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask', 'device'].includes(template.category),
         isStackable: ['consumable', 'crafting_material', 'artifact', 'ammo'].includes(template.category)
     };
 
@@ -808,13 +808,9 @@ async function renderBasicTab(data) {
     const bg = basic.background || {};
     const inv = data.inventory || {};
 
-    // Загружаем шаблоны детекторов, контейнеров и предысторий
-    let detectorTemplates = [];
-    let containerTemplates = [];
+    // Загружаем шаблоны предысторий
     let backgroundTemplates = [];
     try {
-        detectorTemplates = await loadTemplatesForLobby('detector');
-        containerTemplates = await loadTemplatesForLobby('container');
         backgroundTemplates = await loadTemplatesForLobby('background');
     } catch (e) {
         console.error('Failed to load templates', e);
@@ -887,49 +883,6 @@ async function renderBasicTab(data) {
                 <label class="money-label">Деньги</label>
                 <input type="number" class="form-control number-input" name="inventory.money" value="${inv.money || 0}" style="width: 100px;">
             </div>
-
-            <!-- Детектор аномалий -->
-            <div style="display: grid; grid-template-columns: 1fr auto; gap: 10px;">
-                <div style="display: flex; flex-direction: column; gap: 5px;">
-                    <span>Детектор аномалий</span>
-                    <div style="display: flex; gap: 5px; align-items: center;">
-                        <select name="inventory.detectors.anomaly.templateId" class="form-control" style="width: 100%; height: 38px;">
-                            <option value="">-- Выберите --</option>
-                            ${detectorTemplates.filter(t => t.attributes?.type === 'anomaly').map(t =>
-                                `<option value="${t.id}" ${inv.detectors?.anomaly?.templateId == t.id ? 'selected' : ''}>${t.name}</option>`
-                            ).join('')}
-                        </select>
-                        ${inv.detectors?.anomaly?.templateId ?
-                            `<button type="button" class="btn btn-sm btn-danger" onclick="unequipDetector()" style="padding: 2px 8px; white-space: nowrap;">Снять</button>` : ''}
-                    </div>
-                </div>
-                <div style="display: flex; flex-direction: column; gap: 5px;">
-                    <span>Бонус</span>
-                    <input type="number" class="form-control number-input" name="inventory.detectors.anomaly.bonus" value="${inv.detectors?.anomaly?.bonus || 0}" placeholder="0" style="width: 70px; height: 38px;">
-                </div>
-            </div>
-        </div>
-        <div style="display: flex; align-items: center; margin-top: 10px; margin-bottom: 10px;">
-            <h4 style="margin: 0;">Контейнеры на броне</h4>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="addContainer()" style="padding: 2px 8px;">➕</button>
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 10px;">
-            ${Array.isArray(inv.containers) ? inv.containers.map((cont, idx) => {
-                const selectedTemplate = containerTemplates.find(t => t.id === cont.templateId);
-                const options = containerTemplates.map(t =>
-                    `<option value="${t.id}" ${cont.templateId == t.id ? 'selected' : ''}>${t.name}</option>`
-                ).join('');
-                return `
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <select name="inventory.containers.${idx}.templateId" class="form-control" style="width: 150px;">
-                            <option value="">-- Выберите --</option>
-                            ${options}
-                        </select>
-                        <input type="text" class="form-control" name="inventory.containers.${idx}.effect" value="${escapeHtml(cont.effect || selectedTemplate?.attributes?.effect || '')}" placeholder="Содержимое" style="flex: 1;">
-                        <button type="button" class="btn btn-sm btn-danger" onclick="removeContainer(${idx})">✕</button>
-                    </div>
-                `;
-            }).join('') : ''}
         </div>
     `;
 
@@ -1109,26 +1062,6 @@ window.saveBackgroundTemplate = async function() {
     } catch (err) {
         showNotification(err.message);
     }
-};
-
-// Функции для контейнеров (без изменений)
-window.addContainer = function() {
-    updateDataFromFields();
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    if (!Array.isArray(currentCharacterData.inventory.containers)) {
-        currentCharacterData.inventory.containers = [];
-    }
-    currentCharacterData.inventory.containers.push({});
-    renderBasicTab(currentCharacterData);
-    scheduleAutoSave();
-};
-
-window.removeContainer = function(index) {
-    updateDataFromFields();
-    if (!currentCharacterData.inventory?.containers) return;
-    currentCharacterData.inventory.containers.splice(index, 1);
-    renderBasicTab(currentCharacterData);
-    scheduleAutoSave();
 };
 
 window.addBackgroundSkillBonus = function() {
@@ -1885,14 +1818,13 @@ async function renderEquipmentTab(data) {
     const conditionOptions = ['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'];
 
     let weaponTemplates = [], helmetTemplates = [], gasMaskTemplates = [], armorTemplates = [];
-    let modificationTemplates = [], containerTemplates = [];
+    let modificationTemplates = [];
     try {
         weaponTemplates = await loadTemplatesForLobby('weapon');
         helmetTemplates = await loadTemplatesForLobby('helmet');
         gasMaskTemplates = await loadTemplatesForLobby('gas_mask');
         armorTemplates = await loadTemplatesForLobby('armor');
         modificationTemplates = await loadTemplatesForLobby('modification');
-        containerTemplates = await loadTemplatesForLobby('container');
     } catch (e) {
         console.error('Failed to load templates', e);
     }
@@ -2137,7 +2069,6 @@ async function renderEquipmentTab(data) {
                             </select>
                         </div>
                         <div class="field-group field-number"><label>Перемещение</label><input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Контейнеры</label><input type="number" class="number-input form-control" name="equipment.armor.containerSlots" value="${armor.containerSlots || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block" style="flex: 1;">
@@ -2155,6 +2086,27 @@ async function renderEquipmentTab(data) {
                         })()}
                     </div>
                 </div>
+                <!-- Контейнеры на броне (отдельная строка, ниже) -->
+                <div style="margin-top: 15px; display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start;">
+                    ${(armor.containers || []).map((slot, idx) => `
+                        <div style="border: 1px solid #666; border-radius: 4px; padding: 5px; width: 180px; background: rgba(0,0,0,0.2);">
+                            <div style="display: flex; align-items: center; gap: 5px;">
+                                <strong>${idx+1}:</strong>
+                                ${slot.item ? `
+                                    <span style="flex:1; font-size:0.9rem;">${escapeHtml(slot.item.name)}</span>
+                                    <button type="button" class="btn btn-sm btn-danger" onclick="removeArmorContainerItem(${idx})" title="Извлечь">✕</button>
+                                ` : `
+                                    <button type="button" class="btn btn-sm btn-primary" onclick="addItemToArmorContainer(${idx})" style="width:100%;">Вставить</button>
+                                `}
+                            </div>
+                            ${slot.item && slot.item.category === 'container' && slot.item.installedModules?.length ? `
+                                <div style="margin-top: 5px; font-size: 0.75rem; color: #aaa; word-break: break-all;">
+                                    📦 ${slot.item.installedModules.map(m => m.name).join(', ')}
+                                </div>
+                            ` : ''}
+                        </div>
+                    `).join('')}
+                </div>
             </div>
             <div class="modifications-block">
                 <div style="display:flex; align-items:center;">
@@ -2163,6 +2115,29 @@ async function renderEquipmentTab(data) {
                 </div>
                 <div id="armor-modifications-container">${renderArmorModifications(armor.modifications, groupedArmorMods)}</div>
             </div>
+        </div>
+
+        <!-- Детектор аномалий -->
+        <div class="equipment-group">
+            <div class="equipment-row">
+                <div class="equipment-main-block">
+                    <div class="block-header">
+                        <h4>Детектор аномалий</h4>
+                        ${eq.detector?.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipDetector()">Снять</button>` : ''}
+                    </div>
+                    <div class="fields-container">
+                        <div class="field-group field-name">
+                            <label>Название</label>
+                            <strong>${escapeHtml(eq.detector?.name || 'Не надет')}</strong>
+                        </div>
+                        <div class="field-group field-number">
+                            <label>Бонус</label>
+                            <input type="number" class="number-input form-control" name="equipment.detector.bonus" value="${eq.detector?.bonus || 0}">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            ${eq.detector ? renderSlotsUniversal(eq.detector, ['equipment', 'detector']) : ''}
         </div>
 
         <div class="equipment-group">
@@ -2186,6 +2161,7 @@ async function renderEquipmentTab(data) {
  * @returns {string} HTML
  */
 function renderSlotsUniversal(item, itemPath, depth = 0) {
+    if (!item) return '';
     const slots = getItemSlots(item);
     if (!slots.length) return '';
 
@@ -2396,6 +2372,21 @@ function renderArmorModifications(mods, groupedTemplates) {
                 </select>
                 <input type="text" class="form-control" name="equipment.armor.modifications.${index}.description" value="${escapeHtml(mod.description || '')}" placeholder="Описание" style="flex:1;">
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeArmorModification(${index})">✕</button>
+            </div>
+        `;
+    });
+    return html;
+}
+
+function renderArmorContainers(containers) {
+    if (!containers.length) return '<p>Нет контейнеров</p>';
+    let html = '';
+    containers.forEach((cont, idx) => {
+        html += `
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 5px;">
+                <input type="text" class="form-control" name="equipment.armor.containers.${idx}.effect"
+                       value="${escapeHtml(cont.effect || '')}" placeholder="Содержимое" style="flex: 1;">
+                <button type="button" class="btn btn-sm btn-danger" onclick="removeArmorContainer(${idx})">✕</button>
             </div>
         `;
     });
@@ -3323,6 +3314,142 @@ window.confirmFixedReload = async function(weaponIndex) {
     showNotification('Выберите спидлоадер или патроны');
 };
 
+function updateArmorContainerSlots(newSlotCount) {
+    const armor = currentCharacterData.equipment?.armor;
+    if (!armor) return;
+    const current = armor.containers || [];
+    if (newSlotCount > current.length) {
+        for (let i = current.length; i < newSlotCount; i++) {
+            current.push({ item: null });
+        }
+    } else if (newSlotCount < current.length) {
+        armor.containers = current.slice(0, newSlotCount);
+    }
+    renderEquipmentTab(currentCharacterData);
+    scheduleAutoSave();
+}
+
+// Добавить предмет (контейнер или артефакт) в слот брони
+window.addItemToArmorContainer = async function(containerIndex) {
+    const armor = currentCharacterData.equipment?.armor;
+    if (!armor || !armor.containers) return;
+    const slot = armor.containers[containerIndex];
+    if (slot.item) {
+        showNotification('Слот уже занят');
+        return;
+    }
+
+    // Собираем контейнеры и артефакты
+    const candidates = [];
+    const collect = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((it, idx) => {
+            if (it.category === 'container' || it.category === 'artifact') {
+                candidates.push({ item: it, path: path.concat(idx) });
+            }
+            if (it.contents) collect(it.contents, path.concat(idx, 'contents'));
+        });
+    };
+    collect(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
+    collect(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
+    const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
+    beltPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
+    const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
+    vestPouches.forEach((pouch, i) => collect(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
+
+    if (candidates.length === 0) {
+        showNotification('Нет подходящих предметов (контейнеров или артефактов)');
+        return;
+    }
+
+    // Модальное окно
+    const oldModal = document.getElementById('armor-container-select-modal');
+    if (oldModal) oldModal.remove();
+    const modal = document.createElement('div');
+    modal.id = 'armor-container-select-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Выберите предмет для слота ${containerIndex+1}</h3>
+            <select id="armor-container-select" class="form-control" size="5"></select>
+            <div class="form-actions" style="margin-top:15px;">
+                <button class="btn btn-primary" id="confirm-armor-container">Вставить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const select = modal.querySelector('#armor-container-select');
+    candidates.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        opt.textContent = `${entry.item.name} (${entry.item.category === 'container' ? 'Контейнер' : 'Артефакт'})`;
+        select.appendChild(opt);
+    });
+    modal.querySelector('#confirm-armor-container').onclick = async () => {
+        const idx = select.value;
+        if (idx === '') return;
+        const selected = candidates[idx];
+        modal.remove();
+
+        if (!removeItemByPath(selected.path)) {
+            showNotification('Не удалось найти предмет в инвентаре');
+            return;
+        }
+
+        slot.item = selected.item;
+        await renderEquipmentTab(currentCharacterData);
+        await renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Предмет помещён в контейнер брони', 'success');
+    };
+    modal.style.display = 'flex';
+};
+
+// Извлечь предмет из слота брони
+window.removeArmorContainerItem = async function(containerIndex) {
+    const armor = currentCharacterData.equipment?.armor;
+    if (!armor || !armor.containers) return;
+    const slot = armor.containers[containerIndex];
+    if (!slot.item) return;
+    const item = slot.item;
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
+    currentCharacterData.inventory.backpack.push(item);
+    slot.item = null;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Предмет извлечён из контейнера брони', 'success');
+};
+
+function isArtifactContainer(item) {
+    if (item.category !== 'container') return false;
+    const allTemplates = allTemplatesCache || [];
+    const template = allTemplates.find(t => t.id === item.templateId);
+    if (!template) return false;
+    const slots = template.attributes?.slots || [];
+    return slots.some(s => s.type === 'artifact');
+}
+
+// Просмотр содержимого контейнера (если это контейнер)
+window.openContainerContents = function(containerIndex) {
+    const armor = currentCharacterData.equipment?.armor;
+    if (!armor || !armor.containers) return;
+    const slot = armor.containers[containerIndex];
+    if (!slot.item || slot.item.category !== 'container') return;
+    const installed = slot.item.installedModules || [];
+    const artifact = installed.find(m => m.slotType === 'artifact');
+    if (artifact) {
+        showNotification(`В контейнере: ${artifact.name}`, 'system');
+    } else {
+        showNotification('Контейнер пуст');
+    }
+};
+
 function updateAmmoWeight(ammoItem) {
     const qty = ammoItem.quantity || 0;
     if (qty === 0) {
@@ -3788,6 +3915,9 @@ window.fillArmorFromPreset = async function(select) {
     armor.weight = template.weight;
     armor.volume = template.volume;
 
+    const containerSlots = template.attributes?.container_slots || 0;
+    armorToEquip.containers = Array(containerSlots).fill().map(() => ({ item: null }));
+
     initArmorStagedDurability(armor, template);
 
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
@@ -3832,6 +3962,10 @@ window.equipArmorFromInventory = async function(itemPath) {
         modifications: item.modifications || [],
         installedModules: item.installedModules ? [...item.installedModules] : []
     };
+
+    const containerSlots = template.attributes?.container_slots || 0;
+    armorToEquip.containers = Array(containerSlots).fill().map(() => ({ item: null }));
+
     initArmorStagedDurability(armorToEquip, template);
     if (item.durability !== undefined) {
         armorToEquip.durability = item.durability;
@@ -4217,17 +4351,17 @@ window.equipVestFromInventory = async function(itemPath) {
 
 window.equipDetectorFromInventory = async function(itemPath) {
     const item = getItemByPath(itemPath);
-    if (!item || item.category !== 'detector') {
+    if (!item || (item.category !== 'device' && item.category !== 'detector')) {
         showNotification('Этот предмет нельзя надеть как детектор');
         return;
     }
-    // Проверяем, что это детектор аномалий
-    if (item.attributes?.type !== 'anomaly') {
+    if (item.subcategory !== 'anomaly_detector' && item.attributes?.type !== 'anomaly') {
         showNotification('Можно надеть только детектор аномалий');
         return;
     }
 
-    const templates = await loadTemplatesForLobby('detector');
+    // Загружаем шаблоны из категории device (или detector, если старый)
+    const templates = await loadTemplatesForLobby('device');
     const template = templates.find(t => t.id === item.templateId);
     if (!template) {
         showNotification('Шаблон детектора не найден');
@@ -4237,8 +4371,12 @@ window.equipDetectorFromInventory = async function(itemPath) {
     const detectorToEquip = {
         templateId: template.id,
         name: template.name,
-        type: 'anomaly',
-        bonus: item.bonus || 0
+        category: 'device',
+        weight: template.weight,
+        volume: template.volume,
+        bonus: item.attributes?.bonus || 0,
+        installedModules: item.installedModules ? [...item.installedModules] : [],
+        attributes: { ...template.attributes }
     };
 
     if (!removeItemByPath(itemPath)) {
@@ -4246,24 +4384,24 @@ window.equipDetectorFromInventory = async function(itemPath) {
         return;
     }
 
-    // Возвращаем старый детектор, если есть
-    const oldDetector = currentCharacterData.inventory?.detectors?.anomaly;
+    // Снимаем старый детектор
+    const oldDetector = currentCharacterData.equipment?.detector;
     if (oldDetector && oldDetector.templateId) {
-        const oldTemplates = await loadTemplatesForLobby('detector');
+        const oldTemplates = await loadTemplatesForLobby('device');
         const oldTemplate = oldTemplates.find(t => t.id === oldDetector.templateId);
         if (oldTemplate) {
             const oldItem = createItemFromTemplate(oldTemplate);
-            oldItem.bonus = oldDetector.bonus || 0;
+            oldItem.attributes.bonus = oldDetector.bonus || 0;
+            oldItem.installedModules = oldDetector.installedModules || [];
             restoreItemToPath(oldItem, itemPath);
         }
     }
 
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    if (!currentCharacterData.inventory.detectors) currentCharacterData.inventory.detectors = {};
-    currentCharacterData.inventory.detectors.anomaly = detectorToEquip;
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    currentCharacterData.equipment.detector = detectorToEquip;
 
-    renderBasicTab(currentCharacterData);
-    renderInventoryTab(currentCharacterData);
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
     forceSyncCharacter();
     showNotification('Детектор аномалий надет', 'success');
@@ -4382,6 +4520,7 @@ window.unequipArmor = async function() {
     restoredItem.currentStageDurability = armor.currentStageDurability;
     restoredItem.protection = { ...armor.protection };
     restoredItem.modifications = armor.modifications || [];
+    restoredItem.containers = armor.containers || [];
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
     currentCharacterData.inventory.backpack.push(restoredItem);
@@ -4570,25 +4709,26 @@ window.unequipVest = async function() {
 };
 
 window.unequipDetector = async function() {
-    const detector = currentCharacterData.inventory?.detectors?.anomaly;
+    const detector = currentCharacterData.equipment?.detector;
     if (!detector || !detector.templateId) {
-        showNotification('Детектор аномалий не надет');
+        showNotification('Детектор не надет');
         return;
     }
-    const templates = await loadTemplatesForLobby('detector');
+    const templates = await loadTemplatesForLobby('device');
     const template = templates.find(t => t.id === detector.templateId);
     if (!template) {
         showNotification('Шаблон детектора не найден');
         return;
     }
     const restoredItem = createItemFromTemplate(template);
-    restoredItem.bonus = detector.bonus || 0;
+    restoredItem.attributes.bonus = detector.bonus || 0;
+    restoredItem.installedModules = detector.installedModules || [];
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
     currentCharacterData.inventory.backpack.push(restoredItem);
-    delete currentCharacterData.inventory.detectors.anomaly;
-    renderBasicTab(currentCharacterData);
-    renderInventoryTab(currentCharacterData);
+    delete currentCharacterData.equipment.detector;
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
     forceSyncCharacter();
     showNotification('Детектор аномалий снят', 'success');
@@ -7230,7 +7370,8 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     itemDiv.dataset.path = itemPath.join(',');
 
     // Если предмет — контейнер, делаем его drop-целью (закрытый контейнер)
-    if (item.isContainer) {
+    const isArtifactCont = isArtifactContainer(item);
+    if (item.isContainer && !isArtifactCont) {
         setupDropTarget(itemDiv, itemPath.concat('contents'), item);
     }
 
@@ -7258,7 +7399,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     nameWrapper.style.display = 'flex';
     nameWrapper.style.alignItems = 'center';
 
-    if (item.isContainer) {
+    if (item.isContainer && !isArtifactCont) {
         const toggleIcon = document.createElement('span');
         toggleIcon.textContent = '▶';
         toggleIcon.style.cursor = 'pointer';
@@ -7375,7 +7516,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     actionsDiv.appendChild(delBtn);
 
     // Надеть
-    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon'];
+    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon', 'device'];
     if (item.isEquippable || equippableCategories.includes(item.category)) {
         const equipBtn = document.createElement('button');
         equipBtn.type = 'button';
@@ -7396,7 +7537,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             else if (category === 'weapon') equipWeaponFromInventory(itemPath);
             else if (category === 'belt') equipBeltFromInventory(itemPath);
             else if (category === 'vest') equipVestFromInventory(itemPath);
-            else if (category === 'detector') equipDetectorFromInventory(itemPath);
+            else if (category === 'device') equipDetectorFromInventory(itemPath);
             else if (category === 'melee_weapon') equipMeleeWeaponFromInventory(itemPath);
         };
         actionsDiv.appendChild(equipBtn);
@@ -7485,7 +7626,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     }
 
     // Содержимое контейнера
-    if (item.isContainer) {
+    if (item.isContainer && !isArtifactCont) {
         const template = allTemplates?.find(t => t.id === item.templateId);
         const hasArmorPlateSlot = template?.attributes?.slots?.some(s => s.type === 'armor_plate');
         if (!hasArmorPlateSlot) {
@@ -8045,6 +8186,8 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
                 matches = (it.category === 'device' && it.subcategory === 'battery');
             } else if (slotType === 'filter') {
                 matches = (it.category === 'gas_mask_module' && it.attributes?.slot_type === 'filter');
+            } else if (slotType === 'artifact') {
+                matches = (it.category === 'artifact');
             } else {
                 matches = (it.slot_type === slotType) || (it.attributes?.slot_type === slotType);
             }
