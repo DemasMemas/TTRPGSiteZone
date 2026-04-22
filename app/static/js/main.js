@@ -9,7 +9,7 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
  getEditMode, setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, updateTileEditHeight,
  updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
  applyNameChange, applyRadiationChange, updateTileEditRadiation} from './mapEdit.js';
-import { hideObjectHighlight, camera } from './lobby3d.js';
+import { hideObjectHighlight, camera, getHoveredTile } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
 import { Server } from './api.js';
 import AppState, { initDraggablePanels, initHotkeys } from './ui_interactions.js';
@@ -19,6 +19,7 @@ openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, del
 fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
 import { openCharacterSheet, closeCharacterSheet, exportCharacter, importCharacter } from './characterSheet.js';
 import { setCurrentLobbyId as setCharLobbyId } from './characterSheet.js';
+import { initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId } from './locationScene.js';
 import * as THREE from 'three';
 
 initWeather();
@@ -246,6 +247,103 @@ function bindWeatherSliders() {
     });
 }
 bindWeatherSliders();
+
+let currentLocationData = null;
+
+// Функция входа в локацию
+window.enterLocation = async function(locationId) {
+    try {
+        if (typeof window.resetHoveredMarker === 'function') {
+            window.resetHoveredMarker();
+        }
+        const data = await Server.getLocationDetail(currentLobbyId, locationId);
+        currentLocationData = data;
+        setCurrentLocationId(locationId);
+        document.getElementById('canvas-container').style.display = 'none';
+        document.getElementById('location-container').style.display = 'block';
+        initLocationScene('location-canvas');
+        loadLocation(data);
+    } catch (err) {
+        showNotification(err.message);
+    }
+};
+
+// Выход из локации
+window.exitLocation = function() {
+    const locationId = getCurrentLocationId();
+    const characterId = window.currentCharacterId;
+    if (socket && characterId) {
+        socket.emit('leave_location', {
+            token: localStorage.getItem('access_token'),
+            location_id: locationId,
+            character_id: characterId
+        });
+    }
+    document.getElementById('location-container').style.display = 'none';
+    document.getElementById('canvas-container').style.display = 'block';
+    setCurrentLocationId(null);
+    currentLocationData = null;
+    // Перезагрузить чанки глобальной карты, если нужно
+};
+
+// Обработчики WebSocket для локации
+if (socket) {
+    socket.on('joined_location', (data) => {
+        console.log('Joined location', data);
+        updateCharacterPosition(data.character_id, data.x, data.y);
+    });
+    socket.on('location_state', (state) => {
+        state.forEach(s => updateCharacterPosition(s.character_id, s.x, s.y));
+    });
+    socket.on('character_moved', (data) => {
+        updateCharacterPosition(data.character_id, data.x, data.y);
+    });
+}
+
+let awaitingLocationTile = false;
+let locationTileCallback = null;
+
+window.startLocationPick = function() {
+    window.awaitingLocationPick = true;
+    showNotification('Кликните по тайлу на карте для создания локации', 'system');
+    window.locationPickCallback = async (tile) => {
+        const worldX = tile.chunk.chunkX * 32 + tile.tileX;
+        const worldZ = tile.chunk.chunkY * 32 + tile.tileY;
+        const name = prompt('Название локации:');
+        if (!name) return;
+        let width = parseInt(prompt('Ширина локации (в тайлах, от 5 до 200):', '100'));
+        if (isNaN(width) || width < 5) width = 100;
+        let height = parseInt(prompt('Высота локации (в тайлах):', width));
+        if (isNaN(height) || height < 5) height = width;
+        await createLocationFromCoordinates(worldX, worldZ, name, width, height);
+    };
+};
+
+window.createLocationFromCoordinates = async function(tileX, tileZ, name, width, height) {
+    try {
+        await Server.createLocation(currentLobbyId, {
+            name: name,
+            type: 'exploration',
+            world_tile_x: tileX,
+            world_tile_z: tileZ,
+            grid_width: width,
+            grid_height: height,
+            tiles_data: []
+        });
+        showNotification('Локация создана', 'success');
+        // Принудительно перезагружаем все маркеры (чтобы новые локации стали кликабельными)
+        if (socket) socket.emit('get_markers', { token, lobby_id: currentLobbyId });
+    } catch (err) {
+        showNotification(err.message);
+    }
+};
+
+// Добавляем кнопку создания локации в UI (только GM)
+document.getElementById('create-location-btn')?.addEventListener('click', () => {
+    startLocationPick();
+});
+
+document.getElementById('exit-location-btn')?.addEventListener('click', exitLocation);
 
 const savedTheme = localStorage.getItem('theme');
 if (savedTheme === 'light') {

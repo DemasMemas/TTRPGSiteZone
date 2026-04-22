@@ -84,8 +84,12 @@ export function getEraserMode() { return AppState.eraserMode; }
 
 function updateGMControlsVisibility() {
     const gmControls = document.getElementById('gm-only-controls');
+    const createLocationBtn = document.getElementById('create-location-btn');
     if (gmControls) {
         gmControls.style.display = (AppState.isGM && AppState.editMode) ? 'flex' : 'none';
+    }
+    if (createLocationBtn) {
+        createLocationBtn.style.display = (AppState.isGM && AppState.editMode) ? 'inline-flex' : 'none';
     }
 }
 

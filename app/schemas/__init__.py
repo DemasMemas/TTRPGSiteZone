@@ -16,3 +16,4 @@ from .lobby import LobbySchema, LobbyCreateSchema, LobbyResponseSchema
 from .participant import ParticipantSchema
 from .character import CharacterSchema, CharacterCreateSchema
 from .map import GameStateSchema, MapChunkSchema
+from .location import LocationCreateSchema, LocationSchema, LocationObjectSchema

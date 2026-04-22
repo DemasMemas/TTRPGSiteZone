@@ -234,4 +234,32 @@ export const Server = {
     async getProfile() {
         return apiFetch('/auth/profile');
     },
+
+    async createLocation(lobbyId, locationData) {
+        return apiFetch(`/lobbies/${lobbyId}/locations`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(locationData)
+        });
+    },
+
+    async getLocations(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations`);
+    },
+
+    async getLocationDetail(lobbyId, locationId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`);
+    },
+
+    async updateLocation(lobbyId, locationId, updates) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates)
+        });
+    },
+
+    async deleteLocation(lobbyId, locationId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`, { method: 'DELETE' });
+    },
 };

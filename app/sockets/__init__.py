@@ -22,6 +22,7 @@ from . import chat
 from . import dice
 from . import markers
 from . import character
+from . import location
 
 @socketio.on('*')
 def catch_all(event, data):

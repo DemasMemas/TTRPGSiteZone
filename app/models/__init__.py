@@ -19,3 +19,6 @@ from .game_state import GameState
 from .chat_message import ChatMessage
 from .character import LobbyCharacter
 from .map_chunk import MapChunk
+from .location import Location
+from .location_character import LocationCharacter
+from .location_object import LocationObject

@@ -15,6 +15,10 @@ from app.schemas.character import CharacterSchema, CharacterCreateSchema
 from app.schemas.map import GameStateSchema, MapChunkSchema, TileUpdateSchema
 from app.models import LobbyParticipant, GameState, LobbyCharacter
 from app.utils.decorators import requires_participant, requires_gm
+from app.models.location import Location
+from app.models.location_character import LocationCharacter
+from app.models.location_object import LocationObject
+from app.schemas.location import LocationCreateSchema, LocationSchema, LocationObjectSchema
 
 # Импорты для универсальных шаблонов
 from app.models.templates import ItemTemplate
@@ -432,5 +436,161 @@ def update_lobby_template(lobby_id, lobby, template_id):
 def delete_lobby_template(lobby_id, lobby, template_id):
     template = LobbyItemTemplate.query.filter_by(id=template_id, lobby_id=lobby_id).first_or_404()
     db.session.delete(template)
+    db.session.commit()
+    return '', 204
+
+# ========== L O C A T I O N S   E N D P O I N T S ==========
+
+@lobbies_bp.route('/<int:lobby_id>/locations', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_location(lobby_id, lobby):
+    schema = LocationCreateSchema()
+    data = schema.load(request.get_json())
+    location = Location(
+        lobby_id=lobby_id,
+        name=data['name'],
+        description=data['description'],
+        type=data['type'],
+        grid_width=data['grid_width'],
+        grid_height=data['grid_height'],
+        tiles_data=data['tiles_data'],
+        world_tile_x=data['world_tile_x'],
+        world_tile_z=data['world_tile_z'],
+        world_radius=data['world_radius'],
+        spawn_points=data['spawn_points']
+    )
+    db.session.add(location)
+    db.session.commit()
+
+    socketio.emit('location_created', {
+        'lobby_id': lobby_id,
+        'location': {
+            'id': location.id,
+            'name': location.name,
+            'type': location.type,
+            'world_tile_x': location.world_tile_x,
+            'world_tile_z': location.world_tile_z,
+            'world_radius': location.world_radius
+        }
+    }, room=f"lobby_{lobby_id}")
+
+    return jsonify({'id': location.id, 'message': 'Location created'}), 201
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_locations(lobby_id, lobby, participant):
+    locations = Location.query.filter_by(lobby_id=lobby_id).all()
+    result = [{
+        'id': loc.id,
+        'name': loc.name,
+        'type': loc.type,
+        'world_tile_x': loc.world_tile_x,
+        'world_tile_z': loc.world_tile_z,
+        'world_radius': loc.world_radius
+    } for loc in locations]
+    return jsonify(result), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_location_detail(lobby_id, location_id, lobby, participant):
+    location = Location.query.get_or_404(location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+
+    objects = LocationObject.query.filter_by(location_id=location.id).all()
+    obj_schema = LocationObjectSchema(many=True)
+
+    return jsonify({
+        'id': location.id,
+        'name': location.name,
+        'description': location.description,
+        'type': location.type,
+        'grid_width': location.grid_width,
+        'grid_height': location.grid_height,
+        'tiles_data': location.tiles_data,
+        'spawn_points': location.spawn_points,
+        'objects': obj_schema.dump(objects)
+    }), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>', methods=['PUT'])
+@jwt_required()
+@requires_gm
+def update_location(lobby_id, location_id, lobby):
+    location = Location.query.get_or_404(location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+
+    data = request.get_json()
+    allowed = ['name', 'description', 'type', 'tiles_data', 'spawn_points']
+    for field in allowed:
+        if field in data:
+            setattr(location, field, data[field])
+    db.session.commit()
+
+    socketio.emit('location_updated', {
+        'lobby_id': lobby_id,
+        'location_id': location.id,
+        'updates': {k: data[k] for k in allowed if k in data}
+    }, room=f"lobby_{lobby_id}")
+
+    return jsonify({'message': 'Location updated'}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_location(lobby_id, location_id, lobby):
+    location = Location.query.get_or_404(location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+
+    socketio.emit('location_deleted', {
+        'lobby_id': lobby_id,
+        'location_id': location.id
+    }, room=f"lobby_{lobby_id}")
+
+    db.session.delete(location)
+    db.session.commit()
+    return jsonify({'message': 'Location deleted'}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/objects', methods=['POST'])
+@jwt_required()
+@requires_gm
+def add_location_object(lobby_id, location_id, lobby):
+    location = Location.query.get_or_404(location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+
+    schema = LocationObjectSchema()
+    data = schema.load(request.get_json())
+    obj = LocationObject(
+        location_id=location_id,
+        name=data['name'],
+        type=data['type'],
+        tile_x=data['tile_x'],
+        tile_y=data['tile_y'],
+        properties=data.get('properties', {})
+    )
+    db.session.add(obj)
+    db.session.commit()
+    return jsonify(schema.dump(obj)), 201
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/objects/<int:object_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_location_object(lobby_id, object_id, lobby):
+    obj = LocationObject.query.get_or_404(object_id)
+    location = Location.query.get(obj.location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+    db.session.delete(obj)
     db.session.commit()
     return '', 204
