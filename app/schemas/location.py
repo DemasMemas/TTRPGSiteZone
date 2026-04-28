@@ -6,7 +6,7 @@ class LocationCreateSchema(Schema):
     type = fields.Str(load_default='exploration', validate=validate.OneOf(['battle', 'social', 'exploration']))
     grid_width = fields.Int(load_default=20, validate=validate.Range(min=5, max=200))
     grid_height = fields.Int(load_default=20, validate=validate.Range(min=5, max=200))
-    tiles_data = fields.List(fields.Dict(), load_default=[])
+    tiles_data = fields.List(fields.List(fields.Dict()), load_default=[])
     world_tile_x = fields.Int(required=True)
     world_tile_z = fields.Int(required=True)
     world_radius = fields.Int(load_default=0)

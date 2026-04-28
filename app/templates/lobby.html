@@ -274,6 +274,49 @@
             </div>
         </div>
 
+        <!-- Модальное окно создания локации -->
+        <div id="location-create-modal" class="modal" style="display:none;">
+            <div class="modal-content" style="max-width: 500px;">
+                <span class="close" onclick="document.getElementById('location-create-modal').style.display='none'">&times;</span>
+                <h3>Создание новой локации</h3>
+                <div class="form-group">
+                    <label>Название локации</label>
+                    <input type="text" id="new-loc-name" class="form-control" placeholder="Например: Заброшенная деревня">
+                </div>
+                <div class="form-group">
+                    <label>Тип ландшафта</label>
+                    <select id="new-loc-terrain" class="form-control">
+                        <option value="grass">🌿 Поле / Трава</option>
+                        <option value="forest">🌲 Лес</option>
+                        <option value="rock">⛰️ Горы / Камни</option>
+                        <option value="swamp">💧 Болото</option>
+                        <option value="water">🌊 Вода</option>
+                        <option value="desert">🏜️ Пустыня</option>
+                        <option value="urban">🏙️ Город / Руины</option>
+                        <option value="camp">🔥 Лагерь</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Ширина (тайлов, 10–100)</label>
+                    <input type="number" id="new-loc-width" class="form-control number-input" min="10" max="100" value="30">
+                </div>
+                <div class="form-group">
+                    <label>Высота (тайлов, 10–100)</label>
+                    <input type="number" id="new-loc-height" class="form-control number-input" min="10" max="100" value="30">
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="new-loc-gen-objects" checked> Генерировать декоративные объекты</label>
+                </div>
+                <div class="form-group" id="new-loc-extra-options" style="display:none;">
+                    <!-- Здесь могут быть дополнительные опции, например, плотность леса -->
+                </div>
+                <div class="form-actions">
+                    <button id="confirm-create-location" class="btn btn-primary">Создать локацию</button>
+                    <button class="btn btn-secondary" onclick="document.getElementById('location-create-modal').style.display='none'">Отмена</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Модальное окно создания маркера -->
         <div id="marker-create-modal" class="modal" style="display:none;">
             <div class="modal-content">
