@@ -294,7 +294,7 @@ async function deleteCurrentLocation(locationId) {
     try {
         await Server.deleteLocation(currentLobbyId, locationId);
         showNotification('Локация удалена', 'success');
-        exitLocation(); // выходим из локации и возвращаемся на карту
+        exitLocation();
         // Обновляем маркеры локаций
         if (socket) socket.emit('get_markers', { token, lobby_id: currentLobbyId });
     } catch (err) {
