@@ -4258,7 +4258,20 @@ window.equipWeaponFromInventory = async function(itemPath) {
         return;
     }
 
-    // Создаём объект оружия для экипировки
+    // Копируем модули с нормализацией модификаторов (минимальное изменение)
+    const installedModulesCopy = (item.installedModules || []).map(mod => {
+        const modCopy = { ...mod };
+        // Если модификаторы лежат в attributes.modifiers, переносим на верхний уровень
+        if (modCopy.attributes?.modifiers && !modCopy.modifiers) {
+            modCopy.modifiers = { ...modCopy.attributes.modifiers };
+        }
+        // Глубокое копирование вложенных объектов, чтобы избежать ссылок
+        if (modCopy.modifiers) modCopy.modifiers = { ...modCopy.modifiers };
+        if (modCopy.attributes) modCopy.attributes = { ...modCopy.attributes };
+        return modCopy;
+    });
+
+    // Создаём объект оружия для экипировки (всё как было)
     const weaponToEquip = {
         templateId: template.id,
         name: template.name,
@@ -4277,7 +4290,7 @@ window.equipWeaponFromInventory = async function(itemPath) {
         caliber: item.caliber || template.attributes?.caliber,
         magazine_size: item.magazine_size || template.attributes?.magazine_size || 0,
         modifications: item.modifications || [],
-        installedModules: item.installedModules ? [...item.installedModules] : [],
+        installedModules: installedModulesCopy,
         installedMagazine: item.installedMagazine || null,
         ammo: item.ammo || 0
     };

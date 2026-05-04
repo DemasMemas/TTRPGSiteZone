@@ -466,11 +466,6 @@ export function setupMarkerInteraction() {
                 event.stopPropagation();
                 return;
             }
-            if (markerEntry) {
-                openMarkerEditModal(markerEntry.data);
-                event.preventDefault();
-                event.stopPropagation();
-            }
         }
     });
 
