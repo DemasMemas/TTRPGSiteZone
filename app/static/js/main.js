@@ -10,6 +10,7 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
  updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
  applyNameChange, applyRadiationChange, updateTileEditRadiation} from './mapEdit.js';
 import { hideObjectHighlight, camera, getHoveredTile } from './lobby3d.js';
+import { hideGlobalCanvas, showGlobalCanvas } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
 import { Server } from './api.js';
 import AppState, { initDraggablePanels, initHotkeys } from './ui_interactions.js';
@@ -272,18 +273,92 @@ window.enterLocation = async function(locationId) {
         setCurrentLocationId(locationId);
         document.getElementById('canvas-container').style.display = 'none';
         document.getElementById('location-container').style.display = 'block';
+        hideGlobalCanvas();  // из lobby3d.js
+
         initLocationScene('location-canvas');
         loadLocation(data);
 
         if (window.isGM) {
-            const delBtn = addDeleteLocationButton(async () => {
-                if (confirm('Удалить эту локацию? Это действие необратимо.')) {
-                    await deleteCurrentLocation(locationId);
-                }
-            });
+            // Кнопки удаления и редактирования параметров
+            addDeleteLocationButton(async () => { await deleteCurrentLocation(locationId); });
             setDeleteButtonVisible(true);
             addEditLocationButton(() => openLocationEditModal(currentLocationData));
             setEditButtonVisible(true);
+
+            // ---- ПРЕОБРАЗУЕМ ПАНЕЛЬ ИНСТРУМЕНТОВ ----
+            const toolsPanel = document.getElementById('panel-tools');
+            if (toolsPanel) {
+                // Сохраняем оригинальное содержимое, если ещё не сохранено
+                if (!window._originalToolsContent) {
+                    window._originalToolsContent = toolsPanel.querySelector('.panel-content').innerHTML;
+                }
+                // Заменяем содержимое на инструменты локации
+                const panelContent = toolsPanel.querySelector('.panel-content');
+                panelContent.innerHTML = `
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Режим:</span>
+                            <button id="loc-edit-toggle-btn" class="btn btn-sm" style="background:#2c3e50;">🔘 Выкл</button>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Тип:</span>
+                            <select id="loc-edit-terrain" class="form-control" style="width: auto;">
+                                <option value="grass">🌿 Трава</option>
+                                <option value="sand">🏜️ Песок</option>
+                                <option value="rock">⛰️ Камень</option>
+                                <option value="swamp">💧 Болото</option>
+                                <option value="water">🌊 Вода</option>
+                            </select>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Радиус:</span>
+                            <input type="range" id="loc-edit-radius" min="0" max="5" value="0">
+                            <span id="loc-radius-value">0</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Высота:</span>
+                            <input type="range" id="loc-edit-height" min="0.5" max="3.0" step="0.1" value="1.0">
+                            <span id="loc-height-value">1.0</span>
+                        </div>
+                        <label style="display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" id="loc-eraser"> Ластик
+                        </label>
+                    </div>
+                `;
+
+                // Импортируем функции из locationScene
+                const { setLocationEditMode, getLocationEditMode, setLocationBrushRadius, setLocationBrushTerrain, setLocationBrushHeight, setLocationEraserMode } = await import('./locationScene.js');
+
+                // Кнопка включения/выключения режима редактирования
+                const toggleBtn = document.getElementById('loc-edit-toggle-btn');
+                let editActive = false;
+                toggleBtn.onclick = () => {
+                    editActive = !editActive;
+                    setLocationEditMode(editActive);
+                    toggleBtn.textContent = editActive ? '🔴 Вкл' : '🔘 Выкл';
+                    toggleBtn.style.background = editActive ? '#e67e22' : '#2c3e50';
+                };
+
+                // Ползунки
+                document.getElementById('loc-edit-terrain').onchange = (e) => setLocationBrushTerrain(e.target.value);
+                const radiusSlider = document.getElementById('loc-edit-radius');
+                radiusSlider.oninput = (e) => {
+                    const val = parseInt(e.target.value);
+                    setLocationBrushRadius(val);
+                    document.getElementById('loc-radius-value').textContent = val;
+                };
+                const heightSlider = document.getElementById('loc-edit-height');
+                heightSlider.oninput = (e) => {
+                    const val = parseFloat(e.target.value);
+                    setLocationBrushHeight(val);
+                    document.getElementById('loc-height-value').textContent = val.toFixed(1);
+                };
+                document.getElementById('loc-eraser').onchange = (e) => setLocationEraserMode(e.target.checked);
+            }
+        } else {
+            // Обычные игроки: скрываем панель инструментов целиком
+            const toolsPanel = document.getElementById('panel-tools');
+            if (toolsPanel) toolsPanel.style.display = 'none';
         }
     } catch (err) {
         showNotification(err.message);
@@ -315,17 +390,30 @@ window.exitLocation = function() {
     }
     document.getElementById('location-container').style.display = 'none';
     document.getElementById('canvas-container').style.display = 'block';
+    showGlobalCanvas();  // из lobby3d.js
+
     setCurrentLocationId(null);
     currentLocationData = null;
-    // Уничтожаем сцену локации
-    if (typeof destroyLocationScene === 'function') {
-        destroyLocationScene();
-    }
-    // Удаляем кнопки управления локацией, чтобы при новом входе они создались заново
+    destroyLocationScene();
+
+    // Удаляем кнопки удаления/редактирования
     const delBtn = document.getElementById('delete-location-btn');
     if (delBtn) delBtn.remove();
     const editBtn = document.getElementById('edit-location-btn');
     if (editBtn) editBtn.remove();
+
+    // Восстанавливаем оригинальную панель инструментов (для глобальной карты)
+    if (window.isGM && window._originalToolsContent) {
+        const toolsPanel = document.getElementById('panel-tools');
+        if (toolsPanel) {
+            toolsPanel.querySelector('.panel-content').innerHTML = window._originalToolsContent;
+            // Перепривязываем глобальные обработчики (они уже есть в HTML через onclick, так что всё работает)
+        }
+    } else {
+        // Если не GM, показываем панель обратно
+        const toolsPanel = document.getElementById('panel-tools');
+        if (toolsPanel) toolsPanel.style.display = 'flex';
+    }
 };
 
 // Обработчики WebSocket для локации
@@ -339,6 +427,14 @@ if (socket) {
     });
     socket.on('character_moved', (data) => {
         updateCharacterPosition(data.character_id, data.x, data.y);
+    });
+    socket.on('location_tiles_updated', (data) => {
+        if (data.location_id === getCurrentLocationId()) {
+            import('./locationScene.js').then(module => {
+                // Применить изменения на месте (пересоздать кубы)
+                const { applyLocationTilesUpdate } = module; // нужно добавить функцию в locationScene.js
+            });
+        }
     });
 }
 

@@ -1439,3 +1439,28 @@ export function getTileHeightAt(globalX, globalZ) {
 }
 
 export { scene, camera, renderer, controls, directionalLight, ambientLight, waterMat };
+
+// ========== ВРЕМЕННОЕ СКРЫТИЕ ГЛОБАЛЬНОЙ КАРТЫ (ДЛЯ ЛОКАЦИЙ) ==========
+let globalCanvasParent = null;
+let globalCanvasNextSibling = null;
+
+export function hideGlobalCanvas() {
+    const canvas = renderer?.domElement;
+    if (!canvas || !canvas.parentNode) return;
+    // Сохраняем родителя и позицию в DOM
+    globalCanvasParent = canvas.parentNode;
+    globalCanvasNextSibling = canvas.nextSibling;
+    canvas.remove();
+}
+
+export function showGlobalCanvas() {
+    if (!globalCanvasParent || !renderer?.domElement) return;
+    // Вставляем обратно на то же место
+    if (globalCanvasNextSibling) {
+        globalCanvasParent.insertBefore(renderer.domElement, globalCanvasNextSibling);
+    } else {
+        globalCanvasParent.appendChild(renderer.domElement);
+    }
+    // Принудительно перерисовываем один раз, чтобы канвас ожил
+    renderer.render(scene, camera);
+}

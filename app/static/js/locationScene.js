@@ -5,6 +5,7 @@ let scene, camera, renderer, controls;
 let currentLocationId = null;
 let characterSprites = new Map();
 let animationId = null;
+let groundPlaneMesh;
 
 // ---- Инициализация сцены локации (вызывается при входе) ----
 export function initLocationScene(containerId) {
@@ -123,6 +124,9 @@ export function loadLocation(data) {
     groundPlane.rotation.x = -Math.PI / 2;
     groundPlane.position.set(centerX, -0.05, centerZ);
     scene.add(groundPlane);
+
+    groundPlaneMesh = groundPlane;
+    setupLocationEditing();
 
     // Тайлы и объекты на них
     if (data.tiles_data && data.tiles_data.length) {
@@ -355,3 +359,138 @@ export function resizeLocationScene() {
 }
 
 window.addEventListener('resize', resizeLocationScene);
+
+// ========== КИСТЬ ДЛЯ РЕДАКТИРОВАНИЯ ТАЙЛОВ ЛОКАЦИИ ==========
+let editMode = false;
+let brushRadius = 0;
+let currentBrushTerrain = 'grass';
+let currentBrushHeight = 1.0;
+let eraserMode = false;
+
+let highlightBox = null;
+let raycaster = new THREE.Raycaster();
+let mouse = new THREE.Vector2();
+let hoveredTileCoords = null;
+
+function createHighlight() {
+    const geometry = new THREE.BoxGeometry(1.05, 0.1, 1.05);
+    const material = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.5 });
+    highlightBox = new THREE.Mesh(geometry, material);
+    scene.add(highlightBox);
+    highlightBox.visible = false;
+}
+
+function updateHighlight(x, z, height) {
+    if (!highlightBox) createHighlight();
+    highlightBox.position.set(x + 0.5, height + 0.1, z + 0.5);
+    highlightBox.visible = true;
+}
+
+function hideHighlight() { if (highlightBox) highlightBox.visible = false; }
+
+export function setupLocationEditing() {
+    if (!renderer) return;
+    const canvas = renderer.domElement;
+    createHighlight();
+
+    canvas.addEventListener('mousemove', (e) => {
+        if (!editMode || !groundPlaneMesh) {
+            hideHighlight();
+            return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObject(groundPlaneMesh);
+        if (intersects.length) {
+            const point = intersects[0].point;
+            const tileX = Math.floor(point.x);
+            const tileZ = Math.floor(point.z);
+            if (tileX >= 0 && tileX < currentLocationData?.grid_width && tileZ >= 0 && tileZ < currentLocationData?.grid_height) {
+                const tile = currentLocationData.tiles_data[tileZ][tileX];
+                updateHighlight(tileX, tileZ, tile.height || 1.0);
+                hoveredTileCoords = { x: tileX, z: tileZ };
+                return;
+            }
+        }
+        hideHighlight();
+        hoveredTileCoords = null;
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (!editMode || !hoveredTileCoords) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const { x, z } = hoveredTileCoords;
+        const updates = {};
+        if (eraserMode) updates.objects = [];
+        else {
+            if (e.altKey) updates.terrain = currentBrushTerrain;
+            if (e.shiftKey) updates.height = currentBrushHeight;
+        }
+        if (Object.keys(updates).length) {
+            applyLocationBrush(x, z, updates, brushRadius);
+        }
+    });
+}
+
+function applyLocationBrush(centerX, centerZ, updates, radius) {
+    if (!currentLocationData) return;
+    const tiles = currentLocationData.tiles_data;
+    const changed = [];
+    for (let dz = -radius; dz <= radius; dz++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+            const x = centerX + dx, z = centerZ + dz;
+            if (x < 0 || x >= currentLocationData.grid_width || z < 0 || z >= currentLocationData.grid_height) continue;
+            const tile = tiles[z][x];
+            let needUpdate = false;
+            if (updates.terrain !== undefined && tile.terrain !== updates.terrain) {
+                tile.terrain = updates.terrain;
+                needUpdate = true;
+            }
+            if (updates.height !== undefined && tile.height !== updates.height) {
+                tile.height = Math.min(3.0, Math.max(0.5, updates.height));
+                needUpdate = true;
+            }
+            if (updates.objects !== undefined) {
+                tile.objects = [...updates.objects];
+                needUpdate = true;
+            }
+            if (needUpdate) changed.push({ x, z, terrain: tile.terrain, height: tile.height, objects: tile.objects });
+        }
+    }
+    if (!changed.length) return;
+    // Обновляем отображение изменённых тайлов (пересоздаём кубы)
+    const terrainColors = { grass: 0x3a5f0b, sand: 0xC2B280, rock: 0x808080, swamp: 0x4B3B2A, water: 0x1E90FF };
+    for (const c of changed) {
+        // Находим старый куб
+        const oldMesh = scene.children.find(child => child.isMesh && Math.abs(child.position.x - (c.x+0.5))<0.1 && Math.abs(child.position.z - (c.z+0.5))<0.1);
+        if (oldMesh) scene.remove(oldMesh);
+        const color = terrainColors[c.terrain] || 0x3a5f0b;
+        const geometry = new THREE.BoxGeometry(0.98, c.height, 0.98);
+        const material = new THREE.MeshStandardMaterial({ color });
+        const cube = new THREE.Mesh(geometry, material);
+        cube.position.set(c.x+0.5, c.height/2, c.z+0.5);
+        scene.add(cube);
+    }
+    // Отправляем на сервер
+    if (window.socket && currentLocationId) {
+        window.socket.emit('update_location_tiles', {
+            token: localStorage.getItem('access_token'),
+            location_id: currentLocationId,
+            updates: changed
+        });
+    }
+}
+
+// Экспортируем управляющие функции
+export function setLocationEditMode(enabled) {
+    editMode = enabled;
+    if (!enabled) hideHighlight();
+}
+export function getLocationEditMode() { return editMode; }
+export function setLocationBrushRadius(r) { brushRadius = r; }
+export function setLocationBrushTerrain(t) { currentBrushTerrain = t; }
+export function setLocationBrushHeight(h) { currentBrushHeight = h; }
+export function setLocationEraserMode(e) { eraserMode = e; }

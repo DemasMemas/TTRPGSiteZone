@@ -107,6 +107,7 @@ function scheduleBatchUpdate() {
 }
 
 export function applyBrush(centerTile, updates, radius) {
+    if (document.getElementById('location-container')?.style.display === 'block') return;
     if (!AppState.isGM) {
         showNotification('Только ГМ может редактировать тайлы');
         return;

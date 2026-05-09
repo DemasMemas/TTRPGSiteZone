@@ -269,6 +269,10 @@ export function initHotkeys() {
 }
 
 function handleKeyDown(e) {
+    // Если открыта локация – игнорируем глобальные хоткеи
+    const locContainer = document.getElementById('location-container');
+    if (locContainer && locContainer.style.display === 'block') return;
+
     if (e.key === 'Alt') {
         altPressed = true;
         if (controls) controls.enableZoom = false;

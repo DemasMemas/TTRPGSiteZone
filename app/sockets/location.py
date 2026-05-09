@@ -160,3 +160,33 @@ def handle_move_in_location(data):
         'x': new_x,
         'y': new_y
     }, room=f"location_{location_id}")
+
+@socketio.on('update_location_tiles')
+def handle_update_location_tiles(data):
+    token = data.get('token')
+    location_id = data.get('location_id')
+    updates = data.get('updates')
+    if not token or not location_id or not updates:
+        return
+    user = get_user_from_token(token)
+    if not user:
+        return
+    location = Location.query.get(location_id)
+    if not location or location.lobby.gm_id != user.id:
+        return
+    tiles = location.tiles_data
+    changed = []
+    for upd in updates:
+        x = upd.get('x')
+        z = upd.get('z')
+        if x is None or z is None: continue
+        if 0 <= z < len(tiles) and 0 <= x < len(tiles[0]):
+            tile = tiles[z][x]
+            if 'terrain' in upd: tile['terrain'] = upd['terrain']
+            if 'height' in upd: tile['height'] = upd['height']
+            if 'objects' in upd: tile['objects'] = upd['objects']
+            changed.append({'x': x, 'z': z, 'terrain': tile['terrain'], 'height': tile['height'], 'objects': tile['objects']})
+    if changed:
+        location.tiles_data = tiles
+        db.session.commit()
+        socketio.emit('location_tiles_updated', {'location_id': location_id, 'updates': changed}, room=f"location_{location_id}")
