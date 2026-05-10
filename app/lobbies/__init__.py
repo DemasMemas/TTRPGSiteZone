@@ -533,6 +533,21 @@ def update_location(lobby_id, location_id, lobby):
             setattr(location, field, data[field])
     db.session.commit()
 
+    all_updates = []
+    for z, row in enumerate(location.tiles_data):
+        for x, tile in enumerate(row):
+            all_updates.append({
+                'x': x,
+                'z': z,
+                'terrain': tile.get('terrain'),
+                'height': tile.get('height'),
+                'objects': tile.get('objects', [])
+            })
+    socketio.emit('location_tiles_updated', {
+        'location_id': location.id,
+        'updates': all_updates
+    }, room=f"location_{location.id}")
+
     socketio.emit('location_updated', {
         'lobby_id': lobby_id,
         'location_id': location.id,

@@ -37,6 +37,8 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050510);
 scene.fog = new THREE.FogExp2(0x050510, 0.0015);
 
+window.isLocationActive = false;
+
 function createCloudTexture() {
     const canvas = document.createElement('canvas');
     canvas.width = 2048;
@@ -1181,6 +1183,7 @@ export function setEditMode(enabled) {
 export function setTileClickCallback(callback) { window.tileClickCallback = callback; }
 
 function performRaycast(clientX, clientY) {
+    if (window.isLocationActive) return;
     mouse.x = (clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
@@ -1241,6 +1244,7 @@ function performRaycast(clientX, clientY) {
 }
 
 function canvasMouseDownHandler(event) {
+    if (window.isLocationActive) return;
     event.preventDefault();
     if (event.button !== 0) return;
     if (event.target.closest('.ui-overlay')) return;
@@ -1296,6 +1300,7 @@ function canvasMouseDownHandler(event) {
 renderer.domElement.addEventListener('mousedown', canvasMouseDownHandler, { capture: true });
 
 window.addEventListener('click', (event) => {
+    if (window.isLocationActive) return;
     if (event.target.closest('.ui-overlay')) return;
     if (editMode && hoveredTile && window.tileClickCallback) {
         window.tileClickCallback({
@@ -1314,6 +1319,7 @@ window.addEventListener('click', (event) => {
 });
 
 window.addEventListener('dblclick', (event) => {
+    if (window.isLocationActive) return;
     if (event.target.closest('.ui-overlay')) return;
     if (editMode && hoveredTile && window.tileClickCallback) {
         window.tileClickCallback({
@@ -1387,6 +1393,7 @@ export function getHoveredTile() {
 }
 
 window.addEventListener('pointermove', (event) => {
+    if (window.isLocationActive) return;
     lastMouseX = event.clientX;
     lastMouseY = event.clientY;
     lastModifiers.alt = event.altKey;

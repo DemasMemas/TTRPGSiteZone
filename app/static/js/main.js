@@ -10,7 +10,7 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
  updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
  applyNameChange, applyRadiationChange, updateTileEditRadiation} from './mapEdit.js';
 import { hideObjectHighlight, camera, getHoveredTile } from './lobby3d.js';
-import { hideGlobalCanvas, showGlobalCanvas } from './lobby3d.js';
+import { hideGlobalCanvas, showGlobalCanvas, controls as globalControls } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
 import { Server } from './api.js';
 import AppState, { initDraggablePanels, initHotkeys } from './ui_interactions.js';
@@ -20,8 +20,12 @@ openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, del
 fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
 import { openCharacterSheet, closeCharacterSheet, exportCharacter, importCharacter } from './characterSheet.js';
 import { setCurrentLobbyId as setCharLobbyId } from './characterSheet.js';
-import { initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
- addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible, destroyLocationScene } from './locationScene.js';
+import {
+    initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
+    addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible, destroyLocationScene,
+    setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationEraserMode, setLocationEditMode,
+    getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords
+} from './locationScene.js';
 import * as THREE from 'three';
 
 initWeather();
@@ -55,7 +59,524 @@ const socket = initSocket(currentLobbyId, token);
 initMarkers(currentLobbyId, token, socket);
 setupMarkerInteraction();
 
-// Глобальные функции для onclick
+// ========== Глобальные флаги ==========
+window.isLocationActive = false; // флаг активной локации
+window.socket = socket;
+window.currentLocationId = null;
+
+// ========== Перенаправление UI-вызовов в зависимости от активного режима ==========
+
+// Сохраняем оригинальные функции из глобальной карты
+const originalSetBrushRadiusFromInput = window.setBrushRadiusFromInput || setBrushRadiusFromInput;
+const originalSetTileHeightFromInput = window.setTileHeightFromInput || setTileHeightFromInput;
+const originalSetEraserModeFromInput = window.setEraserModeFromInput || setEraserModeFromInput;
+const originalToggleEditMode = window.toggleEditMode || (() => setEditMode(!getEditMode()));
+
+// Переопределяем глобальные функции для UI
+window.setBrushRadiusFromInput = function(value) {
+    if (window.isLocationActive) {
+        setLocationBrushRadius(parseInt(value));
+        const radiusSpan = document.getElementById('brush-radius-value');
+        const radiusSlider = document.getElementById('brush-radius');
+        if (radiusSpan) radiusSpan.textContent = value;
+        if (radiusSlider) radiusSlider.value = value;
+    } else {
+        originalSetBrushRadiusFromInput(value);
+    }
+};
+
+window.setTileHeightFromInput = function(value) {
+    if (window.isLocationActive) {
+        setLocationBrushHeight(parseFloat(value));
+        const heightSpan = document.getElementById('tile-height-value');
+        const heightSlider = document.getElementById('tile-height');
+        if (heightSpan) heightSpan.textContent = parseFloat(value).toFixed(1);
+        if (heightSlider) heightSlider.value = value;
+    } else {
+        originalSetTileHeightFromInput(value);
+    }
+};
+
+window.setEraserModeFromInput = function(checked) {
+    if (window.isLocationActive) {
+        setLocationEraserMode(checked);
+    } else {
+        originalSetEraserModeFromInput(checked);
+    }
+};
+
+window.toggleEditMode = function() {
+    if (window.isLocationActive) {
+        const newMode = !getLocationEditMode();
+        setLocationEditMode(newMode);
+        const btn = document.getElementById('edit-toggle');
+        if (btn) btn.style.background = newMode ? '#4a6fa5' : '';
+    } else {
+        originalToggleEditMode();
+    }
+};
+
+// Также перенаправляем функции applyBrush, если они вызываются из UI (но для локации они не используются)
+// Оставим как есть, так как applyBrush в локации не нужна.
+
+// ========== Функции для работы с локацией ==========
+let currentLocationData = null;
+
+window.enterLocation = async function(locationId) {
+    if (window._locationEventCleanup) {
+        window._locationEventCleanup();
+        window._locationEventCleanup = null;
+    }
+    try {
+        if (typeof window.resetHoveredMarker === 'function') {
+            window.resetHoveredMarker();
+        }
+        // Устанавливаем флаг, что мы в локации
+        window.isLocationActive = true;
+        window.currentLocationId = locationId;
+
+        // Скрываем глобальную информационную панель
+        const globalTileInfo = document.getElementById('tile-info');
+        if (globalTileInfo) globalTileInfo.style.display = 'none';
+
+        const data = await Server.getLocationDetail(currentLobbyId, locationId);
+        currentLocationData = data;
+        setCurrentLocationId(locationId);
+
+        // Скрываем глобальную 3D-сцену
+        document.getElementById('canvas-container').style.display = 'none';
+        document.getElementById('location-container').style.display = 'block';
+        hideGlobalCanvas();
+
+        // Инициализируем сцену локации
+        initLocationScene('location-canvas');
+        loadLocation(data);
+
+        setLocationBrushRadius(window.brushRadius);
+        setLocationBrushHeight(window.tileHeight);
+        setLocationBrushTerrain(window.currentTileType);
+
+        if (socket) {
+            const characterId = window.currentCharacterId || null;
+            socket.emit('join_location', { token: token, location_id: locationId, character_id: characterId });
+        }
+
+        if (window.isGM) {
+            // Кнопки удаления и редактирования параметров
+            addDeleteLocationButton(async () => { await deleteCurrentLocation(locationId); });
+            setDeleteButtonVisible(true);
+            addEditLocationButton(() => openLocationEditModal(currentLocationData));
+            setEditButtonVisible(true);
+
+            // ---- ПРЕОБРАЗУЕМ ПАНЕЛЬ ИНСТРУМЕНТОВ для локации ----
+            const toolsPanel = document.getElementById('panel-tools');
+            if (toolsPanel) {
+                if (!window._originalToolsContent) {
+                    window._originalToolsContent = toolsPanel.querySelector('.panel-content').innerHTML;
+                }
+                const panelContent = toolsPanel.querySelector('.panel-content');
+                panelContent.innerHTML = `
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                        <label style="display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" id="loc-edit-toggle-checkbox"> Режим редактирования
+                        </label>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Тип:</span>
+                            <select id="loc-edit-terrain" class="form-control" style="width: auto;">
+                                <option value="grass">🌿 Трава</option>
+                                <option value="sand">🏜️ Песок</option>
+                                <option value="rock">⛰️ Камень</option>
+                                <option value="swamp">💧 Болото</option>
+                                <option value="water">🌊 Вода</option>
+                            </select>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Радиус:</span>
+                            <input type="range" id="loc-edit-radius" min="0" max="5" value="0">
+                            <span id="loc-radius-value">0</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Высота:</span>
+                            <input type="range" id="loc-edit-height" min="0.5" max="3.0" step="0.1" value="1.0">
+                            <span id="loc-height-value">1.0</span>
+                        </div>
+                        <label style="display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" id="loc-eraser"> Ластик
+                        </label>
+                    </div>
+                `;
+
+                // Получаем элементы
+                const editCheckbox = document.getElementById('loc-edit-toggle-checkbox');
+                const terrainSelect = document.getElementById('loc-edit-terrain');
+                const radiusSlider = document.getElementById('loc-edit-radius');
+                const heightSlider = document.getElementById('loc-edit-height');
+                const eraserCheck = document.getElementById('loc-eraser');
+
+                // Инициализация начальных значений из глобальных переменных
+                radiusSlider.value = window.brushRadius;
+                document.getElementById('loc-radius-value').textContent = window.brushRadius;
+                setLocationBrushRadius(window.brushRadius);
+
+                heightSlider.value = window.tileHeight;
+                document.getElementById('loc-height-value').textContent = window.tileHeight.toFixed(1);
+                setLocationBrushHeight(window.tileHeight);
+
+                terrainSelect.value = window.currentTileType;
+                setLocationBrushTerrain(window.currentTileType);
+
+                editCheckbox.checked = getLocationEditMode();
+
+                // Обработчики
+                editCheckbox.onchange = (e) => setLocationEditMode(e.target.checked);
+
+                terrainSelect.onchange = (e) => setLocationBrushTerrain(e.target.value);
+
+                radiusSlider.oninput = (e) => {
+                    const val = parseInt(e.target.value);
+                    setLocationBrushRadius(val);
+                    document.getElementById('loc-radius-value').textContent = val;
+                };
+
+                heightSlider.oninput = (e) => {
+                    const val = parseFloat(e.target.value);
+                    setLocationBrushHeight(val);
+                    document.getElementById('loc-height-value').textContent = val.toFixed(1);
+                };
+
+                eraserCheck.onchange = (e) => setLocationEraserMode(e.target.checked);
+            }
+        } else {
+            // Обычные игроки: скрываем панель инструментов
+            const toolsPanel = document.getElementById('panel-tools');
+            if (toolsPanel) toolsPanel.style.display = 'none';
+        }
+    } catch (err) {
+        showNotification(err.message);
+    }
+};
+
+async function deleteCurrentLocation(locationId) {
+    try {
+        await Server.deleteLocation(currentLobbyId, locationId);
+        showNotification('Локация удалена', 'success');
+        exitLocation();
+        if (socket) socket.emit('get_markers', { token, lobby_id: currentLobbyId });
+    } catch (err) {
+        showNotification(err.message);
+    }
+}
+
+window.exitLocation = function() {
+    // Очищаем события локации, если они были установлены
+    if (window._locationEventCleanup) {
+        window._locationEventCleanup();
+        window._locationEventCleanup = null;
+    }
+    const locationId = getCurrentLocationId();
+    const characterId = window.currentCharacterId;
+    if (socket && characterId) {
+        socket.emit('leave_location', {
+            token: localStorage.getItem('access_token'),
+            location_id: locationId,
+            character_id: characterId
+        });
+    }
+    // Сбрасываем флаг локации
+    window.isLocationActive = false;
+    window.currentLocationId = null;
+
+    document.getElementById('location-container').style.display = 'none';
+    document.getElementById('canvas-container').style.display = 'block';
+    showGlobalCanvas();
+
+    setCurrentLocationId(null);
+    currentLocationData = null;
+    destroyLocationScene();
+
+    // Удаляем кнопки удаления/редактирования
+    const delBtn = document.getElementById('delete-location-btn');
+    if (delBtn) delBtn.remove();
+    const editBtn = document.getElementById('edit-location-btn');
+    if (editBtn) editBtn.remove();
+
+    // Восстанавливаем оригинальную панель инструментов (для глобальной карты)
+    if (window.isGM && window._originalToolsContent) {
+        const toolsPanel = document.getElementById('panel-tools');
+        if (toolsPanel) {
+            toolsPanel.querySelector('.panel-content').innerHTML = window._originalToolsContent;
+        }
+    } else {
+        const toolsPanel = document.getElementById('panel-tools');
+        if (toolsPanel) toolsPanel.style.display = 'flex';
+    }
+
+    // Принудительно обновляем глобальную карту
+    if (typeof loadAllChunks === 'function') loadAllChunks();
+};
+
+// Вспомогательная функция – генерация локации
+window.generateLocationTiles = function(terrainType, width, height, generateObjects = true) {
+    const terrainMap = {
+        'grass': 'grass',
+        'forest': 'grass',
+        'rock': 'rock',
+        'swamp': 'swamp',
+        'water': 'water',
+        'desert': 'sand',
+        'urban': 'grass',
+        'camp': 'grass'
+    };
+    const baseTerrain = terrainMap[terrainType] || 'grass';
+    const tiles = [];
+    for (let y = 0; y < height; y++) {
+        const row = [];
+        for (let x = 0; x < width; x++) {
+            let heightVal = 1.0 + (Math.random() - 0.5) * 0.2;
+            heightVal = Math.round(heightVal * 10) / 10;
+            const tile = {
+                terrain: baseTerrain,
+                height: heightVal,
+                objects: []
+            };
+            if (generateObjects) {
+                if (terrainType === 'forest' && Math.random() < 0.3) {
+                    tile.objects.push({ type: 'tree' });
+                } else if (terrainType === 'rock' && Math.random() < 0.2) {
+                    tile.objects.push({ type: 'rock' });
+                } else if (terrainType === 'urban' && Math.random() < 0.15) {
+                    tile.objects.push({ type: 'house' });
+                } else if (terrainType === 'camp') {
+                    if (Math.random() < 0.2) tile.objects.push({ type: 'tent' });
+                    else if (Math.random() < 0.1) tile.objects.push({ type: 'campfire' });
+                }
+            }
+            row.push(tile);
+        }
+        tiles.push(row);
+    }
+    return tiles;
+};
+
+let selectedTileForLocation = null;
+function openLocationCreateModal(tile) {
+    selectedTileForLocation = tile;
+    const modal = document.getElementById('location-create-modal');
+    if (!modal) {
+        showNotification('Ошибка: окно создания локации не найдено');
+        return;
+    }
+    const globalTerrain = tile.tileData.terrain || 'grass';
+    let suggestedTerrainOption = 'grass';
+    switch(globalTerrain) {
+        case 'grass': suggestedTerrainOption = 'grass'; break;
+        case 'sand': suggestedTerrainOption = 'desert'; break;
+        case 'rock': suggestedTerrainOption = 'rock'; break;
+        case 'swamp': suggestedTerrainOption = 'swamp'; break;
+        case 'water': suggestedTerrainOption = 'water'; break;
+        default: suggestedTerrainOption = 'grass';
+    }
+    document.getElementById('new-loc-name').value = '';
+    document.getElementById('new-loc-terrain').value = suggestedTerrainOption;
+    document.getElementById('new-loc-width').value = 30;
+    document.getElementById('new-loc-height').value = 30;
+    document.getElementById('new-loc-gen-objects').checked = true;
+    modal.style.display = 'flex';
+}
+
+async function createLocationFromModal() {
+    const name = document.getElementById('new-loc-name').value.trim();
+    if (!name) {
+        showNotification('Введите название локации');
+        return;
+    }
+    const terrainType = document.getElementById('new-loc-terrain').value;
+    let width = parseInt(document.getElementById('new-loc-width').value);
+    let height = parseInt(document.getElementById('new-loc-height').value);
+    const genObjects = document.getElementById('new-loc-gen-objects').checked;
+    if (isNaN(width) || width < 5) width = 30;
+    if (isNaN(height) || height < 5) height = 30;
+    width = Math.min(100, Math.max(10, width));
+    height = Math.min(100, Math.max(10, height));
+
+    if (!selectedTileForLocation) {
+        showNotification('Не выбран тайл для локации');
+        return;
+    }
+    const worldX = selectedTileForLocation.chunk.chunkX * 32 + selectedTileForLocation.tileX;
+    const worldZ = selectedTileForLocation.chunk.chunkY * 32 + selectedTileForLocation.tileY;
+    const tilesData = generateLocationTiles(terrainType, width, height, genObjects);
+
+    try {
+        await Server.createLocation(currentLobbyId, {
+            name: name,
+            type: 'exploration',
+            world_tile_x: worldX,
+            world_tile_z: worldZ,
+            grid_width: width,
+            grid_height: height,
+            tiles_data: tilesData
+        });
+        showNotification('Локация создана', 'success');
+        document.getElementById('location-create-modal').style.display = 'none';
+        if (socket) socket.emit('get_markers', { token, lobby_id: currentLobbyId });
+    } catch (err) {
+        showNotification(err.message);
+    }
+}
+
+function openLocationEditModal(locationData) {
+    let dominantTerrain = 'grass';
+    let terrainCount = {};
+    let hasObjects = false;
+    if (locationData.tiles_data && locationData.tiles_data.length) {
+        for (let row of locationData.tiles_data) {
+            for (let tile of row) {
+                const t = tile.terrain || 'grass';
+                terrainCount[t] = (terrainCount[t] || 0) + 1;
+                if (tile.objects && tile.objects.length) hasObjects = true;
+            }
+        }
+        let maxCount = 0;
+        for (let [t, count] of Object.entries(terrainCount)) {
+            if (count > maxCount) {
+                maxCount = count;
+                dominantTerrain = t;
+            }
+        }
+    }
+
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 500px;">
+            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <h3>Редактирование локации</h3>
+            <div class="form-group">
+                <label>Название</label>
+                <input type="text" id="edit-loc-name" value="${escapeHtml(locationData.name)}" class="form-control">
+            </div>
+            <div class="form-group">
+                <label>Ширина (тайлов)</label>
+                <input type="number" id="edit-loc-width" value="${locationData.grid_width}" min="10" max="100" class="form-control">
+            </div>
+            <div class="form-group">
+                <label>Высота (тайлов)</label>
+                <input type="number" id="edit-loc-height" value="${locationData.grid_height}" min="10" max="100" class="form-control">
+            </div>
+            <div class="form-group">
+                <label>Тип ландшафта</label>
+                <select id="edit-loc-terrain" class="form-control">
+                    <option value="grass" ${dominantTerrain === 'grass' ? 'selected' : ''}>🌿 Поле / Трава</option>
+                    <option value="forest" ${dominantTerrain === 'forest' ? 'selected' : ''}>🌲 Лес</option>
+                    <option value="rock" ${dominantTerrain === 'rock' ? 'selected' : ''}>⛰️ Горы / Камни</option>
+                    <option value="swamp" ${dominantTerrain === 'swamp' ? 'selected' : ''}>💧 Болото</option>
+                    <option value="water" ${dominantTerrain === 'water' ? 'selected' : ''}>🌊 Вода</option>
+                    <option value="desert" ${dominantTerrain === 'sand' ? 'selected' : ''}>🏜️ Пустыня</option>
+                    <option value="urban" ${dominantTerrain === 'urban' ? 'selected' : ''}>🏙️ Город / Руины</option>
+                    <option value="camp" ${dominantTerrain === 'camp' ? 'selected' : ''}>🔥 Лагерь</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="edit-loc-gen-objects" ${hasObjects ? 'checked' : ''}> Генерировать декоративные объекты</label>
+            </div>
+            <div class="form-group">
+                <button id="regenerate-loc-btn" class="btn btn-secondary">🔄 Перегенерировать ландшафт</button>
+            </div>
+            <div class="form-actions">
+                <button id="save-loc-changes" class="btn btn-primary">Сохранить</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.style.display = 'flex';
+
+    let tempTiles = null;
+    document.getElementById('regenerate-loc-btn').onclick = () => {
+        const newWidth = parseInt(document.getElementById('edit-loc-width').value);
+        const newHeight = parseInt(document.getElementById('edit-loc-height').value);
+        const terrainType = document.getElementById('edit-loc-terrain').value;
+        const genObjects = document.getElementById('edit-loc-gen-objects').checked;
+        if (isNaN(newWidth) || isNaN(newHeight)) return;
+        tempTiles = generateLocationTiles(terrainType, newWidth, newHeight, genObjects);
+        showNotification('Ландшафт перегенерирован. Не забудьте сохранить.', 'success');
+    };
+    document.getElementById('save-loc-changes').onclick = async () => {
+        const newName = document.getElementById('edit-loc-name').value;
+        let newWidth = parseInt(document.getElementById('edit-loc-width').value);
+        let newHeight = parseInt(document.getElementById('edit-loc-height').value);
+        let finalTiles = tempTiles;
+        if (!finalTiles) finalTiles = locationData.tiles_data;
+        if (newWidth !== locationData.grid_width || newHeight !== locationData.grid_height) {
+            finalTiles = resizeTilesData(finalTiles, newWidth, newHeight);
+        }
+        try {
+            await Server.updateLocation(currentLobbyId, locationData.id, {
+                name: newName,
+                grid_width: newWidth,
+                grid_height: newHeight,
+                tiles_data: finalTiles
+            });
+            showNotification('Локация обновлена', 'success');
+            modal.remove();
+            window.enterLocation(locationData.id);
+        } catch (err) {
+            showNotification(err.message);
+        }
+    };
+}
+
+function resizeTilesData(oldTiles, newWidth, newHeight) {
+    const newTiles = [];
+    for (let y = 0; y < newHeight; y++) {
+        const row = [];
+        for (let x = 0; x < newWidth; x++) {
+            if (y < oldTiles.length && x < oldTiles[0].length) {
+                row.push({ ...oldTiles[y][x] });
+            } else {
+                row.push({ terrain: 'grass', height: 1.0, objects: [] });
+            }
+        }
+        newTiles.push(row);
+    }
+    return newTiles;
+}
+
+function startLocationPick() {
+    window.awaitingLocationPick = true;
+    showNotification('Кликните по тайлу на карте для создания локации', 'system');
+    window.locationPickCallback = (tile) => {
+        window.awaitingLocationPick = false;
+        openLocationCreateModal(tile);
+    };
+}
+
+document.getElementById('create-location-btn')?.addEventListener('click', startLocationPick);
+document.getElementById('exit-location-btn')?.addEventListener('click', exitLocation);
+
+// ========== Обработчики сокетов для локации ==========
+if (socket) {
+    socket.on('joined_location', (data) => {
+        console.log('Joined location', data);
+        updateCharacterPosition(data.character_id, data.x, data.y);
+    });
+    socket.on('location_state', (state) => {
+        state.forEach(s => updateCharacterPosition(s.character_id, s.x, s.y));
+    });
+    socket.on('character_moved', (data) => {
+        updateCharacterPosition(data.character_id, data.x, data.y);
+    });
+    socket.on('location_tiles_updated', (data) => {
+        if (data.location_id === getCurrentLocationId()) {
+            import('./locationScene.js').then(module => {
+                module.applyLocationTilesUpdate(data.location_id, data.updates);
+            });
+        }
+    });
+}
+
+// ========== Глобальные функции из других модулей ==========
 window.sendMessage = () => {
     const input = document.getElementById('message-input');
     const message = input.value.trim();
@@ -97,46 +618,6 @@ window.closeCharacterSheet = closeCharacterSheet;
 window.exportCharacter = exportCharacter;
 window.importCharacter = importCharacter;
 
-window.addSpecialTrait = window.addSpecialTrait || (() => {});
-window.removeSpecialTrait = window.removeSpecialTrait || (() => {});
-window.addWeapon = window.addWeapon || (() => {});
-window.removeWeapon = window.removeWeapon || (() => {});
-window.addPocketItem = window.addPocketItem || (() => {});
-window.removePocketItem = window.removePocketItem || (() => {});
-window.addBackpackItem = window.addBackpackItem || (() => {});
-window.removeBackpackItem = window.removeBackpackItem || (() => {});
-
-// Функции редактирования карты
-window.toggleEditMode = () => setEditMode(!getEditMode());
-window.setEditMode = setEditMode;
-window.toggleEraserMode = toggleEraserMode;
-window.applyBrush = applyBrush;
-window.openTileEditModal = openTileEditModal;
-window.closeTileEditModal = closeTileEditModal;
-window.applyTerrainChange = applyTerrainChange;
-window.applyHeightChange = applyHeightChange;
-window.addObjectToTile = addObjectToTile;
-window.clearObjectsFromTile = clearObjectsFromTile;
-window.removeObjectFromTile = removeObjectFromTile;
-window.highlightObject = highlightObject;
-window.hideObjectHighlight = hideObjectHighlight;
-
-window.showNotification = showNotification;
-
-window.setBrushRadiusFromInput = setBrushRadiusFromInput;
-window.setTileHeightFromInput = setTileHeightFromInput;
-window.setEraserModeFromInput = setEraserModeFromInput;
-window.applyNameChange = applyNameChange;
-window.applyRadiationChange = applyRadiationChange;
-window.updateTileEditRadiation = updateTileEditRadiation;
-
-// Функции для модального окна
-window.updateTileEditHeight = updateTileEditHeight;
-window.updateObjectOffsetX = updateObjectOffsetX;
-window.updateObjectOffsetZ = updateObjectOffsetZ;
-window.updateObjectScale = updateObjectScale;
-window.updateObjectRotation = updateObjectRotation;
-
 window.showCreateCharacterForm = showCreateCharacterForm;
 
 // Маркеры
@@ -146,7 +627,6 @@ window.submitCreateMarker = submitCreateMarker;
 window.openCreateMarkerModal = openCreateMarkerModal;
 window.openCreateMarkerModalAtCenter = openCreateMarkerModalAtCenter;
 window.fillCenterCoordinates = fillCenterCoordinates;
-window.addMarkerAtCenter = openCreateMarkerModal;
 window.deleteMarker = deleteMarker;
 window.fillEditCenterCoordinates = fillEditCenterCoordinates;
 window.pickTileForMarker = pickTileForMarker;
@@ -207,13 +687,6 @@ window.applyWeatherSettings = () => {
     }).catch(err => showNotification(err.message));
 };
 
-document.querySelectorAll('#weather-settings input[type="checkbox"]').forEach(cb => {
-    cb.addEventListener('change', (e) => {
-        const range = e.target.closest('.weather-control').querySelector('input[type="range"]');
-        if (range) range.disabled = !e.target.checked;
-    });
-});
-
 window.loadWeatherSettings = (settings) => {
     const updateControl = (id, enabled, intensity) => {
         const cb = document.getElementById(id);
@@ -250,6 +723,19 @@ function bindWeatherSliders() {
 }
 bindWeatherSliders();
 
+window.setCurrentTileTypeFromUI = function(value) {
+    if (window.isLocationActive) {
+        setLocationBrushTerrain(value);
+    } else {
+        const select = document.getElementById('tile-type-select');
+        if (select) {
+            select.value = value;
+            AppState.setCurrentTileType(value);
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    }
+};
+
 function escapeHtml(unsafe) {
     if (!unsafe) return '';
     return String(unsafe)
@@ -259,471 +745,6 @@ function escapeHtml(unsafe) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
 }
-
-let currentLocationData = null;
-
-// Функция входа в локацию
-window.enterLocation = async function(locationId) {
-    try {
-        if (typeof window.resetHoveredMarker === 'function') {
-            window.resetHoveredMarker();
-        }
-        const data = await Server.getLocationDetail(currentLobbyId, locationId);
-        currentLocationData = data;
-        setCurrentLocationId(locationId);
-        document.getElementById('canvas-container').style.display = 'none';
-        document.getElementById('location-container').style.display = 'block';
-        hideGlobalCanvas();  // из lobby3d.js
-
-        initLocationScene('location-canvas');
-        loadLocation(data);
-
-        if (window.isGM) {
-            // Кнопки удаления и редактирования параметров
-            addDeleteLocationButton(async () => { await deleteCurrentLocation(locationId); });
-            setDeleteButtonVisible(true);
-            addEditLocationButton(() => openLocationEditModal(currentLocationData));
-            setEditButtonVisible(true);
-
-            // ---- ПРЕОБРАЗУЕМ ПАНЕЛЬ ИНСТРУМЕНТОВ ----
-            const toolsPanel = document.getElementById('panel-tools');
-            if (toolsPanel) {
-                // Сохраняем оригинальное содержимое, если ещё не сохранено
-                if (!window._originalToolsContent) {
-                    window._originalToolsContent = toolsPanel.querySelector('.panel-content').innerHTML;
-                }
-                // Заменяем содержимое на инструменты локации
-                const panelContent = toolsPanel.querySelector('.panel-content');
-                panelContent.innerHTML = `
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
-                        <div style="display: flex; align-items: center; gap: 5px;">
-                            <span>Режим:</span>
-                            <button id="loc-edit-toggle-btn" class="btn btn-sm" style="background:#2c3e50;">🔘 Выкл</button>
-                        </div>
-                        <div style="display: flex; align-items: center; gap: 5px;">
-                            <span>Тип:</span>
-                            <select id="loc-edit-terrain" class="form-control" style="width: auto;">
-                                <option value="grass">🌿 Трава</option>
-                                <option value="sand">🏜️ Песок</option>
-                                <option value="rock">⛰️ Камень</option>
-                                <option value="swamp">💧 Болото</option>
-                                <option value="water">🌊 Вода</option>
-                            </select>
-                        </div>
-                        <div style="display: flex; align-items: center; gap: 5px;">
-                            <span>Радиус:</span>
-                            <input type="range" id="loc-edit-radius" min="0" max="5" value="0">
-                            <span id="loc-radius-value">0</span>
-                        </div>
-                        <div style="display: flex; align-items: center; gap: 5px;">
-                            <span>Высота:</span>
-                            <input type="range" id="loc-edit-height" min="0.5" max="3.0" step="0.1" value="1.0">
-                            <span id="loc-height-value">1.0</span>
-                        </div>
-                        <label style="display: flex; align-items: center; gap: 5px;">
-                            <input type="checkbox" id="loc-eraser"> Ластик
-                        </label>
-                    </div>
-                `;
-
-                // Импортируем функции из locationScene
-                const { setLocationEditMode, getLocationEditMode, setLocationBrushRadius, setLocationBrushTerrain, setLocationBrushHeight, setLocationEraserMode } = await import('./locationScene.js');
-
-                // Кнопка включения/выключения режима редактирования
-                const toggleBtn = document.getElementById('loc-edit-toggle-btn');
-                let editActive = false;
-                toggleBtn.onclick = () => {
-                    editActive = !editActive;
-                    setLocationEditMode(editActive);
-                    toggleBtn.textContent = editActive ? '🔴 Вкл' : '🔘 Выкл';
-                    toggleBtn.style.background = editActive ? '#e67e22' : '#2c3e50';
-                };
-
-                // Ползунки
-                document.getElementById('loc-edit-terrain').onchange = (e) => setLocationBrushTerrain(e.target.value);
-                const radiusSlider = document.getElementById('loc-edit-radius');
-                radiusSlider.oninput = (e) => {
-                    const val = parseInt(e.target.value);
-                    setLocationBrushRadius(val);
-                    document.getElementById('loc-radius-value').textContent = val;
-                };
-                const heightSlider = document.getElementById('loc-edit-height');
-                heightSlider.oninput = (e) => {
-                    const val = parseFloat(e.target.value);
-                    setLocationBrushHeight(val);
-                    document.getElementById('loc-height-value').textContent = val.toFixed(1);
-                };
-                document.getElementById('loc-eraser').onchange = (e) => setLocationEraserMode(e.target.checked);
-            }
-        } else {
-            // Обычные игроки: скрываем панель инструментов целиком
-            const toolsPanel = document.getElementById('panel-tools');
-            if (toolsPanel) toolsPanel.style.display = 'none';
-        }
-    } catch (err) {
-        showNotification(err.message);
-    }
-};
-
-async function deleteCurrentLocation(locationId) {
-    try {
-        await Server.deleteLocation(currentLobbyId, locationId);
-        showNotification('Локация удалена', 'success');
-        exitLocation();
-        // Обновляем маркеры локаций
-        if (socket) socket.emit('get_markers', { token, lobby_id: currentLobbyId });
-    } catch (err) {
-        showNotification(err.message);
-    }
-}
-
-// Выход из локации
-window.exitLocation = function() {
-    const locationId = getCurrentLocationId();
-    const characterId = window.currentCharacterId;
-    if (socket && characterId) {
-        socket.emit('leave_location', {
-            token: localStorage.getItem('access_token'),
-            location_id: locationId,
-            character_id: characterId
-        });
-    }
-    document.getElementById('location-container').style.display = 'none';
-    document.getElementById('canvas-container').style.display = 'block';
-    showGlobalCanvas();  // из lobby3d.js
-
-    setCurrentLocationId(null);
-    currentLocationData = null;
-    destroyLocationScene();
-
-    // Удаляем кнопки удаления/редактирования
-    const delBtn = document.getElementById('delete-location-btn');
-    if (delBtn) delBtn.remove();
-    const editBtn = document.getElementById('edit-location-btn');
-    if (editBtn) editBtn.remove();
-
-    // Восстанавливаем оригинальную панель инструментов (для глобальной карты)
-    if (window.isGM && window._originalToolsContent) {
-        const toolsPanel = document.getElementById('panel-tools');
-        if (toolsPanel) {
-            toolsPanel.querySelector('.panel-content').innerHTML = window._originalToolsContent;
-            // Перепривязываем глобальные обработчики (они уже есть в HTML через onclick, так что всё работает)
-        }
-    } else {
-        // Если не GM, показываем панель обратно
-        const toolsPanel = document.getElementById('panel-tools');
-        if (toolsPanel) toolsPanel.style.display = 'flex';
-    }
-};
-
-// Обработчики WebSocket для локации
-if (socket) {
-    socket.on('joined_location', (data) => {
-        console.log('Joined location', data);
-        updateCharacterPosition(data.character_id, data.x, data.y);
-    });
-    socket.on('location_state', (state) => {
-        state.forEach(s => updateCharacterPosition(s.character_id, s.x, s.y));
-    });
-    socket.on('character_moved', (data) => {
-        updateCharacterPosition(data.character_id, data.x, data.y);
-    });
-    socket.on('location_tiles_updated', (data) => {
-        if (data.location_id === getCurrentLocationId()) {
-            import('./locationScene.js').then(module => {
-                // Применить изменения на месте (пересоздать кубы)
-                const { applyLocationTilesUpdate } = module; // нужно добавить функцию в locationScene.js
-            });
-        }
-    });
-}
-
-// Вспомогательная функция – генерация локации
-window.generateLocationTiles = function(terrainType, width, height, generateObjects = true) {
-    const terrainMap = {
-        'grass': 'grass',
-        'forest': 'grass',
-        'rock': 'rock',
-        'swamp': 'swamp',
-        'water': 'water',
-        'desert': 'sand',
-        'urban': 'grass',
-        'camp': 'grass'
-    };
-    const baseTerrain = terrainMap[terrainType] || 'grass';
-    const tiles = [];
-    for (let y = 0; y < height; y++) {
-        const row = [];
-        for (let x = 0; x < width; x++) {
-            let heightVal = 1.0 + (Math.random() - 0.5) * 0.2;
-            heightVal = Math.round(heightVal * 10) / 10;
-            const tile = {
-                terrain: baseTerrain,
-                height: heightVal,
-                objects: []
-            };
-            if (generateObjects) {
-                if (terrainType === 'forest' && Math.random() < 0.3) {
-                    tile.objects.push({ type: 'tree' });
-                } else if (terrainType === 'rock' && Math.random() < 0.2) {
-                    tile.objects.push({ type: 'rock' });
-                } else if (terrainType === 'urban' && Math.random() < 0.15) {
-                    tile.objects.push({ type: 'house' });
-                } else if (terrainType === 'camp') {
-                    if (Math.random() < 0.2) tile.objects.push({ type: 'tent' });
-                    else if (Math.random() < 0.1) tile.objects.push({ type: 'campfire' });
-                }
-            }
-            row.push(tile);
-        }
-        tiles.push(row);
-    }
-    return tiles;
-};
-
-// Обработчик кнопки "Создать локацию" – открываем модальное окно и выбираем тайл
-let selectedTileForLocation = null;
-
-function openLocationCreateModal(tile) {
-    selectedTileForLocation = tile;
-    const modal = document.getElementById('location-create-modal');
-    if (!modal) {
-        showNotification('Ошибка: окно создания локации не найдено');
-        return;
-    }
-
-    // Определяем тип тайла на карте и сопоставляем с опциями в модалке
-    const globalTerrain = tile.tileData.terrain || 'grass';
-    let suggestedTerrainOption = 'grass';
-    switch(globalTerrain) {
-        case 'grass': suggestedTerrainOption = 'grass'; break;
-        case 'sand': suggestedTerrainOption = 'desert'; break;
-        case 'rock': suggestedTerrainOption = 'rock'; break;
-        case 'swamp': suggestedTerrainOption = 'swamp'; break;
-        case 'water': suggestedTerrainOption = 'water'; break;
-        default: suggestedTerrainOption = 'grass';
-    }
-
-    // Сброс значений
-    document.getElementById('new-loc-name').value = '';
-    document.getElementById('new-loc-terrain').value = suggestedTerrainOption;
-    document.getElementById('new-loc-width').value = 30;
-    document.getElementById('new-loc-height').value = 30;
-    document.getElementById('new-loc-gen-objects').checked = true;
-    modal.style.display = 'flex';
-}
-
-// Функция создания локации (вызывается из модалки)
-async function createLocationFromModal() {
-    const name = document.getElementById('new-loc-name').value.trim();
-    if (!name) {
-        showNotification('Введите название локации');
-        return;
-    }
-    const terrainType = document.getElementById('new-loc-terrain').value;
-    let width = parseInt(document.getElementById('new-loc-width').value);
-    let height = parseInt(document.getElementById('new-loc-height').value);
-    const genObjects = document.getElementById('new-loc-gen-objects').checked;
-
-    if (isNaN(width) || width < 5) width = 30;
-    if (isNaN(height) || height < 5) height = 30;
-    // Ограничения
-    width = Math.min(100, Math.max(10, width));
-    height = Math.min(100, Math.max(10, height));
-
-    if (!selectedTileForLocation) {
-        showNotification('Не выбран тайл для локации');
-        return;
-    }
-
-    const worldX = selectedTileForLocation.chunk.chunkX * 32 + selectedTileForLocation.tileX;
-    const worldZ = selectedTileForLocation.chunk.chunkY * 32 + selectedTileForLocation.tileY;
-
-    const tilesData = generateLocationTiles(terrainType, width, height, genObjects);
-
-    try {
-        await Server.createLocation(currentLobbyId, {
-            name: name,
-            type: 'exploration',
-            world_tile_x: worldX,
-            world_tile_z: worldZ,
-            grid_width: width,
-            grid_height: height,
-            tiles_data: tilesData
-        });
-        showNotification('Локация создана', 'success');
-        document.getElementById('location-create-modal').style.display = 'none';
-        if (socket) socket.emit('get_markers', { token, lobby_id: currentLobbyId });
-    } catch (err) {
-        showNotification(err.message);
-    }
-}
-
-// Привязываем обработчики (после загрузки DOM)
-document.addEventListener('DOMContentLoaded', () => {
-    const confirmBtn = document.getElementById('confirm-create-location');
-    if (confirmBtn) confirmBtn.onclick = createLocationFromModal;
-});
-
-// Модифицируем кнопку создания локации на панели GM
-document.getElementById('create-location-btn')?.addEventListener('click', () => {
-    // Включаем режим выбора тайла (как у маркеров)
-    window.awaitingLocationPick = true;
-    showNotification('Кликните по тайлу на карте для создания локации', 'system');
-    window.locationPickCallback = (tile) => {
-        window.awaitingLocationPick = false;
-        openLocationCreateModal(tile);
-    };
-});
-
-function openLocationEditModal(locationData) {
-    // Определяем преобладающий тип ландшафта из тайлов
-    let dominantTerrain = 'grass';
-    let terrainCount = {};
-    let hasObjects = false;
-    if (locationData.tiles_data && locationData.tiles_data.length) {
-        for (let row of locationData.tiles_data) {
-            for (let tile of row) {
-                const t = tile.terrain || 'grass';
-                terrainCount[t] = (terrainCount[t] || 0) + 1;
-                if (tile.objects && tile.objects.length) hasObjects = true;
-            }
-        }
-        let maxCount = 0;
-        for (let [t, count] of Object.entries(terrainCount)) {
-            if (count > maxCount) {
-                maxCount = count;
-                dominantTerrain = t;
-            }
-        }
-    }
-
-    // Создаём модальное окно
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.innerHTML = `
-        <div class="modal-content" style="max-width: 500px;">
-            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
-            <h3>Редактирование локации</h3>
-            <div class="form-group">
-                <label>Название</label>
-                <input type="text" id="edit-loc-name" value="${escapeHtml(locationData.name)}" class="form-control">
-            </div>
-            <div class="form-group">
-                <label>Ширина (тайлов)</label>
-                <input type="number" id="edit-loc-width" value="${locationData.grid_width}" min="10" max="100" class="form-control">
-            </div>
-            <div class="form-group">
-                <label>Высота (тайлов)</label>
-                <input type="number" id="edit-loc-height" value="${locationData.grid_height}" min="10" max="100" class="form-control">
-            </div>
-            <div class="form-group">
-                <label>Тип ландшафта</label>
-                <select id="edit-loc-terrain" class="form-control">
-                    <option value="grass" ${dominantTerrain === 'grass' ? 'selected' : ''}>🌿 Поле / Трава</option>
-                    <option value="forest" ${dominantTerrain === 'forest' ? 'selected' : ''}>🌲 Лес</option>
-                    <option value="rock" ${dominantTerrain === 'rock' ? 'selected' : ''}>⛰️ Горы / Камни</option>
-                    <option value="swamp" ${dominantTerrain === 'swamp' ? 'selected' : ''}>💧 Болото</option>
-                    <option value="water" ${dominantTerrain === 'water' ? 'selected' : ''}>🌊 Вода</option>
-                    <option value="desert" ${dominantTerrain === 'sand' ? 'selected' : ''}>🏜️ Пустыня</option>
-                    <option value="urban" ${dominantTerrain === 'urban' ? 'selected' : ''}>🏙️ Город / Руины</option>
-                    <option value="camp" ${dominantTerrain === 'camp' ? 'selected' : ''}>🔥 Лагерь</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label><input type="checkbox" id="edit-loc-gen-objects" ${hasObjects ? 'checked' : ''}> Генерировать декоративные объекты</label>
-            </div>
-            <div class="form-group">
-                <button id="regenerate-loc-btn" class="btn btn-secondary">🔄 Перегенерировать ландшафт</button>
-            </div>
-            <div class="form-actions">
-                <button id="save-loc-changes" class="btn btn-primary">Сохранить</button>
-                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-    modal.style.display = 'flex';
-
-    // Переменная для временных тайлов
-    let tempTiles = null;
-
-    // Кнопка перегенерации
-    document.getElementById('regenerate-loc-btn').onclick = () => {
-        const newWidth = parseInt(document.getElementById('edit-loc-width').value);
-        const newHeight = parseInt(document.getElementById('edit-loc-height').value);
-        const terrainType = document.getElementById('edit-loc-terrain').value;
-        const genObjects = document.getElementById('edit-loc-gen-objects').checked;
-        if (isNaN(newWidth) || isNaN(newHeight)) return;
-        tempTiles = generateLocationTiles(terrainType, newWidth, newHeight, genObjects);
-        showNotification('Ландшафт перегенерирован. Не забудьте сохранить.', 'success');
-    };
-
-    // Кнопка сохранения
-    document.getElementById('save-loc-changes').onclick = async () => {
-        const newName = document.getElementById('edit-loc-name').value;
-        let newWidth = parseInt(document.getElementById('edit-loc-width').value);
-        let newHeight = parseInt(document.getElementById('edit-loc-height').value);
-        let finalTiles = tempTiles;
-        if (!finalTiles) {
-            finalTiles = locationData.tiles_data;
-        }
-        // Если размеры изменились, нужно привести тайлы к новому размеру
-        if (newWidth !== locationData.grid_width || newHeight !== locationData.grid_height) {
-            finalTiles = resizeTilesData(finalTiles, newWidth, newHeight);
-        }
-        try {
-            await Server.updateLocation(currentLobbyId, locationData.id, {
-                name: newName,
-                grid_width: newWidth,
-                grid_height: newHeight,
-                tiles_data: finalTiles
-            });
-            showNotification('Локация обновлена', 'success');
-            modal.remove();
-            window.enterLocation(locationData.id); // перезагружаем
-        } catch (err) {
-            showNotification(err.message);
-        }
-    };
-}
-
-function resizeTilesData(oldTiles, newWidth, newHeight) {
-    const newTiles = [];
-    for (let y = 0; y < newHeight; y++) {
-        const row = [];
-        for (let x = 0; x < newWidth; x++) {
-            if (y < oldTiles.length && x < oldTiles[0].length) {
-                row.push({ ...oldTiles[y][x] });
-            } else {
-                row.push({ terrain: 'grass', height: 1.0, objects: [] });
-            }
-        }
-        newTiles.push(row);
-    }
-    return newTiles;
-}
-
-// Добавляем кнопку создания локации в UI (только GM)
-document.getElementById('create-location-btn')?.addEventListener('click', () => {
-    startLocationPick();
-});
-
-document.getElementById('exit-location-btn')?.addEventListener('click', exitLocation);
-
-const savedTheme = localStorage.getItem('theme');
-if (savedTheme === 'light') {
-    document.body.classList.add('light-theme');
-    const btn = document.getElementById('theme-toggle');
-    if (btn) btn.textContent = '🌑';
-}
-
-document.addEventListener('click', function resumeAudio() {
-    if (Howler.ctx && Howler.ctx.state === 'suspended') {
-        Howler.ctx.resume();
-    }
-    document.removeEventListener('click', resumeAudio);
-}, { once: true });
 
 // Загружаем данные при старте
 loadLobbyInfo();
