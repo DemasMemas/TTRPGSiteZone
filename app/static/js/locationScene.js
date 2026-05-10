@@ -372,22 +372,49 @@ export function setupLocationEditing() {
         }
     };
 
+    const onPointerMoveWithDrag = (e) => {
+        if (!locationActive) return;
+        if (e.buttons !== 1) return; // левая кнопка не зажата
+        if (!window.locationEditMode) return;
+        if (!hoveredTileCoords) return;
+
+        const { x, z } = hoveredTileCoords;
+        const updates = {};
+        if (eraserMode) {
+            updates.objects = [];
+        } else {
+            if (e.altKey) updates.terrain = currentBrushTerrain;
+            if (e.shiftKey) updates.height = currentBrushHeight;
+        }
+        if (Object.keys(updates).length) {
+            applyLocationBrush(x, z, updates, brushRadius);
+        }
+    };
+
     const onPointerUp = (e) => {
         if (!locationActive) return;
         canvas.releasePointerCapture(e.pointerId);
     };
 
+    window.addEventListener('pointermove', onPointerMoveWithDrag);
     window.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointerup', onPointerUp);
 
     eventCleanup = () => {
         window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointermove', onPointerMoveWithDrag);
         canvas.removeEventListener('pointerdown', onPointerDown);
         canvas.removeEventListener('pointerup', onPointerUp);
         locationActive = false;
     };
     window._locationEventCleanup = eventCleanup;
+
+    canvas.addEventListener('wheel', (e) => {
+        if (e.altKey) {
+            e.preventDefault();
+        }
+    }, { passive: false });
 }
 
 // Применение кисти
