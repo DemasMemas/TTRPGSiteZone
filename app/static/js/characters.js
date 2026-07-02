@@ -28,9 +28,33 @@ function displayLobbyCharacters(characters) {
     characters.forEach(char => {
         const charDiv = document.createElement('div');
         charDiv.className = 'character-card';
+        charDiv.setAttribute('draggable', 'true');
+        charDiv.setAttribute('data-character-id', char.id);
+        charDiv.setAttribute('data-character-name', char.name);
         charDiv.innerHTML = `
             <h4 style="cursor: pointer;" onclick="window.openCharacterSheet(${char.id})">${char.name}</h4>
         `;
+
+        // Drag start
+        charDiv.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', JSON.stringify({
+                characterId: char.id,
+                characterName: char.name,
+                ownerId: char.owner_id
+            }));
+            e.dataTransfer.effectAllowed = 'copy';
+            charDiv.classList.add('dragging');
+            // Показываем превью перетаскивания (браузерное)
+            // Но мы будем рисовать свой 3D-превью отдельно
+        });
+        charDiv.addEventListener('dragend', (e) => {
+            charDiv.classList.remove('dragging');
+            // Скрываем 3D-превью
+            if (window.locationPreviewSprite) {
+                window.locationPreviewSprite.visible = false;
+            }
+        });
+
         container.appendChild(charDiv);
     });
 }

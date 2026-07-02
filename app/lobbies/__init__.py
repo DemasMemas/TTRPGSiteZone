@@ -13,7 +13,7 @@ from app.schemas.lobby import LobbyCreateSchema, LobbyDetailSchema, LobbyMySchem
 from app.schemas.participant import BannedUserSchema
 from app.schemas.character import CharacterSchema, CharacterCreateSchema
 from app.schemas.map import GameStateSchema, MapChunkSchema, TileUpdateSchema
-from app.models import LobbyParticipant, GameState, LobbyCharacter
+from app.models import LobbyParticipant, GameState, LobbyCharacter, User, Lobby
 from app.utils.decorators import requires_participant, requires_gm
 from app.models.location import Location
 from app.models.location_character import LocationCharacter
@@ -609,3 +609,118 @@ def delete_location_object(lobby_id, object_id, lobby):
     db.session.delete(obj)
     db.session.commit()
     return '', 204
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/spawn_character', methods=['POST'])
+@jwt_required()
+def spawn_character_in_location(lobby_id, location_id):
+    user_id = int(get_jwt_identity())
+    data = request.get_json()
+    character_id = data.get('character_id')
+    tile_x = data.get('tile_x')
+    tile_y = data.get('tile_y')
+    assign_to_user_id = data.get('assign_to_user_id')  # может быть None (тогда себе)
+
+    if not character_id or tile_x is None or tile_y is None:
+        return jsonify({'error': 'Missing parameters'}), 400
+
+    # Проверяем, существует ли локация и принадлежит ли lobby_id
+    location = Location.query.get(location_id)
+    if not location or location.lobby_id != lobby_id:
+        return jsonify({'error': 'Location not found'}), 404
+
+    lobby = Lobby.query.get(lobby_id)
+    if not lobby or not lobby.is_active:
+        return jsonify({'error': 'Lobby not found'}), 404
+
+    # Проверяем, что пользователь – участник лобби (не забанен)
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant or participant.is_banned:
+        return jsonify({'error': 'Access denied'}), 403
+
+    is_gm = (lobby.gm_id == user_id)
+
+    # Проверяем существование персонажа и право на него
+    character = LobbyCharacter.query.get(character_id)
+    if not character:
+        return jsonify({'error': 'Character not found'}), 404
+    if character.lobby_id != lobby_id:
+        return jsonify({'error': 'Character not in this lobby'}), 403
+
+    # Определяем владельца (тот, кто будет управлять персонажем в локации)
+    if assign_to_user_id is not None:
+        if not is_gm:
+            return jsonify({'error': 'Only GM can assign character to another user'}), 403
+        target_user_id = assign_to_user_id
+        # Проверяем, что target_user_id является участником лобби
+        target_participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=target_user_id,
+                                                              is_banned=False).first()
+        if not target_participant:
+            return jsonify({'error': 'Target user not in lobby or banned'}), 400
+    else:
+        # По умолчанию владелец – тот, кто спавнит
+        target_user_id = user_id
+        # Если персонаж принадлежит другому и пользователь не GM – запрещаем
+        if character.owner_id != user_id and not is_gm:
+            return jsonify({'error': 'You cannot spawn this character'}), 403
+
+    # Проверяем, не находится ли уже персонаж в этой локации (если да – перемещаем)
+    existing = LocationCharacter.query.filter_by(location_id=location_id, character_id=character_id).first()
+    if existing:
+        # Перемещаем на новые координаты
+        existing.pos_x = tile_x
+        existing.pos_y = tile_y
+        existing.status = 'idle'
+        db.session.commit()
+        loc_char = existing
+        action = 'moved'
+    else:
+        # Создаём нового LocationCharacter
+        # Инициализируем HP зонами из данных персонажа
+        hp_zones = character.data.get('health', {}).get('zones', {})
+        # Преобразуем в формат для хранения (как в модели)
+        zones_dict = {
+            'head': {'current': hp_zones.get('head', {}).get('current', 50),
+                     'max': hp_zones.get('head', {}).get('max', 50)},
+            'chest': {'current': hp_zones.get('chest', {}).get('current', 100),
+                      'max': hp_zones.get('chest', {}).get('max', 100)},
+            'abdomen': {'current': hp_zones.get('abdomen', {}).get('current', 80),
+                        'max': hp_zones.get('abdomen', {}).get('max', 80)},
+            'left_arm': {'current': hp_zones.get('leftArm', {}).get('current', 40),
+                         'max': hp_zones.get('leftArm', {}).get('max', 40)},
+            'right_arm': {'current': hp_zones.get('rightArm', {}).get('current', 40),
+                          'max': hp_zones.get('rightArm', {}).get('max', 40)},
+            'left_leg': {'current': hp_zones.get('leftLeg', {}).get('current', 60),
+                         'max': hp_zones.get('leftLeg', {}).get('max', 60)},
+            'right_leg': {'current': hp_zones.get('rightLeg', {}).get('current', 60),
+                          'max': hp_zones.get('rightLeg', {}).get('max', 60)}
+        }
+        loc_char = LocationCharacter(
+            location_id=location_id,
+            character_id=character_id,
+            pos_x=tile_x,
+            pos_y=tile_y,
+            status='idle',
+            hp_zones=zones_dict,
+            effects=[]
+        )
+        db.session.add(loc_char)
+        db.session.commit()
+        action = 'spawned'
+
+    # Уведомляем всех в локации через сокет
+    socketio.emit('character_spawned', {
+        'action': action,
+        'character': {
+            'id': character.id,
+            'name': character.name,
+            'owner_id': target_user_id,
+            'owner_username': User.query.get(target_user_id).username if target_user_id else None,
+            'hp_zones': loc_char.hp_zones,
+            'effects': loc_char.effects,
+            'pos_x': loc_char.pos_x,
+            'pos_y': loc_char.pos_y
+        }
+    }, room=f"location_{location_id}")
+
+    return jsonify({'message': f'Character {action} successfully', 'location_character_id': loc_char.id}), 200

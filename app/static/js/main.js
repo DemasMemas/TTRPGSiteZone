@@ -24,7 +24,9 @@ import {
     initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
     addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible, destroyLocationScene,
     setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationEraserMode, setLocationEditMode,
-    getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords
+    getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
+    setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
+    setLocationBrushObjectScale, setLocationBrushObjectRotation
 } from './locationScene.js';
 import * as THREE from 'three';
 
@@ -36,6 +38,7 @@ let currentLobbyId = null;
 
 if (pathParts.length >= 2 && pathParts[0] === 'lobbies') {
     currentLobbyId = pathParts[1];
+    window.currentLobbyId = currentLobbyId;
 }
 
 if (!token) {
@@ -168,7 +171,6 @@ window.enterLocation = async function(locationId) {
             addEditLocationButton(() => openLocationEditModal(currentLocationData));
             setEditButtonVisible(true);
 
-            // ---- ПРЕОБРАЗУЕМ ПАНЕЛЬ ИНСТРУМЕНТОВ для локации ----
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) {
                 if (!window._originalToolsContent) {
@@ -203,6 +205,44 @@ window.enterLocation = async function(locationId) {
                         <label style="display: flex; align-items: center; gap: 5px;">
                             <input type="checkbox" id="loc-eraser"> Ластик
                         </label>
+                        <hr style="width:100%; margin:5px 0;">
+                        <label style="display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" id="loc-obj-mode"> Режим объектов
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" id="loc-rad-mode"> Режим радиации
+                        </label>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Радиация:</span>
+                            <input type="range" id="loc-edit-radiation" min="0" max="10" step="0.1" value="0">
+                            <span id="loc-radiation-value">0.0</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <select id="loc-obj-type" class="form-control" style="width: auto;">
+                                <option value="tree">🌲 Дерево</option>
+                                <option value="house">🏠 Дом</option>
+                                <option value="fence">🚧 Забор</option>
+                                <option value="anomaly_electric">⚡ Электрическая аномалия</option>
+                                <option value="anomaly_fire">🔥 Огненная аномалия</option>
+                                <option value="anomaly_acid">🧪 Кислотная лужа</option>
+                                <option value="anomaly_void">🌀 Искажение</option>
+                            </select>
+                            <input type="color" id="loc-obj-color" value="#2d5a27">
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>X:</span>
+                            <input type="range" id="loc-obj-offset-x" min="-0.5" max="0.5" step="0.01" value="0">
+                            <span id="loc-obj-offset-x-value">0.00</span>
+                            <span>Z:</span>
+                            <input type="range" id="loc-obj-offset-z" min="-0.5" max="0.5" step="0.01" value="0">
+                            <span id="loc-obj-offset-z-value">0.00</span>
+                            <span>Масштаб:</span>
+                            <input type="range" id="loc-obj-scale" min="0.2" max="2.0" step="0.05" value="1.0">
+                            <span id="loc-obj-scale-value">1.00</span>
+                            <span>Поворот:</span>
+                            <input type="range" id="loc-obj-rotation" min="0" max="359" step="1" value="0">
+                            <span id="loc-obj-rotation-value">0°</span>
+                        </div>
                     </div>
                 `;
 
@@ -212,6 +252,15 @@ window.enterLocation = async function(locationId) {
                 const radiusSlider = document.getElementById('loc-edit-radius');
                 const heightSlider = document.getElementById('loc-edit-height');
                 const eraserCheck = document.getElementById('loc-eraser');
+                const radiationSlider = document.getElementById('loc-edit-radiation');
+                const radiationSpan = document.getElementById('loc-radiation-value');
+                if (radiationSlider) {
+                    radiationSlider.oninput = (e) => {
+                        const val = parseFloat(e.target.value);
+                        setLocationBrushRadiation(val);
+                    };
+                    setLocationBrushRadiation(0);
+                }
 
                 // Инициализация начальных значений из глобальных переменных
                 radiusSlider.value = window.brushRadius;
@@ -224,6 +273,23 @@ window.enterLocation = async function(locationId) {
 
                 terrainSelect.value = window.currentTileType;
                 setLocationBrushTerrain(window.currentTileType);
+
+                const objModeCheck = document.getElementById('loc-obj-mode');
+                const objTypeSelect = document.getElementById('loc-obj-type');
+                const objColorInput = document.getElementById('loc-obj-color');
+                const objOffsetX = document.getElementById('loc-obj-offset-x');
+                const objOffsetZ = document.getElementById('loc-obj-offset-z');
+                const objScale = document.getElementById('loc-obj-scale');
+                const objRotation = document.getElementById('loc-obj-rotation');
+
+                if (objModeCheck) objModeCheck.onchange = (e) => setLocationBrushObjectMode(e.target.checked);
+                if (objTypeSelect) objTypeSelect.onchange = (e) => setLocationBrushObjectType(e.target.value);
+                if (objColorInput) objColorInput.oninput = (e) => setLocationBrushObjectColor(e.target.value);
+                if (objOffsetX) objOffsetX.oninput = (e) => setLocationBrushObjectOffsetX(e.target.value);
+                if (objOffsetZ) objOffsetZ.oninput = (e) => setLocationBrushObjectOffsetZ(e.target.value);
+                if (objScale) objScale.oninput = (e) => setLocationBrushObjectScale(e.target.value);
+                if (objRotation) objRotation.oninput = (e) => setLocationBrushObjectRotation(e.target.value);
+
 
                 editCheckbox.checked = getLocationEditMode();
 
@@ -562,7 +628,20 @@ if (socket) {
         updateCharacterPosition(data.character_id, data.x, data.y);
     });
     socket.on('location_state', (state) => {
-        state.forEach(s => updateCharacterPosition(s.character_id, s.x, s.y));
+        state.forEach(s => {
+            import('./locationScene.js').then(module => {
+                module.addCharacterToLocation(
+                    s.character_id,
+                    s.name,
+                    s.owner_id,
+                    s.owner_username,
+                    s.x,
+                    s.y,
+                    s.hp_zones,
+                    s.effects
+                );
+            });
+        });
     });
     socket.on('character_moved', (data) => {
         updateCharacterPosition(data.character_id, data.x, data.y);
@@ -573,6 +652,22 @@ if (socket) {
                 module.applyLocationTilesUpdate(data.location_id, data.updates);
             });
         }
+    });
+    socket.on('character_spawned', (data) => {
+        const locId = getCurrentLocationId();
+        if (!locId) return;
+        import('./locationScene.js').then(module => {
+            module.addCharacterToLocation(
+                data.character.id,
+                data.character.name,
+                data.character.owner_id,
+                data.character.owner_username,
+                data.character.pos_x,
+                data.character.pos_y,
+                data.character.hp_zones,
+                data.character.effects
+            );
+        });
     });
 }
 

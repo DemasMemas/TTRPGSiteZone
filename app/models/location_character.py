@@ -1,6 +1,7 @@
 from app.extensions import db
 from datetime import datetime, timezone
 
+
 class LocationCharacter(db.Model):
     __tablename__ = 'location_characters'
     id = db.Column(db.Integer, primary_key=True)
@@ -8,8 +9,20 @@ class LocationCharacter(db.Model):
     character_id = db.Column(db.Integer, db.ForeignKey('lobby_characters.id'), nullable=False)
     pos_x = db.Column(db.Integer, nullable=False, default=0)
     pos_y = db.Column(db.Integer, nullable=False, default=0)
-    status = db.Column(db.String(20), default='idle')  # idle, in_combat
+    status = db.Column(db.String(20), default='idle')
     last_action = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-    location = db.relationship('Location', backref='participants')
+    # НОВЫЕ ПОЛЯ
+    hp_zones = db.Column(db.JSON, nullable=False, default=lambda: {
+        'head': {'current': 50, 'max': 50},
+        'chest': {'current': 100, 'max': 100},
+        'abdomen': {'current': 80, 'max': 80},
+        'left_arm': {'current': 40, 'max': 40},
+        'right_arm': {'current': 40, 'max': 40},
+        'left_leg': {'current': 60, 'max': 60},
+        'right_leg': {'current': 60, 'max': 60}
+    })
+    effects = db.Column(db.JSON, default=list)
+
+    location = db.relationship('Location', backref='location_participants')
     character = db.relationship('LobbyCharacter')

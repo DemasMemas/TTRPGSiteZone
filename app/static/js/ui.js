@@ -13,6 +13,7 @@ let currentLobbyId;
 
 export function setLobbyData(participants, gm) {
     lobbyParticipants = participants;
+    window.lobbyParticipants = participants;
     gmId = gm;
     isGM = (gmId == localStorage.getItem('user_id'));
 }

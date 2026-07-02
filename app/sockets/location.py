@@ -81,12 +81,20 @@ def handle_join_location(data):
 
     # Отправляем текущее состояние всех персонажей (если есть)
     all_chars = LocationCharacter.query.filter_by(location_id=location_id).all()
-    state = [{
-        'character_id': lc.character_id,
-        'x': lc.pos_x,
-        'y': lc.pos_y,
-        'status': lc.status
-    } for lc in all_chars]
+    state = []
+    for lc in all_chars:
+        character = lc.character
+        state.append({
+            'character_id': character.id,
+            'name': character.name,
+            'owner_id': character.owner_id,
+            'owner_username': character.owner.username if character.owner else None,
+            'hp_zones': lc.hp_zones,
+            'effects': lc.effects,
+            'x': lc.pos_x,
+            'y': lc.pos_y,
+            'status': lc.status
+        })
     emit('location_state', state, room=request.sid)
 
 @socketio.on('leave_location')
@@ -175,7 +183,6 @@ def handle_update_location_tiles(data):
         emit('error', {'message': 'Only GM can edit location tiles'}, room=request.sid)
         return
 
-    # Получаем текущие тайлы
     tiles = location.tiles_data
     if not isinstance(tiles, list):
         tiles = []
@@ -187,11 +194,12 @@ def handle_update_location_tiles(data):
         if x is None or z is None:
             continue
         if 0 <= z < len(tiles) and 0 <= x < len(tiles[0]):
-            # Принудительно копируем тайл, чтобы SQLAlchemy заметил изменение
-            tile = dict(tiles[z][x])
+            tile = dict(tiles[z][x])  # копируем
             terrain_changed = False
             height_changed = False
             objects_changed = False
+            radiation_changed = False   # <-- добавить
+
             if 'terrain' in upd and tile.get('terrain') != upd['terrain']:
                 tile['terrain'] = upd['terrain']
                 terrain_changed = True
@@ -201,20 +209,24 @@ def handle_update_location_tiles(data):
             if 'objects' in upd and tile.get('objects') != upd['objects']:
                 tile['objects'] = upd['objects']
                 objects_changed = True
-            if terrain_changed or height_changed or objects_changed:
+            if 'radiation' in upd and tile.get('radiation') != upd['radiation']:
+                tile['radiation'] = upd['radiation']
+                radiation_changed = True   # <-- добавить
+
+            if terrain_changed or height_changed or objects_changed or radiation_changed:
                 tiles[z][x] = tile
                 changed.append({
                     'x': x, 'z': z,
                     'terrain': tile.get('terrain'),
                     'height': tile.get('height'),
-                    'objects': tile.get('objects')
+                    'objects': tile.get('objects'),
+                    'radiation': tile.get('radiation')   # <-- добавить
                 })
 
     if changed:
         location.tiles_data = tiles
         flag_modified(location, "tiles_data")
         db.session.commit()
-        # Рассылаем всем в комнате локации
         socketio.emit('location_tiles_updated', {
             'location_id': location_id,
             'updates': changed
