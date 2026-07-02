@@ -708,6 +708,23 @@ window.closeVisibilityModal = closeVisibilityModal;
 window.saveVisibility = saveVisibility;
 window.unbanUserHandler = unbanUserHandler;
 
+// Функции для модального окна редактирования тайла
+window.openTileEditModal = openTileEditModal;
+window.closeTileEditModal = closeTileEditModal;
+window.applyTerrainChange = applyTerrainChange;
+window.applyHeightChange = applyHeightChange;
+window.applyNameChange = applyNameChange;
+window.applyRadiationChange = applyRadiationChange;
+window.addObjectToTile = addObjectToTile;
+window.clearObjectsFromTile = clearObjectsFromTile;
+window.removeObjectFromTile = removeObjectFromTile;
+window.updateTileEditHeight = updateTileEditHeight;
+window.updateTileEditRadiation = updateTileEditRadiation;
+window.updateObjectOffsetX = updateObjectOffsetX;
+window.updateObjectOffsetZ = updateObjectOffsetZ;
+window.updateObjectScale = updateObjectScale;
+window.updateObjectRotation = updateObjectRotation;
+
 window.openCharacterSheet = openCharacterSheet;
 window.closeCharacterSheet = closeCharacterSheet;
 window.exportCharacter = exportCharacter;

@@ -516,7 +516,7 @@ body {
 /* Модальные окна */
 .modal {
   position: fixed;
-  z-index: 10;
+  z-index: 100;
   left: 0;
   top: 0;
   width: 100%;
@@ -567,6 +567,20 @@ body {
   gap: 10px;
   justify-content: flex-end;
   margin-top: 20px;
+}
+.modal-left {
+    align-items: center;        /* центрируем по вертикали */
+    justify-content: flex-start; /* прижимаем к левому краю */
+    padding-left: 30px;         /* отступ от левого края */
+    background-color: rgba(0,0,0,0.3); /* можно сделать фон более прозрачным */
+}
+
+.modal-left .modal-content {
+    margin: 0;
+    width: 450px;
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow-y: auto;
 }
 .number-input {
   width: 70px;

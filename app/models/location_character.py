@@ -15,12 +15,12 @@ class LocationCharacter(db.Model):
     # НОВЫЕ ПОЛЯ
     hp_zones = db.Column(db.JSON, nullable=False, default=lambda: {
         'head': {'current': 50, 'max': 50},
-        'chest': {'current': 100, 'max': 100},
-        'abdomen': {'current': 80, 'max': 80},
-        'left_arm': {'current': 40, 'max': 40},
-        'right_arm': {'current': 40, 'max': 40},
-        'left_leg': {'current': 60, 'max': 60},
-        'right_leg': {'current': 60, 'max': 60}
+        'chest': {'current': 150, 'max': 150},
+        'abdomen': {'current': 120, 'max': 120},
+        'left_arm': {'current': 90, 'max': 90},
+        'right_arm': {'current': 90, 'max': 90},
+        'left_leg': {'current': 100, 'max': 100},
+        'right_leg': {'current': 100, 'max': 100}
     })
     effects = db.Column(db.JSON, default=list)
 
