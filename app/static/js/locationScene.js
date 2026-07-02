@@ -784,7 +784,7 @@ export function setupLocationEditing() {
 
     locationActive = true;
 
-    // ---- Обновление подсветки и информации при движении мыши ----
+    // --- Обновление подсветки и информации при движении мыши ---
     const onPointerMove = (e) => {
         if (!locationActive) return;
         const rect = canvas.getBoundingClientRect();
