@@ -1,3 +1,4 @@
+# app/sockets/location.py
 import logging
 from flask import request
 from flask_socketio import emit, join_room, leave_room
@@ -7,7 +8,7 @@ from app.extensions import socketio, db
 from app.models.location import Location
 from app.models.location_character import LocationCharacter
 from app.sockets.utils import get_user_from_token
-from app.models import LobbyParticipant, LobbyCharacter
+from app.models import LobbyParticipant, LobbyCharacter, Lobby, User
 
 logger = logging.getLogger(__name__)
 
@@ -79,15 +80,18 @@ def handle_join_location(data):
         'y': loc_char.pos_y if loc_char else 0
     }, room=request.sid)
 
-    # Отправляем текущее состояние всех персонажей (если есть)
+    # Отправляем текущее состояние всех персонажей (с controlled_by)
     all_chars = LocationCharacter.query.filter_by(location_id=location_id).all()
     state = []
     for lc in all_chars:
         character = lc.character
+        if not character:
+            continue
         state.append({
             'character_id': character.id,
             'name': character.name,
             'owner_id': character.owner_id,
+            'controlled_by': lc.controlled_by,   # <-- кто управляет
             'owner_username': character.owner.username if character.owner else None,
             'hp_zones': lc.hp_zones,
             'effects': lc.effects,
@@ -96,6 +100,7 @@ def handle_join_location(data):
             'status': lc.status
         })
     emit('location_state', state, room=request.sid)
+
 
 @socketio.on('leave_location')
 def handle_leave_location(data):
@@ -110,6 +115,7 @@ def handle_leave_location(data):
     room = f"location_{location_id}"
     leave_room(room)
     emit('left_location', {'character_id': character_id}, room=request.sid)
+
 
 @socketio.on('move_in_location')
 def handle_move_in_location(data):
@@ -133,13 +139,13 @@ def handle_move_in_location(data):
         emit('error', {'message': 'Character not in location'}, room=request.sid)
         return
 
-    # Проверка прав: персонаж должен принадлежать пользователю или пользователь – GM
+    # Проверка прав: персонаж должен быть под управлением пользователя или пользователь – GM
     location = Location.query.get(location_id)
     if not location:
         return
     lobby = location.lobby
     is_gm = (lobby.gm_id == user.id)
-    if not is_gm and loc_char.character.owner_id != user.id:
+    if not is_gm and loc_char.controlled_by != user.id:
         emit('error', {'message': 'Permission denied'}, room=request.sid)
         return
 
@@ -161,6 +167,7 @@ def handle_move_in_location(data):
         'x': new_x,
         'y': new_y
     }, room=f"location_{location_id}")
+
 
 @socketio.on('update_location_tiles')
 def handle_update_location_tiles(data):
@@ -198,7 +205,7 @@ def handle_update_location_tiles(data):
             terrain_changed = False
             height_changed = False
             objects_changed = False
-            radiation_changed = False   # <-- добавить
+            radiation_changed = False
 
             if 'terrain' in upd and tile.get('terrain') != upd['terrain']:
                 tile['terrain'] = upd['terrain']
@@ -211,7 +218,7 @@ def handle_update_location_tiles(data):
                 objects_changed = True
             if 'radiation' in upd and tile.get('radiation') != upd['radiation']:
                 tile['radiation'] = upd['radiation']
-                radiation_changed = True   # <-- добавить
+                radiation_changed = True
 
             if terrain_changed or height_changed or objects_changed or radiation_changed:
                 tiles[z][x] = tile
@@ -220,7 +227,7 @@ def handle_update_location_tiles(data):
                     'terrain': tile.get('terrain'),
                     'height': tile.get('height'),
                     'objects': tile.get('objects'),
-                    'radiation': tile.get('radiation')   # <-- добавить
+                    'radiation': tile.get('radiation')
                 })
 
     if changed:

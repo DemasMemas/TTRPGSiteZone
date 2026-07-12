@@ -11,8 +11,9 @@ class LocationCharacter(db.Model):
     pos_y = db.Column(db.Integer, nullable=False, default=0)
     status = db.Column(db.String(20), default='idle')
     last_action = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    controlled_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    controller = db.relationship('User', foreign_keys=[controlled_by])
 
-    # НОВЫЕ ПОЛЯ
     hp_zones = db.Column(db.JSON, nullable=False, default=lambda: {
         'head': {'current': 50, 'max': 50},
         'chest': {'current': 150, 'max': 150},

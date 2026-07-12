@@ -638,7 +638,8 @@ if (socket) {
                     s.x,
                     s.y,
                     s.hp_zones,
-                    s.effects
+                    s.effects,
+                    s.controlled_by
                 );
             });
         });
@@ -665,7 +666,8 @@ if (socket) {
                 data.character.pos_x,
                 data.character.pos_y,
                 data.character.hp_zones,
-                data.character.effects
+                data.character.effects,
+                data.character.controlled_by
             );
         });
     });

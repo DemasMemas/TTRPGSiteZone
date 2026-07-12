@@ -11,6 +11,9 @@ let tileCubes = [];
 let objectMeshes = [];
 let groundPlaneMesh;
 let characterModels = new Map(); // characterId -> { model, label, data }
+// Контекстное меню
+let contextMenu = null;
+let contextMenuCharacterId = null;
 
 // Переменные для перетаскивания персонажа
 let dragCharacter = null;       // { characterId, model, offsetX, offsetZ, startX, startZ }
@@ -97,7 +100,7 @@ function createCharacterModel(ownerId) {
 }
 
 // ========== Добавление персонажа в сцену ==========
-export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects) {
+export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy) {
     // Удаляем старого, если есть
     if (characterModels.has(characterId)) {
         const old = characterModels.get(characterId);
@@ -139,7 +142,8 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         hpZones,
         effects,
         posX,
-        posY
+        posY,
+        controlledBy: controlledBy || ownerId
     });
 }
 
@@ -152,6 +156,100 @@ export function updateCharacterPosition(characterId, posX, posY) {
     entry.label.position.set(posX + 0.5, tileHeight + 1.2, posY + 0.5);
     entry.posX = posX;
     entry.posY = posY;
+}
+
+// ========== Контекстное меню (ПКМ) ==========
+function createContextMenu() {
+    if (contextMenu) return;
+    contextMenu = document.createElement('div');
+    contextMenu.style.cssText = `
+        position: fixed;
+        z-index: 1000;
+        background: rgba(20,20,30,0.95);
+        border: 1px solid rgba(255,255,255,0.2);
+        border-radius: 8px;
+        padding: 5px 0;
+        min-width: 180px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+        display: none;
+        backdrop-filter: blur(5px);
+        color: white;
+        pointer-events: auto;
+        font-family: 'Segoe UI', Arial, sans-serif;
+    `;
+    document.body.appendChild(contextMenu);
+    document.addEventListener('click', (e) => {
+        if (contextMenu && !contextMenu.contains(e.target)) {
+            contextMenu.style.display = 'none';
+            contextMenuCharacterId = null;
+        }
+    });
+}
+
+function showContextMenu(clientX, clientY, characterId) {
+    createContextMenu();
+    contextMenuCharacterId = characterId;
+    contextMenu.innerHTML = '';
+
+    const items = [
+        { label: '⚔️ Атаковать', action: () => onAttackCharacter(characterId) },
+        { label: '🎒 Использовать предмет', action: () => onUseItem(characterId) },
+        { label: '📄 Посмотреть персонажа', action: () => onViewCharacter(characterId) }
+    ];
+    items.forEach(item => {
+        const div = document.createElement('div');
+        div.textContent = item.label;
+        div.style.cssText = `
+            padding: 8px 20px;
+            cursor: pointer;
+            transition: background 0.15s;
+            font-size: 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        `;
+        div.addEventListener('mouseenter', () => { div.style.background = 'rgba(255,255,255,0.1)'; });
+        div.addEventListener('mouseleave', () => { div.style.background = 'transparent'; });
+        div.addEventListener('click', (e) => {
+            e.stopPropagation();
+            contextMenu.style.display = 'none';
+            contextMenuCharacterId = null;
+            item.action();
+        });
+        contextMenu.appendChild(div);
+    });
+
+    // Позиционирование с учётом границ
+    let left = clientX;
+    let top = clientY;
+    contextMenu.style.display = 'block';
+    const rect = contextMenu.getBoundingClientRect();
+    if (left + rect.width > window.innerWidth) left = window.innerWidth - rect.width - 10;
+    if (top + rect.height > window.innerHeight) top = window.innerHeight - rect.height - 10;
+    if (left < 10) left = 10;
+    if (top < 10) top = 10;
+    contextMenu.style.left = left + 'px';
+    contextMenu.style.top = top + 'px';
+}
+
+function onAttackCharacter(characterId) {
+    // Здесь будет логика атаки
+    showNotification(`⚔️ Атака на персонажа ${characterId}`, 'system');
+}
+
+function onUseItem(characterId) {
+    // Здесь можно открыть инвентарь персонажа или использовать предмет
+    showNotification(`🎒 Использовать предмет для персонажа ${characterId}`, 'system');
+    // Пример открытия листа персонажа на вкладке инвентаря:
+    // import('./characterSheet.js').then(module => {
+    //     module.openCharacterSheet(characterId);
+    //     // после открытия переключить вкладку на инвентарь
+    // });
+}
+
+function onViewCharacter(characterId) {
+    // Открыть лист персонажа
+    import('./characterSheet.js').then(module => {
+        module.openCharacterSheet(characterId);
+    });
 }
 
 // ========== Удаление всех персонажей ==========
@@ -644,7 +742,8 @@ function setupCharacterDragging() {
         // Проверяем права: только владелец или GM
         const currentUserId = parseInt(localStorage.getItem('user_id'));
         const isGM = window.isGM;
-        if (entry.ownerId !== currentUserId && !isGM) {
+        const canControl = (entry.controlledBy === currentUserId) || isGM;
+        if (!canControl) {
             showNotification('Вы не можете перемещать этого персонажа');
             return;
         }
@@ -774,6 +873,18 @@ function setupCharacterDragging() {
 
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
+
+    canvas.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (window.locationEditMode) return; // не мешаем редактированию
+        const obj = getCharacterAtScreen(e.clientX, e.clientY);
+        if (obj) {
+            const charId = obj.userData.characterId;
+            if (charId) {
+                showContextMenu(e.clientX, e.clientY, charId);
+            }
+        }
+    });
 }
 
 // ========== Настройка обработчиков ввода (редактирование + drag&drop) ==========
