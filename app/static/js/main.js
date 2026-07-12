@@ -3,7 +3,7 @@ import { initSocket } from './socketHandlers.js';
 import { initCharacters, loadLobbyCharacters, showCreateCharacterForm } from './characters.js';
 import { initLobbyData, loadLobbyInfo, loadAllChunks } from './lobbyData.js';
 import { setCurrentLobbyId, toggleParticipants, toggleSettings, showSettingsTab, closeVisibilityModal,
-saveVisibility, unbanUserHandler, closeSettings, openSettings } from './ui.js';
+saveVisibility, unbanUserHandler, closeSettings, openSettings, updateParticipantsList } from './ui.js';
 import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush, openTileEditModal, closeTileEditModal,
  applyTerrainChange, applyHeightChange, addObjectToTile, clearObjectsFromTile, removeObjectFromTile, highlightObject,
  getEditMode, setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, updateTileEditHeight,
@@ -28,6 +28,7 @@ import {
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation
 } from './locationScene.js';
+import { getUserColorHex, updateMyColor } from './colors.js';
 import * as THREE from 'three';
 
 initWeather();
@@ -861,10 +862,44 @@ function escapeHtml(unsafe) {
 }
 
 // Загружаем данные при старте
-loadLobbyInfo();
-loadLobbyCharacters();
-loadAllChunks();
-initHotkeys();
+(async function init() {
+    await loadLobbyInfo();
+    await loadLobbyCharacters();
+    await loadAllChunks();
+    initHotkeys();
+
+    // ===== Настройка кнопки выбора цвета =====
+    const colorPickerContainer = document.getElementById('color-picker-container');
+    if (colorPickerContainer) {
+        colorPickerContainer.style.display = window.isGM ? 'none' : 'inline-block';
+    }
+
+    const colorPickerBtn = document.getElementById('color-picker-btn');
+    if (colorPickerBtn) {
+        colorPickerBtn.addEventListener('click', () => {
+            const currentColor = getUserColorHex(parseInt(localStorage.getItem('user_id')));
+            const input = document.createElement('input');
+            input.type = 'color';
+            input.value = currentColor;
+            input.addEventListener('input', async (e) => {
+                try {
+                    await updateMyColor(e.target.value);
+                    showNotification('Цвет обновлён', 'success');
+                    updateParticipantsList();
+                    if (window.isLocationActive) {
+                        const locId = getCurrentLocationId();
+                        if (locId) {
+                            window.enterLocation(locId);
+                        }
+                    }
+                } catch (err) {
+                    showNotification(err.message);
+                }
+            });
+            input.click();
+        });
+    }
+})();
 
 setTimeout(() => {
     initDraggablePanels();

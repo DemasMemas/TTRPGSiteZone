@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'https://unpkg.com/three@0.128.0/examples/jsm/renderers/CSS2DRenderer.js';
 import { showNotification } from './utils.js';
+import { getUserColor, getUserColorHex } from './colors.js';
 
 let scene, camera, renderer, labelRenderer, controls;
 let currentLocationId = null;
@@ -67,19 +68,18 @@ function getTileHeight(tileX, tileZ) {
 }
 
 // ========== Создание 3D модели персонажа ==========
-function createCharacterModel(ownerId) {
+function createCharacterModel(userId) {
     const group = new THREE.Group();
+    const color = getUserColor(userId); // теперь используем общую функцию
 
-    // Тело (капсула) – цилиндр + полусферы
     const bodyGeo = new THREE.CylinderGeometry(0.25, 0.25, 0.7, 8);
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x44aaff });
+    const bodyMat = new THREE.MeshStandardMaterial({ color });
     const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.position.y = 0.35;
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
 
-    // Голова (сфера)
     const headGeo = new THREE.SphereGeometry(0.15, 8);
     const headMat = new THREE.MeshStandardMaterial({ color: 0xffddbb });
     const head = new THREE.Mesh(headGeo, headMat);
@@ -88,14 +88,7 @@ function createCharacterModel(ownerId) {
     head.receiveShadow = true;
     group.add(head);
 
-    // Цвет в зависимости от ownerId
-    const hue = (ownerId * 137.508) % 1.0;
-    const color = new THREE.Color().setHSL(hue, 0.8, 0.5);
-    bodyMat.color.copy(color);
-
-    // Добавляем выделение при наведении (будет меняться позже)
     group.userData.isCharacter = true;
-
     return group;
 }
 
@@ -109,8 +102,8 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         characterModels.delete(characterId);
     }
 
-    // Создаём модель
-    const model = createCharacterModel(ownerId);
+    const colorUserId = controlledBy || ownerId;
+    const model = createCharacterModel(colorUserId);
     const tileHeight = getTileHeight(posX, posY);
     model.position.set(posX + 0.5, tileHeight, posY + 0.5);
     model.userData.characterId = characterId;
@@ -118,13 +111,15 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     scene.add(model);
 
     // Создаём CSS2D-метку с именем
-    const div = document.createElement('div');
+    const div = document.createElement('div');   // <-- объявляем ДО использования
+    const colorHex = getUserColorHex(colorUserId);
     div.textContent = name;
     div.style.color = 'white';
     div.style.fontSize = '14px';
     div.style.fontWeight = 'bold';
     div.style.textShadow = '1px 1px 3px black';
-    div.style.backgroundColor = 'rgba(0,0,0,0.6)';
+    div.style.backgroundColor = colorHex;        // теперь используем цвет
+    div.style.border = `2px solid ${colorHex}`;
     div.style.padding = '2px 8px';
     div.style.borderRadius = '10px';
     div.style.pointerEvents = 'none';

@@ -1,4 +1,5 @@
 import logging
+import re
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
 from app.extensions import db
@@ -38,3 +39,19 @@ def profile():
     user = User.query.get(current_user_id)
     schema = UserProfileSchema()
     return jsonify(schema.dump(user)), 200
+
+@auth_bp.route('/color', methods=['PATCH'])
+@jwt_required()
+def update_color():
+    user_id = int(get_jwt_identity())
+    data = request.get_json()
+    color = data.get('color')
+    if not color or not re.match(r'^#[0-9a-fA-F]{6}$', color):
+        return jsonify({'error': 'Invalid color format. Use #RRGGBB'}), 400
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    user.color = color
+    db.session.commit()
+    logger.info(f"User {user.username} updated color to {color}")
+    return jsonify({'message': 'Color updated', 'color': color}), 200

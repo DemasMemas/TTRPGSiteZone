@@ -122,7 +122,8 @@ def get_participants_characters(lobby_id, lobby, participant):
     for p in participants:
         user_data = {
             'user_id': p.user_id,
-            'username': p.user.username
+            'username': p.user.username,
+            'color': p.user.color
         }
         if p.character_id:
             char = LobbyCharacter.query.get(p.character_id)

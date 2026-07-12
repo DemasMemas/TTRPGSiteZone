@@ -2,6 +2,7 @@
 import { showNotification } from './utils.js';
 import { Server } from './api.js';
 import { loadLobbyCharacters } from './characters.js';
+import { setGmId, getUserColorHex } from './colors.js';
 
 export let lobbyParticipants = [];
 export let gmId = null;
@@ -15,6 +16,7 @@ export function setLobbyData(participants, gm) {
     lobbyParticipants = participants;
     window.lobbyParticipants = participants;
     gmId = gm;
+    setGmId(gmId);
     isGM = (gmId == localStorage.getItem('user_id'));
 }
 
@@ -32,8 +34,11 @@ export function updateParticipantsList() {
 
     lobbyParticipants.forEach(p => {
         const li = document.createElement('li');
-        li.setAttribute('data-user-id', p.user_id);
-        li.innerHTML = `${p.username} ${p.user_id === gmId ? '(ГМ)' : ''}`;
+        const colorHex = getUserColorHex(p.user_id);
+        li.innerHTML = `
+            <span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:${colorHex}; margin-right:8px; flex-shrink:0;"></span>
+            ${p.username} ${p.user_id === gmId ? '(ГМ)' : ''}
+        `;
 
         if (isGM && p.user_id !== gmId) {
             const banBtn = document.createElement('button');
