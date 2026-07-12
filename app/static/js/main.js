@@ -153,6 +153,7 @@ window.enterLocation = async function(locationId) {
         hideGlobalCanvas();
 
         // Инициализируем сцену локации
+        destroyLocationScene();
         initLocationScene('location-canvas');
         loadLocation(data);
 

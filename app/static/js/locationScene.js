@@ -5,23 +5,20 @@ import { CSS2DRenderer, CSS2DObject } from 'https://unpkg.com/three@0.128.0/exam
 import { showNotification } from './utils.js';
 import { getUserColor, getUserColorHex } from './colors.js';
 
+// ========== Глобальные переменные ==========
 let scene, camera, renderer, labelRenderer, controls;
 let currentLocationId = null;
 let currentLocationData = null;
 let tileCubes = [];
 let objectMeshes = [];
 let groundPlaneMesh;
-let characterModels = new Map(); // characterId -> { model, label, data }
-// Контекстное меню
+let characterModels = new Map();
+let previewSprite = null;
 let contextMenu = null;
 let contextMenuCharacterId = null;
-
-// Переменные для перетаскивания персонажа
-let dragCharacter = null;       // { characterId, model, offsetX, offsetZ, startX, startZ }
+let dragCharacter = null;
 let isDraggingCharacter = false;
 let hoveredCharacterId = null;
-
-// Режимы редактирования
 let editMode = false;
 let brushRadius = 0;
 let currentBrushTerrain = 'grass';
@@ -35,20 +32,23 @@ let brushObjectOffsetX = 0.0;
 let brushObjectOffsetZ = 0.0;
 let brushObjectScale = 1.0;
 let brushObjectRotation = 0;
-
-// Для raycast
 let raycaster = new THREE.Raycaster();
 let mouse = new THREE.Vector2();
 let hoveredTileCoords = null;
 let highlightBox = null;
-
 let locationActive = false;
 let eventCleanup = null;
 let processedTilesForObjects = new Set();
 let lastHighlightCoords = null;
-
-// Глобальный флаг для UI
 window.locationEditMode = false;
+let animationFrameId = null;
+
+// Хранилище обработчиков для удаления
+const handlers = {
+    window: {},
+    document: {},
+    canvas: {}
+};
 
 const terrainColors = {
     grass: 0x3a5f0b,
@@ -67,11 +67,26 @@ function getTileHeight(tileX, tileZ) {
     return row[tileX].height || 1.0;
 }
 
-// ========== Создание 3D модели персонажа ==========
+function disposeObject(obj) {
+    if (!obj) return;
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+        if (Array.isArray(obj.material)) {
+            obj.material.forEach(mat => mat.dispose());
+        } else {
+            obj.material.dispose();
+        }
+    }
+    if (obj.texture) obj.texture.dispose();
+    if (obj.children) {
+        obj.children.forEach(child => disposeObject(child));
+    }
+}
+
+// ========== Создание модели персонажа ==========
 function createCharacterModel(userId) {
     const group = new THREE.Group();
-    const color = getUserColor(userId); // теперь используем общую функцию
-
+    const color = getUserColor(userId);
     const bodyGeo = new THREE.CylinderGeometry(0.25, 0.25, 0.7, 8);
     const bodyMat = new THREE.MeshStandardMaterial({ color });
     const body = new THREE.Mesh(bodyGeo, bodyMat);
@@ -79,7 +94,6 @@ function createCharacterModel(userId) {
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
-
     const headGeo = new THREE.SphereGeometry(0.15, 8);
     const headMat = new THREE.MeshStandardMaterial({ color: 0xffddbb });
     const head = new THREE.Mesh(headGeo, headMat);
@@ -87,21 +101,18 @@ function createCharacterModel(userId) {
     head.castShadow = true;
     head.receiveShadow = true;
     group.add(head);
-
     group.userData.isCharacter = true;
     return group;
 }
 
-// ========== Добавление персонажа в сцену ==========
+// ========== Добавление персонажа ==========
 export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy) {
-    // Удаляем старого, если есть
     if (characterModels.has(characterId)) {
         const old = characterModels.get(characterId);
         scene.remove(old.model);
         if (old.label) scene.remove(old.label);
         characterModels.delete(characterId);
     }
-
     const colorUserId = controlledBy || ownerId;
     const model = createCharacterModel(colorUserId);
     const tileHeight = getTileHeight(posX, posY);
@@ -110,15 +121,14 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     model.userData.ownerId = ownerId;
     scene.add(model);
 
-    // Создаём CSS2D-метку с именем
-    const div = document.createElement('div');   // <-- объявляем ДО использования
+    const div = document.createElement('div');
     const colorHex = getUserColorHex(colorUserId);
     div.textContent = name;
     div.style.color = 'white';
     div.style.fontSize = '14px';
     div.style.fontWeight = 'bold';
     div.style.textShadow = '1px 1px 3px black';
-    div.style.backgroundColor = colorHex;        // теперь используем цвет
+    div.style.backgroundColor = colorHex;
     div.style.border = `2px solid ${colorHex}`;
     div.style.padding = '2px 8px';
     div.style.borderRadius = '10px';
@@ -127,7 +137,6 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     label.position.set(posX + 0.5, tileHeight + 1.2, posY + 0.5);
     scene.add(label);
 
-    // Сохраняем данные
     characterModels.set(characterId, {
         model,
         label,
@@ -142,7 +151,6 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     });
 }
 
-// ========== Обновление позиции персонажа ==========
 export function updateCharacterPosition(characterId, posX, posY) {
     const entry = characterModels.get(characterId);
     if (!entry) return;
@@ -153,7 +161,7 @@ export function updateCharacterPosition(characterId, posX, posY) {
     entry.posY = posY;
 }
 
-// ========== Контекстное меню (ПКМ) ==========
+// ========== Контекстное меню ==========
 function createContextMenu() {
     if (contextMenu) return;
     contextMenu = document.createElement('div');
@@ -173,19 +181,20 @@ function createContextMenu() {
         font-family: 'Segoe UI', Arial, sans-serif;
     `;
     document.body.appendChild(contextMenu);
-    document.addEventListener('click', (e) => {
+    const onClick = (e) => {
         if (contextMenu && !contextMenu.contains(e.target)) {
             contextMenu.style.display = 'none';
             contextMenuCharacterId = null;
         }
-    });
+    };
+    document.addEventListener('click', onClick);
+    handlers.document.click = onClick;
 }
 
 function showContextMenu(clientX, clientY, characterId) {
     createContextMenu();
     contextMenuCharacterId = characterId;
     contextMenu.innerHTML = '';
-
     const items = [
         { label: '⚔️ Атаковать', action: () => onAttackCharacter(characterId) },
         { label: '🎒 Использовать предмет', action: () => onUseItem(characterId) },
@@ -211,8 +220,6 @@ function showContextMenu(clientX, clientY, characterId) {
         });
         contextMenu.appendChild(div);
     });
-
-    // Позиционирование с учётом границ
     let left = clientX;
     let top = clientY;
     contextMenu.style.display = 'block';
@@ -226,70 +233,43 @@ function showContextMenu(clientX, clientY, characterId) {
 }
 
 function onAttackCharacter(characterId) {
-    // Здесь будет логика атаки
     showNotification(`⚔️ Атака на персонажа ${characterId}`, 'system');
 }
-
 function onUseItem(characterId) {
-    // Здесь можно открыть инвентарь персонажа или использовать предмет
     showNotification(`🎒 Использовать предмет для персонажа ${characterId}`, 'system');
-    // Пример открытия листа персонажа на вкладке инвентаря:
-    // import('./characterSheet.js').then(module => {
-    //     module.openCharacterSheet(characterId);
-    //     // после открытия переключить вкладку на инвентарь
-    // });
 }
-
 function onViewCharacter(characterId) {
-    // Открыть лист персонажа
     import('./characterSheet.js').then(module => {
         module.openCharacterSheet(characterId);
     });
 }
 
-// ========== Удаление всех персонажей ==========
+// ========== Очистка персонажей ==========
 function clearAllCharacters() {
     characterModels.forEach((entry) => {
-        scene.remove(entry.model);
-        if (entry.label) scene.remove(entry.label);
+        if (entry.model) {
+            disposeObject(entry.model);
+            scene.remove(entry.model);
+        }
+        if (entry.label) {
+            scene.remove(entry.label);
+        }
     });
     characterModels.clear();
 }
 
 // ========== Инициализация сцены ==========
 export function initLocationScene(containerId) {
+    // Сначала полностью уничтожаем старую сцену
+    destroyLocationScene();
+
     const container = document.getElementById(containerId);
     if (!container) return;
 
-    // Очистка предыдущей сцены
-    if (renderer) {
-        renderer.dispose();
-        if (renderer.domElement && renderer.domElement.parentNode) {
-            renderer.domElement.parentNode.removeChild(renderer.domElement);
-        }
-        renderer = null;
-    }
-    if (labelRenderer) {
-        if (labelRenderer.domElement && labelRenderer.domElement.parentNode) {
-            labelRenderer.domElement.parentNode.removeChild(labelRenderer.domElement);
-        }
-        labelRenderer = null;
-    }
-    if (scene) {
-        scene = null;
-    }
-    camera = null;
-    controls = null;
-    tileCubes = [];
-    objectMeshes = [];
-    clearAllCharacters();
-    dragCharacter = null;
-    isDraggingCharacter = false;
-    hoveredCharacterId = null;
-
+    // Очищаем контейнер
     while (container.firstChild) container.removeChild(container.firstChild);
 
-    // Создаём WebGL рендерер
+    // WebGL рендерер
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -297,13 +277,13 @@ export function initLocationScene(containerId) {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
 
-    // Создаём CSS2D рендерер для меток
+    // CSS2D рендерер
     labelRenderer = new CSS2DRenderer();
     labelRenderer.setSize(container.clientWidth, container.clientHeight);
     labelRenderer.domElement.style.position = 'absolute';
     labelRenderer.domElement.style.top = '0';
     labelRenderer.domElement.style.left = '0';
-    labelRenderer.domElement.style.pointerEvents = 'none'; // чтобы клики проходили сквозь метки
+    labelRenderer.domElement.style.pointerEvents = 'none';
     container.appendChild(labelRenderer.domElement);
 
     // Сцена
@@ -314,7 +294,7 @@ export function initLocationScene(containerId) {
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
     camera.position.set(50, 60, 50);
 
-    // Управление
+    // Контролы
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
@@ -334,12 +314,12 @@ export function initLocationScene(containerId) {
     fillLight.position.set(0, 5, 0);
     scene.add(fillLight);
 
-    // Highlight box (для редактирования)
+    // Highlight
     createHighlight();
 
     // Анимация
     function animate() {
-        requestAnimationFrame(animate);
+        animationFrameId = requestAnimationFrame(animate);
         if (controls) controls.update();
         if (renderer && scene && camera) renderer.render(scene, camera);
         if (labelRenderer) labelRenderer.render(scene, camera);
@@ -366,7 +346,7 @@ export function initLocationScene(containerId) {
         document.body.appendChild(locInfo);
     }
 
-    // Настройка обработчиков редактирования, drag&drop спавна и перетаскивания персонажей
+    // Настройка обработчиков
     setupLocationEditing();
     setupCharacterDragging();
 }
@@ -401,13 +381,15 @@ export function loadLocation(data) {
     currentLocationData = data;
     if (!scene) return;
 
-    // Очищаем сцену от старых объектов (кроме света и highlight)
+    // Очистка старых объектов (кроме света и highlight)
     const toRemove = [];
     scene.children.forEach(child => {
         if (!child.isLight && child !== highlightBox) toRemove.push(child);
     });
-    toRemove.forEach(child => scene.remove(child));
-
+    toRemove.forEach(child => {
+        disposeObject(child);
+        scene.remove(child);
+    });
     clearAllCharacters();
 
     const gridWidth = data.grid_width;
@@ -455,7 +437,7 @@ export function loadLocation(data) {
         }
     }
 
-    // Отдельные объекты (если есть)
+    // Отдельные объекты
     if (data.objects && data.objects.length) {
         data.objects.forEach(obj => {
             const boxGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
@@ -466,17 +448,16 @@ export function loadLocation(data) {
         });
     }
 
-    // Настройка камеры
+    // Камера
     const distance = Math.max(gridWidth, gridHeight) * 0.8;
     camera.position.set(centerX, distance * 0.6, centerZ + distance);
     controls.target.set(centerX, 0, centerZ);
     controls.update();
 
-    // Добавляем highlight обратно в сцену (если он был удалён)
     if (highlightBox && !scene.children.includes(highlightBox)) scene.add(highlightBox);
 }
 
-// ========== Обновление тайла ==========
+// ========== Обновление тайлов ==========
 function updateTileCube(x, z, tile) {
     const cube = tileCubes.find(c => c.userData.tileX === x && c.userData.tileZ === z);
     if (!cube) return;
@@ -497,7 +478,6 @@ function rebuildTileObjects(tileX, tileZ) {
     const worldX = tileX + 0.5;
     const worldZ = tileZ + 0.5;
 
-    // Удаляем старые объекты на этом тайле
     const toRemove = [];
     for (let i = 0; i < objectMeshes.length; i++) {
         const mesh = objectMeshes[i];
@@ -550,7 +530,7 @@ function rebuildTileObjects(tileX, tileZ) {
     }
 }
 
-// ========== Применение обновлений тайлов (из сокета) ==========
+// ========== Обновления из сокета ==========
 export function applyLocationTilesUpdate(locationId, updates) {
     if (getCurrentLocationId() !== locationId) return;
     if (!currentLocationData) return;
@@ -563,7 +543,6 @@ export function applyLocationTilesUpdate(locationId, updates) {
         updateTileCube(upd.x, upd.z, tile);
         rebuildTileObjects(upd.x, upd.z);
     }
-    // Обновляем позиции персонажей, если изменилась высота тайлов
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
         entry.model.position.y = height;
@@ -571,12 +550,11 @@ export function applyLocationTilesUpdate(locationId, updates) {
     });
 }
 
-// ========== Редактирование (кисть) ==========
+// ========== Кисть ==========
 export function applyLocationBrush(centerX, centerZ, updates, radius) {
     if (!currentLocationData) return;
     const tiles = currentLocationData.tiles_data;
     const changed = [];
-
     for (let dz = -radius; dz <= radius; dz++) {
         for (let dx = -radius; dx <= radius; dx++) {
             const x = centerX + dx;
@@ -584,7 +562,6 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             if (x < 0 || x >= currentLocationData.grid_width || z < 0 || z >= currentLocationData.grid_height) continue;
             const tile = tiles[z][x];
             let needUpdate = false;
-
             if (updates.terrain !== undefined && tile.terrain !== updates.terrain) {
                 tile.terrain = updates.terrain;
                 needUpdate = true;
@@ -622,7 +599,6 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 tile.objects = [];
                 needUpdate = true;
             }
-
             if (needUpdate) {
                 updateTileCube(x, z, tile);
                 if (updates.objects !== undefined || updates.addObject) {
@@ -632,7 +608,6 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             }
         }
     }
-
     if (changed.length === 0) return;
     if (window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
@@ -641,7 +616,6 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             updates: changed.map(c => ({ x: c.x, z: c.z, terrain: c.terrain, height: c.height, objects: c.objects, radiation: c.radiation }))
         });
     }
-    // Обновляем позиции персонажей после изменения высоты
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
         entry.model.position.y = height;
@@ -649,26 +623,22 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     });
 }
 
-// ========== Настройка обработчиков для перетаскивания персонажей (3D) ==========
+// ========== Перетаскивание персонажей (3D) ==========
 function setupCharacterDragging() {
     if (!renderer) return;
     const canvas = renderer.domElement;
 
-    // Находим персонажа под курсором
     function getCharacterAtScreen(clientX, clientY) {
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-
-        // Получаем все модели персонажей
         const models = [];
-        characterModels.forEach((entry, id) => {
+        characterModels.forEach((entry) => {
             models.push(entry.model);
         });
-        const intersects = raycaster.intersectObjects(models, true); // true для дочерних объектов
+        const intersects = raycaster.intersectObjects(models, true);
         if (intersects.length > 0) {
-            // Ищем родителя с userData.isCharacter
             let obj = intersects[0].object;
             while (obj) {
                 if (obj.userData && obj.userData.isCharacter) {
@@ -676,14 +646,13 @@ function setupCharacterDragging() {
                 }
                 obj = obj.parent;
             }
-            // Если не нашли, пробуем взять ближайший объект
             return intersects[0].object;
         }
         return null;
     }
 
-    // Обработчик наведения (подсветка)
-    canvas.addEventListener('mousemove', (e) => {
+    // mousemove для подсветки
+    const onMouseMove = (e) => {
         if (isDraggingCharacter) return;
         const obj = getCharacterAtScreen(e.clientX, e.clientY);
         if (obj) {
@@ -691,7 +660,6 @@ function setupCharacterDragging() {
             if (charId && hoveredCharacterId !== charId) {
                 hoveredCharacterId = charId;
                 canvas.style.cursor = 'grab';
-                // Можно добавить подсветку, например увеличить яркость
                 const entry = characterModels.get(charId);
                 if (entry) {
                     entry.model.children.forEach(child => {
@@ -704,7 +672,6 @@ function setupCharacterDragging() {
             }
         } else {
             if (hoveredCharacterId !== null) {
-                // Убираем подсветку
                 const entry = characterModels.get(hoveredCharacterId);
                 if (entry) {
                     entry.model.children.forEach(child => {
@@ -718,23 +685,21 @@ function setupCharacterDragging() {
                 canvas.style.cursor = 'default';
             }
         }
-    });
+    };
+    canvas.addEventListener('mousemove', onMouseMove);
+    handlers.canvas.mousemove = onMouseMove;
 
-    // Начало перетаскивания
-    canvas.addEventListener('pointerdown', (e) => {
+    // pointerdown - начало перетаскивания
+    const onPointerDown = (e) => {
         if (e.button !== 0) return;
-        if (window.locationEditMode) return; // не мешаем редактированию
+        if (window.locationEditMode) return;
         if (isDraggingCharacter) return;
-
         const obj = getCharacterAtScreen(e.clientX, e.clientY);
         if (!obj) return;
         const charId = obj.userData.characterId;
         if (!charId) return;
-
         const entry = characterModels.get(charId);
         if (!entry) return;
-
-        // Проверяем права: только владелец или GM
         const currentUserId = parseInt(localStorage.getItem('user_id'));
         const isGM = window.isGM;
         const canControl = (entry.controlledBy === currentUserId) || isGM;
@@ -742,23 +707,17 @@ function setupCharacterDragging() {
             showNotification('Вы не можете перемещать этого персонажа');
             return;
         }
-
         e.preventDefault();
         e.stopPropagation();
 
-        // Запоминаем данные для перетаскивания
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-
-        // Получаем плоскость на высоте персонажа
         const planeY = entry.model.position.y;
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY);
         const intersectPoint = new THREE.Vector3();
-        if (!raycaster.ray.intersectPlane(plane, intersectPoint)) {
-            return;
-        }
+        if (!raycaster.ray.intersectPlane(plane, intersectPoint)) return;
 
         dragCharacter = {
             characterId: charId,
@@ -772,7 +731,6 @@ function setupCharacterDragging() {
         controls.enabled = false;
         canvas.style.cursor = 'grabbing';
 
-        // Убираем подсветку
         if (hoveredCharacterId !== null) {
             const oldEntry = characterModels.get(hoveredCharacterId);
             if (oldEntry) {
@@ -785,71 +743,52 @@ function setupCharacterDragging() {
             }
             hoveredCharacterId = null;
         }
-    });
+    };
+    canvas.addEventListener('pointerdown', onPointerDown);
+    handlers.canvas.charPointerDown = onPointerDown;
 
-    // Перемещение
-    canvas.addEventListener('pointermove', (e) => {
+    // pointermove - перемещение
+    const onPointerMove = (e) => {
         if (!isDraggingCharacter || !dragCharacter) return;
         e.preventDefault();
-
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-
         const planeY = dragCharacter.model.position.y;
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY);
         const intersectPoint = new THREE.Vector3();
-        if (!raycaster.ray.intersectPlane(plane, intersectPoint)) {
-            return;
-        }
-
-        // Новая позиция (мировые координаты)
+        if (!raycaster.ray.intersectPlane(plane, intersectPoint)) return;
         let newX = intersectPoint.x + dragCharacter.offsetX;
         let newZ = intersectPoint.z + dragCharacter.offsetZ;
-
-        // Ограничиваем по границам локации
         newX = Math.max(0.5, Math.min(currentLocationData.grid_width - 0.5, newX));
         newZ = Math.max(0.5, Math.min(currentLocationData.grid_height - 0.5, newZ));
-
-        // Получаем высоту тайла под новой позицией
         const tileX = Math.floor(newX);
         const tileZ = Math.floor(newZ);
         const height = getTileHeight(tileX, tileZ);
-
-        // Обновляем позицию модели и метки
         dragCharacter.model.position.set(newX, height, newZ);
         const entry = characterModels.get(dragCharacter.characterId);
         if (entry) {
             entry.label.position.set(newX, height + 1.2, newZ);
-            // Обновляем сохранённые координаты
             entry.posX = tileX;
             entry.posY = tileZ;
         }
-    });
+    };
+    canvas.addEventListener('pointermove', onPointerMove);
+    handlers.canvas.charPointerMove = onPointerMove;
 
-    // Отпускание
+    // pointerup / pointercancel - завершение
     const endDrag = (e) => {
         if (!isDraggingCharacter || !dragCharacter) {
             controls.enabled = true;
             return;
         }
-
         e.preventDefault();
-
-        // Отправляем обновление позиции на сервер
         const entry = characterModels.get(dragCharacter.characterId);
         if (entry) {
             const newX = Math.floor(entry.posX);
             const newY = Math.floor(entry.posY);
-            // Отправляем через сокет или REST
             if (window.socket && window.currentLocationId) {
-                // Используем существующий механизм перемещения (или спавн?)
-                // Но у нас нет отдельного события для перемещения в локации,
-                // можно использовать move_in_location или обновить через REST.
-                // Для простоты пока просто сохраняем локально, но для синхронизации надо отправить.
-                // В вашем проекте есть сокет-событие 'move_in_location'.
-                // Пока отправим вручную (если есть обработчик на бэкенде).
                 window.socket.emit('move_in_location', {
                     token: localStorage.getItem('access_token'),
                     location_id: window.currentLocationId,
@@ -859,19 +798,22 @@ function setupCharacterDragging() {
                 });
             }
         }
-
         dragCharacter = null;
         isDraggingCharacter = false;
         controls.enabled = true;
         canvas.style.cursor = 'default';
     };
+    const onPointerUp = (e) => { endDrag(e); };
+    const onPointerCancel = (e) => { endDrag(e); };
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerCancel);
+    handlers.canvas.charPointerUp = onPointerUp;
+    handlers.canvas.charPointerCancel = onPointerCancel;
 
-    canvas.addEventListener('pointerup', endDrag);
-    canvas.addEventListener('pointercancel', endDrag);
-
-    canvas.addEventListener('contextmenu', (e) => {
+    // contextmenu
+    const onContextMenu = (e) => {
         e.preventDefault();
-        if (window.locationEditMode) return; // не мешаем редактированию
+        if (window.locationEditMode) return;
         const obj = getCharacterAtScreen(e.clientX, e.clientY);
         if (obj) {
             const charId = obj.userData.characterId;
@@ -879,18 +821,18 @@ function setupCharacterDragging() {
                 showContextMenu(e.clientX, e.clientY, charId);
             }
         }
-    });
+    };
+    canvas.addEventListener('contextmenu', onContextMenu);
+    handlers.canvas.contextmenu = onContextMenu;
 }
 
-// ========== Настройка обработчиков ввода (редактирование + drag&drop) ==========
+// ========== Настройка обработчиков редактирования и Drag&Drop спавна ==========
 export function setupLocationEditing() {
     if (!renderer) return;
     const canvas = renderer.domElement;
     const locInfo = document.getElementById('location-tile-info');
-
     locationActive = true;
 
-    // --- Обновление подсветки и информации при движении мыши ---
     const onPointerMove = (e) => {
         if (!locationActive) return;
         const rect = canvas.getBoundingClientRect();
@@ -923,23 +865,21 @@ export function setupLocationEditing() {
             lastHighlightCoords = null;
         }
     };
+    window.addEventListener('pointermove', onPointerMove);
+    handlers.window.pointerMove = onPointerMove;
 
-    // ---- Редактирование кистью при зажатой кнопке ----
     const onPointerDown = (e) => {
         if (!locationActive) return;
         if (e.button !== 0) return;
         if (!hoveredTileCoords) return;
         if (!window.locationEditMode) return;
         if (e.target !== canvas) return;
-
         e.preventDefault();
         e.stopPropagation();
         canvas.setPointerCapture(e.pointerId);
         const { x, z } = hoveredTileCoords;
-
         const radMode = document.getElementById('loc-rad-mode')?.checked;
         const objMode = document.getElementById('loc-obj-mode')?.checked;
-
         const updates = {};
         if (eraserMode) {
             updates.objects = [];
@@ -958,6 +898,8 @@ export function setupLocationEditing() {
         }
         processedTilesForObjects.clear();
     };
+    canvas.addEventListener('pointerdown', onPointerDown);
+    handlers.canvas.editPointerDown = onPointerDown;
 
     const onPointerMoveWithDrag = (e) => {
         if (!locationActive) return;
@@ -965,11 +907,9 @@ export function setupLocationEditing() {
         if (!window.locationEditMode) return;
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
-
         const { x, z } = hoveredTileCoords;
         const radMode = document.getElementById('loc-rad-mode')?.checked;
         const objMode = document.getElementById('loc-obj-mode')?.checked;
-
         const updates = {};
         if (eraserMode) {
             updates.objects = [];
@@ -987,17 +927,26 @@ export function setupLocationEditing() {
             applyLocationBrush(x, z, updates, brushRadius);
         }
     };
+    window.addEventListener('pointermove', onPointerMoveWithDrag);
+    handlers.window.pointerMoveWithDrag = onPointerMoveWithDrag;
 
     const onPointerUp = (e) => {
         if (!locationActive) return;
         canvas.releasePointerCapture(e.pointerId);
     };
+    canvas.addEventListener('pointerup', onPointerUp);
+    handlers.canvas.editPointerUp = onPointerUp;
 
-    // ---- Drag & Drop персонажей ----
-    let previewSprite = null;
+    // Drag & Drop спавна персонажей
     let previewValid = false;
 
     function createPreviewSprite() {
+        if (previewSprite) {
+            scene.remove(previewSprite);
+            previewSprite.material.map?.dispose();
+            previewSprite.material.dispose();
+            previewSprite = null;
+        }
         const canvas2 = document.createElement('canvas');
         canvas2.width = 64;
         canvas2.height = 64;
@@ -1011,10 +960,10 @@ export function setupLocationEditing() {
         ctx.fillText('✨', 26, 42);
         const texture = new THREE.CanvasTexture(canvas2);
         const material = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.7 });
-        const sprite = new THREE.Sprite(material);
-        sprite.scale.set(0.8, 0.8, 1);
-        scene.add(sprite);
-        return sprite;
+        previewSprite = new THREE.Sprite(material);
+        previewSprite.scale.set(0.8, 0.8, 1);
+        scene.add(previewSprite);
+        return previewSprite;
     }
 
     function updatePreviewPosition(clientX, clientY) {
@@ -1042,26 +991,29 @@ export function setupLocationEditing() {
         previewValid = false;
     }
 
-    canvas.addEventListener('dragover', (e) => {
+    const onDragOver = (e) => {
         e.preventDefault();
         e.stopPropagation();
         updatePreviewPosition(e.clientX, e.clientY);
-    });
+    };
+    canvas.addEventListener('dragover', onDragOver);
+    handlers.canvas.dragover = onDragOver;
 
-    canvas.addEventListener('dragleave', (e) => {
+    const onDragLeave = (e) => {
         e.preventDefault();
         if (previewSprite) previewSprite.visible = false;
         previewValid = false;
-    });
+    };
+    canvas.addEventListener('dragleave', onDragLeave);
+    handlers.canvas.dragleave = onDragLeave;
 
-    canvas.addEventListener('drop', async (e) => {
+    const onDrop = async (e) => {
         e.preventDefault();
         e.stopPropagation();
         if (!previewValid) {
             console.warn('Drop cancelled: preview not valid');
             return;
         }
-        // Получаем координаты тайла под мышью
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1071,56 +1023,46 @@ export function setupLocationEditing() {
         const point = intersects[0].point;
         const tileX = Math.floor(point.x);
         const tileZ = Math.floor(point.z);
-
         const dragData = e.dataTransfer.getData('text/plain');
-        if (!dragData) {
-            console.warn('No drag data');
-            return;
-        }
+        if (!dragData) return;
         let parsed;
-        try {
-            parsed = JSON.parse(dragData);
-        } catch (err) {
-            console.warn('Invalid drag data JSON', err);
-            return;
-        }
+        try { parsed = JSON.parse(dragData); } catch (err) { return; }
         const characterId = parsed.characterId;
         const ownerId = parsed.ownerId;
-
-        if (!characterId) {
-            console.warn('No characterId in drag data');
-            return;
-        }
-
-        // Открываем модальное окно выбора владельца
+        if (!characterId) return;
         openOwnerSelectionModal(characterId, tileX, tileZ, ownerId);
-
         if (previewSprite) previewSprite.visible = false;
         previewValid = false;
-    });
+    };
+    canvas.addEventListener('drop', onDrop);
+    handlers.canvas.drop = onDrop;
 
-    // ---- Регистрация обработчиков ----
-    window.addEventListener('pointermove', onPointerMoveWithDrag);
-    window.addEventListener('pointermove', onPointerMove);
-    canvas.addEventListener('pointerdown', onPointerDown);
-    canvas.addEventListener('pointerup', onPointerUp);
+    const onWheel = (e) => {
+        if (e.altKey) e.preventDefault();
+    };
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    handlers.canvas.wheel = onWheel;
 
-    // Отключаем зуум при Alt
-    canvas.addEventListener('wheel', (e) => {
-        if (e.altKey) {
-            e.preventDefault();
-        }
-    }, { passive: false });
-
-    // Сохраняем cleanup
     eventCleanup = () => {
-        window.removeEventListener('pointermove', onPointerMove);
-        window.removeEventListener('pointermove', onPointerMoveWithDrag);
-        canvas.removeEventListener('pointerdown', onPointerDown);
-        canvas.removeEventListener('pointerup', onPointerUp);
+        // Удаляем все обработчики из хранилища
+        Object.keys(handlers.window).forEach(key => {
+            window.removeEventListener(key, handlers.window[key]);
+            delete handlers.window[key];
+        });
+        Object.keys(handlers.canvas).forEach(key => {
+            canvas.removeEventListener(key, handlers.canvas[key]);
+            delete handlers.canvas[key];
+        });
+        // document.click удаляется отдельно в destroyLocationScene
         locationActive = false;
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
         if (previewSprite) {
             scene.remove(previewSprite);
+            previewSprite.material.map?.dispose();
+            previewSprite.material.dispose();
             previewSprite = null;
         }
     };
@@ -1132,7 +1074,6 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
     const lobbyParticipants = window.lobbyParticipants || [];
     const currentUserId = parseInt(localStorage.getItem('user_id'));
     const isGM = window.isGM;
-
     let characterOwner = dragDataOwnerId;
     if (!characterOwner) {
         try {
@@ -1143,11 +1084,8 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
                 const info = await response.json();
                 characterOwner = info.owner_id;
             }
-        } catch (err) {
-            console.warn('Failed to fetch character owner', err);
-        }
+        } catch (err) {}
     }
-
     let options = [];
     if (isGM) {
         options = lobbyParticipants.map(p => ({ id: p.user_id, name: p.username }));
@@ -1158,13 +1096,10 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
         }
         options = [{ id: currentUserId, name: localStorage.getItem('username') }];
     }
-
     if (options.length === 0) {
         showNotification('Нет доступных владельцев');
         return;
     }
-
-    // Модальное окно
     const modal = document.createElement('div');
     modal.className = 'modal';
     modal.style.display = 'flex';
@@ -1182,7 +1117,6 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
         </div>
     `;
     document.body.appendChild(modal);
-
     document.getElementById('confirm-spawn').onclick = async () => {
         const assignToUserId = parseInt(document.getElementById('owner-select').value);
         modal.remove();
@@ -1216,13 +1150,11 @@ export function setLocationEditMode(enabled) {
     editMode = enabled;
     window.locationEditMode = enabled;
     if (!enabled) hideHighlight();
-
     if (hoveredTileCoords && currentLocationData) {
         const { x, z } = hoveredTileCoords;
         const tile = currentLocationData.tiles_data[z]?.[x];
         if (tile) updateHighlight(x, z, tile.height);
     }
-
     const btn = document.getElementById('edit-toggle');
     if (btn) btn.style.background = enabled ? '#4a6fa5' : '';
     const locCheckbox = document.getElementById('loc-edit-toggle-checkbox');
@@ -1348,12 +1280,10 @@ export function addDeleteLocationButton(callback) {
     document.getElementById('location-container').appendChild(btn);
     return btn;
 }
-
 export function setDeleteButtonVisible(visible) {
     const btn = document.getElementById('delete-location-btn');
     if (btn) btn.style.display = visible ? 'block' : 'none';
 }
-
 export function addEditLocationButton(callback) {
     let btn = document.getElementById('edit-location-btn');
     if (btn) btn.remove();
@@ -1378,7 +1308,6 @@ export function addEditLocationButton(callback) {
     document.getElementById('location-container').appendChild(btn);
     return btn;
 }
-
 export function setEditButtonVisible(visible) {
     const btn = document.getElementById('edit-location-btn');
     if (btn) btn.style.display = visible ? 'block' : 'none';
@@ -1386,9 +1315,60 @@ export function setEditButtonVisible(visible) {
 
 export function destroyLocationScene() {
     locationActive = false;
+
+    // Удаляем обработчики
     if (eventCleanup) {
         eventCleanup();
         eventCleanup = null;
+    }
+    if (window._locationEventCleanup) {
+        window._locationEventCleanup();
+        window._locationEventCleanup = null;
+    }
+
+    // Удаляем обработчики document.click (контекстное меню)
+    if (handlers.document.click) {
+        document.removeEventListener('click', handlers.document.click);
+        delete handlers.document.click;
+    }
+
+    // Удаляем контекстное меню
+    if (contextMenu && contextMenu.parentNode) {
+        contextMenu.parentNode.removeChild(contextMenu);
+        contextMenu = null;
+    }
+    contextMenuCharacterId = null;
+
+    // Очищаем сцену
+    if (scene) {
+        const objectsToRemove = [];
+        scene.traverse((child) => {
+            if (child.isLight || child.type === 'Camera' || child.type === 'GridHelper') return;
+            if (child === highlightBox) return;
+            objectsToRemove.push(child);
+        });
+        objectsToRemove.forEach(obj => {
+            disposeObject(obj);
+            scene.remove(obj);
+        });
+        tileCubes = [];
+        objectMeshes = [];
+        clearAllCharacters();
+
+        if (highlightBox) {
+            scene.remove(highlightBox);
+            disposeObject(highlightBox);
+            highlightBox = null;
+        }
+        scene = null;
+    }
+
+    // Рендереры
+    if (labelRenderer) {
+        if (labelRenderer.domElement && labelRenderer.domElement.parentNode) {
+            labelRenderer.domElement.parentNode.removeChild(labelRenderer.domElement);
+        }
+        labelRenderer = null;
     }
     if (renderer) {
         renderer.dispose();
@@ -1397,32 +1377,38 @@ export function destroyLocationScene() {
         }
         renderer = null;
     }
-    if (labelRenderer) {
-        if (labelRenderer.domElement && labelRenderer.domElement.parentNode) {
-            labelRenderer.domElement.parentNode.removeChild(labelRenderer.domElement);
-        }
-        labelRenderer = null;
-    }
-    clearAllCharacters();
-    if (scene) {
-        tileCubes.forEach(cube => {
-            if (cube && cube.parent) scene.remove(cube);
-        });
-        objectMeshes.forEach(mesh => {
-            if (mesh && mesh.parent) scene.remove(mesh);
-        });
-        scene = null;
-    }
-    tileCubes = [];
-    objectMeshes = [];
-    const locInfo = document.getElementById('location-tile-info');
-    if (locInfo) locInfo.style.display = 'none';
+
+    // Камера и контролы
     camera = null;
-    controls = null;
+    if (controls) {
+        controls.dispose();
+        controls = null;
+    }
+    window.locationControls = null;
+
+    // Данные
     currentLocationData = null;
     hoveredTileCoords = null;
-    if (highlightBox && highlightBox.parent) scene?.remove(highlightBox);
-    highlightBox = null;
+    lastHighlightCoords = null;
+    processedTilesForObjects.clear();
+    dragCharacter = null;
+    isDraggingCharacter = false;
+    hoveredCharacterId = null;
+
+    // previewSprite
+    if (previewSprite) {
+        scene?.remove(previewSprite);
+        previewSprite.material.map?.dispose();
+        previewSprite.material.dispose();
+        previewSprite = null;
+    }
+
+    const locInfo = document.getElementById('location-tile-info');
+    if (locInfo) locInfo.style.display = 'none';
+
+    // Также удаляем обработчик resize, если он был добавлен
+    // (он добавляется один раз, но лучше убрать)
+    // Мы не можем удалить его, т.к. он не сохранён. Но это не критично.
 }
 
 export function resizeLocationScene() {
@@ -1438,4 +1424,6 @@ export function resizeLocationScene() {
     }
 }
 
+// Удаляем обработчик resize при перезагрузке модуля? Но он добавляется один раз.
+// Можно оставить, он не влияет на утечки.
 window.addEventListener('resize', resizeLocationScene);
