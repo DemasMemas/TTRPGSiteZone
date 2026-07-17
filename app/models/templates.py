@@ -1,6 +1,7 @@
 # app/models/templates.py
 from datetime import datetime, timezone
 from app.extensions import db
+from app.utils.defaults import empty_dict, empty_list
 
 
 class ItemTemplate(db.Model):
@@ -20,10 +21,10 @@ class ItemTemplate(db.Model):
     volume = db.Column(db.Float, default=0.0)  # объём/размер в инвентаре
 
     # Универсальный JSON для всех специфических атрибутов
-    attributes = db.Column(db.JSON, nullable=False, default={})
+    attributes = db.Column(db.JSON, nullable=False, default=empty_dict)
 
     # Список ID шаблонов, с которыми этот предмет совместим (например, магазины для оружия)
-    compatible_ids = db.Column(db.JSON, default=list)
+    compatible_ids = db.Column(db.JSON, default=empty_list)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now(timezone.utc))

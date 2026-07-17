@@ -3,7 +3,7 @@ from marshmallow import Schema, fields, validate
 
 class CharacterCreateSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
-    data = fields.Dict(load_default={})
+    data = fields.Dict(load_default=dict)
 
 class CharacterSchema(Schema):
     id = fields.Int(dump_only=True)

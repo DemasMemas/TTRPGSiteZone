@@ -1,5 +1,6 @@
 from app.extensions import db
 from datetime import datetime, timezone
+from app.utils.defaults import default_hp_zones, empty_list
 
 
 class LocationCharacter(db.Model):
@@ -14,16 +15,8 @@ class LocationCharacter(db.Model):
     controlled_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     controller = db.relationship('User', foreign_keys=[controlled_by])
 
-    hp_zones = db.Column(db.JSON, nullable=False, default=lambda: {
-        'head': {'current': 50, 'max': 50},
-        'chest': {'current': 150, 'max': 150},
-        'abdomen': {'current': 120, 'max': 120},
-        'left_arm': {'current': 90, 'max': 90},
-        'right_arm': {'current': 90, 'max': 90},
-        'left_leg': {'current': 100, 'max': 100},
-        'right_leg': {'current': 100, 'max': 100}
-    })
-    effects = db.Column(db.JSON, default=list)
+    hp_zones = db.Column(db.JSON, nullable=False, default=default_hp_zones)
+    effects = db.Column(db.JSON, default=empty_list)
 
     location = db.relationship('Location', backref='location_participants')
     character = db.relationship('LobbyCharacter')

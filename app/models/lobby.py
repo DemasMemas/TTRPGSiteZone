@@ -1,6 +1,7 @@
 # app/models/lobby.py
 from datetime import datetime, timezone
 from app.extensions import db
+from app.utils.defaults import default_weather_settings
 
 class Lobby(db.Model):
     __tablename__ = 'lobbies'
@@ -13,7 +14,7 @@ class Lobby(db.Model):
     map_type = db.Column(db.String(20), nullable=False, default='empty')
     chunks_width = db.Column(db.Integer, nullable=False, default=16)
     chunks_height = db.Column(db.Integer, nullable=False, default=16)
-    weather_settings = db.Column(db.JSON, default={})
+    weather_settings = db.Column(db.JSON, default=default_weather_settings)
 
     # связи
     gm = db.relationship('User', foreign_keys=[gm_id])

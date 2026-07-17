@@ -1,4 +1,5 @@
 from app.extensions import db
+from app.utils.defaults import empty_dict
 
 class LocationObject(db.Model):
     __tablename__ = 'location_objects'
@@ -8,6 +9,6 @@ class LocationObject(db.Model):
     type = db.Column(db.String(50))   # door, chest, cover, wall
     tile_x = db.Column(db.Integer, nullable=False)
     tile_y = db.Column(db.Integer, nullable=False)
-    properties = db.Column(db.JSON, default=dict)  # {'locked': False, 'health': 50}
+    properties = db.Column(db.JSON, default=empty_dict)  # {'locked': False, 'health': 50}
 
     location = db.relationship('Location', backref='objects')

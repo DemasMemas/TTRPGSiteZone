@@ -17,6 +17,8 @@
 
 import logging
 import os
+import tempfile
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from flask import Flask, render_template, jsonify
 from flask_jwt_extended import JWTManager
@@ -28,14 +30,28 @@ from app.services.exceptions import (
 )
 from marshmallow import ValidationError as MarshmallowValidationError
 
-def create_app(config_name='default'):
-    app = Flask(__name__)
-    app.config.from_object(config_by_name[config_name])
 
-    # Настройка логирования в файл
-    if not os.path.exists('logs'):
-        os.mkdir('logs')
-    file_handler = RotatingFileHandler('logs/ttrpg.log', maxBytes=10*1024*1024, backupCount=10, encoding='utf-8')
+def _configure_logging(app):
+    logs_dir = Path(app.root_path).parent / 'logs'
+    fallback_dir = Path(tempfile.gettempdir())
+    log_path = logs_dir / 'ttrpg.log'
+
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=10,
+            encoding='utf-8',
+        )
+    except OSError:
+        file_handler = RotatingFileHandler(
+            fallback_dir / 'ttrpg.log',
+            maxBytes=10 * 1024 * 1024,
+            backupCount=10,
+            encoding='utf-8',
+        )
+
     file_handler.setFormatter(logging.Formatter(
         '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
     ))
@@ -43,6 +59,13 @@ def create_app(config_name='default'):
     app.logger.addHandler(file_handler)
     app.logger.setLevel(logging.INFO)
     app.logger.info('TTRPG application startup')
+
+def create_app(config_name='default'):
+    app = Flask(__name__)
+    app.config.from_object(config_by_name[config_name])
+
+    # Настройка логирования в файл
+    _configure_logging(app)
 
     # Инициализация расширений
     db.init_app(app)

@@ -1,5 +1,6 @@
 from app.extensions import db
 from datetime import datetime, timezone
+from app.utils.defaults import empty_list
 
 class Location(db.Model):
     __tablename__ = 'locations'
@@ -10,11 +11,11 @@ class Location(db.Model):
     type = db.Column(db.String(20), nullable=False, default='exploration')  # battle, social, exploration
     grid_width = db.Column(db.Integer, nullable=False, default=20)
     grid_height = db.Column(db.Integer, nullable=False, default=20)
-    tiles_data = db.Column(db.JSON, nullable=False, default=list)
+    tiles_data = db.Column(db.JSON, nullable=False, default=empty_list)
     world_tile_x = db.Column(db.Integer, nullable=False)
     world_tile_z = db.Column(db.Integer, nullable=False)
     world_radius = db.Column(db.Integer, default=0)
-    spawn_points = db.Column(db.JSON, default=list)  # [{x, y, character_id?}]
+    spawn_points = db.Column(db.JSON, default=empty_list)  # [{x, y, character_id?}]
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now(timezone.utc))
 

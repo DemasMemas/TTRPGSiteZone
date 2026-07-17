@@ -4,12 +4,31 @@ import copy
 import random
 from app.extensions import db
 from app.models import MapChunk, Lobby, LobbyParticipant
-from app.constants import CHUNK_SIZE, MAX_CHUNKS_WIDTH, MAX_CHUNKS_HEIGHT, ANOMALY_TYPES
+from app.constants import CHUNK_SIZE, ANOMALY_TYPES
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 
 logger = logging.getLogger(__name__)
 
 class MapService:
+    @staticmethod
+    def _validate_chunk_bounds(lobby, min_x, max_x, min_y, max_y):
+        if min_x > max_x or min_y > max_y:
+            raise ValidationError("Invalid chunk bounds")
+
+        max_allowed_x = lobby.chunks_width - 1
+        max_allowed_y = lobby.chunks_height - 1
+        if min_x < 0 or min_y < 0 or max_x > max_allowed_x or max_y > max_allowed_y:
+            raise ValidationError(
+                f"Chunk bounds must be within 0-{max_allowed_x} for x and 0-{max_allowed_y} for y"
+            )
+
+    @staticmethod
+    def _get_world_bounds(lobby):
+        return (
+            lobby.chunks_width * CHUNK_SIZE - 1,
+            lobby.chunks_height * CHUNK_SIZE - 1,
+        )
+
     @staticmethod
     def get_chunks(lobby_id, user_id, bounds):
         """
@@ -27,6 +46,7 @@ class MapService:
             raise NotFoundError("Lobby not found")
 
         min_x, max_x, min_y, max_y = bounds
+        MapService._validate_chunk_bounds(lobby, min_x, max_x, min_y, max_y)
         result = []
         for cx in range(min_x, max_x + 1):
             for cy in range(min_y, max_y + 1):
@@ -54,6 +74,8 @@ class MapService:
             raise NotFoundError("Lobby not found")
         if lobby.gm_id != gm_id:
             raise PermissionDenied("Only GM can edit tiles")
+        if not (0 <= chunk_x < lobby.chunks_width and 0 <= chunk_y < lobby.chunks_height):
+            raise ValidationError("Chunk coordinates are outside the lobby bounds")
 
         if not (0 <= tile_x < CHUNK_SIZE and 0 <= tile_y < CHUNK_SIZE):
             raise ValidationError(f"Tile coordinates must be 0-{CHUNK_SIZE-1}")
@@ -93,6 +115,8 @@ class MapService:
         updates_by_chunk = {}
         for item in updates_list:
             cx, cy = item['chunk_x'], item['chunk_y']
+            if not (0 <= cx < lobby.chunks_width and 0 <= cy < lobby.chunks_height):
+                raise ValidationError("Chunk coordinates are outside the lobby bounds")
             key = (cx, cy)
             if key not in updates_by_chunk:
                 updates_by_chunk[key] = []
@@ -150,6 +174,8 @@ class MapService:
     @staticmethod
     def _generate_chunk_data(lobby_id, chunk_x, chunk_y, map_type):
         """Генерирует данные для нового чанка в зависимости от типа карты."""
+        lobby = Lobby.query.get(lobby_id)
+        max_x, max_y = MapService._get_world_bounds(lobby) if lobby else (0, 0)
         data = []
         for y in range(CHUNK_SIZE):
             row = []
@@ -166,7 +192,7 @@ class MapService:
                     elif r < 0.8: terrain = 'rock'
                     else: terrain = 'swamp'
                 elif map_type == 'predefined':
-                    if global_x < 2 or global_x > 511-2 or global_y < 2 or global_y > 511-2:
+                    if global_x < 2 or global_x > max_x - 2 or global_y < 2 or global_y > max_y - 2:
                         terrain = 'water'
                     else:
                         r = random.random()

@@ -1,6 +1,7 @@
 # app/models/lobby_templates.py
 from datetime import datetime, timezone
 from app.extensions import db
+from app.utils.defaults import empty_dict, empty_list
 
 
 class LobbyItemTemplate(db.Model):
@@ -18,8 +19,8 @@ class LobbyItemTemplate(db.Model):
     price = db.Column(db.Integer, default=0)
     weight = db.Column(db.Float, default=0.0)
     volume = db.Column(db.Float, default=0.0)
-    attributes = db.Column(db.JSON, nullable=False, default={})
-    compatible_ids = db.Column(db.JSON, default=list)
+    attributes = db.Column(db.JSON, nullable=False, default=empty_dict)
+    compatible_ids = db.Column(db.JSON, default=empty_list)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now(timezone.utc))
