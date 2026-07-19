@@ -187,6 +187,7 @@ body {
   position: absolute;
   transition: width 0.3s, height 0.3s;
   z-index: 100;
+  cursor: grab;
 }
 .draggable-panel .panel-header {
   cursor: grab;

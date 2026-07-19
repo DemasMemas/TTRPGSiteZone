@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { updateRain } from './weather.js';
+import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 
 const CHUNK_SIZE = 32;
 export const chunksMap = new Map();
@@ -593,23 +594,11 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
     const lod = new THREE.LOD();
     const color = new THREE.Color(baseColor);
 
-    let nearGroup;
-    switch(type) {
-        case 'fire': nearGroup = createFireAnomaly(color); break;
-        case 'electric': nearGroup = createElectricAnomaly(color); break;
-        case 'acid': nearGroup = createAcidAnomaly(color); break;
-        default: nearGroup = createVoidAnomaly(color); break;
-    }
-    nearGroup.scale.set(scale, scale, scale);
+    const nearGroup = createAnomalyEffect(type, color, scale);
     nearGroup.position.set(0, 0, 0);
     lod.addLevel(nearGroup, 0);
 
-    const midGroup = new THREE.Group();
-    const coreGeo = new THREE.SphereGeometry(0.25, 8);
-    const coreMat = new THREE.MeshStandardMaterial({ color: color, emissive: color.clone().multiplyScalar(0.5), transparent: true, opacity: 0.8 });
-    const core = new THREE.Mesh(coreGeo, coreMat);
-    core.scale.set(scale, scale, scale);
-    midGroup.add(core);
+    const midGroup = createAnomalyEffect(type, color, scale);
     midGroup.position.set(0, 0, 0);
     lod.addLevel(midGroup, 80);
 
@@ -622,6 +611,14 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
 
     lod.position.set(x, y, z);
     return lod;
+}
+
+function animateChunkAnomalies(time) {
+    const nearby = [];
+    chunksMap.forEach(entry => (entry.anomalyLODs || []).forEach(anomaly => {
+        if (anomaly.position.distanceToSquared(camera.position) < 220 * 220) nearby.push(anomaly);
+    }));
+    animateAnomalyEffects(nearby, time);
 }
 
 // --- Вода: простой цветной материал (без текстуры) ---
@@ -1347,6 +1344,7 @@ function animate() {
     controls.update();
     updateChunkVisibility();
     updateRain(delta);
+    animateChunkAnomalies(now);
 
     if (lastMouseX !== 0 || lastMouseY !== 0) {
         performRaycast(lastMouseX, lastMouseY);

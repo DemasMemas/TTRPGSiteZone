@@ -26,7 +26,9 @@ import {
     setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationEraserMode, setLocationEditMode,
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
-    setLocationBrushObjectScale, setLocationBrushObjectRotation
+    setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
+    setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
+    setLocationStructureRotation
 } from './locationScene.js';
 import { getUserColorHex, updateMyColor } from './colors.js';
 import * as THREE from 'three';
@@ -185,6 +187,13 @@ window.enterLocation = async function(locationId) {
                             <input type="checkbox" id="loc-edit-toggle-checkbox"> Режим редактирования
                         </label>
                         <div style="display: flex; align-items: center; gap: 5px;">
+                            <span>Инструмент:</span>
+                            <select id="loc-build-mode" class="form-control" style="width: auto;">
+                                <option value="terrain">Ландшафт и декор</option>
+                                <option value="structure">Строительство</option>
+                            </select>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 5px;">
                             <span>Тип:</span>
                             <select id="loc-edit-terrain" class="form-control" style="width: auto;">
                                 <option value="grass">🌿 Трава</option>
@@ -208,6 +217,25 @@ window.enterLocation = async function(locationId) {
                             <input type="checkbox" id="loc-eraser"> Ластик
                         </label>
                         <hr style="width:100%; margin:5px 0;">
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <strong>Конструкция</strong>
+                            <select id="loc-structure-preset" class="form-control" style="width: auto;">
+                                <option value="wall">Стена</option>
+                                <option value="floor">Пол</option>
+                                <option value="door">Дверь</option>
+                                <option value="table">Стол</option>
+                                <option value="chair">Стул</option>
+                                <option value="shelf">Стеллаж</option>
+                                <option value="chest">Сундук</option>
+                                <option value="fence">Забор</option>
+                            </select>
+                            <label id="loc-structure-width-field">Ширина <input id="loc-structure-width" type="number" min="0.2" max="30" step="0.1" value="3" style="width:58px;"></label>
+                            <label id="loc-structure-depth-field">Глубина <input id="loc-structure-depth" type="number" min="0.1" max="30" step="0.1" value="0.2" style="width:58px;"></label>
+                            <label id="loc-structure-height-field">Высота <input id="loc-structure-height" type="number" min="0.1" max="20" step="0.1" value="2.4" style="width:58px;"></label>
+                            <label id="loc-structure-rotation-field">Поворот <select id="loc-structure-rotation" class="form-control" style="width:auto;"><option value="0">0°</option><option value="1.5707963267948966">90°</option></select></label>
+                            <label>Цвет <input id="loc-structure-color" type="color" value="#8b6b4f"></label>
+                            <span style="font-size:12px; opacity:.8;">Выберите структуру и кликните по тайлу</span>
+                        </div>
                         <label style="display: flex; align-items: center; gap: 5px;">
                             <input type="checkbox" id="loc-obj-mode"> Режим объектов
                         </label>
@@ -222,8 +250,6 @@ window.enterLocation = async function(locationId) {
                         <div style="display: flex; align-items: center; gap: 5px;">
                             <select id="loc-obj-type" class="form-control" style="width: auto;">
                                 <option value="tree">🌲 Дерево</option>
-                                <option value="house">🏠 Дом</option>
-                                <option value="fence">🚧 Забор</option>
                                 <option value="anomaly_electric">⚡ Электрическая аномалия</option>
                                 <option value="anomaly_fire">🔥 Огненная аномалия</option>
                                 <option value="anomaly_acid">🧪 Кислотная лужа</option>
@@ -247,6 +273,34 @@ window.enterLocation = async function(locationId) {
                         </div>
                     </div>
                 `;
+
+                const toolsRoot = panelContent.firstElementChild;
+                toolsRoot.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr)); gap:10px; align-items:start;';
+                const createToolSection = (title, elements) => {
+                    const section = document.createElement('section');
+                    section.style.cssText = 'display:flex; flex-direction:column; gap:8px; padding:10px; border:1px solid rgba(130, 100, 60, .45); border-radius:8px; background:rgba(25, 22, 18, .32);';
+                    const heading = document.createElement('strong');
+                    heading.textContent = title;
+                    heading.style.cssText = 'font-size:13px; color:#e0c08a;';
+                    section.appendChild(heading);
+                    elements.forEach(element => {
+                        const node = document.getElementById(element);
+                        if (!node) return;
+                        const block = node.closest('label, div') || node;
+                        block.style.display = 'flex';
+                        block.style.flexWrap = 'wrap';
+                        block.style.alignItems = 'center';
+                        block.style.gap = '6px';
+                        section.appendChild(block);
+                    });
+                    toolsRoot.appendChild(section);
+                };
+                createToolSection('Режим', ['loc-edit-toggle-checkbox', 'loc-build-mode', 'loc-eraser']);
+                createToolSection('Ландшафт', ['loc-edit-terrain', 'loc-edit-radius', 'loc-edit-height']);
+                createToolSection('Строительство', ['loc-structure-preset']);
+                createToolSection('Декор', ['loc-obj-mode', 'loc-obj-type', 'loc-obj-offset-x']);
+                createToolSection('Эффекты', ['loc-rad-mode', 'loc-edit-radiation']);
+                toolsRoot.querySelectorAll('hr').forEach(element => element.remove());
 
                 // Получаем элементы
                 const editCheckbox = document.getElementById('loc-edit-toggle-checkbox');
@@ -283,6 +337,47 @@ window.enterLocation = async function(locationId) {
                 const objOffsetZ = document.getElementById('loc-obj-offset-z');
                 const objScale = document.getElementById('loc-obj-scale');
                 const objRotation = document.getElementById('loc-obj-rotation');
+                const buildModeSelect = document.getElementById('loc-build-mode');
+                const structurePreset = document.getElementById('loc-structure-preset');
+                const structureWidth = document.getElementById('loc-structure-width');
+                const structureDepth = document.getElementById('loc-structure-depth');
+                const structureHeight = document.getElementById('loc-structure-height');
+                const structureRotation = document.getElementById('loc-structure-rotation');
+                const structureColor = document.getElementById('loc-structure-color');
+                const structureWidthField = document.getElementById('loc-structure-width-field');
+                const structureDepthField = document.getElementById('loc-structure-depth-field');
+                const structureHeightField = document.getElementById('loc-structure-height-field');
+                const structureRotationField = document.getElementById('loc-structure-rotation-field');
+                const structureDefaults = {
+                    wall: { width: 3, depth: 0.2, height: 2.4 },
+                    floor: { width: 1, depth: 1, height: 0.12 },
+                    door: { width: 0.9, depth: 0.18, height: 2 },
+                    table: { width: 1.4, depth: 0.8, height: 1 },
+                    chair: { width: 0.55, depth: 0.55, height: 1 },
+                    shelf: { width: 1.2, depth: 0.4, height: 2 },
+                    chest: { width: 0.9, depth: 0.6, height: 0.7 },
+                    fence: { width: 2, depth: 0.15, height: 1.2 }
+                };
+                const applyStructurePreset = (preset) => {
+                    const values = structureDefaults[preset];
+                    if (!values) return;
+                    structureWidth.value = values.width;
+                    structureDepth.value = values.depth;
+                    structureHeight.value = values.height;
+                    setLocationStructurePreset(preset);
+                    setLocationStructureWidth(values.width);
+                    setLocationStructureDepth(values.depth);
+                    setLocationStructureHeight(values.height);
+                    const isFloor = preset === 'floor';
+                    structureWidthField.firstChild.textContent = isFloor ? 'Размер ' : 'Ширина ';
+                    structureWidth.type = isFloor ? 'range' : 'number';
+                    structureWidth.min = isFloor ? '1' : '0.2';
+                    structureWidth.max = isFloor ? '10' : '30';
+                    structureWidth.step = isFloor ? '1' : '0.1';
+                    structureDepthField.style.display = isFloor ? 'none' : '';
+                    structureHeightField.style.display = isFloor ? 'none' : '';
+                    structureRotationField.style.display = isFloor ? 'none' : '';
+                };
 
                 if (objModeCheck) objModeCheck.onchange = (e) => setLocationBrushObjectMode(e.target.checked);
                 if (objTypeSelect) objTypeSelect.onchange = (e) => setLocationBrushObjectType(e.target.value);
@@ -291,6 +386,14 @@ window.enterLocation = async function(locationId) {
                 if (objOffsetZ) objOffsetZ.oninput = (e) => setLocationBrushObjectOffsetZ(e.target.value);
                 if (objScale) objScale.oninput = (e) => setLocationBrushObjectScale(e.target.value);
                 if (objRotation) objRotation.oninput = (e) => setLocationBrushObjectRotation(e.target.value);
+                if (buildModeSelect) buildModeSelect.onchange = (e) => setLocationBuildMode(e.target.value);
+                if (structurePreset) structurePreset.onchange = (e) => applyStructurePreset(e.target.value);
+                if (structureWidth) structureWidth.oninput = (e) => setLocationStructureWidth(e.target.value);
+                if (structureDepth) structureDepth.oninput = (e) => setLocationStructureDepth(e.target.value);
+                if (structureHeight) structureHeight.oninput = (e) => setLocationStructureHeight(e.target.value);
+                if (structureRotation) structureRotation.onchange = (e) => setLocationStructureRotation(e.target.value);
+                if (structureColor) structureColor.oninput = (e) => setLocationStructureColor(e.target.value);
+                applyStructurePreset(structurePreset.value);
 
 
                 editCheckbox.checked = getLocationEditMode();
@@ -654,6 +757,21 @@ if (socket) {
             import('./locationScene.js').then(module => {
                 module.applyLocationTilesUpdate(data.location_id, data.updates);
             });
+        }
+    });
+    socket.on('location_object_created', (data) => {
+        if (data.location_id === getCurrentLocationId()) {
+            import('./locationScene.js').then(module => module.addLocationObject(data.object));
+        }
+    });
+    socket.on('location_object_deleted', (data) => {
+        if (data.location_id === getCurrentLocationId()) {
+            import('./locationScene.js').then(module => module.removeLocationObject(data.object_id));
+        }
+    });
+    socket.on('location_object_updated', (data) => {
+        if (data.location_id === getCurrentLocationId()) {
+            import('./locationScene.js').then(module => module.updateLocationObject(data.object));
         }
     });
     socket.on('character_spawned', (data) => {

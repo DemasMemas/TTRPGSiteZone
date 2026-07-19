@@ -49,9 +49,11 @@ function makeDraggable(panel, handle, panelId) {
     let isDragging = false;
 
     const onMouseDown = (e) => {
-        if (e.target.classList.contains('toggle-btn')) return;
+        if (e.button !== 0) return;
+        if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"], .toggle-btn')) return;
         e.preventDefault();
         panel.style.transition = 'none';
+        panel.style.zIndex = '110';
         const rect = panel.getBoundingClientRect();
         panel.style.left = rect.left + 'px';
         panel.style.top = rect.top + 'px';
@@ -77,8 +79,9 @@ function makeDraggable(panel, handle, panelId) {
         let newTop = startTop + dy;
         const winW = window.innerWidth;
         const winH = window.innerHeight;
-        newLeft = Math.min(Math.max(newLeft, 0), winW - startWidth);
-        newTop = Math.min(Math.max(newTop, 0), winH - startHeight);
+        // Keep a visible grab area even when a panel is larger than the viewport.
+        newLeft = Math.min(Math.max(newLeft, 0), Math.max(0, winW - Math.min(startWidth, 80)));
+        newTop = Math.min(Math.max(newTop, 0), Math.max(0, winH - Math.min(startHeight, 56)));
         panel.style.left = newLeft + 'px';
         panel.style.top = newTop + 'px';
     };
@@ -88,6 +91,7 @@ function makeDraggable(panel, handle, panelId) {
             isDragging = false;
             panel.style.cursor = '';
             panel.style.transition = '';
+            panel.style.zIndex = '100';
             const rect = panel.getBoundingClientRect();
             savePanelState(panelId, { position: { left: rect.left, top: rect.top } });
         }
@@ -116,6 +120,7 @@ function applyPosition(panel, pos) {
 
 export function initDraggablePanels() {
     document.querySelectorAll('.draggable-panel').forEach(panel => {
+        if (panel.dataset.draggableInitialized === 'true') return;
         const panelId = panel.id;
         if (!panelId) return;
         const header = panel.querySelector('.panel-header');
@@ -142,7 +147,8 @@ export function initDraggablePanels() {
             }
             if (saved.position) applyPosition(panel, saved.position);
         }
-        makeDraggable(panel, header, panelId);
+        makeDraggable(panel, panel, panelId);
+        panel.dataset.draggableInitialized = 'true';
     });
 }
 

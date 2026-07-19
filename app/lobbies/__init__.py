@@ -596,7 +596,12 @@ def add_location_object(lobby_id, location_id, lobby):
     )
     db.session.add(obj)
     db.session.commit()
-    return jsonify(schema.dump(obj)), 201
+    payload = schema.dump(obj)
+    socketio.emit('location_object_created', {
+        'location_id': location_id,
+        'object': payload
+    }, room=f"location_{location_id}")
+    return jsonify(payload), 201
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/objects/<int:object_id>', methods=['DELETE'])
@@ -607,9 +612,40 @@ def delete_location_object(lobby_id, object_id, lobby):
     location = Location.query.get(obj.location_id)
     if location.lobby_id != lobby_id:
         return jsonify({'error': 'Access denied'}), 403
+    location_id = location.id
     db.session.delete(obj)
     db.session.commit()
+    socketio.emit('location_object_deleted', {
+        'location_id': location_id,
+        'object_id': object_id
+    }, room=f"location_{location_id}")
     return '', 204
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/objects/<int:object_id>', methods=['PATCH'])
+@jwt_required()
+@requires_participant
+def update_location_object(lobby_id, object_id, lobby, participant):
+    obj = LocationObject.query.get_or_404(object_id)
+    location = Location.query.get(obj.location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+
+    data = request.get_json() or {}
+    if 'tile_x' in data:
+        obj.tile_x = data['tile_x']
+    if 'tile_y' in data:
+        obj.tile_y = data['tile_y']
+    if 'properties' in data and isinstance(data['properties'], dict):
+        obj.properties = {**(obj.properties or {}), **data['properties']}
+    db.session.commit()
+
+    payload = LocationObjectSchema().dump(obj)
+    socketio.emit('location_object_updated', {
+        'location_id': location.id,
+        'object': payload
+    }, room=f"location_{location.id}")
+    return jsonify(payload), 200
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/spawn_character', methods=['POST'])

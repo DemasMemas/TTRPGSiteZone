@@ -13,6 +13,7 @@ async function apiFetch(url, options = {}) {
         const data = await response.json().catch(() => ({}));
         throw new Error(getErrorMessage(data) || `HTTP error ${response.status}`);
     }
+    if (response.status === 204) return null;
     return response.json();
 }
 
@@ -261,5 +262,27 @@ export const Server = {
 
     async deleteLocation(lobbyId, locationId) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`, { method: 'DELETE' });
+    },
+
+    async createLocationObject(lobbyId, locationId, objectData) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/objects`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(objectData)
+        });
+    },
+
+    async deleteLocationObject(lobbyId, objectId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/objects/${objectId}`, {
+            method: 'DELETE'
+        });
+    },
+
+    async updateLocationObject(lobbyId, objectId, updates) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/objects/${objectId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates)
+        });
     },
 };

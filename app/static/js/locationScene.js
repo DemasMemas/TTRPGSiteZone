@@ -4,13 +4,19 @@ import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/cont
 import { CSS2DRenderer, CSS2DObject } from 'https://unpkg.com/three@0.128.0/examples/jsm/renderers/CSS2DRenderer.js';
 import { showNotification } from './utils.js';
 import { getUserColor, getUserColorHex } from './colors.js';
+import { Server } from './api.js';
+import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 
 // ========== Глобальные переменные ==========
 let scene, camera, renderer, labelRenderer, controls;
 let currentLocationId = null;
 let currentLocationData = null;
 let tileCubes = [];
+let locationTileMesh = null;
+const tileInstanceTransform = new THREE.Object3D();
 let objectMeshes = [];
+let anomalyEffectMeshes = [];
+let locationObjectMeshes = [];
 let groundPlaneMesh;
 let characterModels = new Map();
 let previewSprite = null;
@@ -42,6 +48,32 @@ let processedTilesForObjects = new Set();
 let lastHighlightCoords = null;
 window.locationEditMode = false;
 let animationFrameId = null;
+let buildMode = 'terrain';
+let structurePreset = 'wall';
+let structureWidth = 3;
+let structureDepth = 0.2;
+let structureHeight = 2.4;
+let structureColor = '#8b6b4f';
+let structureRotation = 0;
+let buildPreviewMesh = null;
+const structureDeletionInFlight = new Set();
+let pendingObjectMoveId = null;
+
+const objectInteractions = {
+    door: ['toggle_door'],
+    shelf: ['open_container'],
+    chest: ['open_container'],
+    table: ['move', 'climb'],
+    chair: ['move'],
+    fence: ['climb']
+};
+
+const interactionRequirements = {
+    toggle_door: { requires_actor: true, max_distance: 1, checks: ['locked'] },
+    open_container: { requires_actor: true, max_distance: 1, checks: ['locked', 'search'] },
+    move: { requires_actor: true, max_distance: 1, checks: ['strength', 'weight'] },
+    climb: { requires_actor: true, max_distance: 1, checks: ['athletics'] }
+};
 
 // Хранилище обработчиков для удаления
 const handlers = {
@@ -321,6 +353,7 @@ export function initLocationScene(containerId) {
     function animate() {
         animationFrameId = requestAnimationFrame(animate);
         if (controls) controls.update();
+        animateAnomalyEffects(anomalyEffectMeshes, performance.now());
         if (renderer && scene && camera) renderer.render(scene, camera);
         if (labelRenderer) labelRenderer.render(scene, camera);
     }
@@ -373,11 +406,288 @@ function hideHighlight() {
     if (highlightBox) highlightBox.visible = false;
 }
 
+function getLocationObjectAtScreen(clientX, clientY) {
+    if (!renderer || !camera) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const hit = raycaster.intersectObjects(locationObjectMeshes, true)[0];
+    if (!hit) return null;
+    let mesh = hit.object;
+    while (mesh && !mesh.userData.locationObjectId) mesh = mesh.parent;
+    return mesh || null;
+}
+
+function getObjectActions(object) {
+    return object.properties?.interactions || objectInteractions[object.type] || [];
+}
+
+async function updateInteractiveObject(objectId, updates) {
+    try {
+        const object = await Server.updateLocationObject(window.currentLobbyId, objectId, updates);
+        updateLocationObject(object);
+    } catch (error) {
+        showNotification(error.message || 'Не удалось обновить объект');
+    }
+}
+
+function showObjectContextMenu(clientX, clientY, object) {
+    createContextMenu();
+    contextMenu.innerHTML = '';
+    const actions = [{ label: 'Осмотреть', action: () => showNotification(object.name || object.type, 'system') }];
+    getObjectActions(object).forEach(action => {
+        if (action === 'toggle_door') {
+            const isOpen = Boolean(object.properties?.is_open);
+            actions.push({
+                label: isOpen ? 'Закрыть дверь' : 'Открыть дверь',
+                action: () => updateInteractiveObject(object.id, { properties: { is_open: !isOpen } })
+            });
+        }
+        if (action === 'open_container') {
+            actions.push({
+                label: 'Открыть содержимое',
+                action: () => {
+                    const contents = object.properties?.contents || [];
+                    showNotification(contents.length ? `Содержимое: ${contents.join(', ')}` : 'Контейнер пуст', 'system');
+                }
+            });
+        }
+        if (action === 'move') {
+            actions.push({
+                label: 'Передвинуть',
+                action: () => {
+                    pendingObjectMoveId = object.id;
+                    showNotification('Выберите тайл для перемещения объекта', 'system');
+                }
+            });
+        }
+        if (action === 'climb') {
+            actions.push({ label: 'Перелезть', action: () => showNotification('Проверка преодоления объекта готова для подключения к правилам сцены', 'system') });
+        }
+    });
+    actions.forEach(item => {
+        const button = document.createElement('button');
+        button.textContent = item.label;
+        button.style.cssText = 'display:block; width:100%; padding:8px 14px; border:0; background:transparent; color:inherit; text-align:left; cursor:pointer;';
+        button.onclick = (event) => {
+            event.stopPropagation();
+            contextMenu.style.display = 'none';
+            item.action();
+        };
+        contextMenu.appendChild(button);
+    });
+    contextMenu.style.display = 'block';
+    const rect = contextMenu.getBoundingClientRect();
+    contextMenu.style.left = `${Math.min(clientX, window.innerWidth - rect.width - 10)}px`;
+    contextMenu.style.top = `${Math.min(clientY, window.innerHeight - rect.height - 10)}px`;
+}
+
+function disposeLocationObject(mesh) {
+    mesh.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+    });
+}
+
+function getStructureDimensions(preset = structurePreset) {
+    if (preset === 'floor') return { width: structureWidth, depth: structureWidth, height: 0.12 };
+    if (preset === 'door') return { width: 0.9, depth: 0.18, height: Math.max(1.8, structureHeight) };
+    if (preset === 'table') return { width: structureWidth, depth: structureDepth, height: Math.max(0.6, structureHeight) };
+    if (preset === 'chair') return { width: structureWidth, depth: structureDepth, height: structureHeight };
+    if (preset === 'shelf') return { width: structureWidth, depth: Math.max(0.3, structureDepth), height: structureHeight };
+    return { width: structureWidth, depth: Math.max(0.1, structureDepth), height: structureHeight };
+}
+
+function createLocationObjectMesh(obj) {
+    const properties = obj.properties || {};
+    const dimensions = properties.dimensions || getStructureDimensions(obj.type);
+    const width = dimensions.width || 1;
+    const depth = dimensions.depth || 1;
+    const height = dimensions.height || 1;
+    const material = new THREE.MeshStandardMaterial({ color: properties.color || '#aa8866' });
+    const group = new THREE.Group();
+    let main;
+
+    if (obj.type === 'chair') {
+        main = new THREE.Mesh(new THREE.BoxGeometry(width, 0.12, depth), material);
+        main.position.y = 0.48;
+        group.add(main);
+        const legGeometry = new THREE.BoxGeometry(0.08, 0.48, 0.08);
+        [-0.2, 0.2].forEach(x => [-0.2, 0.2].forEach(z => {
+            const leg = new THREE.Mesh(legGeometry, material);
+            leg.position.set(x, 0.24, z);
+            group.add(leg);
+        }));
+        const back = new THREE.Mesh(new THREE.BoxGeometry(width, 0.55, 0.1), material);
+        back.position.set(0, 0.78, -0.22);
+        group.add(back);
+    } else if (obj.type === 'table') {
+        main = new THREE.Mesh(new THREE.BoxGeometry(width, 0.12, depth), material);
+        main.position.y = height - 0.06;
+        group.add(main);
+        const legGeometry = new THREE.BoxGeometry(0.12, height - 0.12, 0.12);
+        [-1, 1].forEach(x => [-1, 1].forEach(z => {
+            const leg = new THREE.Mesh(legGeometry, material);
+            leg.position.set(x * (width / 2 - 0.12), (height - 0.12) / 2, z * (depth / 2 - 0.12));
+            group.add(leg);
+        }));
+    } else {
+        main = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
+        main.position.y = height / 2;
+        group.add(main);
+    }
+
+    group.position.set(obj.tile_x + 0.5, getTileHeight(obj.tile_x, obj.tile_y), obj.tile_y + 0.5);
+    group.rotation.y = (properties.rotation || 0) + (properties.is_open ? Math.PI / 2 : 0);
+    group.userData = { locationObjectId: obj.id, locationObject: obj };
+    return group;
+}
+
+function addLocationObjectMesh(obj) {
+    if (locationObjectMeshes.some(mesh => mesh.userData.locationObjectId === obj.id)) return;
+    const mesh = createLocationObjectMesh(obj);
+    scene.add(mesh);
+    locationObjectMeshes.push(mesh);
+}
+
+function removeLocationObjectMesh(objectId) {
+    const mesh = locationObjectMeshes.find(item => item.userData.locationObjectId === objectId);
+    if (!mesh) return;
+    scene.remove(mesh);
+    disposeLocationObject(mesh);
+    locationObjectMeshes = locationObjectMeshes.filter(item => item !== mesh);
+}
+
+function replaceLocationObjectMesh(object) {
+    removeLocationObjectMesh(object.id);
+    addLocationObjectMesh(object);
+}
+
+function updateLocationObjectHeight(tileX, tileZ) {
+    const height = getTileHeight(tileX, tileZ);
+    locationObjectMeshes.forEach(mesh => {
+        const object = mesh.userData.locationObject;
+        if (object.tile_x === tileX && object.tile_y === tileZ) mesh.position.y = height;
+    });
+}
+
+function clearBuildPreview() {
+    if (!buildPreviewMesh) return;
+    scene?.remove(buildPreviewMesh);
+    disposeLocationObject(buildPreviewMesh);
+    buildPreviewMesh = null;
+}
+
+function updateBuildPreview() {
+    clearBuildPreview();
+    if (!window.locationEditMode || buildMode !== 'structure' || !hoveredTileCoords || !scene) return;
+    const { x, z } = hoveredTileCoords;
+    const dimensions = getStructureDimensions();
+    const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(dimensions.width, dimensions.height, dimensions.depth),
+        new THREE.MeshBasicMaterial({ color: structureColor, transparent: true, opacity: 0.35, depthWrite: false })
+    );
+    mesh.position.set(x + 0.5, getTileHeight(x, z) + dimensions.height / 2, z + 0.5);
+    mesh.rotation.y = structureRotation;
+    buildPreviewMesh = mesh;
+    scene.add(mesh);
+}
+
+async function placeStructureAtTile(x, z) {
+    if (!window.currentLobbyId || !currentLocationId) return;
+    const dimensions = getStructureDimensions();
+    try {
+        const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, {
+            name: structurePreset,
+            type: structurePreset,
+            tile_x: x,
+            tile_y: z,
+            properties: {
+                dimensions,
+                color: structureColor,
+                rotation: structureRotation,
+                interactions: objectInteractions[structurePreset] || [],
+                interaction_requirements: (objectInteractions[structurePreset] || []).reduce((rules, action) => {
+                    rules[action] = interactionRequirements[action];
+                    return rules;
+                }, {}),
+                contents: ['shelf', 'chest'].includes(structurePreset) ? [] : undefined,
+                is_open: false
+            }
+        });
+        currentLocationData.objects = currentLocationData.objects || [];
+        if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
+        addLocationObjectMesh(object);
+    } catch (error) {
+        showNotification(error.message || 'Не удалось построить объект');
+    }
+}
+
+async function removeStructuresAtTile(x, z) {
+    if (!window.currentLobbyId) return;
+    const meshes = locationObjectMeshes.filter(item => {
+        const object = item.userData.locationObject;
+        return object.tile_x === x && object.tile_y === z;
+    });
+    const objectIds = meshes
+        .map(mesh => mesh.userData.locationObjectId)
+        .filter(id => !structureDeletionInFlight.has(id));
+    if (!objectIds.length) return;
+
+    objectIds.forEach(id => structureDeletionInFlight.add(id));
+    const results = await Promise.allSettled(
+        objectIds.map(id => Server.deleteLocationObject(window.currentLobbyId, id))
+    );
+    results.forEach((result, index) => {
+        const objectId = objectIds[index];
+        structureDeletionInFlight.delete(objectId);
+        if (result.status === 'fulfilled') {
+            removeLocationObjectMesh(objectId);
+            currentLocationData.objects = currentLocationData.objects.filter(object => object.id !== objectId);
+        } else {
+            showNotification(result.reason?.message || 'Не удалось удалить объект');
+        }
+    });
+}
+
+export function setLocationBuildMode(mode) { buildMode = mode; updateBuildPreview(); }
+export function setLocationStructurePreset(value) { structurePreset = value; updateBuildPreview(); }
+export function setLocationStructureWidth(value) { structureWidth = Math.max(0.2, Number(value)); updateBuildPreview(); }
+export function setLocationStructureDepth(value) { structureDepth = Math.max(0.1, Number(value)); updateBuildPreview(); }
+export function setLocationStructureHeight(value) { structureHeight = Math.max(0.1, Number(value)); updateBuildPreview(); }
+export function setLocationStructureColor(value) { structureColor = value; updateBuildPreview(); }
+export function setLocationStructureRotation(value) { structureRotation = Number(value); updateBuildPreview(); }
+
+export function addLocationObject(object) {
+    if (!currentLocationData) return;
+    currentLocationData.objects = currentLocationData.objects || [];
+    if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
+    addLocationObjectMesh(object);
+}
+
+export function removeLocationObject(objectId) {
+    if (!currentLocationData) return;
+    removeLocationObjectMesh(objectId);
+    currentLocationData.objects = (currentLocationData.objects || []).filter(object => object.id !== objectId);
+}
+
+export function updateLocationObject(object) {
+    if (!currentLocationData) return;
+    currentLocationData.objects = currentLocationData.objects || [];
+    const index = currentLocationData.objects.findIndex(item => item.id === object.id);
+    if (index === -1) currentLocationData.objects.push(object);
+    else currentLocationData.objects[index] = object;
+    replaceLocationObjectMesh(object);
+}
+
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
     console.log('loadLocation', data);
     tileCubes = [];
     objectMeshes = [];
+    anomalyEffectMeshes = [];
+    locationObjectMeshes = [];
     currentLocationData = data;
     if (!scene) return;
 
@@ -412,23 +722,25 @@ export function loadLocation(data) {
     groundPlaneMesh = groundPlane;
 
     // Тайлы
-    for (let y = 0; y < data.tiles_data.length; y++) {
-        const row = data.tiles_data[y];
-        for (let x = 0; x < row.length; x++) {
-            const tile = row[x];
-            const color = terrainColors[tile.terrain] || 0x3a5f0b;
-            const height = tile.height || 1.0;
-            const geometry = new THREE.BoxGeometry(0.98, height, 0.98);
-            const material = new THREE.MeshStandardMaterial({ color });
-            const cube = new THREE.Mesh(geometry, material);
-            cube.castShadow = false;
-            cube.receiveShadow = false;
-            cube.userData = { tileX: x, tileZ: y, tileData: tile };
-            cube.position.set(x + 0.5, height / 2, y + 0.5);
-            tileCubes.push(cube);
-            scene.add(cube);
+    const tileCount = gridWidth * gridHeight;
+    const geometry = new THREE.BoxGeometry(0.98, 1, 0.98);
+    const material = new THREE.MeshStandardMaterial();
+    locationTileMesh = new THREE.InstancedMesh(geometry, material, tileCount);
+    locationTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
+    locationTileMesh.castShadow = false;
+    locationTileMesh.receiveShadow = false;
+    locationTileMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    locationTileMesh.userData.tileByInstance = [];
+    for (let y = 0; y < gridHeight; y++) {
+        for (let x = 0; x < gridWidth; x++) {
+            const tile = data.tiles_data[y][x];
+            updateTileInstance(y * gridWidth + x, x, y, tile, locationTileMesh);
         }
     }
+    locationTileMesh.instanceMatrix.needsUpdate = true;
+    locationTileMesh.instanceColor.needsUpdate = true;
+    tileCubes = [locationTileMesh];
+    scene.add(locationTileMesh);
 
     // Объекты на тайлах
     for (let y = 0; y < data.tiles_data.length; y++) {
@@ -439,13 +751,7 @@ export function loadLocation(data) {
 
     // Отдельные объекты
     if (data.objects && data.objects.length) {
-        data.objects.forEach(obj => {
-            const boxGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
-            const mat = new THREE.MeshStandardMaterial({ color: 0xaa8866 });
-            const mesh = new THREE.Mesh(boxGeo, mat);
-            mesh.position.set(obj.tile_x + 0.5, 0.4, obj.tile_y + 0.5);
-            scene.add(mesh);
-        });
+        data.objects.forEach(addLocationObjectMesh);
     }
 
     // Камера
@@ -459,16 +765,20 @@ export function loadLocation(data) {
 
 // ========== Обновление тайлов ==========
 function updateTileCube(x, z, tile) {
-    const cube = tileCubes.find(c => c.userData.tileX === x && c.userData.tileZ === z);
-    if (!cube) return;
-    const newHeight = tile.height || 1.0;
-    const newColor = terrainColors[tile.terrain] || 0x3a5f0b;
-    const newGeo = new THREE.BoxGeometry(0.98, newHeight, 0.98);
-    cube.geometry.dispose();
-    cube.geometry = newGeo;
-    cube.material.color.setHex(newColor);
-    cube.position.y = newHeight / 2;
-    cube.userData.tileData = tile;
+    if (!locationTileMesh || !currentLocationData) return;
+    updateTileInstance(z * currentLocationData.grid_width + x, x, z, tile, locationTileMesh);
+    locationTileMesh.instanceMatrix.needsUpdate = true;
+    locationTileMesh.instanceColor.needsUpdate = true;
+}
+
+function updateTileInstance(instanceId, x, z, tile, mesh) {
+    const height = tile.height || 1.0;
+    tileInstanceTransform.position.set(x + 0.5, height / 2, z + 0.5);
+    tileInstanceTransform.scale.set(1, height, 1);
+    tileInstanceTransform.updateMatrix();
+    mesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
+    mesh.setColorAt(instanceId, new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b));
+    mesh.userData.tileByInstance[instanceId] = { x, z };
 }
 
 function rebuildTileObjects(tileX, tileZ) {
@@ -487,15 +797,14 @@ function rebuildTileObjects(tileX, tileZ) {
         }
     }
     objectMeshes = objectMeshes.filter(m => !toRemove.includes(m));
+    anomalyEffectMeshes = anomalyEffectMeshes.filter(m => !toRemove.includes(m));
 
     const objects = tile.objects || [];
     for (const obj of objects) {
-        let geometry, material, yOffset;
+        let geometry, material, yOffset, mesh;
+        let isAnomalyEffect = false;
         switch (obj.type) {
             case 'tree':
-                geometry = new THREE.CylinderGeometry(0.3, 0.5, 0.8, 6);
-                material = new THREE.MeshStandardMaterial({ color: 0x2d5a27 });
-                yOffset = 0.4;
                 break;
             case 'rock':
                 geometry = new THREE.DodecahedronGeometry(0.3);
@@ -517,16 +826,49 @@ function rebuildTileObjects(tileX, tileZ) {
                 material = new THREE.MeshStandardMaterial({ color: 0xff6600 });
                 yOffset = 0.05;
                 break;
+            case 'anomaly':
+                mesh = createAnomalyEffect(obj.anomalyType || 'electric', obj.color || '#00ffff', obj.scale || 1);
+                yOffset = 0;
+                isAnomalyEffect = true;
+                break;
             default:
                 geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
                 material = new THREE.MeshStandardMaterial({ color: 0xffaa44 });
                 yOffset = 0.25;
         }
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.userData = { tileX, tileZ, objType: obj.type };
+        if (obj.type === 'anomaly') {
+            // The shared effect owns its scale and animation state.
+        } else if (obj.type === 'tree') {
+            mesh = new THREE.Group();
+            const trunk = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.1, 0.14, 0.75, 8),
+                new THREE.MeshStandardMaterial({ color: 0x5b3a20 })
+            );
+            trunk.position.y = 0.375;
+            mesh.add(trunk);
+            [
+                { radius: 0.46, height: 0.72, y: 0.82, color: 0x255b2f },
+                { radius: 0.36, height: 0.66, y: 1.14, color: 0x2f7439 },
+                { radius: 0.25, height: 0.55, y: 1.44, color: 0x3a8745 }
+            ].forEach(layer => {
+                const foliage = new THREE.Mesh(
+                    new THREE.ConeGeometry(layer.radius, layer.height, 8),
+                    new THREE.MeshStandardMaterial({ color: obj.color || layer.color })
+                );
+                foliage.position.y = layer.y;
+                mesh.add(foliage);
+            });
+            yOffset = 0;
+        } else {
+            mesh = new THREE.Mesh(geometry, material);
+        }
+        mesh.userData = { ...mesh.userData, tileX, tileZ, objType: obj.type };
         mesh.position.set(worldX, tileHeight + yOffset, worldZ);
+        mesh.rotation.y = obj.rotation || 0;
+        if (!isAnomalyEffect) mesh.scale.setScalar(obj.scale || 1);
         scene.add(mesh);
         objectMeshes.push(mesh);
+        if (isAnomalyEffect) anomalyEffectMeshes.push(mesh);
     }
 }
 
@@ -542,6 +884,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
         if (upd.radiation !== undefined) tile.radiation = upd.radiation;
         updateTileCube(upd.x, upd.z, tile);
         rebuildTileObjects(upd.x, upd.z);
+        updateLocationObjectHeight(upd.x, upd.z);
     }
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
@@ -601,6 +944,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             }
             if (needUpdate) {
                 updateTileCube(x, z, tile);
+                if (updates.height !== undefined) updateLocationObjectHeight(x, z);
                 if (updates.objects !== undefined || updates.addObject) {
                     rebuildTileObjects(x, z);
                 }
@@ -820,7 +1164,10 @@ function setupCharacterDragging() {
             if (charId) {
                 showContextMenu(e.clientX, e.clientY, charId);
             }
+            return;
         }
+        const locationObject = getLocationObjectAtScreen(e.clientX, e.clientY);
+        if (locationObject) showObjectContextMenu(e.clientX, e.clientY, locationObject.userData.locationObject);
     };
     canvas.addEventListener('contextmenu', onContextMenu);
     handlers.canvas.contextmenu = onContextMenu;
@@ -841,16 +1188,16 @@ export function setupLocationEditing() {
         raycaster.setFromCamera(mouse, camera);
         const intersects = raycaster.intersectObjects(tileCubes);
         if (intersects.length > 0) {
-            const cube = intersects[0].object;
-            const x = cube.userData.tileX;
-            const z = cube.userData.tileZ;
+            const hit = intersects[0];
+            const coords = hit.object.userData.tileByInstance?.[hit.instanceId];
+            if (!coords) return;
+            const { x, z } = coords;
             const tile = currentLocationData.tiles_data[z][x];
             locInfo.innerHTML = `
                 <b>Тайл (${x}, ${z})</b><br>
                 Ландшафт: ${tile.terrain}<br>
                 Высота: ${tile.height}<br>
                 Радиация: ${tile.radiation !== undefined ? tile.radiation : '0'}<br>
-                Объектов: ${tile.objects ? tile.objects.length : 0}
             `;
             locInfo.style.display = 'block';
             if (!lastHighlightCoords || lastHighlightCoords.x !== x || lastHighlightCoords.z !== z) {
@@ -858,11 +1205,13 @@ export function setupLocationEditing() {
                 lastHighlightCoords = { x, z };
             }
             hoveredTileCoords = { x, z };
+            updateBuildPreview();
         } else {
             locInfo.style.display = 'none';
             hideHighlight();
             hoveredTileCoords = null;
             lastHighlightCoords = null;
+            clearBuildPreview();
         }
     };
     window.addEventListener('pointermove', onPointerMove);
@@ -872,12 +1221,24 @@ export function setupLocationEditing() {
         if (!locationActive) return;
         if (e.button !== 0) return;
         if (!hoveredTileCoords) return;
-        if (!window.locationEditMode) return;
         if (e.target !== canvas) return;
+        if (pendingObjectMoveId) {
+            const { x, z } = hoveredTileCoords;
+            const objectId = pendingObjectMoveId;
+            pendingObjectMoveId = null;
+            updateInteractiveObject(objectId, { tile_x: x, tile_y: z });
+            return;
+        }
+        if (!window.locationEditMode) return;
         e.preventDefault();
         e.stopPropagation();
         canvas.setPointerCapture(e.pointerId);
         const { x, z } = hoveredTileCoords;
+        if (buildMode === 'structure') {
+            if (eraserMode) removeStructuresAtTile(x, z);
+            else placeStructureAtTile(x, z);
+            return;
+        }
         const radMode = document.getElementById('loc-rad-mode')?.checked;
         const objMode = document.getElementById('loc-obj-mode')?.checked;
         const updates = {};
@@ -908,6 +1269,10 @@ export function setupLocationEditing() {
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
         const { x, z } = hoveredTileCoords;
+        if (buildMode === 'structure') {
+            if (eraserMode) removeStructuresAtTile(x, z);
+            return;
+        }
         const radMode = document.getElementById('loc-rad-mode')?.checked;
         const objMode = document.getElementById('loc-obj-mode')?.checked;
         const updates = {};
@@ -1149,7 +1514,10 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
 export function setLocationEditMode(enabled) {
     editMode = enabled;
     window.locationEditMode = enabled;
-    if (!enabled) hideHighlight();
+    if (!enabled) {
+        hideHighlight();
+        clearBuildPreview();
+    }
     if (hoveredTileCoords && currentLocationData) {
         const { x, z } = hoveredTileCoords;
         const tile = currentLocationData.tiles_data[z]?.[x];
@@ -1159,6 +1527,7 @@ export function setLocationEditMode(enabled) {
     if (btn) btn.style.background = enabled ? '#4a6fa5' : '';
     const locCheckbox = document.getElementById('loc-edit-toggle-checkbox');
     if (locCheckbox) locCheckbox.checked = enabled;
+    updateBuildPreview();
 }
 
 export function getLocationEditMode() { return editMode; }
@@ -1352,7 +1721,10 @@ export function destroyLocationScene() {
             scene.remove(obj);
         });
         tileCubes = [];
+        locationTileMesh = null;
         objectMeshes = [];
+        anomalyEffectMeshes = [];
+        locationObjectMeshes = [];
         clearAllCharacters();
 
         if (highlightBox) {
@@ -1388,9 +1760,11 @@ export function destroyLocationScene() {
 
     // Данные
     currentLocationData = null;
+    clearBuildPreview();
     hoveredTileCoords = null;
     lastHighlightCoords = null;
     processedTilesForObjects.clear();
+    structureDeletionInFlight.clear();
     dragCharacter = null;
     isDraggingCharacter = false;
     hoveredCharacterId = null;
