@@ -44,6 +44,15 @@ if (pathParts.length >= 2 && pathParts[0] === 'lobbies') {
     window.currentLobbyId = currentLobbyId;
 }
 
+const savedCharacterId = parseInt(localStorage.getItem('currentCharacterId') || '0', 10);
+if (savedCharacterId > 0) {
+    window.currentCharacterId = savedCharacterId;
+}
+const savedLocationCharacterId = parseInt(localStorage.getItem('selectedLocationCharacterId') || '0', 10);
+if (savedLocationCharacterId > 0) {
+    window.currentLocationCharacterId = savedLocationCharacterId;
+}
+
 if (!token) {
     showNotification('Вы не авторизованы');
     window.location.href = '/';
@@ -69,6 +78,30 @@ setupMarkerInteraction();
 window.isLocationActive = false; // флаг активной локации
 window.socket = socket;
 window.currentLocationId = null;
+window.currentLocationCharacterId = window.currentLocationCharacterId || null;
+
+async function resolveLocationCharacterId() {
+    const myUserId = parseInt(localStorage.getItem('user_id') || '0', 10);
+    if (!myUserId) return null;
+
+    const ownedCharacters = await Server.getLobbyCharacters(currentLobbyId)
+        .then((characters) => (characters || []).filter((char) => char.owner_id === myUserId))
+        .catch(() => []);
+
+    const savedLocationCharacterId = parseInt(localStorage.getItem('selectedLocationCharacterId') || '0', 10);
+    if (savedLocationCharacterId > 0) {
+        const savedCharacter = ownedCharacters.find((char) => char.id === savedLocationCharacterId);
+        if (savedCharacter) return savedCharacter.id;
+    }
+
+    const viewedCharacterId = parseInt(window.currentCharacterId || '0', 10);
+    if (viewedCharacterId > 0) {
+        const viewedCharacter = ownedCharacters.find((char) => char.id === viewedCharacterId);
+        if (viewedCharacter) return viewedCharacter.id;
+    }
+
+    return ownedCharacters[0]?.id || null;
+}
 
 // ========== Перенаправление UI-вызовов в зависимости от активного режима ==========
 
@@ -164,8 +197,12 @@ window.enterLocation = async function(locationId) {
         setLocationBrushTerrain(window.currentTileType);
 
         if (socket) {
-            const characterId = window.currentCharacterId || null;
-            socket.emit('join_location', { token: token, location_id: locationId, character_id: characterId });
+            const characterId = await resolveLocationCharacterId();
+            window.currentLocationCharacterId = characterId || null;
+            if (characterId) {
+                localStorage.setItem('selectedLocationCharacterId', String(characterId));
+            }
+            socket.emit('join_location', { token: token, location_id: locationId, character_id: characterId || null });
         }
 
         if (window.isGM) {
@@ -232,7 +269,7 @@ window.enterLocation = async function(locationId) {
                             <label id="loc-structure-width-field">Ширина <input id="loc-structure-width" type="number" min="0.2" max="30" step="0.1" value="3" style="width:58px;"></label>
                             <label id="loc-structure-depth-field">Глубина <input id="loc-structure-depth" type="number" min="0.1" max="30" step="0.1" value="0.2" style="width:58px;"></label>
                             <label id="loc-structure-height-field">Высота <input id="loc-structure-height" type="number" min="0.1" max="20" step="0.1" value="2.4" style="width:58px;"></label>
-                            <label id="loc-structure-rotation-field">Поворот <select id="loc-structure-rotation" class="form-control" style="width:auto;"><option value="0">0°</option><option value="1.5707963267948966">90°</option></select></label>
+                            <label id="loc-structure-rotation-field">Поворот <select id="loc-structure-rotation" class="form-control" style="width:auto;"><option value="0">0°</option><option value="1.5707963267948966">90°</option><option value="3.141592653589793">180°</option><option value="4.71238898038469">270°</option></select></label>
                             <label>Цвет <input id="loc-structure-color" type="color" value="#8b6b4f"></label>
                             <span style="font-size:12px; opacity:.8;">Выберите структуру и кликните по тайлу</span>
                         </div>
@@ -445,7 +482,7 @@ window.exitLocation = function() {
         window._locationEventCleanup = null;
     }
     const locationId = getCurrentLocationId();
-    const characterId = window.currentCharacterId;
+    const characterId = window.currentLocationCharacterId;
     if (socket && characterId) {
         socket.emit('leave_location', {
             token: localStorage.getItem('access_token'),
@@ -456,6 +493,7 @@ window.exitLocation = function() {
     // Сбрасываем флаг локации
     window.isLocationActive = false;
     window.currentLocationId = null;
+    window.currentLocationCharacterId = null;
 
     document.getElementById('location-container').style.display = 'none';
     document.getElementById('canvas-container').style.display = 'block';
@@ -730,6 +768,10 @@ document.getElementById('exit-location-btn')?.addEventListener('click', exitLoca
 if (socket) {
     socket.on('joined_location', (data) => {
         console.log('Joined location', data);
+        if (data.character_id) {
+            window.currentLocationCharacterId = data.character_id;
+            localStorage.setItem('selectedLocationCharacterId', String(data.character_id));
+        }
         updateCharacterPosition(data.character_id, data.x, data.y);
     });
     socket.on('location_state', (state) => {
@@ -738,13 +780,13 @@ if (socket) {
                 module.addCharacterToLocation(
                     s.character_id,
                     s.name,
-                    s.owner_id,
+                    Number(s.owner_id),
                     s.owner_username,
                     s.x,
                     s.y,
                     s.hp_zones,
                     s.effects,
-                    s.controlled_by
+                    Number(s.controlled_by)
                 );
             });
         });
@@ -781,16 +823,25 @@ if (socket) {
             module.addCharacterToLocation(
                 data.character.id,
                 data.character.name,
-                data.character.owner_id,
+                Number(data.character.owner_id),
                 data.character.owner_username,
                 data.character.pos_x,
                 data.character.pos_y,
                 data.character.hp_zones,
                 data.character.effects,
-                data.character.controlled_by
+                Number(data.character.controlled_by)
             );
         });
     });
+
+    const syncCombatState = (state) => {
+        import('./locationScene.js').then(module => {
+            module.setCombatState(state);
+        });
+    };
+
+    socket.on('combat_state', syncCombatState);
+    socket.on('combat_state_updated', syncCombatState);
 }
 
 // ========== Глобальные функции из других модулей ==========

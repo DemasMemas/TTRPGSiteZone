@@ -20,7 +20,7 @@ import os
 import tempfile
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, send_from_directory
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
 from app.extensions import db, migrate, jwt, socketio
@@ -86,6 +86,14 @@ def create_app(config_name='default'):
     @app.route('/')
     def index():
         return render_template('index.html')
+
+    @app.route('/favicon.ico')
+    def favicon():
+        return send_from_directory(
+            app.static_folder,
+            'assets/pictures/bg.png',
+            mimetype='image/png',
+        )
 
     # ---- Централизованная обработка ошибок ----
     @app.errorhandler(ValidationError)

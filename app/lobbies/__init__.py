@@ -9,6 +9,7 @@ from app.services.lobby import LobbyService
 from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
+from app.services.combat import CombatService
 from app.schemas.lobby import LobbyCreateSchema, LobbyDetailSchema, LobbyMySchema, LobbySchema
 from app.schemas.participant import BannedUserSchema
 from app.schemas.character import CharacterSchema, CharacterCreateSchema
@@ -696,13 +697,17 @@ def spawn_character_in_location(lobby_id, location_id):
         target_user_id = user_id
 
     # Проверяем, не находится ли уже персонаж в этой локации (если да – перемещаем)
-    existing = LocationCharacter.query.filter_by(location_id=location_id, character_id=character_id).first()
+    existing = LocationCharacter.query.filter_by(location_id=location_id, character_id=character_id).order_by(
+        LocationCharacter.last_action.desc().nullslast(),
+        LocationCharacter.id.desc(),
+    ).first()
     if existing:
         # Перемещаем на новые координаты
         existing.pos_x = tile_x
         existing.pos_y = tile_y
         existing.status = 'idle'
-        existing.controlled_by = target_user_id  # обновляем управление
+        if assign_to_user_id is not None:
+            existing.controlled_by = target_user_id  # обновляем управление
         db.session.commit()
         loc_char = existing
         action = 'moved'
@@ -729,6 +734,15 @@ def spawn_character_in_location(lobby_id, location_id):
             controlled_by=target_user_id
         )
         db.session.add(loc_char)
+        db.session.flush()
+        profile = CombatService._combat_profile(loc_char)
+        loc_char.initiative_bonus = profile['initiative_bonus']
+        loc_char.action_points_max = profile['action_points']
+        loc_char.action_points_current = profile['action_points']
+        loc_char.free_actions_max = profile['free_actions']
+        loc_char.free_actions_current = profile['free_actions']
+        loc_char.movement_points_max = profile['movement_points']
+        loc_char.movement_points_current = profile['movement_points']
         db.session.commit()
         action = 'spawned'
 
@@ -749,3 +763,87 @@ def spawn_character_in_location(lobby_id, location_id):
     }, room=f"location_{location_id}")
 
     return jsonify({'message': f'Character {action} successfully', 'location_character_id': loc_char.id}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_location_combat_state(lobby_id, location_id, lobby, participant):
+    state = CombatService.get_state(location_id, participant.user_id)
+    return jsonify(state), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/start', methods=['POST'])
+@jwt_required()
+@requires_gm
+def start_location_combat(lobby_id, location_id, lobby):
+    state = CombatService.start_combat(location_id, lobby.gm_id)
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(state), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/end_turn', methods=['POST'])
+@jwt_required()
+@requires_participant
+def end_location_combat_turn(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    state = CombatService.end_turn(
+        location_id,
+        participant.user_id,
+        location_character_id=data.get('location_character_id'),
+    )
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(state), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/end', methods=['POST'])
+@jwt_required()
+@requires_gm
+def end_location_combat(lobby_id, location_id, lobby):
+    state = CombatService.end_combat(location_id, lobby.gm_id)
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(state), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/spend', methods=['POST'])
+@jwt_required()
+@requires_participant
+def spend_location_combat_resources(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    location_character_id = data.get('location_character_id')
+    if not location_character_id:
+        return jsonify({'error': 'location_character_id is required'}), 400
+
+    updated_character = CombatService.spend_resources(
+        location_id,
+        participant.user_id,
+        location_character_id=location_character_id,
+        action_points=data.get('action_points', 0),
+        free_actions=data.get('free_actions', 0),
+        movement_points=data.get('movement_points', 0),
+    )
+    state = CombatService.get_state(location_id, participant.user_id)
+    socketio.emit('combat_character_updated', updated_character, room=f"location_{location_id}")
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(updated_character), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/action', methods=['POST'])
+@jwt_required()
+@requires_participant
+def perform_location_combat_action(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    location_character_id = data.get('location_character_id')
+    action_key = data.get('action_key')
+    if not location_character_id or not action_key:
+        return jsonify({'error': 'location_character_id and action_key are required'}), 400
+
+    result = CombatService.perform_action(
+        location_id,
+        participant.user_id,
+        location_character_id=location_character_id,
+        action_key=action_key,
+    )
+    socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
+    socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
+    return jsonify(result), 200

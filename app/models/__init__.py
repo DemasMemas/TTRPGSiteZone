@@ -22,3 +22,4 @@ from .map_chunk import MapChunk
 from .location import Location
 from .location_character import LocationCharacter
 from .location_object import LocationObject
+from .location_combat import LocationCombatState

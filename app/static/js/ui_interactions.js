@@ -50,7 +50,7 @@ function makeDraggable(panel, handle, panelId) {
 
     const onMouseDown = (e) => {
         if (e.button !== 0) return;
-        if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"], .toggle-btn')) return;
+        if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"], .toggle-btn, .close, .character-card, .character-card *')) return;
         e.preventDefault();
         panel.style.transition = 'none';
         panel.style.zIndex = '110';
@@ -97,7 +97,7 @@ function makeDraggable(panel, handle, panelId) {
         }
     };
 
-    handle.addEventListener('mousedown', onMouseDown);
+    panel.addEventListener('mousedown', onMouseDown);
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
 }
@@ -147,8 +147,17 @@ export function initDraggablePanels() {
             }
             if (saved.position) applyPosition(panel, saved.position);
         }
-        makeDraggable(panel, panel, panelId);
+        makeDraggable(panel, header, panelId);
         panel.dataset.draggableInitialized = 'true';
+    });
+
+    document.querySelectorAll('.modal .modal-content').forEach(modalContent => {
+        if (modalContent.dataset.draggableInitialized === 'true') return;
+        const modal = modalContent.closest('.modal');
+        const panelId = modal?.id;
+        if (!panelId) return;
+        makeDraggable(modalContent, modalContent, panelId);
+        modalContent.dataset.draggableInitialized = 'true';
     });
 }
 

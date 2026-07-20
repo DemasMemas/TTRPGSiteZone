@@ -25,3 +25,11 @@ def default_hp_zones():
         'left_leg': {'current': 100, 'max': 100},
         'right_leg': {'current': 100, 'max': 100},
     }
+
+
+def default_combat_resources():
+    return {
+        'action_points': 5,
+        'free_actions': 1,
+        'movement_points': 6,
+    }

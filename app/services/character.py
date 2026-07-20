@@ -2,7 +2,7 @@
 import logging
 from sqlalchemy.orm import joinedload
 from app.extensions import db
-from app.models import LobbyCharacter, Lobby, LobbyParticipant
+from app.models import LobbyCharacter, Lobby, LobbyParticipant, LocationCharacter
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -34,11 +34,22 @@ class CharacterService:
         if not character:
             raise NotFoundError("Character not found")
 
-        # Проверяем, что пользователь в той же комнате
+        lobby = Lobby.query.get(character.lobby_id)
         participant = LobbyParticipant.query.filter_by(
             lobby_id=character.lobby_id, user_id=user_id
         ).first()
         if not participant:
+            raise PermissionDenied("Access denied")
+        is_controller = LocationCharacter.query.filter_by(
+            character_id=character_id,
+            controlled_by=user_id,
+        ).first() is not None
+        if (
+            character.owner_id != user_id
+            and lobby.gm_id != user_id
+            and user_id not in (character.visible_to or [])
+            and not is_controller
+        ):
             raise PermissionDenied("Access denied")
 
         return character
@@ -58,6 +69,8 @@ class CharacterService:
             raise PermissionDenied("You are not in this lobby")
 
         lobby = Lobby.query.get(character.lobby_id)
+        if character.owner_id != user_id and lobby.gm_id != user_id:
+            raise PermissionDenied("Only owner or GM can update character")
 
         # Если пытаются изменить visible_to, проверяем права (только владелец или GM)
         if 'visible_to' in updates:

@@ -15,6 +15,16 @@ class LocationCharacter(db.Model):
     controlled_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     controller = db.relationship('User', foreign_keys=[controlled_by])
 
+    initiative_bonus = db.Column(db.Integer, nullable=False, default=0)
+    initiative_roll = db.Column(db.Integer, nullable=True)
+    initiative_total = db.Column(db.Integer, nullable=True)
+    action_points_max = db.Column(db.Integer, nullable=False, default=5)
+    action_points_current = db.Column(db.Integer, nullable=False, default=5)
+    free_actions_max = db.Column(db.Integer, nullable=False, default=1)
+    free_actions_current = db.Column(db.Integer, nullable=False, default=1)
+    movement_points_max = db.Column(db.Integer, nullable=False, default=6)
+    movement_points_current = db.Column(db.Integer, nullable=False, default=6)
+
     hp_zones = db.Column(db.JSON, nullable=False, default=default_hp_zones)
     effects = db.Column(db.JSON, default=empty_list)
 

@@ -285,4 +285,44 @@ export const Server = {
             body: JSON.stringify(updates)
         });
     },
+
+    async getLocationCombatState(lobbyId, locationId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat`);
+    },
+
+    async startLocationCombat(lobbyId, locationId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start`, {
+            method: 'POST',
+        });
+    },
+
+    async endLocationCombat(lobbyId, locationId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/end`, {
+            method: 'POST',
+        });
+    },
+
+    async endLocationCombatTurn(lobbyId, locationId, locationCharacterId = null) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/end_turn`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ location_character_id: locationCharacterId }),
+        });
+    },
+
+    async spendLocationCombatResources(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/spend`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async performLocationCombatAction(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
 };

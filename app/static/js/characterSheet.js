@@ -2699,14 +2699,22 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
             }
         }
 
+        const combatState = window.locationCombatState;
+        const isCombatActive = Boolean(combatState && combatState.status === 'active');
+        const isCurrentTurn = Boolean(
+            !isCombatActive ||
+            combatState?.current_character?.character_id === currentCharacterId
+        );
+        const combatActionDisabled = isCombatActive && !isCurrentTurn;
+
         let attackButtonsHtml = '';
         if (isMelee) {
             const allowedAttacks = template?.attributes?.allowed_attacks || [];
             attackButtonsHtml = allowedAttacks.map(attackType =>
-                `<button type="button" class="btn btn-sm btn-primary" onclick="useMeleeAttack(${index}, '${attackType}')">${attackType}</button>`
+                `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="useMeleeAttack(${index}, '${attackType}')">${attackType}</button>`
             ).join('');
         } else {
-            attackButtonsHtml = `<button type="button" class="btn btn-sm btn-success" onclick="useWeaponFromEquipment(${index})" style="margin-left: 5px;" title="Выстрелить">🔫 Выстрел</button>`;
+            attackButtonsHtml = `<button type="button" class="btn btn-sm btn-success" ${combatActionDisabled ? 'disabled' : ''} onclick="useWeaponFromEquipment(${index})" style="margin-left: 5px;" title="${combatActionDisabled ? 'Сейчас не ход этого персонажа' : 'Выстрелить'}">🔫 Выстрел</button>`;
         }
 
         let grenadeLauncherHtml = '';
@@ -2715,9 +2723,9 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
             if (launcher) {
                 const isLoaded = launcher.loaded || false;
                 if (isLoaded) {
-                    grenadeLauncherHtml = `<button type="button" class="btn btn-sm btn-warning" onclick="fireGrenadeLauncher(${index})" style="margin-left: 5px;" title="Выстрел из подствольника">💣 Выстрел ГП</button>`;
+                    grenadeLauncherHtml = `<button type="button" class="btn btn-sm btn-warning" ${combatActionDisabled ? 'disabled' : ''} onclick="fireGrenadeLauncher(${index})" style="margin-left: 5px;" title="${combatActionDisabled ? 'Сейчас не ход этого персонажа' : 'Выстрел из подствольника'}">💣 Выстрел ГП</button>`;
                 } else {
-                    grenadeLauncherHtml = `<button type="button" class="btn btn-sm btn-secondary" onclick="reloadGrenadeLauncher(${index})" style="margin-left: 5px;" title="Зарядить подствольник">➕ Зарядить ГП</button>`;
+                    grenadeLauncherHtml = `<button type="button" class="btn btn-sm btn-secondary" ${combatActionDisabled ? 'disabled' : ''} onclick="reloadGrenadeLauncher(${index})" style="margin-left: 5px;" title="${combatActionDisabled ? 'Сейчас не ход этого персонажа' : 'Зарядить подствольник'}">➕ Зарядить ГП</button>`;
                 }
             }
         }
@@ -5308,60 +5316,6 @@ window.unequipDetector = async function() {
     showNotification('Детектор аномалий снят', 'success');
 };
 
-window.useWeaponFromEquipment = function(weaponIndex) {
-    const weapon = currentCharacterData.weapons[weaponIndex];
-    if (!weapon) return;
-
-    // Проверяем тип магазина
-    const weaponTemplateId = weapon.templateId;
-    let hasFixedMagazine = false;
-    if (weaponTemplateId) {
-        // Можно загрузить шаблон, но проще проверить weapon.installedMagazine
-        hasFixedMagazine = !weapon.installedMagazine && weapon.attributes?.fixedMagazine;
-    }
-
-    if (hasFixedMagazine) {
-        // Несъёмный магазин
-        if (weapon.ammo <= 0) {
-            showNotification('Нет патронов');
-            return;
-        }
-        weapon.ammo -= 1;
-        showNotification(`Выстрел из ${weapon.name}. Осталось патронов: ${weapon.ammo}`, 'system');
-    } else {
-        // Съёмный магазин
-        const mag = weapon.installedMagazine;
-        if (!mag || !mag.ammo || mag.ammo.length === 0) {
-            showNotification('Нет магазина или патронов');
-            return;
-        }
-        // Уменьшаем последний тип патронов (LIFO)
-        const last = mag.ammo[mag.ammo.length - 1];
-        last.quantity -= 1;
-        if (last.quantity <= 0) {
-            mag.ammo.pop();
-        }
-        weapon.ammo = mag.ammo.reduce((sum, a) => sum + a.quantity, 0);
-        updateMagazineWeight(mag);
-        showNotification(`Выстрел из ${weapon.name}. Осталось патронов: ${weapon.ammo}`, 'system');
-    }
-
-    renderEquipmentTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
-};
-
-window.useMeleeAttack = function(weaponIndex, attackType) {
-    const weapon = currentCharacterData.weapons[weaponIndex];
-    if (!weapon) return;
-    const template = (allTemplatesCache || []).find(t => t.id == weapon.templateId);
-    const attrs = template?.attributes || {};
-    const baseDamage = attrs.damage || 0;
-    const baseAP = attrs.armor_piercing || 0;
-    const modifiers = getMeleeAttackModifiers(attackType, baseDamage, baseAP);
-    showNotification(`⚔️ Атака "${attackType}" оружием ${weapon.name}. Урон: ${modifiers.damage}, Бронебойность: ${modifiers.ap}%`, 'system');
-};
-
 function getMeleeAttackModifiers(attackType, baseDamage, baseAP) {
     switch(attackType) {
         case 'Колющий':
@@ -5375,6 +5329,130 @@ function getMeleeAttackModifiers(attackType, baseDamage, baseAP) {
         default:
             return { damage: baseDamage, ap: baseAP };
     }
+}
+
+window.useWeaponFromEquipment = function(weaponIndex) {
+    const sheetData = currentCharacterData;
+    const actorCharacterId = currentCharacterId;
+    const weapon = sheetData?.weapons?.[weaponIndex];
+    if (!weapon) return;
+
+    const combatState = window.locationCombatState;
+    const isCombatActive = Boolean(combatState && combatState.status === 'active');
+    const isCurrentTurn = Boolean(
+        !isCombatActive ||
+        combatState?.current_character?.character_id === actorCharacterId
+    );
+
+    if (isCombatActive && !isCurrentTurn) {
+        showNotification('Сейчас не ход этого персонажа', 'system');
+        return;
+    }
+
+    const spendAmmo = async () => {
+        const mag = weapon.installedMagazine;
+        if (mag && Array.isArray(mag.ammo)) {
+            if (mag.ammo.length === 0) {
+                showNotification('Нет магазина или патронов');
+                return false;
+            }
+            const last = mag.ammo[mag.ammo.length - 1];
+            last.quantity -= 1;
+            if (last.quantity <= 0) {
+                mag.ammo.pop();
+            }
+            weapon.ammo = mag.ammo.reduce((sum, a) => sum + a.quantity, 0);
+            updateMagazineWeight(mag);
+        } else if (typeof weapon.ammo === 'number') {
+            if (weapon.ammo <= 0) {
+                showNotification('Нет патронов');
+                return false;
+            }
+            weapon.ammo -= 1;
+        } else {
+            showNotification('Нет патронов');
+            return false;
+        }
+
+        if (actorCharacterId && sheetData) {
+            await Server.updateCharacter(actorCharacterId, { data: sheetData });
+        }
+        renderEquipmentTab(sheetData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification(`Выстрел из ${weapon.name}. Осталось патронов: ${weapon.ammo}`, 'system');
+        return true;
+    };
+
+    if (!isCombatActive) {
+        spendAmmo();
+        return;
+    }
+
+    closeCharacterSheet();
+    import('./locationScene.js').then((module) => {
+        module.queueCombatActionFromSheet({
+            actorCharacterId,
+            actionKey: 'attack',
+            weaponIndex,
+            source: 'sheet',
+            onResolve: spendAmmo,
+        });
+    });
+};
+
+window.useMeleeAttack = function(weaponIndex, attackType) {
+    const sheetData = currentCharacterData;
+    const actorCharacterId = currentCharacterId;
+    const weapon = sheetData?.weapons?.[weaponIndex];
+    if (!weapon) return;
+    const template = (allTemplatesCache || []).find(t => t.id == weapon.templateId);
+    const attrs = template?.attributes || {};
+    const baseDamage = attrs.damage || 0;
+    const baseAP = attrs.armor_piercing || 0;
+    const modifiers = getMeleeAttackModifiers(attackType, baseDamage, baseAP);
+    const combatState = window.locationCombatState;
+    const isCombatActive = Boolean(combatState && combatState.status === 'active');
+    const isCurrentTurn = Boolean(
+        !isCombatActive ||
+        combatState?.current_character?.character_id === actorCharacterId
+    );
+    if (isCombatActive && !isCurrentTurn) {
+        showNotification('Сейчас не ход этого персонажа', 'system');
+        return;
+    }
+    if (!isCombatActive) {
+        showNotification(`⚔️ Атака "${attackType}" оружием ${weapon.name}. Урон: ${modifiers.damage}, Бронебойность: ${modifiers.ap}%`, 'system');
+        return;
+    }
+
+    closeCharacterSheet();
+    import('./locationScene.js').then((module) => {
+        module.queueCombatActionFromSheet({
+            actorCharacterId,
+            actionKey: 'attack',
+            weaponIndex,
+            attackType,
+            source: 'sheet',
+        });
+    });
+};
+
+let combatSheetRefreshBound = false;
+
+function refreshCombatSensitiveSheetTabs() {
+    if (!currentCharacterData) return;
+    const modal = document.getElementById('character-sheet-modal');
+    if (!modal || modal.style.display === 'none') return;
+    const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
+    if (activeTab === 'equipment') {
+        renderEquipmentTab(currentCharacterData);
+    }
+}
+
+if (!combatSheetRefreshBound) {
+    combatSheetRefreshBound = true;
+    window.addEventListener('combat-state-updated', refreshCombatSensitiveSheetTabs);
 }
 
 window.fireGrenadeLauncher = async function(weaponIndex) {
@@ -7089,6 +7167,129 @@ window.removeBackpackItemAtPath = function(pathStr) {
     forceSyncCharacter();
 };
 
+function getBackpackItemAtPath(path) {
+    if (!Array.isArray(path) || path.length === 0) return null;
+    let parentData = currentCharacterData;
+    for (let i = 0; i < path.length; i += 1) {
+        const key = path[i];
+        if (Array.isArray(parentData) && typeof key === 'number') {
+            parentData = parentData[key];
+        } else if (parentData && typeof parentData === 'object' && key in parentData) {
+            parentData = parentData[key];
+        } else {
+            return null;
+        }
+    }
+    return parentData ?? null;
+}
+
+function setBackpackItemQuantityAtPath(path, quantity) {
+    if (!Array.isArray(path) || path.length === 0) return false;
+    let parentData = currentCharacterData;
+    for (let i = 0; i < path.length - 1; i += 1) {
+        const key = path[i];
+        if (Array.isArray(parentData) && typeof key === 'number') {
+            parentData = parentData[key];
+        } else if (parentData && typeof parentData === 'object' && key in parentData) {
+            parentData = parentData[key];
+        } else {
+            return false;
+        }
+    }
+
+    const index = path[path.length - 1];
+    if (!Array.isArray(parentData) || typeof index !== 'number' || !parentData[index]) return false;
+    const item = parentData[index];
+    if (!quantity || quantity <= 0) {
+        parentData.splice(index, 1);
+        return true;
+    }
+    item.quantity = Math.floor(quantity);
+    return true;
+}
+
+window.dropBackpackItemAtPath = async function(pathStr) {
+    const path = pathStr.split(',').map(p => (p === '' || Number.isNaN(Number(p)) ? p : parseInt(p, 10)));
+    if (path.length === 0) return;
+
+    const item = getBackpackItemAtPath(path);
+    if (!item) return;
+
+    const currentQuantity = Math.max(1, Number(item.quantity) || 1);
+    let amount = currentQuantity;
+    if (currentQuantity > 1) {
+        const response = window.prompt(`Сколько выбросить? 1-${currentQuantity}`, '1');
+        if (response === null) return;
+        amount = Math.max(1, Math.min(parseInt(response, 10) || 1, currentQuantity));
+    }
+
+    const itemClone = JSON.parse(JSON.stringify(item));
+    itemClone.quantity = amount;
+    const locationCharacterId = currentCharacterId || window.currentLocationCharacterId || null;
+    const locationPosition = window.isLocationActive && typeof window.getLocationCharacterPosition === 'function'
+        ? window.getLocationCharacterPosition(locationCharacterId)
+        : null;
+
+    if (window.isLocationActive && window.currentLocationId && locationPosition) {
+        try {
+            const existingGroundItem = typeof window.getGroundItemObjectAtPosition === 'function'
+                ? window.getGroundItemObjectAtPosition(locationPosition.x, locationPosition.y)
+                : null;
+
+            if (existingGroundItem) {
+                const existingContents = Array.isArray(existingGroundItem.properties?.contents)
+                    ? [...existingGroundItem.properties.contents]
+                    : [];
+                existingContents.push(itemClone);
+                const updatedGroundItem = await Server.updateLocationObject(window.currentLobbyId, existingGroundItem.id, {
+                    properties: {
+                        contents: existingContents,
+                        is_ground_item: true,
+                        passable: true,
+                        interactions: ['open_container'],
+                    },
+                });
+                if (typeof window.updateLocationObject === 'function' && updatedGroundItem) {
+                    window.updateLocationObject(updatedGroundItem);
+                }
+            } else {
+                const createdGroundItem = await Server.createLocationObject(window.currentLobbyId, window.currentLocationId, {
+                    name: 'Пол',
+                    type: 'ground_item',
+                    tile_x: locationPosition.x,
+                    tile_y: locationPosition.y,
+                    properties: {
+                        contents: [itemClone],
+                        is_ground_item: true,
+                        passable: true,
+                        dropped_by_character_id: currentCharacterId || null,
+                        interactions: ['open_container'],
+                    },
+                });
+                if (typeof window.addLocationObject === 'function' && createdGroundItem) {
+                    window.addLocationObject(createdGroundItem);
+                }
+            }
+        } catch (error) {
+            showNotification(error.message || 'Не удалось выбросить предмет', 'system');
+            return;
+        }
+    }
+
+    if (amount >= currentQuantity) {
+        window.removeBackpackItemAtPath(pathStr);
+    } else {
+        setBackpackItemQuantityAtPath(path, currentQuantity - amount);
+        renderInventoryTab(currentCharacterData);
+        recalculateInventoryTotals();
+        scheduleAutoSave();
+        forceSyncCharacter();
+    }
+    if (window.isLocationActive && window.currentLocationId && locationPosition) {
+        showNotification('Предмет выброшен', 'success');
+    }
+};
+
 async function addItemToContainerDirect(containerItem, contentsDiv, containerPath) {
     const existingSelect = contentsDiv.querySelector('.inline-template-select');
     if (existingSelect) existingSelect.remove();
@@ -8088,6 +8289,21 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     delBtn.style.lineHeight = '1';
     delBtn.onclick = () => removeBackpackItemAtPath(itemPath.join(','));
     actionsDiv.appendChild(delBtn);
+    const dropBtn = document.createElement('button');
+    dropBtn.type = 'button';
+    dropBtn.className = 'btn btn-sm btn-warning';
+    dropBtn.textContent = '⇩';
+    dropBtn.title = 'Бросить на пол';
+    dropBtn.style.width = '28px';
+    dropBtn.style.height = '28px';
+    dropBtn.style.padding = '0';
+    dropBtn.style.fontSize = '14px';
+    dropBtn.style.lineHeight = '1';
+    dropBtn.onclick = async (e) => {
+        e.stopPropagation();
+        await window.dropBackpackItemAtPath(itemPath.join(','));
+    };
+    actionsDiv.appendChild(dropBtn);
 
     // Надеть
     const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon',
@@ -8617,8 +8833,10 @@ window.deleteCharacterFromSheet = function() {
 };
 
 // ========== 9. ПУБЛИЧНЫЕ ФУНКЦИИ ==========
-export async function openCharacterSheet(characterId) {
+export async function openCharacterSheet(characterId, tabId = 'basic') {
     currentCharacterId = characterId;
+    window.currentCharacterId = characterId;
+    localStorage.setItem('currentCharacterId', String(characterId));
     try {
         const character = await Server.getCharacter(characterId);
         currentCharacterData = character.data || {};
@@ -8651,6 +8869,7 @@ export async function openCharacterSheet(characterId) {
         currentCharacterData.visible_to = character.visible_to || [];
         await getAllItemTemplates();
         await renderCharacterSheet(character.name, currentCharacterData);
+        switchSheetTab(tabId);
         document.getElementById('character-sheet-modal').style.display = 'flex';
 
         const socket = getSocket();

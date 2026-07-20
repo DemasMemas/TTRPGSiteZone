@@ -59,3 +59,6 @@ app/utils/__pycache__/defaults.cpython-313.pyc
 app/utils/__pycache__/dice.cpython-313.pyc
 .env
 logs/ttrpg.log
+app/services/__pycache__/combat.cpython-313.pyc
+app/models/__pycache__/location_combat.cpython-313.pyc
+tmp_write_test.txt
