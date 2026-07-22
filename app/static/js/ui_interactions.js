@@ -50,7 +50,7 @@ function makeDraggable(panel, handle, panelId) {
 
     const onMouseDown = (e) => {
         if (e.button !== 0) return;
-        if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"], .toggle-btn, .close, .character-card, .character-card *')) return;
+        if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"], [draggable="true"], .toggle-btn, .close, .character-card, .character-card *')) return;
         e.preventDefault();
         panel.style.transition = 'none';
         panel.style.zIndex = '110';

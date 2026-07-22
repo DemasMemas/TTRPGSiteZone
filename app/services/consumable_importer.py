@@ -282,27 +282,37 @@ def parse_consumable_templates_v2(workbook_path: Path) -> List[Dict[str, Any]]:
         if volume > 1000:
             volume = 1.0
 
-        profile = parse_consumable_profile(description)
+        profile = parse_consumable_profile(f"{name}. {description}")
+        filter_charges = profile["direct"].get("filter_charges")
+        is_gas_mask_filter = filter_charges is not None
+        attributes = {
+            "section": current_section,
+            "import_tier": import_tier,
+            "consumable": profile,
+            "effects": profile["effects"],
+            "uses": profile["direct"].get("uses"),
+            "duration": profile["direct"].get("duration"),
+            "delay": profile["direct"].get("delay"),
+            "raw_description": description,
+        }
+        if is_gas_mask_filter:
+            attributes.update({
+                "slot_type": "filter",
+                "filter_charges": filter_charges,
+                "durability": filter_charges,
+                "max_durability": filter_charges,
+            })
         templates.append(
             {
                 "name": name,
-                "category": "consumable",
-                "subcategory": current_section,
+                "category": "gas_mask_module" if is_gas_mask_filter else "consumable",
+                "subcategory": "filter" if is_gas_mask_filter else current_section,
                 "item_class": item_class,
                 "description": description,
                 "price": price,
                 "weight": weight,
                 "volume": volume,
-                "attributes": {
-                    "section": current_section,
-                    "import_tier": import_tier,
-                    "consumable": profile,
-                    "effects": profile["effects"],
-                    "uses": profile["direct"].get("uses"),
-                    "duration": profile["direct"].get("duration"),
-                    "delay": profile["direct"].get("delay"),
-                    "raw_description": description,
-                },
+                "attributes": attributes,
                 "compatible_ids": [],
             }
         )
@@ -316,14 +326,18 @@ def upsert_consumable_templates(workbook_path: str | Path, session=None) -> Dict
     session = session or db.session
 
     existing_by_section: Dict[str, List[ItemTemplate]] = {}
-    for item in ItemTemplate.query.filter_by(category="consumable").all():
-        existing_by_section.setdefault(item.subcategory or "", []).append(item)
+    existing_items = ItemTemplate.query.filter(
+        ItemTemplate.category.in_(["consumable", "gas_mask_module"])
+    ).all()
+    for item in existing_items:
+        section = (item.attributes or {}).get("section") or item.subcategory or ""
+        existing_by_section.setdefault(section, []).append(item)
 
     inserted = 0
     updated = 0
     used_ids: set[int] = set()
     for data in templates:
-        section = data["subcategory"] or ""
+        section = data["attributes"].get("section") or data["subcategory"] or ""
         candidates = existing_by_section.get(section, [])
         normalized_name = _normalize_consumable_name(data["name"])
         item = None
@@ -350,7 +364,7 @@ def upsert_consumable_templates(workbook_path: str | Path, session=None) -> Dict
         used_ids.add(item.id)
 
         changed = False
-        for field in ["name", "subcategory", "item_class", "description", "price", "weight", "volume"]:
+        for field in ["name", "category", "subcategory", "item_class", "description", "price", "weight", "volume"]:
             value = data[field]
             if getattr(item, field) != value:
                 setattr(item, field, value)

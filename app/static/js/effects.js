@@ -383,7 +383,8 @@ function adjustHealthField(health, field, delta, min = 0, max = null) {
 export function applyEffectToHealth(healthInput = {}, rawEffect = {}) {
     const health = healthInput;
     const effect = normalizeEffect(rawEffect);
-    const magnitude = Math.abs(toInt(effect.value, 0));
+    const signedValue = Number(effect.value);
+    const magnitude = Math.abs(Number.isFinite(signedValue) ? signedValue : toInt(effect.value, 0));
 
     if (effect.type === 'heal') {
         const current = toInt(health.current, 0);
@@ -399,34 +400,34 @@ export function applyEffectToHealth(healthInput = {}, rawEffect = {}) {
     }
 
     if (effect.type === 'radiation') {
-        adjustHealthField(health, 'radiation', -magnitude, 0, null);
+        adjustHealthField(health, 'radiation', Number.isFinite(signedValue) ? signedValue : -magnitude, 0, null);
         return { health, effect, applied: true, summary: `radiation:-${magnitude}` };
     }
 
     if (effect.type === 'pain') {
-        adjustHealthField(health, 'painLevel', magnitude, 0, 10);
+        adjustHealthField(health, 'painLevel', Number.isFinite(signedValue) ? signedValue : magnitude, 0, 10);
         health.combatMeta = health.combatMeta || {};
         health.combatMeta.painIncreased = true;
         return { health, effect, applied: true, summary: `pain:+${magnitude}` };
     }
 
     if (effect.type === 'exhaustion') {
-        adjustHealthField(health, 'exhaustion', magnitude, 0, 10);
+        adjustHealthField(health, 'exhaustion', Number.isFinite(signedValue) ? signedValue : magnitude, 0, 10);
         return { health, effect, applied: true, summary: `exhaustion:+${magnitude}` };
     }
 
     if (effect.type === 'stress') {
-        adjustHealthField(health, 'stress', magnitude, 0, 10);
+        adjustHealthField(health, 'stress', Number.isFinite(signedValue) ? signedValue : magnitude, 0, 10);
         return { health, effect, applied: true, summary: `stress:+${magnitude}` };
     }
 
     if (effect.type === 'intoxication') {
-        adjustHealthField(health, 'intoxication', magnitude, 0, 100);
+        adjustHealthField(health, 'intoxication', Number.isFinite(signedValue) ? signedValue : magnitude, 0, 100);
         return { health, effect, applied: true, summary: `intoxication:+${magnitude}` };
     }
 
     if (effect.type === 'infection') {
-        adjustHealthField(health, 'infection', magnitude, 0, 100);
+        adjustHealthField(health, 'infection', Number.isFinite(signedValue) ? signedValue : magnitude, 0, 100);
         syncHealthDerivedStatuses(health);
         return { health, effect, applied: true, summary: `infection:+${magnitude}` };
     }

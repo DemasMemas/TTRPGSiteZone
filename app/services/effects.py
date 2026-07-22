@@ -415,7 +415,8 @@ def _adjust_field(health: Dict[str, Any], field: str, delta: int, minimum: Optio
 
 def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str, Any]:
     effect = normalize_effect(raw_effect)
-    magnitude = abs(_to_int(effect.get("value", 0), 0))
+    signed_value = _to_float(effect.get("value", 0), 0)
+    magnitude = abs(_to_float(effect.get("value", 0), 0))
     effect_type = effect["type"]
 
     if effect_type == "heal":
@@ -444,29 +445,29 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
         return health
 
     if effect_type == "radiation":
-        _adjust_field(health, "radiation", -magnitude, 0, None)
+        _adjust_field(health, "radiation", int(signed_value) if float(signed_value).is_integer() else signed_value, 0, None)
         return health
 
     if effect_type == "pain":
-        _adjust_field(health, "painLevel", magnitude, 0, 10)
+        _adjust_field(health, "painLevel", int(signed_value) if float(signed_value).is_integer() else signed_value, 0, 10)
         meta = health.setdefault("combatMeta", {})
         meta["painIncreased"] = True
         return health
 
     if effect_type == "exhaustion":
-        _adjust_field(health, "exhaustion", magnitude, 0, 10)
+        _adjust_field(health, "exhaustion", int(signed_value) if float(signed_value).is_integer() else signed_value, 0, 10)
         return health
 
     if effect_type == "stress":
-        _adjust_field(health, "stress", magnitude, 0, 10)
+        _adjust_field(health, "stress", int(signed_value) if float(signed_value).is_integer() else signed_value, 0, 10)
         return health
 
     if effect_type == "intoxication":
-        _adjust_field(health, "intoxication", magnitude, 0, 100)
+        _adjust_field(health, "intoxication", int(signed_value) if float(signed_value).is_integer() else signed_value, 0, 100)
         return health
 
     if effect_type == "infection":
-        _adjust_field(health, "infection", magnitude, 0, 100)
+        _adjust_field(health, "infection", int(signed_value) if float(signed_value).is_integer() else signed_value, 0, 100)
         sync_health_derived_statuses(health)
         return health
 

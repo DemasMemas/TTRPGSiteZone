@@ -640,6 +640,26 @@ function addToBackpack(item) {
 function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, slotType) {
     if (!targetItem.installedModules) targetItem.installedModules = [];
 
+    if (slotType === 'filter') {
+        const charges = Number(
+            moduleItem.attributes?.consumable?.direct?.filter_charges
+            ?? moduleItem.attributes?.filter_charges
+            ?? moduleItem.maxDurability
+            ?? moduleItem.durability
+            ?? 0
+        );
+        moduleItem.category = 'gas_mask_module';
+        moduleItem.subcategory = 'filter';
+        moduleItem.attributes = {
+            ...(moduleItem.attributes || {}),
+            slot_type: 'filter',
+            durability: charges,
+            max_durability: charges,
+        };
+        moduleItem.durability = charges;
+        moduleItem.maxDurability = charges;
+    }
+
     // Обработка стопки
     if (moduleItem.quantity > 1) {
         moduleItem = { ...moduleItem, quantity: 1 };
@@ -693,7 +713,7 @@ function createItemFromTemplate(template, quantity = 1) {
         installedModules: [],
         contents: [],
         isContainer: template.category === 'container' || template.category === 'backpack' || template.category === 'pouch',
-        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask', 'device'].includes(template.category),
+        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask', 'device', 'detector'].includes(template.category),
         isStackable: ['consumable', 'crafting_material', 'artifact', 'ammo'].includes(template.category)
     };
 
@@ -1324,8 +1344,6 @@ window.saveModuleTemplate = async function() {
         clearTemplatesCache('weapon_module'); clearAllTemplatesCache();
         document.getElementById('create-module-template-modal').style.display = 'none';
         showNotification(id ? 'Модуль обновлён' : 'Модуль создан', 'success');
-        await populateBackpackTemplateSelect();
-        populatePocketsTemplateSelect();
         if (typeof loadTemplatesForManager === 'function') {
             const active = document.querySelector('#templates-modal .tab-btn.active')?.dataset.cat;
             if (active === 'weapon_module') loadTemplatesForManager('weapon_module');
@@ -1410,8 +1428,6 @@ window.saveMagazineTemplate = async function() {
             const active = document.querySelector('#templates-modal .tab-btn.active')?.dataset.cat;
             if (active === 'magazine') loadTemplatesForManager('magazine');
         }
-        await populateBackpackTemplateSelect();
-        populatePocketsTemplateSelect();
     } catch (e) { showNotification(e.message); }
 };
 
@@ -4958,25 +4974,6 @@ window.equipDetectorFromInventory = async function(itemPath) {
         return;
     }
 
-    // Загружаем шаблоны из категории device (или detector, если старый)
-    const templates = await loadTemplatesForLobby('device');
-    const template = templates.find(t => t.id === item.templateId);
-    if (!template) {
-        showNotification('Шаблон детектора не найден');
-        return;
-    }
-
-    const detectorToEquip = {
-        templateId: template.id,
-        name: template.name,
-        category: 'device',
-        weight: template.weight,
-        volume: template.volume,
-        bonus: item.attributes?.bonus || 0,
-        installedModules: item.installedModules ? [...item.installedModules] : [],
-        attributes: { ...template.attributes }
-    };
-
     if (!removeItemByPath(itemPath)) {
         showNotification('Не удалось найти предмет в инвентаре');
         return;
@@ -4985,18 +4982,14 @@ window.equipDetectorFromInventory = async function(itemPath) {
     // Снимаем старый детектор
     const oldDetector = currentCharacterData.equipment?.detector;
     if (oldDetector && oldDetector.templateId) {
-        const oldTemplates = await loadTemplatesForLobby('device');
-        const oldTemplate = oldTemplates.find(t => t.id === oldDetector.templateId);
-        if (oldTemplate) {
-            const oldItem = createItemFromTemplate(oldTemplate);
-            oldItem.attributes.bonus = oldDetector.bonus || 0;
-            oldItem.installedModules = oldDetector.installedModules || [];
-            restoreItemToPath(oldItem, itemPath);
-        }
+        const isExistingDuplicate = oldDetector.id && item.id && oldDetector.id === item.id;
+        if (!isExistingDuplicate) restoreItemToPath(oldDetector, itemPath);
     }
 
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
-    currentCharacterData.equipment.detector = detectorToEquip;
+    item.bonus = item.bonus ?? item.attributes?.bonus ?? 0;
+    item.installedModules = Array.isArray(item.installedModules) ? item.installedModules : [];
+    currentCharacterData.equipment.detector = item;
 
     await renderEquipmentTab(currentCharacterData);
     await renderInventoryTab(currentCharacterData);
@@ -5762,18 +5755,9 @@ window.unequipDetector = async function() {
         showNotification('Детектор не надет');
         return;
     }
-    const templates = await loadTemplatesForLobby('device');
-    const template = templates.find(t => t.id === detector.templateId);
-    if (!template) {
-        showNotification('Шаблон детектора не найден');
-        return;
-    }
-    const restoredItem = createItemFromTemplate(template);
-    restoredItem.attributes.bonus = detector.bonus || 0;
-    restoredItem.installedModules = detector.installedModules || [];
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
-    currentCharacterData.inventory.backpack.push(restoredItem);
+    currentCharacterData.inventory.backpack.push(detector);
     delete currentCharacterData.equipment.detector;
     await renderEquipmentTab(currentCharacterData);
     await renderInventoryTab(currentCharacterData);
@@ -6071,7 +6055,6 @@ async function useItem(item, itemPath, options = {}) {
 }
 
 async function useConsumable(item, itemPath, options = {}) {
-    const effects = (item.attributes?.effects || []).filter(effect => effect?.source !== 'direct');
     const consumable = item.attributes?.consumable || {};
     const direct = { ...(consumable.direct || {}) };
     const modifiers = Array.isArray(consumable.modifiers) ? consumable.modifiers : [];
@@ -6082,6 +6065,38 @@ async function useConsumable(item, itemPath, options = {}) {
     const isCombatActive = Boolean(combatState && combatState.status === 'active');
     let hasChanges = false;
     const itemName = String(item.name || '').toLowerCase();
+    const directEffectTypes = new Set();
+
+    if (direct.hp !== undefined) {
+        directEffectTypes.add('heal');
+        directEffectTypes.add('damage');
+    }
+    [
+        ['radiation_delta', 'radiation'],
+        ['intoxication_delta', 'intoxication'],
+        ['exhaustion_delta', 'exhaustion'],
+        ['stress_delta', 'stress'],
+        ['stress_in_combat_delta', 'stress'],
+        ['stress_safe_delta', 'stress'],
+        ['pain_delta', 'pain'],
+        ['infection_delta', 'infection'],
+        ['temperature_delta', 'temperature'],
+        ['psy_delta', 'psy'],
+        ['strength_delta', 'strength'],
+        ['agility_delta', 'agility'],
+        ['accuracy_delta', 'accuracy'],
+        ['weight_delta', 'weight'],
+        ['will_delta', 'will'],
+        ['psy_defense_delta', 'psy_defense'],
+    ].forEach(([key, type]) => {
+        if (direct[key] !== undefined) directEffectTypes.add(type);
+    });
+
+    const effects = (item.attributes?.effects || []).filter(effect => {
+        if (!effect || effect?.source === 'direct') return false;
+        const type = String(effect.type || '').trim().toLowerCase();
+        return !directEffectTypes.has(type);
+    });
 
     if (itemName.includes('самогон')) {
         direct.radiation_delta = -2.5;
@@ -6346,7 +6361,16 @@ async function useConsumable(item, itemPath, options = {}) {
     showNotification(`${item.name} использован`, 'success');
     if (options.render !== false) {
         renderInventoryTab(currentCharacterData);
-        renderHealthTab(currentCharacterData);
+        const healthContainer = document.getElementById('health-right-column');
+        if (healthContainer) {
+            renderHealthTab(currentCharacterData, healthContainer);
+        }
+        const sheetHealthContainer = document.getElementById('sheet-tab-health');
+        if (sheetHealthContainer) {
+            renderHealthTab(currentCharacterData, sheetHealthContainer);
+        } else {
+            renderHealthTab(currentCharacterData);
+        }
     }
     if (options.save !== false) {
         scheduleAutoSave();
@@ -7843,8 +7867,6 @@ async function renderInventoryTab(data) {
     if (pocketsContainerEl) setupDropTarget(pocketsContainerEl, ['inventory', 'pockets'], { capacity: pocketMaxVolume, contents: pockets });
     if (backpackContainerEl) setupDropTarget(backpackContainerEl, ['inventory', 'backpack'], { capacity: backpackLimit, contents: backpack });
 
-    populateBackpackTemplateSelect();
-    populatePocketsTemplateSelect();
     recalculateInventoryTotals();
 
     container.addEventListener('input', (e) => {
@@ -8086,94 +8108,6 @@ window.dropBackpackItemAtPath = async function(pathStr) {
     }
 };
 
-async function addItemToContainerDirect(containerItem, contentsDiv, containerPath) {
-    const existingSelect = contentsDiv.querySelector('.inline-template-select');
-    if (existingSelect) existingSelect.remove();
-
-    const select = document.createElement('select');
-    select.className = 'form-control inline-template-select';
-    select.style.marginTop = '5px';
-    select.style.width = '100%';
-    select.innerHTML = '<option value="">-- Выберите предмет --</option>';
-
-    const allTemplates = await getAllItemTemplates();
-    const categories = {};
-    allTemplates.forEach(t => {
-        if (!categories[t.category]) categories[t.category] = [];
-        categories[t.category].push(t);
-    });
-
-    for (const [cat, templates] of Object.entries(categories)) {
-        const optgroup = document.createElement('optgroup');
-        optgroup.label = getCategoryDisplay(cat);
-        templates.forEach(t => {
-            const option = document.createElement('option');
-            option.value = t.id;
-            option.textContent = `${t.name} (${t.effectiveWeight || t.weight} кг, ${t.effectiveVolume || t.volume} л)`;
-            optgroup.appendChild(option);
-        });
-        select.appendChild(optgroup);
-    }
-
-    updatePouchVolumeFromContentsDiv(contentsDiv);
-
-    select.onchange = async (e) => {
-        const templateId = e.target.value;
-        if (!templateId) { select.remove(); return; }
-        const template = allTemplates.find(t => t.id == templateId);
-        if (!template) { select.remove(); return; }
-
-        const newItem = createItemFromTemplate(template);
-        if (!Array.isArray(containerItem.contents)) containerItem.contents = [];
-        containerItem.contents.push(newItem);
-
-        const children = Array.from(contentsDiv.children);
-        for (let child of children) {
-            if (!child.classList.contains('inline-template-select') && !child.matches('button')) {
-                child.remove();
-            }
-        }
-
-        // При перерисовке используем загруженные allTemplates
-        containerItem.contents.forEach((subItem, subIndex) => {
-            renderBackpackItem(subItem, subIndex, containerPath, contentsDiv, allTemplates);
-        });
-
-        const addBtn = contentsDiv.querySelector('button');
-        if (addBtn && contentsDiv.lastChild !== addBtn) {
-            contentsDiv.appendChild(addBtn);
-        }
-
-        select.remove();
-        recalculateInventoryTotals();
-
-        if (containerPath.length >= 2) {
-            const pouchParentPath = containerPath.slice(0, -1);
-            const pouchDiv = document.querySelector(`[data-path="${pouchParentPath.join(',')}"]`);
-            if (pouchDiv) {
-                const infoSpan = pouchDiv.querySelector('span[data-volume-info]');
-                if (infoSpan) {
-                    const pouch = getItemByPath(pouchParentPath);
-                    if (pouch) {
-                        const used = calculatePouchUsedVolume(pouch);
-                        const internalLimit = pouch.internalVolume || pouch.capacity;
-                        infoSpan.textContent = `📦 ${used} / ${internalLimit} л`;
-                    }
-                }
-            }
-        }
-
-        scheduleAutoSave();
-    };
-
-    const addButton = contentsDiv.querySelector('button');
-    if (addButton && addButton.parentNode === contentsDiv) {
-        contentsDiv.insertBefore(select, addButton);
-    } else {
-        contentsDiv.appendChild(select);
-    }
-}
-
 function updateHandlersInElement(element, basePath, index) {
     const newPath = basePath.concat(index).join(',');
     // Кнопка удаления (крестик)
@@ -8318,7 +8252,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
         addBtn.type = 'button';
         addBtn.className = 'btn btn-sm btn-secondary';
         addBtn.textContent = '➕ Добавить внутрь';
-        addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv, path.concat('contents'));
+        addBtn.onclick = () => openInventoryTemplatePicker(path.concat('contents'));
         contentsDiv.appendChild(addBtn);
     }
 
@@ -8349,7 +8283,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
         }
     }
 
-    setupDropTarget(itemDiv, path, pouch);
+    setupDropTarget(itemDiv, path.concat('contents'), pouch);
 
     parentContainer.appendChild(itemDiv);
 }
@@ -8457,7 +8391,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
         addBtn.type = 'button';
         addBtn.className = 'btn btn-sm btn-secondary';
         addBtn.textContent = '➕ Добавить внутрь';
-        addBtn.onclick = () => addItemToContainerDirect(pouch, contentsDiv, path.concat('contents'));
+        addBtn.onclick = () => openInventoryTemplatePicker(path.concat('contents'));
         contentsDiv.appendChild(addBtn);
     }
 
@@ -8487,7 +8421,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
         }
     }
 
-    setupDropTarget(itemDiv, path, pouch);
+    setupDropTarget(itemDiv, path.concat('contents'), pouch);
 
     parentContainer.appendChild(itemDiv);
 }
@@ -8698,6 +8632,55 @@ function renderInventoryTemplatePicker(templates, query = '') {
     }).join('');
 }
 
+function getInventoryTargetPath(target = 'pockets') {
+    if (Array.isArray(target)) return [...target];
+    return target === 'backpack'
+        ? ['inventory', 'backpack']
+        : ['inventory', 'pockets'];
+}
+
+function getInventoryTargetItems(targetPath) {
+    if (targetPath.length === 2 && targetPath[0] === 'inventory') {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!Array.isArray(currentCharacterData.inventory[targetPath[1]])) {
+            currentCharacterData.inventory[targetPath[1]] = [];
+        }
+    }
+    const target = getItemByPath(targetPath);
+    if (Array.isArray(target)) return target;
+    if (target && typeof target === 'object') {
+        if (!Array.isArray(target.contents)) target.contents = [];
+        return target.contents;
+    }
+    return null;
+}
+
+async function addTemplateItemToInventory(templateId, target, quantity = 1, ammoVariant = null) {
+    if (!templateId) return false;
+
+    const allTemplates = await getAllItemTemplates();
+    const template = allTemplates.find(t => t.id == templateId);
+    if (!template) return false;
+
+    const targetPath = getInventoryTargetPath(target);
+    const targetItems = getInventoryTargetItems(targetPath);
+    if (!targetItems) {
+        showNotification('Контейнер для предмета не найден');
+        return false;
+    }
+
+    const newItem = createItemFromTemplate(template, quantity);
+    if (template.category === 'ammo') {
+        applyAmmoVariantToItem(newItem, template, ammoVariant);
+        updateAmmoWeight(newItem);
+    }
+    targetItems.push(newItem);
+
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    return true;
+}
+
 window.openInventoryTemplatePicker = async function(target = 'pockets') {
     let modal = document.getElementById('inventory-template-picker-modal');
     if (!modal) {
@@ -8717,7 +8700,7 @@ window.openInventoryTemplatePicker = async function(target = 'pockets') {
         document.body.appendChild(modal);
     }
 
-    modal._inventoryTarget = target || 'pockets';
+    modal._inventoryTarget = getInventoryTargetPath(target);
     modal.style.display = 'flex';
     bindBackdropClose(modal, closeInventoryTemplatePicker);
 
@@ -8755,19 +8738,14 @@ window.selectInventoryTemplate = async function(templateId) {
     const template = allTemplates.find(t => t.id === templateId);
     if (!template) return;
     const picker = document.getElementById('inventory-template-picker-modal');
-    const target = picker?._inventoryTarget || 'pockets';
+    const target = picker?._inventoryTarget || getInventoryTargetPath('pockets');
     if (template.category === 'ammo') {
         closeInventoryTemplatePicker();
         openAmmoSelectionModal(templateId, target);
         return;
     }
 
-    if (target === 'backpack') {
-        await addBackpackItemFromTemplate(templateId);
-    } else {
-        await addPocketItemFromTemplate(templateId);
-    }
-    closeInventoryTemplatePicker();
+    await addTemplateItemToInventory(templateId, target);
 };
 
 function renderAmmoSelectionModalContent(templates, initialTemplateId = null) {
@@ -8825,7 +8803,7 @@ window.openAmmoSelectionModal = async function(initialTemplateId = null, target 
         document.body.appendChild(modal);
     }
 
-    modal._inventoryTarget = target || 'pockets';
+    modal._inventoryTarget = getInventoryTargetPath(target);
     modal.style.display = 'flex';
     bindBackdropClose(modal, closeAmmoSelectionModal);
 
@@ -8934,18 +8912,9 @@ window.confirmAmmoSelection = async function() {
         return;
     }
 
-    const newItem = createItemFromTemplate(template, quantity);
     const ammoVariant = chosenVariant || normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect);
-    applyAmmoVariantToItem(newItem, template, ammoVariant);
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    const targetArrayName = modal._inventoryTarget === 'backpack' ? 'backpack' : 'pockets';
-    if (!Array.isArray(currentCharacterData.inventory[targetArrayName])) currentCharacterData.inventory[targetArrayName] = [];
-    currentCharacterData.inventory[targetArrayName].push(newItem);
-
-    updateAmmoWeight(newItem);
-    await renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    closeAmmoSelectionModal();
+    const added = await addTemplateItemToInventory(templateId, modal._inventoryTarget, quantity, ammoVariant);
+    if (added) closeAmmoSelectionModal();
 };
 
 window.addEffectToModal = function(type) {
@@ -9259,6 +9228,7 @@ function renderBackpackNew(items, groupedByCategory, allTemplates) {
 
 function renderBackpackItem(item, index, parentPath, parentContainer, allTemplates) {
     const itemDiv = document.createElement('div');
+    itemDiv.draggable = true;
     itemDiv.style.marginBottom = '5px';
     itemDiv.style.padding = '5px';
     itemDiv.style.border = '1px solid #444';
@@ -9315,12 +9285,10 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     nameDragZone.style.display = 'flex';
     nameDragZone.style.alignItems = 'center';
     nameDragZone.style.cursor = 'grab';
-    nameDragZone.draggable = true;   // перетаскивается именно эта область
+    nameDragZone.draggable = true;
 
-    // Обработчик dragstart для зоны названия
-    nameDragZone.addEventListener('dragstart', (e) => {
-        // Запрещаем перетаскивание, если кликнули на кнопке или на инпуте
-        if (e.target.closest('button') || e.target.closest('input')) {
+    itemDiv.addEventListener('dragstart', (e) => {
+        if (e.target.closest('button, input, select, textarea')) {
             e.preventDefault();
             e.stopPropagation();
             return false;
@@ -9328,8 +9296,16 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         draggedItem = item;
         draggedItemPath = itemPath;
         e.dataTransfer.setData('text/plain', itemPath.join(','));
+        e.dataTransfer.setData('application/x-inventory-path', JSON.stringify(itemPath));
         e.dataTransfer.effectAllowed = 'move';
-        e.stopPropagation(); // чтобы событие не поднималось к itemDiv
+        itemDiv.classList.add('dragging');
+        e.stopPropagation();
+    });
+    itemDiv.addEventListener('dragend', () => {
+        itemDiv.classList.remove('dragging');
+        document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+        draggedItem = null;
+        draggedItemPath = null;
     });
 
     nameDragZone.appendChild(nameWrapper);
@@ -9393,10 +9369,10 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         if (!input) return;
         input.addEventListener('mousedown', (e) => {
             e.stopPropagation();
-            nameDragZone.draggable = false;
+            itemDiv.draggable = false;
         });
-        input.addEventListener('mouseup', () => { nameDragZone.draggable = true; });
-        input.addEventListener('mouseleave', () => { nameDragZone.draggable = true; });
+        input.addEventListener('mouseup', () => { itemDiv.draggable = true; });
+        input.addEventListener('mouseleave', () => { itemDiv.draggable = true; });
     };
     disableDragForInput(weightInput);
     disableDragForInput(volumeInput);
@@ -9461,7 +9437,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             else if (category === 'weapon') equipWeaponFromInventory(itemPath);
             else if (category === 'belt') equipBeltFromInventory(itemPath);
             else if (category === 'vest') equipVestFromInventory(itemPath);
-            else if (category === 'device') equipDetectorFromInventory(itemPath);
+            else if (category === 'device' || category === 'detector') equipDetectorFromInventory(itemPath);
             else if (category === 'melee_weapon') equipMeleeWeaponFromInventory(itemPath);
             else if (category === 'headphones') equipHeadphonesFromInventory(itemPath);
             else if (category === 'glasses') equipGlassesFromInventory(itemPath);
@@ -9589,7 +9565,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             addBtn.type = 'button';
             addBtn.className = 'btn btn-sm btn-secondary';
             addBtn.textContent = '➕ Добавить внутрь';
-            addBtn.onclick = () => addItemToContainerDirect(item, contentsDiv, itemPath.concat('contents'));
+            addBtn.onclick = () => openInventoryTemplatePicker(itemPath.concat('contents'));
             contentsDiv.appendChild(addBtn);
 
             setupDropTarget(contentsDiv, itemPath.concat('contents'), item);
@@ -9704,32 +9680,6 @@ function showItemDetailsModal(item) {
     modal.style.display = 'flex';
 }
 
-async function populateBackpackTemplateSelect() {
-    const select = document.getElementById('backpack-add-template');
-    if (!select) return;
-
-    const allTemplates = await getAllItemTemplates();
-    select.innerHTML = '<option value="">-- Добавить предмет (выберите) --</option>';
-
-    const categories = {};
-    allTemplates.forEach(t => {
-        if (!categories[t.category]) categories[t.category] = [];
-        categories[t.category].push(t);
-    });
-
-    for (const [cat, templates] of Object.entries(categories)) {
-        const optgroup = document.createElement('optgroup');
-        optgroup.label = getCategoryDisplay(cat);
-        templates.forEach(t => {
-            const option = document.createElement('option');
-            option.value = t.id;
-            option.textContent = t.name;
-            optgroup.appendChild(option);
-        });
-        select.appendChild(optgroup);
-    }
-}
-
 window.updateBackpackItemField = function(index, field, value) {
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     let items = currentCharacterData.inventory.backpack;
@@ -9817,50 +9767,8 @@ function removeFromArrayById(arr, id) {
     return false;
 }
 
-async function populatePocketsTemplateSelect() {
-    const select = document.getElementById('pockets-add-template');
-    if (!select) return;
-
-    const allTemplates = await getAllItemTemplates();
-    select.innerHTML = '<option value="">-- Добавить предмет (выберите) --</option>';
-
-    const categories = {};
-    allTemplates.forEach(t => {
-        if (!categories[t.category]) categories[t.category] = [];
-        categories[t.category].push(t);
-    });
-
-    for (const [cat, templates] of Object.entries(categories)) {
-        const optgroup = document.createElement('optgroup');
-        optgroup.label = getCategoryDisplay(cat);
-        templates.forEach(t => {
-            const option = document.createElement('option');
-            option.value = t.id;
-            option.textContent = t.name;
-            optgroup.appendChild(option);
-        });
-        select.appendChild(optgroup);
-    }
-}
-
-window.addPocketItemFromTemplate = async function(templateId) {
-    if (!templateId) return;
-    const allTemplates = await getAllItemTemplates();
-    const template = allTemplates.find(t => t.id == templateId);
-    if (!template) return;
-
-    const newItem = createItemFromTemplate(template);
-
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    if (!Array.isArray(currentCharacterData.inventory.pockets)) {
-        currentCharacterData.inventory.pockets = [];
-    }
-    currentCharacterData.inventory.pockets.push(newItem);
-
-    await renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    document.getElementById('pockets-add-template').value = '';
-};
+window.addPocketItemFromTemplate = templateId =>
+    addTemplateItemToInventory(templateId, 'pockets');
 
 window.addPocketItemManual = function() {
     const newItem = {
@@ -10184,7 +10092,11 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
             if (slotType === 'battery') {
                 matches = (it.category === 'device' && it.subcategory === 'battery');
             } else if (slotType === 'filter') {
-                matches = (it.category === 'gas_mask_module' && it.attributes?.slot_type === 'filter');
+                matches = (
+                    (it.category === 'gas_mask_module' && (it.subcategory === 'filter' || it.attributes?.slot_type === 'filter'))
+                    || Number.isFinite(Number(it.attributes?.consumable?.direct?.filter_charges))
+                    || Number.isFinite(Number(it.attributes?.filter_charges))
+                );
             } else if (slotType === 'artifact') {
                 matches = (it.category === 'artifact');
             } else {
@@ -10460,7 +10372,7 @@ async function rerenderContainer(containerPath, parentElement = null) {
             addBtn.type = 'button';
             addBtn.className = 'btn btn-sm btn-secondary';
             addBtn.textContent = '➕ Добавить внутрь';
-            addBtn.onclick = () => addItemToContainerDirect(container, containerDiv, containerPath);
+            addBtn.onclick = () => openInventoryTemplatePicker(containerPath);
             containerDiv.appendChild(addBtn);
         }
     }
@@ -10533,37 +10445,8 @@ window.removeWeaponModification = function(weaponIndex, modIndex) {
     scheduleAutoSave();
 };
 
-const originalAdd = window.addBackpackItemFromTemplate;
-window.addBackpackItemFromTemplate = async function(templateId) {
-    if (!templateId) return;
-
-    const allTemplates = await getAllItemTemplates();
-    const template = allTemplates.find(t => t.id == templateId);
-    if (!template) return;
-
-    const newItem = createItemFromTemplate(template);
-
-    // Определяем, куда добавлять
-    let targetArray;
-    if (window._tempContainerPath) {
-        const container = getItemByPath(window._tempContainerPath);
-        if (container && container.isContainer) {
-            if (!Array.isArray(container.contents)) container.contents = [];
-            targetArray = container.contents;
-        }
-        window._tempContainerPath = null;
-    } else {
-        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-        if (!Array.isArray(currentCharacterData.inventory.backpack)) {
-            currentCharacterData.inventory.backpack = [];
-        }
-        targetArray = currentCharacterData.inventory.backpack;
-    }
-
-    targetArray.push(newItem);
-    await renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-};
+window.addBackpackItemFromTemplate = templateId =>
+    addTemplateItemToInventory(templateId, 'backpack');
 
 window.addBackpackItemManual = function() {
     const newItem = {
@@ -10619,6 +10502,7 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
 
     containerDiv.addEventListener('dragover', (e) => {
         e.preventDefault();
+        e.stopPropagation();
         e.dataTransfer.dropEffect = 'move';
         containerDiv.classList.add('drag-over');
     });
@@ -10629,9 +10513,24 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
 
     containerDiv.addEventListener('drop', async (e) => {
         e.preventDefault();
+        e.stopPropagation();
         containerDiv.classList.remove('drag-over');
 
-        if (!draggedItem || !draggedItemPath) return;
+        let sourcePath = draggedItemPath;
+        try {
+            const transferredPath = e.dataTransfer.getData('application/x-inventory-path');
+            if (transferredPath) sourcePath = JSON.parse(transferredPath);
+        } catch (error) {
+            console.warn('Invalid inventory drag path', error);
+        }
+        if (!Array.isArray(sourcePath)) {
+            const plainPath = e.dataTransfer.getData('text/plain');
+            if (plainPath) sourcePath = plainPath.split(',').map(part => /^\d+$/.test(part) ? Number(part) : part);
+        }
+        const sourceItem = Array.isArray(sourcePath) ? getItemByPath(sourcePath) : null;
+        if (!sourceItem || !sourcePath) return;
+        draggedItem = sourceItem;
+        draggedItemPath = sourcePath;
 
         const targetContainer = containerItem || getItemByPath(containerPath);
         if (!targetContainer) return;
@@ -10644,9 +10543,18 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
             return;
         }
 
+        const targetItems = Array.isArray(targetContainer)
+            ? targetContainer
+            : targetContainer.contents;
+        if (!Array.isArray(targetItems)) return;
+
         const newVolume = getTotalVolume(draggedItem);
-        const currentUsed = calculatePouchUsedVolume(targetContainer);
-        const limit = targetContainer.capacity || targetContainer.volume || 0;
+        const sourceContainerPath = draggedItemPath.slice(0, -1);
+        const isSameContainer = sourceContainerPath.length === containerPath.length
+            && sourceContainerPath.every((value, index) => value === containerPath[index]);
+        const currentUsed = targetItems.reduce((sum, item) => sum + getTotalVolume(item), 0)
+            - (isSameContainer ? newVolume : 0);
+        const limit = Number(targetContainer.internalVolume || targetContainer.capacity || targetContainer.volume || 0);
         if (currentUsed + newVolume > limit) {
             showNotification('Недостаточно места в контейнере');
             draggedItem = null; draggedItemPath = null;
@@ -10661,13 +10569,10 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
         }
 
         // Добавляем в целевой контейнер
-        if (!Array.isArray(targetContainer.contents)) targetContainer.contents = [];
-        targetContainer.contents.push(draggedItem);
+        targetItems.push(draggedItem);
 
-        // Перерисовываем и исходный, и целевой контейнеры
-        const sourceContainerPath = draggedItemPath.slice(0, -1);
-        await rerenderContainer(sourceContainerPath);
-        await rerenderContainer(containerPath);
+        // Полная перерисовка сохраняет корректные пути после сдвига индексов.
+        await renderInventoryTab(currentCharacterData);
 
         recalculateInventoryTotals();
         scheduleAutoSave();
