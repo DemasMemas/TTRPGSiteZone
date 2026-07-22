@@ -1,106 +1,106 @@
 /* ===== Переменные тем ===== */
 :root {
-  --bg-color: #111122;
-  --text-color: white;
-  --text-secondary: rgba(255,255,255,0.7);
-  --text-muted: rgba(255,255,255,0.5);
-  --text-soft: #aaa;
-  --text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+  --bg-color: #070a08;
+  --text-color: #efe9da;
+  --text-secondary: rgba(239,233,218,0.75);
+  --text-muted: rgba(239,233,218,0.54);
+  --text-soft: #b6ad97;
+  --text-shadow: 0 1px 2px rgba(0,0,0,0.75);
 
-  --panel-bg: rgba(20, 20, 30, 0.85);
-  --panel-header-bg: rgba(40, 40, 50, 0.9);
-  --panel-border: rgba(255,255,255,0.1);
-  --panel-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  --panel-bg: rgba(10, 13, 10, 0.88);
+  --panel-header-bg: rgba(22, 26, 19, 0.95);
+  --panel-border: rgba(184, 164, 110, 0.14);
+  --panel-shadow: 0 18px 42px rgba(0,0,0,0.55);
 
-  --btn-bg: rgba(60, 60, 80, 0.9);
-  --btn-primary-bg: #4a6fa5;
-  --btn-primary-hover: #3a5a8c;
-  --btn-secondary-bg: rgba(100, 100, 120, 0.9);
-  --btn-secondary-hover: rgba(120, 120, 140, 0.9);
-  --btn-danger-bg: #dc3545;
-  --btn-danger-hover: #c82333;
+  --btn-bg: rgba(25, 28, 22, 0.94);
+  --btn-primary-bg: #6c7543;
+  --btn-primary-hover: #7d8650;
+  --btn-secondary-bg: rgba(56, 60, 52, 0.92);
+  --btn-secondary-hover: rgba(72, 76, 66, 0.94);
+  --btn-danger-bg: #8f4d3f;
+  --btn-danger-hover: #a35d4c;
 
-  --input-bg: rgba(0,0,0,0.3);
-  --input-border: rgba(255,255,255,0.2);
-  --input-placeholder: rgba(255,255,255,0.5);
+  --input-bg: rgba(5, 8, 6, 0.58);
+  --input-border: rgba(184, 164, 110, 0.18);
+  --input-placeholder: rgba(239,233,218,0.42);
 
-  --message-bg: rgba(255,255,255,0.1);
-  --message-system-bg: rgba(255,255,0,0.1);
-  --message-system-border: gold;
-  --username-color: #aaccff;
+  --message-bg: rgba(255,255,255,0.05);
+  --message-system-bg: rgba(161,138,75,0.11);
+  --message-system-border: #b79d58;
+  --username-color: #d6c278;
 
-  --online-color: #8f8;
-  --offline-color: #888;
-  --ban-btn-color: #f66;
-  --ban-btn-hover: #f00;
+  --online-color: #a7c47b;
+  --offline-color: #7f7a69;
+  --ban-btn-color: #d28a77;
+  --ban-btn-hover: #f0a18d;
 
-  --tab-btn-color: rgba(255,255,255,0.7);
-  --tab-btn-active-bg: #4a6fa5;
-  --unban-btn-color: #4f6b99;
-  --unban-btn-hover: #6f8bbf;
+  --tab-btn-color: rgba(239,233,218,0.74);
+  --tab-btn-active-bg: #6f5f32;
+  --unban-btn-color: #c3aa68;
+  --unban-btn-hover: #e0cb86;
 
-  --skill-btn-bg: #3a4a6f;
-  --skill-btn-hover: #4f6b99;
+  --skill-btn-bg: #4f5630;
+  --skill-btn-hover: #6c7543;
 
-  --scrollbar-track: rgba(0,0,0,0.1);
-  --scrollbar-thumb: rgba(255,255,255,0.3);
+  --scrollbar-track: rgba(0,0,0,0.14);
+  --scrollbar-thumb: rgba(184, 164, 110, 0.36);
 
-  --range-bg: rgba(255,255,255,0.2);
-  --range-thumb: #4a6fa5;
+  --range-bg: rgba(255,255,255,0.12);
+  --range-thumb: #7d8650;
 
-  --hint-color: #aaa;
-  --loading-color: #007bff;
+  --hint-color: #b6ad97;
+  --loading-color: #b79d58;
 }
 
 body.light-theme {
-  --bg-color: #f0f0f0;
-  --text-color: #222;
-  --text-secondary: rgba(0,0,0,0.7);
-  --text-muted: rgba(0,0,0,0.5);
-  --text-soft: #555;
+  --bg-color: #ebe5d4;
+  --text-color: #24221d;
+  --text-secondary: rgba(36,34,29,0.72);
+  --text-muted: rgba(36,34,29,0.54);
+  --text-soft: #5f5a4f;
   --text-shadow: none;
 
-  --panel-bg: rgba(255, 255, 255, 0.9);
-  --panel-header-bg: rgba(220, 220, 230, 0.9);
-  --panel-border: rgba(0,0,0,0.1);
-  --panel-shadow: 0 4px 20px rgba(0,0,0,0.2);
+  --panel-bg: rgba(250, 246, 236, 0.92);
+  --panel-header-bg: rgba(224, 216, 199, 0.92);
+  --panel-border: rgba(36,34,29,0.1);
+  --panel-shadow: 0 4px 20px rgba(0,0,0,0.16);
 
-  --btn-bg: rgba(200, 200, 220, 0.9);
-  --btn-primary-bg: #4a6fa5;
-  --btn-primary-hover: #3a5a8c;
-  --btn-secondary-bg: rgba(180, 180, 200, 0.9);
-  --btn-secondary-hover: rgba(160, 160, 180, 0.9);
+  --btn-bg: rgba(228, 221, 208, 0.94);
+  --btn-primary-bg: #7a8051;
+  --btn-primary-hover: #6c7543;
+  --btn-secondary-bg: rgba(210, 203, 188, 0.94);
+  --btn-secondary-hover: rgba(196, 188, 174, 0.98);
 
-  --input-bg: rgba(255,255,255,0.8);
-  --input-border: rgba(0,0,0,0.2);
-  --input-placeholder: rgba(0,0,0,0.5);
+  --input-bg: rgba(255,255,255,0.82);
+  --input-border: rgba(36,34,29,0.16);
+  --input-placeholder: rgba(36,34,29,0.48);
 
-  --message-bg: rgba(0,0,0,0.05);
-  --message-system-bg: rgba(255,215,0,0.1);
-  --message-system-border: darkgoldenrod;
-  --username-color: #2a4f8e;
+  --message-bg: rgba(36,34,29,0.05);
+  --message-system-bg: rgba(161,138,75,0.12);
+  --message-system-border: #8c7234;
+  --username-color: #6f5f32;
 
-  --online-color: #2e7d32;
-  --offline-color: #757575;
-  --ban-btn-color: #d32f2f;
-  --ban-btn-hover: #b71c1c;
+  --online-color: #486d2f;
+  --offline-color: #6d675d;
+  --ban-btn-color: #b85b47;
+  --ban-btn-hover: #9b402d;
 
-  --tab-btn-color: rgba(0,0,0,0.7);
-  --tab-btn-active-bg: #4a6fa5;
-  --unban-btn-color: #2a4f8e;
-  --unban-btn-hover: #1e3a6b;
+  --tab-btn-color: rgba(36,34,29,0.7);
+  --tab-btn-active-bg: #7a8051;
+  --unban-btn-color: #6f5f32;
+  --unban-btn-hover: #4e4524;
 
-  --skill-btn-bg: #5a7ab5;
-  --skill-btn-hover: #4f6b99;
+  --skill-btn-bg: #8a9162;
+  --skill-btn-hover: #7a8051;
 
   --scrollbar-track: rgba(0,0,0,0.05);
-  --scrollbar-thumb: rgba(0,0,0,0.2);
+  --scrollbar-thumb: rgba(36,34,29,0.22);
 
-  --range-bg: rgba(0,0,0,0.1);
-  --range-thumb: #4a6fa5;
+  --range-bg: rgba(36,34,29,0.1);
+  --range-thumb: #7a8051;
 
-  --hint-color: #666;
-  --loading-color: #0066cc;
+  --hint-color: #6d675d;
+  --loading-color: #7a8051;
 }
 
 /* ===== Глобальные стили ===== */
@@ -112,7 +112,11 @@ body.light-theme {
 }
 
 body {
-  background: var(--bg-color);
+  background:
+    radial-gradient(circle at top left, rgba(123, 103, 48, 0.08), transparent 34%),
+    radial-gradient(circle at bottom right, rgba(36, 75, 54, 0.18), transparent 26%),
+    linear-gradient(180deg, rgba(4, 6, 5, 0.78), rgba(4, 6, 5, 0.92)),
+    var(--bg-color);
   color: var(--text-color);
   overflow: hidden;
 }
@@ -196,8 +200,9 @@ body {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--panel-header-bg);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.14)), var(--panel-header-bg);
   border-radius: 12px 12px 0 0;
+  border-bottom: 1px solid rgba(184, 164, 110, 0.1);
 }
 .draggable-panel .panel-header:active {
   cursor: grabbing;
@@ -211,11 +216,11 @@ body {
   line-height: 1;
   padding: 2px 6px;
   border-radius: 4px;
-  background: rgba(255,255,255,0.1);
+  background: rgba(184, 164, 110, 0.1);
   transition: background 0.2s;
 }
 .toggle-btn:hover {
-  background: rgba(255,255,255,0.2);
+  background: rgba(184, 164, 110, 0.2);
 }
 
 /* Панель участников */
@@ -250,12 +255,13 @@ body {
 #online-participants li,
 #offline-participants li {
   padding: 5px 10px 5px 20px;
-  background: rgba(255,255,255,0.05);
+  background: rgba(255,255,255,0.04);
   border-radius: 20px;
   margin-bottom: 4px;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  border: 1px solid rgba(184, 164, 110, 0.08);
 }
 #online-participants li {
   color: var(--online-color);
@@ -304,6 +310,7 @@ body {
   border-radius: 12px;
   max-width: 90%;
   word-wrap: break-word;
+  border: 1px solid rgba(184, 164, 110, 0.06);
 }
 .message .username {
   font-weight: bold;
@@ -388,6 +395,7 @@ body {
   align-items: center;
   gap: 15px;
   z-index: 3;
+  border: 1px solid rgba(184, 164, 110, 0.12);
 }
 .lobby-menu .menu-item {
   color: var(--text-color);
@@ -422,6 +430,7 @@ body {
   padding: 15px;
   z-index: 4;
   box-shadow: var(--panel-shadow);
+  border: 1px solid rgba(184, 164, 110, 0.12);
 }
 .settings-header {
   display: flex;
@@ -452,7 +461,7 @@ body {
   color: white;
 }
 .tab-btn:hover {
-  background: rgba(255,255,255,0.1);
+  background: rgba(184, 164, 110, 0.12);
 }
 .settings-tab-content {
   padding: 10px 0;
@@ -466,7 +475,7 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 8px 12px;
-  background: rgba(255,255,255,0.05);
+  background: rgba(255,255,255,0.04);
   border-radius: 20px;
   margin-bottom: 5px;
 }
@@ -498,6 +507,7 @@ body {
   overflow-x: auto;
   max-width: 100%;
   white-space: nowrap;
+  border: 1px solid rgba(184, 164, 110, 0.12);
 }
 #gm-only-controls {
   display: inline-flex;

@@ -179,6 +179,8 @@ const customModals = [
     '#create-backpack-template-modal',
     '#create-vest-template-modal',
     '#create-inventory-item-modal',
+    '#inventory-template-picker-modal',
+    '#ammo-selection-modal',
     '#create-special-trait-template-modal',
     '#create-background-template-modal'
 ];

@@ -5,6 +5,8 @@ import heapq
 from app.extensions import db
 from app.models import Location, LocationCharacter, LocationCombatState, LobbyParticipant, LobbyCharacter, LocationObject
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+from app.services.effects import apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
+from sqlalchemy.orm.attributes import flag_modified
 
 
 DEFAULT_ACTION_POINTS = 5
@@ -114,6 +116,196 @@ class CombatService:
         if raw_penalty is None:
             raw_penalty = data.get('movementPenalty', data.get('movement_penalty', 0))
         return max(0, CombatService._coerce_int(raw_penalty, 0))
+
+    @staticmethod
+    def _skill_modifier(character_data, skill_path):
+        current = character_data if isinstance(character_data, dict) else {}
+        for part in skill_path.split('.'):
+            if not isinstance(current, dict):
+                return 0
+            current = current.get(part)
+        if not isinstance(current, dict):
+            base_mod = 0
+            bonus = 0
+        else:
+            base = current.get('base')
+            bonus = current.get('bonus', 0)
+            base_mod = math.floor((CombatService._coerce_int(base, 10) - 10) / 2)
+        temp_bonus = CombatService._consumable_stat_bonus(character_data, skill_path.split('.')[-1])
+        return base_mod + CombatService._coerce_int(bonus, 0) + temp_bonus
+
+    @staticmethod
+    def _consumable_stat_bonus(character_data, stat_name):
+        if not isinstance(character_data, dict):
+            return 0
+        health = character_data.get('health') if isinstance(character_data.get('health'), dict) else {}
+        combat_meta = health.get('combatMeta') if isinstance(health, dict) and isinstance(health.get('combatMeta'), dict) else {}
+        modifiers = combat_meta.get('consumableModifiers')
+        if not isinstance(modifiers, list):
+            return 0
+        total = 0
+        for item in modifiers:
+            if not isinstance(item, dict):
+                continue
+            remaining = item.get('remaining')
+            if remaining is not None and CombatService._coerce_int(remaining, 0) <= 0:
+                continue
+            item_stat = str(item.get('stat') or '').strip()
+            if item_stat in {stat_name, f'{stat_name}_delta', 'generic', 'generic_multiplier'}:
+                total += CombatService._coerce_int(item.get('value', 0), 0)
+        return total
+
+    @staticmethod
+    def _bleeding_modifier_total(health):
+        if not isinstance(health, dict):
+            return 0
+        combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+        modifiers = combat_meta.get('bleedingModifiers')
+        if isinstance(modifiers, list):
+            total = 0
+            for item in modifiers:
+                if isinstance(item, dict):
+                    remaining = item.get('remaining')
+                    if remaining is not None and CombatService._coerce_int(remaining, 0) <= 0:
+                        continue
+                    total += CombatService._coerce_int(item.get('value', 0), 0)
+                else:
+                    total += CombatService._coerce_int(item, 0)
+            return total
+        return CombatService._coerce_int(combat_meta.get('bleedingModifierTotal', health.get('bleedingModifierTotal', 0)), 0)
+
+    @staticmethod
+    def _advance_blood_stage(stage):
+        order = ['normal', 'light', 'medium', 'severe', 'critical']
+        current = str(stage or 'normal').lower()
+        if current not in order:
+            current = 'normal'
+        index = order.index(current)
+        next_index = min(len(order) - 1, index + 1)
+        return order[next_index]
+
+    @staticmethod
+    def _resolve_bleeding_check(loc_char):
+        if not loc_char or not getattr(loc_char, 'character', None):
+            return None
+        character = loc_char.character
+        character_data = character.data if isinstance(character.data, dict) else {}
+        health = character_data.get('health')
+        if not isinstance(health, dict):
+            return None
+
+        sync_health_derived_statuses(health)
+        bleeding = health.get('bleeding') if isinstance(health.get('bleeding'), dict) else {}
+        severity = CombatService._coerce_int(bleeding.get('totalSeverity', health.get('bleedingSeverity', 0)), 0)
+        if severity <= 0:
+            return None
+
+        stage = str(health.get('blood') or health.get('bloodStage') or 'normal').lower()
+        stage_penalty = CombatService._coerce_int(bleeding.get('stagePenalty', 0), 0)
+        modifier_total = CombatService._bleeding_modifier_total(health)
+        will_bonus = CombatService._skill_modifier(character_data, 'skills.physical.will')
+        roll = random.randint(1, 20)
+        total = roll + will_bonus
+        difficulty = max(0, 5 + severity - stage_penalty + modifier_total - will_bonus)
+        success = total >= difficulty
+
+        meta = health.setdefault('combatMeta', {})
+        meta['bleedingCheck'] = {
+            'roll': roll,
+            'bonus': will_bonus,
+            'total': total,
+            'difficulty': difficulty,
+            'severity': severity,
+            'stagePenalty': stage_penalty,
+            'modifierTotal': modifier_total,
+            'success': success,
+        }
+
+        if not success:
+            health['blood'] = CombatService._advance_blood_stage(stage)
+        health['bloodStage'] = str(health.get('blood') or stage or 'normal').lower()
+        sync_health_derived_statuses(health)
+        character_data['health'] = health
+        character.data = character_data
+        flag_modified(character, 'data')
+        return meta['bleedingCheck']
+
+    @staticmethod
+    def _tick_character_effects(loc_char, phase='turn_end'):
+        if not loc_char:
+            return loc_char
+        effects = loc_char.effects if isinstance(loc_char.effects, list) else []
+        loc_char.effects = tick_effects(effects, phase=phase)
+        return loc_char
+
+    @staticmethod
+    def _apply_periodic_health_effects(loc_char, phase='turn_end'):
+        if not loc_char or not getattr(loc_char, 'character', None):
+            return loc_char
+        character_data = loc_char.character.data if isinstance(loc_char.character.data, dict) else {}
+        health = character_data.get('health')
+        if not isinstance(health, dict):
+            return loc_char
+        health['effects'] = tick_effects(health.get('effects') or [], phase=phase)
+        apply_periodic_effects_to_health(health, health.get('effects') or [], phase=phase)
+        combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else None
+        if isinstance(combat_meta, dict):
+            for key in ('consumableModifiers', 'bleedingModifiers'):
+                items = combat_meta.get(key)
+                if not isinstance(items, list):
+                    continue
+                updated = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        updated.append(item)
+                        continue
+                    remaining = item.get('remaining')
+                    if remaining is None:
+                        updated.append(item)
+                        continue
+                    next_remaining = max(0, CombatService._coerce_int(remaining, 0) - 1)
+                    if next_remaining > 0:
+                        updated.append({**item, 'remaining': next_remaining})
+                combat_meta[key] = updated
+        character_data['health'] = health
+        loc_char.character.data = character_data
+        flag_modified(loc_char.character, 'data')
+        return loc_char
+
+    @staticmethod
+    def _sync_location_effects_from_character(loc_char):
+        if not loc_char or not getattr(loc_char, 'character', None):
+            return loc_char
+        character_data = loc_char.character.data if isinstance(loc_char.character.data, dict) else {}
+        normalize_character_effects(character_data)
+        loc_char.character.data = character_data
+        flag_modified(loc_char.character, 'data')
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        if isinstance(health, dict):
+            loc_char.effects = normalize_effect_list(health.get('effects') or [])
+        else:
+            loc_char.effects = []
+        return loc_char
+
+    @staticmethod
+    def _apply_end_of_round_pain_recovery(loc_chars):
+        for loc_char in loc_chars or []:
+            character = getattr(loc_char, 'character', None)
+            if not character or not isinstance(character.data, dict):
+                continue
+            data = character.data
+            health = data.get('health')
+            if not isinstance(health, dict):
+                continue
+            meta = health.setdefault('combatMeta', {})
+            pain_level = max(0, CombatService._coerce_int(health.get('painLevel', 0), 0))
+            pain_increased = bool(meta.get('painIncreased', False))
+            if not pain_increased and pain_level > 0:
+                health['painLevel'] = pain_level - 1
+            meta['painSnapshot'] = health.get('painLevel', 0)
+            meta['painIncreased'] = False
+            character.data = data
+            flag_modified(character, 'data')
 
     @staticmethod
     def _object_height(obj):
@@ -460,6 +652,10 @@ class CombatService:
     def _serialize_character(loc_char, current_turn_id=None):
         character = loc_char.character
         profile = CombatService._combat_profile(loc_char)
+        data = character.data if character and isinstance(character.data, dict) else {}
+        health = data.get('health') if isinstance(data, dict) else {}
+        if not isinstance(health, dict):
+            health = {}
         return {
             'location_character_id': loc_char.id,
             'character_id': character.id if character else None,
@@ -483,6 +679,17 @@ class CombatService:
             'movement_gain': profile['movement_gain'],
             'hp_zones': loc_char.hp_zones,
             'effects': loc_char.effects,
+            'pain_level': CombatService._coerce_int(health.get('painLevel', 0), 0),
+            'exhaustion': CombatService._coerce_int(health.get('exhaustion', 0), 0),
+            'stress': CombatService._coerce_int(health.get('stress', 0), 0),
+            'radiation': CombatService._coerce_int(health.get('radiation', 0), 0),
+            'blood': health.get('blood') or health.get('bloodStage') or 'normal',
+            'blood_stage': health.get('bloodStage') or health.get('blood') or 'normal',
+            'bleeding_severity': CombatService._coerce_int(health.get('bleedingSeverity', 0), 0),
+            'bleeding_difficulty': CombatService._coerce_int(health.get('bleedingDifficulty', 0), 0),
+            'bleeding_modifier_total': CombatService._coerce_int(health.get('bleedingModifierTotal', 0), 0),
+            'will_bonus': CombatService._skill_modifier(data, 'skills.physical.will'),
+            'bleeding': health.get('bleeding', {}),
             'is_current_turn': loc_char.id == current_turn_id,
         }
 
@@ -586,6 +793,7 @@ class CombatService:
             loc_char.initiative_roll = random.randint(1, 20)
             loc_char.initiative_total = loc_char.initiative_roll + loc_char.initiative_bonus
             CombatService._prepare_character_for_turn(loc_char)
+            CombatService._sync_location_effects_from_character(loc_char)
 
         ordered_chars = sorted(
             loc_chars,
@@ -646,10 +854,19 @@ class CombatService:
             raise NotFoundError("Next character not found")
 
         if next_index == 0:
+            round_characters = CombatService._unique_location_characters(
+                LocationCharacter.query.filter_by(location_id=location_id).all()
+            )
+            CombatService._apply_end_of_round_pain_recovery(round_characters)
             state.round_number += 1
         state.turn_index = next_index
         state.current_location_character_id = next_character_id
+        CombatService._tick_character_effects(current_character, phase='turn_end')
+        CombatService._apply_periodic_health_effects(current_character, phase='turn_end')
+        CombatService._resolve_bleeding_check(current_character)
+        CombatService._sync_location_effects_from_character(current_character)
         CombatService._prepare_character_for_turn(next_character)
+        CombatService._sync_location_effects_from_character(next_character)
         db.session.commit()
 
         return CombatService._serialize_state(location, state)
@@ -855,6 +1072,9 @@ class CombatService:
             loc_char.initiative_roll = None
             loc_char.initiative_total = None
             loc_char.movement_points_current = 0
+            CombatService._tick_character_effects(loc_char, phase='turn_end')
+            CombatService._apply_periodic_health_effects(loc_char, phase='turn_end')
+            CombatService._sync_location_effects_from_character(loc_char)
 
         db.session.commit()
         return CombatService._serialize_state(location, state)

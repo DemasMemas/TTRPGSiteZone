@@ -23,6 +23,7 @@ import { Server } from './api.js';
 import { showNotification } from './utils.js';
 import { lobbyParticipants } from './ui.js';
 import { getSocket } from './socketHandlers.js';
+import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
 
 // ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
 let currentCharacterId = null;
@@ -147,6 +148,147 @@ function getCategoryDisplay(cat) {
     return map[cat] || cat;
 }
 
+function formatAmmoPenetration(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '0%';
+    if (num <= 1) return `${Math.round(num * 100)}%`;
+    return `${Math.round(num)}%`;
+}
+
+function normalizeAmmoVariant(value) {
+    const text = String(value || '').trim().toLowerCase();
+    if (!text || text === 'нет' || text === 'обычные' || text === 'standard') return null;
+    if (text.includes('убп')) return 'ubp';
+    if (text === 'rip' || text.includes('rip')) return 'rip';
+    if (text.includes('бронеб') || text === 'бп' || text === 'bp') return 'bp';
+    if (text.includes('экспанс') || text === 'эп' || text === 'ep') return 'ep';
+    if (text.includes('разрыв') || text.includes('взрыв')) return 'explosive';
+    if (text.includes('зажиг')) return 'incendiary';
+    if (text.includes('светошум')) return 'flashbang';
+    if (text.includes('дым')) return 'smoke';
+    if (text.includes('газ')) return 'gas';
+    return text;
+}
+
+function getAmmoVariantLabel(value) {
+    const variant = normalizeAmmoVariant(value);
+    const map = {
+        bp: 'БП',
+        ep: 'ЭП',
+        ubp: 'УБП',
+        rip: 'RIP',
+        explosive: 'Взрывные',
+        incendiary: 'Зажигательные',
+        flashbang: 'Светошумовые',
+        smoke: 'Дымовые',
+        gas: 'Газовые'
+    };
+    return variant ? (map[variant] || String(value)) : 'Обычные';
+}
+
+function normalizeAmmoVariants(value) {
+    if (Array.isArray(value)) {
+        return Array.from(new Set(value.map(normalizeAmmoVariant).filter(Boolean)));
+    }
+    if (!value) return [];
+    return String(value)
+        .split(/[,/;\n]+/)
+        .map(part => normalizeAmmoVariant(part))
+        .filter(Boolean)
+        .filter((variant, index, array) => array.indexOf(variant) === index);
+}
+
+function getAmmoVariantLabels(value) {
+    const variants = normalizeAmmoVariants(value);
+    if (!variants.length) return 'Обычные';
+    return variants.map(getAmmoVariantLabel).join(', ');
+}
+
+function getItemCaliber(item) {
+    const value = item?.attributes?.caliber
+        ?? item?.caliber
+        ?? item?.subcategory
+        ?? item?.attributes?.ammo_group
+        ?? item?.attributes?.magazine_caliber
+        ?? '';
+    return normalizeCaliberText(value);
+}
+
+function normalizeCaliberText(value) {
+    return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[×*]/g, 'x')
+        .replace(/\s+/g, '')
+        .replace(/\./g, '')
+        .replace(/[^a-z0-9x+-]/g, '');
+}
+
+const AMMO_VARIANT_MODIFIERS = {
+    bp: { damagePercent: 100, penetrationDeltaPercent: 20 },
+    ep: { damagePercent: 150, penetrationDeltaPercent: -15 },
+    ubp: { damagePercent: 100, penetrationDeltaPercent: 35 },
+    rip: { damagePercent: 300, penetrationDeltaPercent: -50 },
+    explosive: { damagePercent: 300, penetrationDeltaPercent: -5 },
+    incendiary: { damagePercent: 100, penetrationDeltaPercent: 0 },
+    flashbang: { damagePercent: 100, penetrationDeltaPercent: -100 },
+    smoke: { damagePercent: 0, penetrationDeltaPercent: -100 },
+    gas: { damagePercent: 0, penetrationDeltaPercent: -100 }
+};
+
+function getAmmoVariantStats(baseDamage, basePenetration, variant) {
+    const normalized = normalizeAmmoVariant(variant);
+    const modifier = normalized ? AMMO_VARIANT_MODIFIERS[normalized] : null;
+    if (!modifier) {
+        return {
+            damage: Math.max(0, Math.round(Number(baseDamage) || 0)),
+            penetration: Math.max(0, Math.round((Number(basePenetration) || 0) * 100)),
+        };
+    }
+    const damagePercent = Number.isFinite(Number(modifier.damagePercent)) ? Number(modifier.damagePercent) : 100;
+    const penetrationDeltaPercent = Number.isFinite(Number(modifier.penetrationDeltaPercent)) ? Number(modifier.penetrationDeltaPercent) : 0;
+    const damage = Math.max(0, Math.round((Number(baseDamage) || 0) * damagePercent / 100));
+    const basePercent = Math.round((Number(basePenetration) || 0) * 100);
+    const penetration = Math.max(0, Math.round(basePercent + penetrationDeltaPercent));
+    return { damage, penetration };
+}
+
+function applyAmmoVariantToItem(item, template, variant) {
+    if (!item || item.category !== 'ammo') return item;
+    const normalized = normalizeAmmoVariant(variant);
+    const baseDamage = Number(template?.attributes?.damage ?? item.attributes?.damage ?? item.damage ?? 0);
+    const basePenetration = Number(template?.attributes?.penetration ?? item.attributes?.penetration ?? item.penetration ?? 0);
+    const stats = getAmmoVariantStats(baseDamage, basePenetration, normalized);
+    if (!item.attributes) item.attributes = {};
+    item.attributes.ammo_variant = normalized || null;
+    item.attributes.damage = stats.damage;
+    item.attributes.penetration = stats.penetration / 100;
+    item.damage = stats.damage;
+    item.penetration = stats.penetration / 100;
+    const baseName = template?.name || item.name || 'Патрон';
+    item.name = normalized ? `${baseName} (${getAmmoVariantLabel(normalized)})` : baseName;
+    return item;
+}
+
+window.closeInventoryTemplatePicker = function() {
+    const modal = document.getElementById('inventory-template-picker-modal');
+    if (modal) modal.style.display = 'none';
+};
+
+function bindBackdropClose(modal, closeFn) {
+    if (!modal || modal._backdropCloseBound) return;
+    const content = modal.querySelector('.modal-content');
+    if (content) {
+        ['pointerdown', 'mousedown', 'click'].forEach((eventName) => {
+            content.addEventListener(eventName, (e) => e.stopPropagation());
+        });
+    }
+    modal.addEventListener('mousedown', (e) => {
+        if (e.target === modal) closeFn();
+    });
+    modal._backdropCloseBound = true;
+}
+
 async function getAllItemTemplates(forceRefresh = false) {
     if (!forceRefresh && allTemplatesCache) return allTemplatesCache;
 
@@ -161,7 +303,10 @@ async function getAllItemTemplates(forceRefresh = false) {
     for (const cat of categories) {
         try {
             const templates = await loadTemplatesForLobby(cat);
-            all = all.concat(templates.map(t => ({
+            const normalizedTemplates = cat === 'ammo'
+                ? templates.filter(t => t.source === 'global')
+                : templates;
+            all = all.concat(normalizedTemplates.map(t => ({
                 ...t,
                 categoryDisplay: getCategoryDisplay(cat),
                 // Для удобства: вытаскиваем вес и объём из attributes или корня
@@ -180,7 +325,7 @@ function clearAllTemplatesCache() {
     allTemplatesCache = null;
     const categories = ['weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
                         'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch',
-                        'weapon_module'];
+                        'weapon_module', 'ammo'];
     categories.forEach(cat => clearTemplatesCache(cat));
 }
 
@@ -353,6 +498,9 @@ function updateDataFromFields() {
             value = input.checked;
         } else if (input.type === 'number') {
             value = input.value === '' ? null : parseFloat(input.value);
+        } else if (input.dataset?.nullableNumber === 'true') {
+            const normalized = String(input.value || '').trim();
+            value = (!normalized || normalized === '—' || normalized === '-' || normalized === '–') ? null : parseFloat(normalized);
         } else {
             value = input.value;
         }
@@ -362,6 +510,17 @@ function updateDataFromFields() {
         }
         setValueByPath(currentCharacterData, name, value);
     });
+    normalizeCharacterEffects(currentCharacterData);
+    if (currentCharacterData.health) {
+        if (Array.isArray(currentCharacterData.health.effects)) {
+            currentCharacterData.health.effects.forEach(effect => {
+                if (effect && effect.remaining !== null && effect.remaining !== undefined) {
+                    effect.duration = effect.remaining;
+                }
+            });
+        }
+        syncHealthDerivedStatuses(currentCharacterData.health);
+    }
 }
 
 function scheduleAutoSave() {
@@ -523,6 +682,8 @@ function createItemFromTemplate(template, quantity = 1) {
         category: template.category,
         subcategory: template.subcategory,
         quantity: quantity,
+        uses: template.attributes?.uses ?? null,
+        maxUses: template.attributes?.uses ?? null,
         weight: template.weight || 0,
         volume: template.volume || 0,
         price: template.price || 0,
@@ -537,6 +698,7 @@ function createItemFromTemplate(template, quantity = 1) {
     };
 
     if (template.category === 'magazine') {
+        item.caliber = template.attributes?.caliber || template.subcategory || null;
         item.emptyWeight = template.attributes?.emptyWeight || 0;
         item.loadedWeight = template.attributes?.loadedWeight || 0;
         item.ammo = [];
@@ -549,6 +711,7 @@ function createItemFromTemplate(template, quantity = 1) {
     }
 
     if (template.category === 'ammo') {
+        item.caliber = template.attributes?.caliber || template.subcategory || null;
         // Начальный вес пачки патронов
         const qty = item.quantity;
         if (qty === 0) {
@@ -558,6 +721,8 @@ function createItemFromTemplate(template, quantity = 1) {
             const occupiedVolume = singleVolume * qty;
             item.weight = (occupiedVolume < 0.5) ? 0.1 : 0.25;
         }
+        item.damage = template.attributes?.damage ?? 0;
+        item.penetration = template.attributes?.penetration ?? 0;
     }
 
     if (template.category === 'armor_plate') {
@@ -1250,6 +1415,122 @@ window.saveMagazineTemplate = async function() {
     } catch (e) { showNotification(e.message); }
 };
 
+window.openCreateAmmoTemplateModal = function(template = null) {
+    let modal = document.getElementById('create-ammo-template-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'create-ammo-template-modal';
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+                <span class="close" onclick="document.getElementById('create-ammo-template-modal').style.display='none'">&times;</span>
+                <h3>${template ? 'Редактировать' : 'Создать'} патроны</h3>
+                <input type="hidden" id="ammo-template-id">
+                <div class="form-group"><label>Название</label><input type="text" id="ammo-name" class="form-control"></div>
+                <div class="form-group"><label>Калибр</label><input type="text" id="ammo-caliber" class="form-control" placeholder="например, 5.45x39"></div>
+                <div class="form-group">
+                    <label>Вариация патрона</label>
+                    <select id="ammo-variant" class="form-control">
+                        <option value="">Обычные</option>
+                        <option value="bp">БП</option>
+                        <option value="ep">ЭП</option>
+                        <option value="ubp">УБП</option>
+                        <option value="rip">RIP</option>
+                        <option value="explosive">Взрывные</option>
+                        <option value="incendiary">Зажигательные</option>
+                        <option value="flashbang">Светошумовые</option>
+                        <option value="smoke">Дымовые</option>
+                        <option value="gas">Газовые</option>
+                    </select>
+                    <small style="display:block; margin-top:4px; opacity:0.75;">Выбирается только один вариант.</small>
+                </div>
+                <div class="form-group"><label>Категория покупки</label><input type="text" id="ammo-purchase-category" class="form-control" placeholder="например, боевые, охотничьи"></div>
+                <div class="form-group"><label>Урон</label><input type="number" id="ammo-damage" class="form-control number-input" value="0"></div>
+                <div class="form-group"><label>Пробитие, %</label><input type="number" id="ammo-penetration" class="form-control number-input" value="0" min="0" max="100"></div>
+                <div class="form-group"><label>Дальность</label><input type="number" id="ammo-range" class="form-control number-input" value="0"></div>
+                <div class="form-group"><label>Примечания</label><textarea id="ammo-notes" class="form-control" rows="3"></textarea></div>
+                <div class="form-group"><label>Цена</label><input type="number" id="ammo-price" class="form-control number-input" value="0"></div>
+                <div class="form-group"><label>Вес</label><input type="number" id="ammo-weight" class="form-control number-input" value="0" step="0.1"></div>
+                <div class="form-group"><label>Объём</label><input type="number" id="ammo-volume" class="form-control number-input" value="0" step="0.1"></div>
+                <div class="form-actions"><button class="btn btn-primary" onclick="saveAmmoTemplate()">Сохранить</button><button class="btn btn-secondary" onclick="document.getElementById('create-ammo-template-modal').style.display='none'">Отмена</button></div>
+            </div>`;
+        document.body.appendChild(modal);
+    }
+    if (template) {
+        document.getElementById('ammo-template-id').value = template.id;
+        document.getElementById('ammo-name').value = template.name || '';
+        document.getElementById('ammo-caliber').value = template.attributes?.caliber || '';
+        document.getElementById('ammo-variant').value = normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect) || '';
+        document.getElementById('ammo-purchase-category').value = template.attributes?.purchase_category || '';
+        document.getElementById('ammo-damage').value = template.attributes?.damage ?? 0;
+        document.getElementById('ammo-penetration').value = formatAmmoPenetration(template.attributes?.penetration ?? 0).replace('%', '');
+        document.getElementById('ammo-range').value = template.attributes?.range ?? 0;
+        document.getElementById('ammo-notes').value = template.attributes?.notes || '';
+        document.getElementById('ammo-price').value = template.price || 0;
+        document.getElementById('ammo-weight').value = template.weight || 0;
+        document.getElementById('ammo-volume').value = template.volume || 0;
+    } else {
+        document.getElementById('ammo-template-id').value = '';
+        document.getElementById('ammo-name').value = '';
+        document.getElementById('ammo-caliber').value = '';
+        document.getElementById('ammo-variant').value = '';
+        document.getElementById('ammo-purchase-category').value = '';
+        document.getElementById('ammo-damage').value = 0;
+        document.getElementById('ammo-penetration').value = 0;
+        document.getElementById('ammo-range').value = 0;
+        document.getElementById('ammo-notes').value = '';
+        document.getElementById('ammo-price').value = 0;
+        document.getElementById('ammo-weight').value = 0;
+        document.getElementById('ammo-volume').value = 0;
+    }
+    modal.style.display = 'flex';
+};
+
+window.saveAmmoTemplate = async function() {
+    const id = document.getElementById('ammo-template-id').value;
+    const name = document.getElementById('ammo-name').value.trim();
+    if (!name) { showNotification('Введите название'); return; }
+
+    const caliber = document.getElementById('ammo-caliber').value.trim();
+    const ammoVariant = document.getElementById('ammo-variant').value.trim();
+    const purchaseCategory = document.getElementById('ammo-purchase-category').value.trim();
+    const notes = document.getElementById('ammo-notes').value.trim();
+    const penetrationPercent = parseFloat(document.getElementById('ammo-penetration').value);
+    const penetration = Number.isFinite(penetrationPercent) ? Math.max(0, penetrationPercent) / 100 : 0;
+
+    const data = {
+        name,
+        category: 'ammo',
+        subcategory: caliber || ammoVariant || null,
+        item_class: purchaseCategory || null,
+        price: parseInt(document.getElementById('ammo-price').value) || 0,
+        weight: parseFloat(document.getElementById('ammo-weight').value) || 0,
+        volume: parseFloat(document.getElementById('ammo-volume').value) || 0,
+        attributes: {
+            caliber,
+            ammo_variant: ammoVariant || null,
+            purchase_category: purchaseCategory,
+            damage: parseInt(document.getElementById('ammo-damage').value) || 0,
+            penetration,
+            range: parseInt(document.getElementById('ammo-range').value) || 0,
+            notes: notes || null
+        }
+    };
+
+    try {
+        if (id) await Server.updateLobbyTemplate(currentLobbyId, id, data);
+        else await Server.createLobbyTemplate(currentLobbyId, data);
+        clearTemplatesCache('ammo');
+        clearAllTemplatesCache();
+        document.getElementById('create-ammo-template-modal').style.display = 'none';
+        showNotification(id ? 'Патроны обновлены' : 'Патроны созданы', 'success');
+        if (typeof loadTemplatesForManager === 'function') {
+            const active = document.querySelector('#templates-modal .tab-btn.active')?.dataset.cat;
+            if (active === 'ammo') loadTemplatesForManager('ammo');
+        }
+    } catch (e) { showNotification(e.message); }
+};
+
 // ----- МЕНЕДЖЕР ШАБЛОНОВ -----
 window.openTemplatesManager = function() {
     document.getElementById('templates-modal').style.display = 'flex';
@@ -1269,18 +1550,86 @@ window.closeTemplatesManager = function() {
     document.getElementById('templates-modal').style.display = 'none';
 };
 
+function getTemplateManagerActionButtons(category) {
+    const buttons = [];
+    if (category === 'magazine') {
+        buttons.push(`<button type="button" class="btn btn-sm btn-primary" onclick="openCreateMagazineTemplateModal()">➕ Создать магазин</button>`);
+    }
+    return buttons.join('');
+}
+
+function renderTemplateManagerCards(category, templates) {
+    const isAmmo = category === 'ammo';
+    const showActions = category !== 'ammo';
+    const gridStyle = 'display:grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px;';
+    let html = `<div style="${gridStyle}">`;
+    templates.forEach(t => {
+        const attrs = t.attributes || {};
+        const tags = [];
+        if (isAmmo) {
+            if (attrs.caliber) tags.push(`Калибр: ${escapeHtml(String(attrs.caliber))}`);
+            if (attrs.damage !== undefined && attrs.damage !== null) tags.push(`Урон: ${escapeHtml(String(attrs.damage))}`);
+            if (attrs.penetration !== undefined && attrs.penetration !== null) tags.push(`Пробитие: ${escapeHtml(formatAmmoPenetration(attrs.penetration))}`);
+            if (attrs.range !== undefined && attrs.range !== null) tags.push(`Дальность: ${escapeHtml(String(attrs.range))}`);
+            const ammoVariants = attrs.ammo_variants?.length ? attrs.ammo_variants : (attrs.ammo_variant ? [attrs.ammo_variant] : []);
+            if (ammoVariants.length) tags.push(`Вариации: ${escapeHtml(getAmmoVariantLabels(ammoVariants))}`);
+            if (attrs.purchase_category) tags.push(`Категория: ${escapeHtml(String(attrs.purchase_category))}`);
+        } else {
+            if (attrs.caliber) tags.push(`Калибр: ${escapeHtml(String(attrs.caliber))}`);
+            if (attrs.capacity !== undefined && attrs.capacity !== null) tags.push(`Ёмкость: ${escapeHtml(String(attrs.capacity))}`);
+            if (attrs.reload_time_od !== undefined && attrs.reload_time_od !== null) tags.push(`Перезарядка: ${escapeHtml(String(attrs.reload_time_od))} ОД`);
+            if (attrs.isLoader) tags.push('Спидлоадер/лента');
+            if (Array.isArray(attrs.compatible_weapons) && attrs.compatible_weapons.length) tags.push(`Оружие: ${escapeHtml(String(attrs.compatible_weapons.length))}`);
+        }
+        html += `
+            <div style="border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:12px; background: rgba(0,0,0,0.18);">
+                <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                    <div>
+                        <div style="font-weight:700; font-size:15px; line-height:1.2;">${escapeHtml(t.name)}</div>
+                        <div style="opacity:0.7; font-size:12px; margin-top:2px;">ID ${t.id}${t.subcategory ? ` • ${escapeHtml(t.subcategory)}` : ''}</div>
+                    </div>
+                    <div style="font-size:12px; opacity:0.7;">${escapeHtml(category === 'ammo' ? 'Патроны' : 'Магазин')}</div>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:10px;">
+                    ${tags.map(tag => `<span style="font-size:12px; padding:3px 7px; border-radius:999px; background: rgba(255,255,255,0.08);">${tag}</span>`).join('')}
+                </div>
+                ${showActions ? `<div style="display:flex; gap:8px; margin-top:12px;">
+                    <button class="btn-sm btn-primary" onclick="editTemplate(${t.id}, '${category}')">✏️</button>
+                    <button class="btn-sm btn-danger" onclick="deleteTemplate(${t.id}, '${category}')">🗑️</button>
+                </div>` : '<div style="margin-top:12px; font-size:12px; opacity:0.7;">Глобальный шаблон</div>'}
+            </div>`;
+    });
+    html += '</div>';
+    return html;
+}
+
 async function loadTemplatesForManager(category) {
     const container = document.getElementById('templates-list');
+    const actionsContainer = document.getElementById('templates-manager-actions');
+    if (actionsContainer) actionsContainer.innerHTML = getTemplateManagerActionButtons(category);
     container.innerHTML = 'Загрузка...';
     try {
         const data = await Server.getLobbyTemplates(currentLobbyId, category);
-        const templates = data.local;
+        const templates = category === 'ammo'
+            ? [...(data.global || [])]
+            : data.local;
         if (!templates.length) {
             container.innerHTML = '<p>Нет кастомных шаблонов</p>';
             return;
         }
-        let html = '<table style="width:100%"><tr><th>ID</th><th>Название</th><th>Подкатегория</th><th></th></tr>';
+        const uniqueTemplates = [];
+        const seenIds = new Set();
         templates.forEach(t => {
+            if (!t || seenIds.has(t.id)) return;
+            seenIds.add(t.id);
+            uniqueTemplates.push(t);
+        });
+        if (category === 'ammo' || category === 'magazine') {
+            container.innerHTML = renderTemplateManagerCards(category, uniqueTemplates);
+            return;
+        }
+        let html = '<table style="width:100%"><tr><th>ID</th><th>Название</th><th>Подкатегория</th><th></th></tr>';
+        uniqueTemplates.forEach(t => {
             html += `<tr><td>${t.id}</td><td>${escapeHtml(t.name)}</td><td>${t.subcategory || ''}</td>
             <td>
                 <button class="btn-sm btn-primary" onclick="editTemplate(${t.id}, '${category}')">✏️</button>
@@ -1322,6 +1671,7 @@ window.editTemplate = async function(templateId, category) {
         case 'vest': openCreateVestTemplateModal(template); break;
         case 'weapon_module': openCreateModuleTemplateModal(template); break;
         case 'magazine': openCreateMagazineTemplateModal(template); break;
+        case 'ammo': showNotification('Патроны — глобальные шаблоны только для просмотра'); break;
         case 'melee_weapon': openCreateMeleeWeaponTemplateModal(template); break; // если будет модалка
         default: showNotification('Редактирование не поддерживается');
     }
@@ -1333,7 +1683,16 @@ function renderHealthTab(data, container = null) {
     if (!targetContainer) return;
 
     const health = data.health || {};
+    syncHealthDerivedStatuses(health);
     const zones = health.zones || {};
+    const bleeding = health.bleeding || {};
+    const bleedingEffects = Array.isArray(bleeding.effects) ? bleeding.effects : [];
+    const currentBlood = health.blood || health.bloodStage || 'normal';
+    const willSkill = data.skills?.physical?.will || {};
+    const willBase = Number.isFinite(Number(willSkill.base)) ? Number(willSkill.base) : 10;
+    const willBonus = Math.floor((willBase - 10) / 2) + (Number.isFinite(Number(willSkill.bonus)) ? Number(willSkill.bonus) : 0);
+    const bleedingModifierTotal = Number.isFinite(Number(bleeding.modifierTotal)) ? Number(bleeding.modifierTotal) : 0;
+    const finalBleedingDc = Math.max(0, (bleeding.baseDifficulty ?? 5) + (bleeding.totalSeverity || 0) - (bleeding.stagePenalty || 0) + bleedingModifierTotal - willBonus);
 
     const bloodOptions = [
         { value: 'normal', label: 'Нормально' },
@@ -1343,8 +1702,38 @@ function renderHealthTab(data, container = null) {
         { value: 'critical', label: 'Критическая кровопотеря' }
     ];
     const bloodSelect = bloodOptions.map(opt =>
-        `<option value="${opt.value}" ${health.blood === opt.value ? 'selected' : ''}>${opt.label}</option>`
+        `<option value="${opt.value}" ${currentBlood === opt.value ? 'selected' : ''}>${opt.label}</option>`
     ).join('');
+    const bloodTypeKnown = Boolean(health.combatMeta?.bloodTypeKnown);
+    const bloodTypeValue = health.combatMeta?.bloodType;
+    const directStatusChips = [
+        { key: 'radiation', label: 'Радиация', value: health.radiation, color: '#d88f4b' },
+        { key: 'intoxication', label: 'Опьянение', value: health.intoxication, color: '#9bb8ff' },
+        { key: 'painLevel', label: 'Боль', value: health.painLevel, color: '#ff8a8a' },
+        { key: 'stress', label: 'Стресс', value: health.stress, color: '#d4a5ff' },
+        { key: 'exhaustion', label: 'Истощение', value: health.exhaustion, color: '#ffd67d' },
+        { key: 'infection', label: 'Заражение', value: health.infection, color: '#86d48f' },
+    ].filter(item => Number.isFinite(Number(item.value)) && Number(item.value) !== 0);
+    const storedEffects = Array.isArray(health.effects) ? normalizeEffectList(health.effects) : [];
+    const storedEffectChips = storedEffects.map((effect) => {
+        const parts = [effect.name || effect.type];
+        if (effect.value !== undefined && effect.value !== null && effect.value !== 0) {
+            parts.push(`+${effect.value}`);
+        }
+        if (effect.remaining !== null && effect.remaining !== undefined && effect.remaining !== '') {
+            parts.push(`ост. ${effect.remaining}`);
+        } else if (effect.duration !== null && effect.duration !== undefined && effect.duration !== '') {
+            parts.push(`длит. ${effect.duration}`);
+        }
+        return parts.join(' · ');
+    });
+    const visibleEffectChips = [
+        ...directStatusChips.map((item) => {
+            const value = Number(item.value);
+            return `${item.label}: ${value >= 0 ? '+' : ''}${value}`;
+        }),
+        ...storedEffectChips
+    ];
 
     let html = `
         <div class="health-tab">
@@ -1352,6 +1741,23 @@ function renderHealthTab(data, container = null) {
                 <div style="width: 180px;">
                     <label>Кровь</label>
                     <select class="form-control" name="health.blood" style="width:100%;">${bloodSelect}</select>
+                    <div style="margin-top:6px; font-size:12px; opacity:0.8;">
+                        Группа крови: ${bloodTypeKnown ? formatBloodType(bloodTypeValue) : 'неизвестна'}
+                    </div>
+                </div>
+                <div style="min-width: 220px; flex: 1; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);">
+                    <div style="font-size: 12px; opacity: 0.75; margin-bottom: 4px;">Проверка кровопотери</div>
+                    <div style="font-size: 13px; line-height: 1.45;">
+                        <div>База: 5</div>
+                        <div>Тяжесть: +${bleeding.totalSeverity || 0}</div>
+                        <div>Стадия кровопотери: -${bleeding.stagePenalty || 0}</div>
+                        <div>Модификаторы: ${bleedingModifierTotal >= 0 ? '+' : ''}${bleedingModifierTotal}</div>
+                        <div>Бонус Воли: ${willBonus >= 0 ? '+' : ''}${willBonus}</div>
+                        <div style="margin-top:4px; font-weight:700;">Итог: ${finalBleedingDc}</div>
+                    </div>
+                    <div style="font-size: 12px; opacity: 0.72; margin-top: 6px;">
+                        ${bleedingEffects.length ? bleedingEffects.map(item => `${escapeHtml(item.name || item.type)} (${item.kind === 'internal' ? 'внутр.' : 'внешн.'} ${item.stage || 'light'})`).join(', ') : 'Активных кровотечений нет'}
+                    </div>
                 </div>
                 <div style="width: 80px;">
                     <label>Стресс</label>
@@ -1368,6 +1774,12 @@ function renderHealthTab(data, container = null) {
                 <div style="width: 80px;">
                     <label>Радиация</label>
                     <input type="number" class="form-control" name="health.radiation" value="${health.radiation || 0}">
+                </div>
+            </div>
+            <div style="margin: 0 0 14px 0; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);">
+                <div style="font-size: 12px; opacity: 0.78; margin-bottom: 8px;">Активные эффекты и состояния</div>
+                <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                    ${visibleEffectChips.length ? visibleEffectChips.map((text) => `<span style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.08); font-size:12px;">${escapeHtml(text)}</span>`).join('') : '<span style="opacity:0.7; font-size:12px;">Сейчас нет активных эффектов</span>'}
                 </div>
             </div>
             <hr>
@@ -1436,38 +1848,23 @@ function renderHealthTab(data, container = null) {
             </div>
     `;
 
-    const effects = Array.isArray(health.effects) ? health.effects : [];
+    const effects = normalizeEffectList(Array.isArray(health.effects) ? health.effects : []);
+    const effectTypeOptions = getEffectTypeOptions();
     let effectsHtml = '';
     effects.forEach((effect, index) => {
-        const name = effect.name || '';
         const value = effect.value || 0;
+        const isBleedingEffect = String(effect.type || '').startsWith('bleeding');
+        const hasRemaining = !isBleedingEffect;
+        const remaining = effect.remaining ?? '';
+        const selectedType = effect.type || 'generic';
         effectsHtml += `
-            <div style="display: flex; gap: 5px; margin-bottom: 5px; align-items: center;">
-                <input list="effect-names" class="form-control" name="health.effects.${index}.name" value="${escapeHtml(name)}" placeholder="Название эффекта" style="flex:2;">
-                <datalist id="effect-names">
-                    <option value="Слабое Внешнее Кровотечение">
-                    <option value="Среднее Внешнее Кровотечение">
-                    <option value="Сильное Внешнее Кровотечение">
-                    <option value="Экстремальное Внешнее Кровотечение">
-                    <option value="Слабое Внутреннее Кровотечение">
-                    <option value="Среднее Внутреннее Кровотечение">
-                    <option value="Сильное Внутреннее Кровотечение">
-                    <option value="Экстремальное Внутреннее Кровотечение">
-                    <option value="Перелом">
-                    <option value="Опьянение">
-                    <option value="Зависимость от препарата">
-                    <option value="Неделя ломки">
-                    <option value="Температура тела">
-                    <option value="Заражение крови">
-                    <option value="Критический уровень">
-                    <option value="Оглушение">
-                    <option value="Слепота">
-                    <option value="Контузия">
-                    <option value="Пси-состояние">
-                    <option value="Болевой шок">
-                </datalist>
-                <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Знач" style="width:80px;">
-                <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">✕</button>
+            <div style="display: grid; grid-template-columns: 1.1fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
+                <select class="form-control" name="health.effects.${index}.type" style="width:100%;">
+                    ${effectTypeOptions.map(opt => `<option value="${opt.value}" ${opt.value === selectedType ? 'selected' : ''}>${opt.label}</option>`).join('')}
+                </select>
+                <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Значение" style="width:80px;">
+                ${hasRemaining ? `<input type="text" class="form-control number-input" name="health.effects.${index}.remaining" value="${escapeHtml(remaining)}" placeholder="Остаток" data-nullable-number="true" style="width:90px;">` : '<div></div>'}
+                <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">×</button>
             </div>
         `;
     });
@@ -1477,7 +1874,14 @@ function renderHealthTab(data, container = null) {
         <div id="effects-container">
             ${effectsHtml}
         </div>
-        <button type="button" class="btn btn-sm" onclick="addEffect()">+ Добавить эффект</button>
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">
+            <button type="button" class="btn btn-sm" onclick="addEffect()">+ Добавить эффект</button>
+            <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('bleeding', 1, 3, 'Кровотечение')">Кровотечение</button>
+            <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('pain', 1, 2, 'Боль')">Боль</button>
+            <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('exhaustion', 1, 2, 'Истощение')">Истощение</button>
+            <button type="button" class="btn btn-sm btn-info" onclick="applyQuickEffect('regeneration', 5, 3, 'Регенерация')">Регенерация</button>
+            <button type="button" class="btn btn-sm btn-success" onclick="applyQuickEffect('heal', 10, 0, 'Лечение')">Лечение</button>
+        </div>
         </div>
     `;
 
@@ -1490,7 +1894,7 @@ window.addEffect = function() {
     if (!Array.isArray(currentCharacterData.health.effects)) {
         currentCharacterData.health.effects = [];
     }
-    currentCharacterData.health.effects.push({ name: '', value: 0 });
+    currentCharacterData.health.effects.push(createEffectDraft('generic'));
     const healthContainer = document.getElementById('health-right-column');
     if (healthContainer) {
         renderHealthTab(currentCharacterData, healthContainer);
@@ -1498,6 +1902,41 @@ window.addEffect = function() {
         renderHealthTab(currentCharacterData);
     }
     scheduleAutoSave();
+};
+
+window.applyQuickEffect = function(type, value = 1, duration = 0, label = '') {
+    updateDataFromFields();
+    if (!currentCharacterData.health) currentCharacterData.health = {};
+    if (!Array.isArray(currentCharacterData.health.effects)) {
+        currentCharacterData.health.effects = [];
+    }
+
+    const effect = createEffectDraft(type, {
+        name: label || type,
+        value,
+        duration: duration > 0 ? duration : null,
+        remaining: duration > 0 ? duration : null,
+        tick: duration > 0 ? 'turn_end' : 'manual',
+        active: true,
+    });
+
+    if (type === 'heal' || type === 'radiation' || type === 'pain' || type === 'exhaustion' || type === 'stress' || type === 'intoxication' || type === 'infection') {
+        applyEffectToHealth(currentCharacterData.health, effect);
+    } else {
+        currentCharacterData.health.effects.push(effect);
+    }
+
+    const healthContainer = document.getElementById('health-right-column');
+    if (healthContainer) {
+        renderHealthTab(currentCharacterData, healthContainer);
+    } else {
+        renderHealthTab(currentCharacterData);
+    }
+
+    normalizeCharacterEffects(currentCharacterData);
+    scheduleAutoSave();
+    const summary = effectSummary(effect);
+    if (summary) showNotification(`Тестовый эффект: ${summary}`, 'system');
 };
 
 window.removeEffect = function(index) {
@@ -2686,8 +3125,8 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     let ammoBreakdown = '';
                     if (installedMag.ammo && installedMag.ammo.length > 0) {
                         const nextAmmo = installedMag.ammo[installedMag.ammo.length - 1];
-                        ammoBreakdown = `<br><small>Состав: ${installedMag.ammo.map(a => `${a.name} (${a.quantity})`).join(', ')}`;
-                        if (nextAmmo) ammoBreakdown += `<br>▶ Следующий: ${nextAmmo.name}`;
+                        ammoBreakdown = `<br><small>Состав: ${installedMag.ammo.map(a => `${formatAmmoStackLabel(a)} (${a.quantity})`).join(', ')}`;
+                        if (nextAmmo) ammoBreakdown += `<br>▶ Следующий: ${formatAmmoStackLabel(nextAmmo)}`;
                         ammoBreakdown += '</small>';
                     }
                     magazineHtml += `<span>${escapeHtml(installedMag.name)} (${totalAmmo}/${installedMag.capacity || 30})${ammoBreakdown}</span>`;
@@ -2786,7 +3225,7 @@ window.equipModuleToWeapon = async function(weaponIndex, slotType) {
 
     const weaponTemplates = await loadTemplatesForLobby('weapon');
     const weaponTemplate = weaponTemplates.find(t => t.id == weapon.templateId);
-    const weaponCaliber = weaponTemplate?.attributes?.caliber;
+    const weaponCaliber = getItemCaliber(weaponTemplate);
 
     const inventoryModules = [];
     const collectModules = (items, path) => {
@@ -2987,7 +3426,7 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
 
     const weaponTemplates = await loadTemplatesForLobby('weapon');
     const weaponTemplate = weaponTemplates.find(t => t.id == weapon.templateId);
-    const weaponCaliber = weaponTemplate?.attributes?.caliber;
+    const weaponCaliber = getItemCaliber(weaponTemplate);
 
     const inventoryMagazines = [];
 
@@ -2996,7 +3435,8 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
         items.forEach((item, idx) => {
             if (item.category === 'magazine') {
                 // Проверка калибра
-                if (weaponCaliber && item.attributes?.caliber && item.attributes.caliber !== weaponCaliber) return;
+                const itemCaliber = getItemCaliber(item);
+                if (weaponCaliber && itemCaliber && itemCaliber !== weaponCaliber) return;
                 // Проверка совместимости по списку оружий (если список не пуст)
                 const compatible = item.attributes?.compatible_weapons;
                 if (compatible && compatible.length > 0 && !compatible.includes(weapon.templateId)) return;
@@ -3094,7 +3534,7 @@ function confirmEquipMagazineDirect(weaponIndex, selected) {
             emptyWeight: oldMag.emptyWeight || 0,
             loadedWeight: oldMag.loadedWeight || 0,
             attributes: {
-                caliber: oldMag.caliber,
+                caliber: getItemCaliber(oldMag),
                 capacity: oldMag.capacity,
                 emptyWeight: oldMag.emptyWeight,
                 loadedWeight: oldMag.loadedWeight
@@ -3113,7 +3553,7 @@ function confirmEquipMagazineDirect(weaponIndex, selected) {
         id: selected.item.id,
         templateId: selected.item.templateId,
         name: selected.item.name,
-        caliber: selected.item.attributes?.caliber,
+        caliber: getItemCaliber(selected.item),
         capacity: selected.item.attributes?.capacity || 30,
         emptyWeight: selected.item.emptyWeight || 0,
         loadedWeight: selected.item.loadedWeight || 0,
@@ -3187,7 +3627,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
         return;
     }
 
-    const caliber = weaponTemplate.attributes?.caliber;
+    const caliber = getItemCaliber(weaponTemplate);
     const maxAmmo = weaponTemplate.attributes?.magazine_size || 0;
     const currentAmmo = weapon.ammo || 0;
     const needed = maxAmmo - currentAmmo;
@@ -3201,7 +3641,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
     const collectLoaders = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'magazine' && item.isLoader && item.attributes?.caliber === caliber) {
+            if (item.category === 'magazine' && item.isLoader && getItemCaliber(item) === caliber) {
                 const total = item.ammo ? item.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
                 if (total > 0) {
                     loaderItems.push({ item, path: path.concat(idx) });
@@ -3222,7 +3662,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
     const collectAmmo = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'ammo' && item.attributes?.caliber === caliber && item.quantity > 0) {
+            if (item.category === 'ammo' && getItemCaliber(item) === caliber && item.quantity > 0) {
                 ammoItems.push({ item, path: path.concat(idx) });
             }
             if (item.contents) collectAmmo(item.contents, path.concat(idx, 'contents'));
@@ -3600,7 +4040,7 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
     if (delta > 0) {
         // +1: взять один патрон из инвентаря
         if (totalAmmo >= cap) { showNotification('Магазин полон'); return; }
-        const caliber = mag.attributes?.caliber;
+        const caliber = getItemCaliber(mag);
         if (!caliber) { showNotification('Неизвестный калибр'); return; }
 
         // Ищем патроны
@@ -3608,7 +4048,7 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
         const collectAmmo = (items, path) => {
             if (!Array.isArray(items)) return;
             items.forEach((item, idx) => {
-                if (item.category === 'ammo' && item.attributes?.caliber === caliber && item.quantity > 0) {
+                if (item.category === 'ammo' && getItemCaliber(item) === caliber && item.quantity > 0) {
                     ammoItems.push({ item, path: path.concat(idx) });
                 }
                 if (item.contents) collectAmmo(item.contents, path.concat(idx, 'contents'));
@@ -3648,13 +4088,14 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
         if (last.quantity <= 0) mag.ammo.pop();
 
         // Ищем существующую пачку такого же типа в том же контейнере
-        const existing = targetArray.find(item => item.category === 'ammo' && item.templateId === templateId);
+        const existing = targetArray.find(item => item.category === 'ammo' && getAmmoStackKey(item) === getAmmoStackKey(last));
         if (existing) {
             existing.quantity += 1;
             updateAmmoWeight(existing);
         } else {
             const newAmmo = createItemFromTemplate(ammoTemplate);
             newAmmo.quantity = 1;
+            applyAmmoVariantToItem(newAmmo, ammoTemplate, last.ammo_variant || null);
             updateAmmoWeight(newAmmo);
             targetArray.push(newAmmo);
         }
@@ -3674,11 +4115,11 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     if (!mag || mag.category !== 'magazine') return;
 
     const cap = mag.attributes?.capacity || 30;
-    const cur = mag.currentAmmo !== undefined ? mag.currentAmmo : cap;
+    const cur = getMagazineAmmoCount(mag);
     const needed = cap - cur;
     if (needed <= 0) { showNotification('Магазин полон'); return; }
 
-    const caliber = mag.attributes?.caliber;
+    const caliber = getItemCaliber(mag);
     if (!caliber) { showNotification('У магазина не указан калибр'); return; }
 
     // Собираем ВСЕ подходящие патроны (включая разные типы)
@@ -3686,7 +4127,7 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     const collectAmmo = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'ammo' && item.attributes?.caliber === caliber && item.quantity > 0) {
+            if (item.category === 'ammo' && getItemCaliber(item) === caliber && item.quantity > 0) {
                 ammoItems.push({ item, path: path.concat(idx) });
             }
             if (item.contents) collectAmmo(item.contents, path.concat(idx, 'contents'));
@@ -3787,13 +4228,14 @@ window.unloadMagazineToInventory = async function(pathStr) {
     for (const ammoEntry of mag.ammo) {
         const template = allTemplates.find(t => t.id === ammoEntry.templateId);
         if (!template) continue;
-        const existing = targetArray.find(item => item.category === 'ammo' && item.templateId === ammoEntry.templateId);
+        const existing = targetArray.find(item => item.category === 'ammo' && getAmmoStackKey(item) === getAmmoStackKey(ammoEntry));
         if (existing) {
             existing.quantity += ammoEntry.quantity;
             updateAmmoWeight(existing);
         } else {
             const newAmmo = createItemFromTemplate(template);
             newAmmo.quantity = ammoEntry.quantity;
+            applyAmmoVariantToItem(newAmmo, template, ammoEntry.ammo_variant || null);
             updateAmmoWeight(newAmmo);
             targetArray.push(newAmmo);
         }
@@ -3812,16 +4254,40 @@ function updateMagazineWeight(mag) {
     mag.weight = (totalAmmo > 0) ? (mag.loadedWeight || 0.25) : (mag.emptyWeight || 0);
 };
 
+function getMagazineAmmoCount(mag) {
+    if (!mag || !Array.isArray(mag.ammo)) return 0;
+    return mag.ammo.reduce((sum, ammoEntry) => sum + (Number(ammoEntry?.quantity) || 0), 0);
+}
+
+function getAmmoStackKey(ammoItem) {
+    return [
+        ammoItem?.templateId ?? '',
+        normalizeAmmoVariant(ammoItem?.attributes?.ammo_variant || ammoItem?.ammo_variant || ammoItem?.attributes?.ammo_kind || ammoItem?.attributes?.special_version || ammoItem?.attributes?.effect) || ''
+    ].join('::');
+}
+
+function formatAmmoStackLabel(ammoItem) {
+    if (!ammoItem) return '';
+    const variant = normalizeAmmoVariant(ammoItem?.attributes?.ammo_variant || ammoItem?.ammo_variant || ammoItem?.attributes?.ammo_kind || ammoItem?.attributes?.special_version || ammoItem?.attributes?.effect);
+    return variant ? `${ammoItem.name} (${getAmmoVariantLabel(variant)})` : ammoItem.name;
+}
+
 function addAmmoToMagazine(mag, ammoItem, count) {
     if (!mag.ammo) mag.ammo = [];
-    const existing = mag.ammo.find(a => a.templateId === ammoItem.templateId);
+    const ammoVariant = normalizeAmmoVariant(ammoItem?.attributes?.ammo_variant || ammoItem?.ammo_variant || ammoItem?.attributes?.ammo_kind || ammoItem?.attributes?.special_version || ammoItem?.attributes?.effect);
+    const ammoKey = getAmmoStackKey(ammoItem);
+    const existing = mag.ammo.find(a => getAmmoStackKey(a) === ammoKey);
     if (existing) {
         existing.quantity += count;
     } else {
         mag.ammo.push({
             templateId: ammoItem.templateId,
             name: ammoItem.name,
-            quantity: count
+            quantity: count,
+            ammo_variant: ammoVariant || null,
+            damage: ammoItem.damage ?? ammoItem.attributes?.damage ?? null,
+            penetration: ammoItem.penetration ?? ammoItem.attributes?.penetration ?? null,
+            range: ammoItem.attributes?.range ?? null,
         });
     }
     updateMagazineWeight(mag);
@@ -5587,11 +6053,11 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
 };
 
 // Использование предмета из инвентаря (для расходников, гранат и т.д.)
-async function useItem(item, itemPath) {
+async function useItem(item, itemPath, options = {}) {
     if (item.category === 'consumable') {
-        await useConsumable(item, itemPath);
+        await useConsumable(item, itemPath, options);
     } else if (item.category === 'grenade') {
-        await useGrenade(item, itemPath);
+        await useGrenade(item, itemPath, options);
     } else if (item.category === 'device') {
         // Если устройство имеет батарею и разряжено, предложить зарядить
         if (item.attributes?.power !== undefined && item.attributes.power < 100) {
@@ -5604,24 +6070,291 @@ async function useItem(item, itemPath) {
     }
 }
 
-async function useConsumable(item, itemPath) {
-    const effects = item.attributes?.effects || [];
-    if (effects.length === 0) {
+async function useConsumable(item, itemPath, options = {}) {
+    const effects = (item.attributes?.effects || []).filter(effect => effect?.source !== 'direct');
+    const consumable = item.attributes?.consumable || {};
+    const direct = { ...(consumable.direct || {}) };
+    const modifiers = Array.isArray(consumable.modifiers) ? consumable.modifiers : [];
+    const statusRemovals = Array.isArray(consumable.status_removals) ? consumable.status_removals : [];
+    const statusAdditions = Array.isArray(consumable.status_additions) ? consumable.status_additions : [];
+    const health = currentCharacterData.health || {};
+    const combatState = window.locationCombatState;
+    const isCombatActive = Boolean(combatState && combatState.status === 'active');
+    let hasChanges = false;
+    const itemName = String(item.name || '').toLowerCase();
+
+    if (itemName.includes('самогон')) {
+        direct.radiation_delta = -2.5;
+        direct.intoxication_delta = 25;
+        if (direct.exhaustion_delta === undefined) direct.exhaustion_delta = -0.5;
+        if (direct.uses === undefined) direct.uses = 8;
+    } else if (itemName.includes('вино') || itemName.includes('алког') || itemName.includes('спирт')) {
+        if (direct.intoxication_delta === undefined) direct.intoxication_delta = 1;
+    }
+    if (itemName.includes('бинт')) {
+        if (direct.bleeding_stop_light_cost === undefined) {
+            direct.bleeding_stop_light_cost = 1;
+            direct.bleeding_stop_type = 'external';
+        }
+    }
+    if (itemName.includes('губка коллагеновая')) {
+        direct.bleeding_stop_light_cost = 1;
+        direct.bleeding_stop_medium_cost = 2;
+        direct.bleeding_stop_type = 'external';
+    }
+    if (itemName.includes('групп') && itemName.includes('кров')) {
+        direct.blood_type_test = true;
+    }
+    if (itemName.includes('вода')) {
+        direct.radiation_delta = -1;
+        direct.intoxication_delta = -10;
+        direct.exhaustion_delta = -0.5;
+        if (direct.uses === undefined) direct.uses = 3;
+        if (!Number.isFinite(Number(item.uses)) || Number(item.uses) <= 0) {
+            item.uses = 3;
+            item.maxUses = 3;
+            item.attributes = item.attributes || {};
+            item.attributes.uses_remaining = 3;
+        }
+    }
+    if (itemName.includes('физраств') || itemName.includes('соляной раствор')) {
+        direct.not_consumed = true;
+    }
+
+    const adjust = (field, delta, min = 0, max = null) => {
+        if (delta === undefined || delta === null || Number.isNaN(Number(delta)) || Number(delta) === 0) return;
+        const current = Number(health[field] ?? 0);
+        let next = current + Number(delta);
+        if (min !== null) next = Math.max(min, next);
+        if (max !== null) next = Math.min(max, next);
+        health[field] = next;
+        hasChanges = true;
+    };
+
+    effects.forEach(eff => applyEffect(eff));
+
+    if (direct.hp !== undefined) {
+        const current = Number(health.current ?? 0);
+        const max = health.max ?? null;
+        let next = current + Number(direct.hp);
+        if (max !== null && max !== undefined && max !== '') {
+            next = Math.min(Number(max), next);
+        }
+        health.current = Math.max(0, next);
+        hasChanges = true;
+    }
+    adjust('radiation', direct.radiation_delta, 0, null);
+    adjust('temperature', direct.temperature_delta, 0, null);
+    adjust('psyState', direct.psy_delta, 0, 50);
+    adjust('infection', direct.infection_delta, 0, 100);
+    adjust('painLevel', direct.pain_delta, 0, 10);
+    adjust('exhaustion', direct.exhaustion_delta, 0, 10);
+    adjust('stress', direct.stress_delta, 0, 10);
+    adjust('stress', isCombatActive ? direct.stress_in_combat_delta : direct.stress_safe_delta, 0, 10);
+    adjust('intoxication', direct.intoxication_delta, 0, 100);
+
+    if (direct.pain_block_turns || direct.stress_block_turns || direct.addiction_block_hours || direct.medical_difficulty || direct.application_form || direct.sleep_block_hours || direct.will_shock_bonus || direct.will_shock_advantage) {
+        if (!health.combatMeta) health.combatMeta = {};
+        if (direct.pain_block_turns) health.combatMeta.painBlockTurns = Number(direct.pain_block_turns) || 0;
+        if (direct.stress_block_turns) health.combatMeta.stressBlockTurns = Number(direct.stress_block_turns) || 0;
+        if (direct.addiction_block_hours) health.combatMeta.addictionBlockHours = Number(direct.addiction_block_hours) || 0;
+        if (direct.medical_difficulty !== undefined) health.combatMeta.medicalDifficulty = Number(direct.medical_difficulty) || 0;
+        if (direct.application_form) health.combatMeta.applicationForm = String(direct.application_form);
+        if (direct.sleep_block_hours) health.combatMeta.sleepBlockHours = Number(direct.sleep_block_hours) || 0;
+        if (direct.will_shock_bonus !== undefined) health.combatMeta.willShockBonus = Number(direct.will_shock_bonus) || 0;
+        if (direct.will_shock_advantage !== undefined) health.combatMeta.willShockAdvantage = Boolean(direct.will_shock_advantage);
+        hasChanges = true;
+    }
+
+    if (modifiers.length > 0) {
+        if (!health.combatMeta) health.combatMeta = {};
+        if (!Array.isArray(health.combatMeta.consumableModifiers)) {
+            health.combatMeta.consumableModifiers = [];
+        }
+        modifiers.forEach((modifier) => {
+            if (!modifier || typeof modifier !== 'object') return;
+            health.combatMeta.consumableModifiers.push({
+                stat: modifier.stat || 'generic',
+                value: Number(modifier.value ?? 0) || 0,
+                remaining: modifier.remaining ?? null,
+                note: modifier.note || '',
+            });
+        });
+        hasChanges = true;
+    }
+
+    if (direct.bleeding_modifier_delta !== undefined) {
+        if (!health.combatMeta) health.combatMeta = {};
+        if (!Array.isArray(health.combatMeta.bleedingModifiers)) {
+            health.combatMeta.bleedingModifiers = [];
+        }
+        health.combatMeta.bleedingModifiers.push({
+            stat: 'bleeding',
+            value: Number(direct.bleeding_modifier_delta) || 0,
+            remaining: direct.duration ?? null,
+            note: 'consumable',
+        });
+        hasChanges = true;
+    }
+
+    if (direct.bleeding_stop_light_cost !== undefined || direct.bleeding_stop_medium_cost !== undefined) {
+        const order = ['bleeding_external_light', 'bleeding_external_medium'];
+        const target = Array.isArray(health.effects) ? health.effects.find(effect => order.includes(String(effect?.type || '').trim())) : null;
+        if (target) {
+            const targetType = String(target.type || '').trim();
+            health.effects = health.effects.filter(effect => String(effect?.type || '').trim() !== targetType);
+            hasChanges = true;
+        }
+        if (!health.combatMeta) health.combatMeta = {};
+        health.combatMeta.collagenSponge = {
+            lightCost: direct.bleeding_stop_light_cost ?? null,
+            mediumCost: direct.bleeding_stop_medium_cost ?? null,
+            stopType: direct.bleeding_stop_type || 'external',
+        };
+        hasChanges = true;
+    }
+
+    if (direct.rest_heal_multiplier !== undefined) {
+        if (!health.combatMeta) health.combatMeta = {};
+        if (!Array.isArray(health.combatMeta.consumableModifiers)) {
+            health.combatMeta.consumableModifiers = [];
+        }
+        health.combatMeta.consumableModifiers.push({
+            stat: 'rest_heal_multiplier',
+            value: Number(direct.rest_heal_multiplier) || 0,
+            remaining: direct.duration ?? null,
+            note: 'rest_bonus',
+        });
+        hasChanges = true;
+    }
+
+    if (direct.nutrition !== undefined) {
+        if (!health.combatMeta) health.combatMeta = {};
+        health.combatMeta.nutrition = Number(health.combatMeta.nutrition || 0) + (Number(direct.nutrition) || 0);
+        hasChanges = true;
+    }
+
+    if (direct.blood_type_test) {
+        if (!health.combatMeta) health.combatMeta = {};
+        const result = rollBloodType();
+        health.combatMeta.bloodTypeTested = true;
+        health.combatMeta.bloodTypeKnown = true;
+        health.combatMeta.bloodType = result.bloodType;
+        health.combatMeta.bloodTypeRoll = result.roll;
+        showNotification(`Группа крови определена: ${formatBloodType(result.bloodType)} (d20: ${result.roll})`, 'success');
+        hasChanges = true;
+    }
+
+    if (direct.fracture_splint) {
+        if (!health.combatMeta) health.combatMeta = {};
+        health.combatMeta.fractureSplint = true;
+        health.combatMeta.fractureSplintTurns = Number(direct.fracture_duration_turns) || 4;
+        health.combatMeta.fractureRestoreHealth = Number(direct.fracture_restore_health) || 1;
+        hasChanges = true;
+    }
+
+    if (direct.filter_charges !== undefined) {
+        if (!health.combatMeta) health.combatMeta = {};
+        health.combatMeta.filterCharges = Number(direct.filter_charges) || 0;
+        health.combatMeta.requiresGasMask = Boolean(direct.requires_gas_mask);
+        hasChanges = true;
+    }
+
+    if (direct.strength_delta !== undefined || direct.agility_delta !== undefined || direct.accuracy_delta !== undefined || direct.weight_delta !== undefined || direct.will_delta !== undefined || direct.psy_defense_delta !== undefined) {
+        if (!health.combatMeta) health.combatMeta = {};
+        if (!Array.isArray(health.combatMeta.consumableModifiers)) {
+            health.combatMeta.consumableModifiers = [];
+        }
+        [
+            ['strength', direct.strength_delta],
+            ['agility', direct.agility_delta],
+            ['accuracy', direct.accuracy_delta],
+            ['weight', direct.weight_delta],
+            ['will', direct.will_delta],
+            ['psy_defense', direct.psy_defense_delta],
+        ].forEach(([stat, value]) => {
+            if (value === undefined) return;
+            health.combatMeta.consumableModifiers.push({
+                stat,
+                value: Number(value) || 0,
+                remaining: direct.duration ?? null,
+                note: 'stat_bonus',
+            });
+        });
+        hasChanges = true;
+    }
+
+    if (statusRemovals.length > 0 && Array.isArray(health.effects)) {
+        const targetSet = new Set(statusRemovals.map(item => String(item).trim()).filter(Boolean));
+        const before = health.effects.length;
+        health.effects = health.effects.filter((effect) => {
+            const type = String(effect?.type || '').trim();
+            return !targetSet.has(type);
+        });
+        if (health.effects.length !== before) {
+            hasChanges = true;
+        }
+    }
+
+    if (statusAdditions.length > 0) {
+        if (!health.combatMeta) health.combatMeta = {};
+        if (!Array.isArray(health.combatMeta.consumableStatusAdditions)) {
+            health.combatMeta.consumableStatusAdditions = [];
+        }
+        statusAdditions.forEach((status) => {
+            const normalized = String(status || '').trim();
+            if (!normalized) return;
+            health.combatMeta.consumableStatusAdditions.push(normalized);
+            applyEffectToHealth(health, { type: normalized, name: normalized, value: 0, remaining: direct.duration ?? null, tick: 'manual' });
+        });
+        hasChanges = true;
+    }
+
+    if (hasChanges) {
+        currentCharacterData.health = health;
+        normalizeCharacterEffects(currentCharacterData);
+        syncHealthDerivedStatuses(currentCharacterData.health);
+    } else if (effects.length === 0) {
         showNotification('Предмет не имеет эффектов');
         return;
     }
-    effects.forEach(eff => applyEffect(eff));
-    item.quantity -= 1;
-    if (item.quantity <= 0) {
-        removeItemByPath(itemPath);
+
+    const currentUses = Number(item.uses ?? item.attributes?.uses ?? item.attributes?.uses_remaining ?? null);
+    const maxUses = Number(item.maxUses ?? item.attributes?.uses ?? item.attributes?.maxUses ?? null);
+    if (Number.isFinite(currentUses) && currentUses > 0) {
+        item.uses = currentUses - 1;
+        item.attributes = item.attributes || {};
+        item.attributes.uses_remaining = Math.max(0, currentUses - 1);
+        if (item.uses <= 0) {
+            if (!direct.not_consumed) {
+                item.quantity -= 1;
+                if (item.quantity > 0 && Number.isFinite(maxUses) && maxUses > 0) {
+                    item.uses = maxUses;
+                    item.maxUses = maxUses;
+                    item.attributes.uses_remaining = maxUses;
+                } else if (item.quantity <= 0) {
+                    removeItemByPath(itemPath);
+                }
+            }
+        }
+    } else if (!direct.not_consumed) {
+        item.quantity -= 1;
+        if (item.quantity <= 0) {
+            removeItemByPath(itemPath);
+        }
     }
     showNotification(`${item.name} использован`, 'success');
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
+    if (options.render !== false) {
+        renderInventoryTab(currentCharacterData);
+        renderHealthTab(currentCharacterData);
+    }
+    if (options.save !== false) {
+        scheduleAutoSave();
+        forceSyncCharacter();
+    }
 }
 
-async function useGrenade(item, itemPath) {
+async function useGrenade(item, itemPath, options = {}) {
     if (item.attributes?.caliber) {
         showNotification('Эту гранату нельзя метнуть вручную — она для гранатомёта');
         return;
@@ -5632,9 +6365,75 @@ async function useGrenade(item, itemPath) {
     if (item.quantity <= 0) {
         removeItemByPath(itemPath);
     }
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
+    if (options.render !== false) {
+        renderInventoryTab(currentCharacterData);
+    }
+    if (options.save !== false) {
+        scheduleAutoSave();
+        forceSyncCharacter();
+    }
+}
+
+export async function useCharacterInventoryItem(characterId, itemPath, options = {}) {
+    const normalizedPath = Array.isArray(itemPath)
+        ? itemPath
+        : String(itemPath || '')
+            .split(',')
+            .map(part => (part === '' || Number.isNaN(Number(part)) ? part : Number(part)));
+    if (!characterId || !normalizedPath.length) {
+        throw new Error('Не удалось выбрать предмет');
+    }
+
+    const previousCharacterId = currentCharacterId;
+    const previousCharacterData = currentCharacterData;
+    const shouldRestorePreviousState = previousCharacterId !== characterId;
+    const activeData = !shouldRestorePreviousState && currentCharacterData
+        ? currentCharacterData
+        : null;
+
+    try {
+        if (shouldRestorePreviousState || !currentCharacterData) {
+            const loadedCharacter = await Server.getCharacter(characterId);
+            currentCharacterId = characterId;
+            currentCharacterData = loadedCharacter?.data || {};
+        }
+
+        normalizeCharacterEffects(currentCharacterData);
+
+        const item = getItemByPath(normalizedPath);
+        if (!item) {
+            throw new Error('Предмет не найден');
+        }
+
+    await useItem(item, normalizedPath, { ...options, render: false, save: false });
+    await Server.updateCharacter(characterId, { data: currentCharacterData });
+    if (currentCharacterId === characterId) {
+        renderInventoryTab(currentCharacterData);
+        renderHealthTab(currentCharacterData);
+    }
+    } finally {
+        if (shouldRestorePreviousState) {
+            currentCharacterId = previousCharacterId;
+            currentCharacterData = previousCharacterData;
+        } else if (activeData) {
+            currentCharacterData = activeData;
+        }
+    }
+    return true;
+}
+
+function rollBloodType() {
+    const roll = Math.floor(Math.random() * 20) + 1;
+    if (roll <= 10) return { roll, bloodType: 1 };
+    if (roll <= 15) return { roll, bloodType: 2 };
+    if (roll <= 19) return { roll, bloodType: 3 };
+    return { roll, bloodType: 4 };
+}
+
+function formatBloodType(value) {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized) || normalized <= 0) return 'неизвестна';
+    return `${Math.trunc(normalized)} группа`;
 }
 
 function toggleDevice(item, itemPath) {
@@ -5806,14 +6605,11 @@ async function rechargeDevice(item, itemPath) {
 
 function applyEffect(effect) {
     const health = currentCharacterData.health || {};
-    if (effect.type === 'heal') {
-        health.current = (health.current || 0) + parseInt(effect.value);
-        if (health.current > health.max) health.current = health.max;
-    } else if (effect.type === 'radiation') {
-        health.radiation = (health.radiation || 0) - parseInt(effect.value);
-        if (health.radiation < 0) health.radiation = 0;
-    }
+    applyEffectToHealth(health, effect);
     currentCharacterData.health = health;
+    normalizeCharacterEffects(currentCharacterData);
+    const summary = effectSummary(effect);
+    if (summary) showNotification(`Эффект: ${summary}`, 'system');
 }
 
 // Функции добавления/удаления модификаций
@@ -6925,9 +7721,9 @@ async function renderInventoryTab(data) {
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="pockets-container"></div>
-        <select id="pockets-add-template" class="form-control" style="margin-top:10px;" onchange="addPocketItemFromTemplate(this.value)">
-            <option value="">-- Добавить предмет (выберите) --</option>
-        </select>
+        <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker()">➕ Добавить предмет</button>
+        </div>
         <button type="button" class="btn btn-sm btn-secondary" onclick="addPocketItemManual()">📝 Свой предмет</button>
 
         <!-- Пояс -->
@@ -7017,9 +7813,9 @@ async function renderInventoryTab(data) {
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="backpack-container"></div>
-        <select id="backpack-add-template" class="form-control" style="margin-top:10px;" onchange="addBackpackItemFromTemplate(this.value)">
-            <option value="">-- Добавить предмет (выберите) --</option>
-        </select>
+        <div style="margin-top:10px;">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker('backpack')">➕ Добавить предмет</button>
+        </div>
         <button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>
     `;
 
@@ -7824,6 +8620,334 @@ window.openCreateInventoryItemModal = function() {
     modal.style.display = 'flex';
 };
 
+function renderInventoryTemplatePicker(templates, query = '') {
+    const normalizedQuery = query.trim().toLowerCase();
+    const availableTemplates = templates.filter(t => {
+        const isGenericMagazine = t.category === 'magazine'
+            && /^магазин$/i.test(String(t.name || '').trim())
+            && !t.attributes?.caliber
+            && !t.attributes?.capacity;
+        return !isGenericMagazine;
+    });
+    const filtered = normalizedQuery
+        ? availableTemplates.filter(t => {
+            const haystack = [
+                t.name,
+                t.categoryDisplay || getCategoryDisplay(t.category),
+                t.subcategory,
+                t.item_class,
+                t.description,
+                t.attributes?.caliber,
+                t.attributes?.ammo_group,
+                t.attributes?.ammo_kind,
+                t.attributes?.purchase_category
+            ].filter(Boolean).join(' ').toLowerCase();
+            return haystack.includes(normalizedQuery);
+        })
+        : availableTemplates;
+
+    if (!filtered.length) {
+        return '<div style="padding:12px; opacity:0.75;">Ничего не найдено</div>';
+    }
+
+    const grouped = {};
+    filtered.forEach(t => {
+        const group = t.categoryDisplay || getCategoryDisplay(t.category) || 'Прочее';
+        if (!grouped[group]) grouped[group] = [];
+        grouped[group].push(t);
+    });
+
+    const order = Object.keys(grouped).sort((a, b) => a.localeCompare(b, 'ru'));
+    return order.map(group => {
+        const items = grouped[group];
+        return `
+            <details style="border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:8px 10px; background: rgba(0,0,0,0.12); margin-bottom:8px;">
+                <summary style="cursor:pointer; font-weight:700; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                    <span>${escapeHtml(group)}</span>
+                    <span style="opacity:0.65; font-weight:400;">${items.length}</span>
+                </summary>
+                <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:8px; margin-top:10px;">
+                    ${items.map(t => {
+                        const attrs = t.attributes || {};
+                        const chips = [];
+                        if (attrs.caliber) chips.push(`Калибр: ${escapeHtml(String(attrs.caliber))}`);
+                        if (attrs.damage !== undefined && attrs.damage !== null && t.category === 'ammo') chips.push(`Урон: ${escapeHtml(String(attrs.damage))}`);
+                        if (attrs.penetration !== undefined && attrs.penetration !== null && t.category === 'ammo') chips.push(`Пробитие: ${escapeHtml(formatAmmoPenetration(attrs.penetration))}`);
+                        if (attrs.range !== undefined && attrs.range !== null && t.category === 'ammo') chips.push(`Дальность: ${escapeHtml(String(attrs.range))}`);
+                        if (attrs.capacity !== undefined && attrs.capacity !== null && t.category === 'magazine') chips.push(`Ёмкость: ${escapeHtml(String(attrs.capacity))}`);
+                        if (t.category === 'ammo') {
+                            const ammoVariants = attrs.ammo_variants?.length ? attrs.ammo_variants : (attrs.ammo_variant ? [attrs.ammo_variant] : []);
+                            if (ammoVariants.length) {
+                                chips.push(`Вариации: ${escapeHtml(getAmmoVariantLabels(ammoVariants))}`);
+                            }
+                        }
+                        if (attrs.isLoader && t.category === 'magazine') chips.push('Спидлоадер');
+                        return `
+                            <button type="button" onclick="selectInventoryTemplate(${t.id})" style="text-align:left; width:100%; border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:10px; background: rgba(255,255,255,0.03); color:inherit; cursor:pointer;">
+                                <div style="display:flex; justify-content:space-between; gap:8px;">
+                                    <div style="font-weight:600;">${escapeHtml(t.name)}</div>
+                                    <div style="opacity:0.55; font-size:12px;">ID ${t.id}</div>
+                                </div>
+                                <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:6px;">
+                                    ${chips.map(chip => `<span style="font-size:11px; padding:2px 6px; border-radius:999px; background: rgba(255,255,255,0.08);">${chip}</span>`).join('')}
+                                </div>
+                            </button>`;
+                    }).join('')}
+                </div>
+            </details>`;
+    }).join('');
+}
+
+window.openInventoryTemplatePicker = async function(target = 'pockets') {
+    let modal = document.getElementById('inventory-template-picker-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'inventory-template-picker-modal';
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width: 980px; width: 92vw; max-height: 85vh; overflow-y:auto;">
+                <span class="close" onclick="closeInventoryTemplatePicker()">&times;</span>
+                <h3>Добавить предмет в инвентарь</h3>
+                <div class="form-group">
+                    <label>Поиск</label>
+                    <input type="text" id="inventory-template-picker-search" class="form-control" placeholder="Название, калибр, категория...">
+                </div>
+                <div id="inventory-template-picker-content"></div>
+            </div>`;
+        document.body.appendChild(modal);
+    }
+
+    modal._inventoryTarget = target || 'pockets';
+    modal.style.display = 'flex';
+    bindBackdropClose(modal, closeInventoryTemplatePicker);
+
+    if (!document._inventoryTemplatePickerEscBound) {
+        document.addEventListener('keydown', (e) => {
+            const picker = document.getElementById('inventory-template-picker-modal');
+            if (e.key === 'Escape' && picker && picker.style.display !== 'none') {
+                closeInventoryTemplatePicker();
+            }
+        });
+        document._inventoryTemplatePickerEscBound = true;
+    }
+
+    const searchInput = modal.querySelector('#inventory-template-picker-search');
+    const content = modal.querySelector('#inventory-template-picker-content');
+    searchInput.value = '';
+    content.innerHTML = 'Загрузка...';
+
+    const render = async () => {
+        const templates = await getAllItemTemplates();
+        content.innerHTML = renderInventoryTemplatePicker(templates, searchInput.value);
+    };
+
+    if (!modal._pickerBound) {
+        searchInput.addEventListener('input', () => render());
+        modal._pickerBound = true;
+    }
+
+    await render();
+    searchInput.focus();
+};
+
+window.selectInventoryTemplate = async function(templateId) {
+    const allTemplates = await getAllItemTemplates();
+    const template = allTemplates.find(t => t.id === templateId);
+    if (!template) return;
+    const picker = document.getElementById('inventory-template-picker-modal');
+    const target = picker?._inventoryTarget || 'pockets';
+    if (template.category === 'ammo') {
+        closeInventoryTemplatePicker();
+        openAmmoSelectionModal(templateId, target);
+        return;
+    }
+
+    if (target === 'backpack') {
+        await addBackpackItemFromTemplate(templateId);
+    } else {
+        await addPocketItemFromTemplate(templateId);
+    }
+    closeInventoryTemplatePicker();
+};
+
+function renderAmmoSelectionModalContent(templates, initialTemplateId = null) {
+    const grouped = {};
+    templates.forEach(t => {
+        const caliber = t.attributes?.caliber || t.subcategory || t.name || 'Без калибра';
+        if (!grouped[caliber]) grouped[caliber] = [];
+        grouped[caliber].push(t);
+    });
+    const calibers = Object.keys(grouped).sort((a, b) => a.localeCompare(b, 'ru'));
+    const initialTemplate = templates.find(t => t.id === initialTemplateId) || templates[0] || null;
+    const initialCaliber = initialTemplate ? (initialTemplate.attributes?.caliber || initialTemplate.subcategory || initialTemplate.name || calibers[0] || '') : (calibers[0] || '');
+
+    return {
+        calibers,
+        grouped,
+        initialTemplate,
+        initialCaliber
+    };
+}
+
+window.closeAmmoSelectionModal = function() {
+    const modal = document.getElementById('ammo-selection-modal');
+    if (modal) modal.style.display = 'none';
+};
+
+window.openAmmoSelectionModal = async function(initialTemplateId = null, target = 'pockets') {
+    let modal = document.getElementById('ammo-selection-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'ammo-selection-modal';
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width: 900px; width: 92vw; max-height: 85vh; overflow-y:auto;">
+                <span class="close" onclick="closeAmmoSelectionModal()">&times;</span>
+                <h3>Добавить патроны</h3>
+                <div class="form-group">
+                    <label>Калибр</label>
+                    <select id="ammo-selection-caliber" class="form-control"></select>
+                </div>
+                <div class="form-group">
+                    <label>Вариант</label>
+                    <select id="ammo-selection-variant" class="form-control"></select>
+                </div>
+                <div class="form-group">
+                    <label>Количество</label>
+                    <input type="number" id="ammo-selection-quantity" class="form-control number-input" min="1" value="1">
+                </div>
+                <div id="ammo-selection-preview" style="margin: 8px 0 12px; padding: 10px; border:1px solid rgba(255,255,255,0.12); border-radius:8px; background: rgba(0,0,0,0.12);"></div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="confirmAmmoSelection()">Добавить</button>
+                    <button class="btn btn-secondary" onclick="closeAmmoSelectionModal()">Отмена</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+    }
+
+    modal._inventoryTarget = target || 'pockets';
+    modal.style.display = 'flex';
+    bindBackdropClose(modal, closeAmmoSelectionModal);
+
+    if (!document._ammoSelectionEscBound) {
+        document.addEventListener('keydown', (e) => {
+            const picker = document.getElementById('ammo-selection-modal');
+            if (e.key === 'Escape' && picker && picker.style.display !== 'none') {
+                closeAmmoSelectionModal();
+            }
+        });
+        document._ammoSelectionEscBound = true;
+    }
+
+    const allTemplates = await getAllItemTemplates(true);
+    const ammoTemplates = allTemplates.filter(t => t.category === 'ammo');
+    const { calibers, grouped, initialCaliber, initialTemplate } = renderAmmoSelectionModalContent(ammoTemplates, initialTemplateId);
+    modal._ammoGrouped = grouped;
+    modal._ammoTemplates = ammoTemplates;
+    modal._selectedAmmoTemplateId = initialTemplate?.id || null;
+
+    const caliberSelect = modal.querySelector('#ammo-selection-caliber');
+    const variantSelect = modal.querySelector('#ammo-selection-variant');
+    const preview = modal.querySelector('#ammo-selection-preview');
+    const qtyInput = modal.querySelector('#ammo-selection-quantity');
+
+    caliberSelect.innerHTML = calibers.map(caliber => {
+        const count = grouped[caliber].length;
+        return `<option value="${escapeHtml(caliber)}">${escapeHtml(caliber)} (${count})</option>`;
+    }).join('');
+
+    const getVariantsForTemplate = (template) => {
+        const variants = normalizeAmmoVariants(template?.attributes?.ammo_variants);
+        if (variants.length) return variants;
+        const single = normalizeAmmoVariant(template?.attributes?.ammo_variant || template?.attributes?.ammo_kind || template?.attributes?.special_version || template?.attributes?.effect);
+        return single ? [single] : [];
+    };
+
+    const renderVariantOptions = (template, preferredVariant = null) => {
+        const variants = getVariantsForTemplate(template);
+        const options = ['__base__', ...variants.filter(variant => variant !== '__base__')];
+        variantSelect.innerHTML = options.map(variant => {
+            const value = variant === '__base__' ? '' : variant;
+            const label = variant === '__base__' ? 'Обычный' : getAmmoVariantLabel(variant);
+            const isSelected = preferredVariant ? value === preferredVariant : false;
+            return `<option value="${escapeHtml(value)}" ${isSelected ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+        }).join('');
+        if (!variantSelect.value && options.length) {
+            variantSelect.value = options[0] === '__base__' ? '' : options[0];
+        }
+    };
+
+    const updatePreview = () => {
+        const selectedId = modal._selectedAmmoTemplateId;
+        const selected = ammoTemplates.find(t => t.id === selectedId);
+        const variant = variantSelect.value ? getAmmoVariantLabel(variantSelect.value) : 'Обычный';
+        if (!selected) {
+            preview.innerHTML = '<span style="opacity:0.7;">Нет данных</span>';
+            return;
+        }
+        const variantStats = getAmmoVariantStats(selected.attributes?.damage || 0, selected.attributes?.penetration || 0, variantSelect.value);
+        preview.innerHTML = `
+            <div><strong>${escapeHtml(selected.name)}</strong></div>
+            <div style="margin-top:4px; opacity:0.85;">Вариант: ${escapeHtml(variant)}</div>
+            <div style="opacity:0.85;">Пробитие: ${escapeHtml(formatAmmoPenetration(variantStats.penetration / 100))}</div>
+            <div style="opacity:0.85;">Урон: ${escapeHtml(String(variantStats.damage))}</div>
+            <div style="opacity:0.85;">Дальность: ${escapeHtml(String(selected.attributes?.range ?? 0))}</div>
+        `;
+    };
+
+    caliberSelect.onchange = () => {
+        const options = grouped[caliberSelect.value] || [];
+        const currentSelected = options.find(t => t.id === modal._selectedAmmoTemplateId) || options[0] || null;
+        modal._selectedAmmoTemplateId = currentSelected ? currentSelected.id : null;
+        renderVariantOptions(currentSelected);
+        updatePreview();
+    };
+    variantSelect.onchange = updatePreview;
+
+    const chosenCaliber = grouped[initialCaliber] ? initialCaliber : calibers[0];
+    if (chosenCaliber) {
+        caliberSelect.value = chosenCaliber;
+        const selectedTemplate = (initialTemplate && getItemCaliber(initialTemplate) === normalizeCaliberText(chosenCaliber))
+            ? initialTemplate
+            : (grouped[chosenCaliber]?.[0] || null);
+        modal._selectedAmmoTemplateId = selectedTemplate ? selectedTemplate.id : null;
+        renderVariantOptions(selectedTemplate, normalizeAmmoVariant(initialTemplate?.attributes?.ammo_variant) || '');
+    }
+    updatePreview();
+
+    modal._ammoTemplates = ammoTemplates;
+    modal._ammoGrouped = grouped;
+};
+
+window.confirmAmmoSelection = async function() {
+    const modal = document.getElementById('ammo-selection-modal');
+    if (!modal) return;
+    const variantSelect = modal.querySelector('#ammo-selection-variant');
+    const qtyInput = modal.querySelector('#ammo-selection-quantity');
+    const templateId = modal._selectedAmmoTemplateId;
+    const quantity = Math.max(1, parseInt(qtyInput.value, 10) || 1);
+    const chosenVariant = variantSelect?.value || null;
+    const ammoTemplates = modal._ammoTemplates || [];
+    const template = ammoTemplates.find(t => t.id === templateId);
+    if (!template) {
+        showNotification('Патрон не найден');
+        return;
+    }
+
+    const newItem = createItemFromTemplate(template, quantity);
+    const ammoVariant = chosenVariant || normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect);
+    applyAmmoVariantToItem(newItem, template, ammoVariant);
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    const targetArrayName = modal._inventoryTarget === 'backpack' ? 'backpack' : 'pockets';
+    if (!Array.isArray(currentCharacterData.inventory[targetArrayName])) currentCharacterData.inventory[targetArrayName] = [];
+    currentCharacterData.inventory[targetArrayName].push(newItem);
+
+    updateAmmoWeight(newItem);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    closeAmmoSelectionModal();
+};
+
 window.addEffectToModal = function(type) {
     const container = document.getElementById(`${type}-effects-container`);
     const div = document.createElement('div');
@@ -8231,6 +9355,15 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         nameDragZone.appendChild(infoBtn);
     }
 
+    const usesLeft = Number.isFinite(Number(item.uses)) ? Number(item.uses) : Number.isFinite(Number(item.attributes?.uses_remaining)) ? Number(item.attributes.uses_remaining) : null;
+    const maxUses = Number.isFinite(Number(item.maxUses)) ? Number(item.maxUses) : Number.isFinite(Number(item.attributes?.uses)) ? Number(item.attributes.uses) : null;
+    if (usesLeft !== null && maxUses !== null && maxUses > 0) {
+        const usesBadge = document.createElement('span');
+        usesBadge.style.cssText = 'margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; background:rgba(255,255,255,0.08); color:#d7e7ff; white-space:nowrap;';
+        usesBadge.textContent = `Исп.: ${Math.max(0, usesLeft)}/${maxUses}`;
+        nameDragZone.appendChild(usesBadge);
+    }
+
     row.appendChild(nameDragZone);
 
     // --- Вес ---
@@ -8511,6 +9644,20 @@ function showItemDetailsModal(item) {
             html += `<li>${escapeHtml(eff.type)}: ${escapeHtml(eff.value)}</li>`;
         });
         html += '</ul></p>';
+    }
+
+    if (item.category === 'ammo') {
+        const ammoVariants = item.attributes?.ammo_variants?.length
+            ? item.attributes.ammo_variants
+            : normalizeAmmoVariants(item.attributes?.ammo_variant || item.attributes?.ammo_kind || item.attributes?.special_version || item.attributes?.effect);
+        html += `<p><strong>Варианты:</strong> ${escapeHtml(getAmmoVariantLabels(ammoVariants))}</p>`;
+        html += `<p><strong>Пробитие:</strong> ${escapeHtml(formatAmmoPenetration(item.attributes?.penetration || 0))}</p>`;
+        if (item.attributes?.damage !== undefined && item.attributes?.damage !== null) {
+            html += `<p><strong>Урон:</strong> ${escapeHtml(String(item.attributes.damage))}</p>`;
+        }
+        if (item.attributes?.range !== undefined && item.attributes?.range !== null) {
+            html += `<p><strong>Дальность:</strong> ${escapeHtml(String(item.attributes.range))}</p>`;
+        }
     }
 
     // Модификации
@@ -8840,6 +9987,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
     try {
         const character = await Server.getCharacter(characterId);
         currentCharacterData = character.data || {};
+        normalizeCharacterEffects(currentCharacterData);
 
         migratePouchesToNewFormat();
 
@@ -8879,6 +10027,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
             socket.on('character_data_updated', (data) => {
                 if (data.character_id === currentCharacterId && data.updated_by !== parseInt(localStorage.getItem('user_id'))) {
                     currentCharacterData = data.updates.data || currentCharacterData;
+                    normalizeCharacterEffects(currentCharacterData);
 
                     // Принудительно обновляем инвентарь и экипировку (они всегда в DOM)
                     renderInventoryTab(currentCharacterData);
@@ -8886,6 +10035,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
 
                     // Обновляем активную вкладку для немедленного отображения
                     const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
+                    if (activeTab === 'health') renderHealthTab(currentCharacterData);
                     if (activeTab === 'basic') renderBasicTab(currentCharacterData);
                     else if (activeTab === 'skills') renderSkillsTab(currentCharacterData);
                     else if (activeTab === 'settings') renderSettingsTab(currentCharacterData);
@@ -9413,7 +10563,6 @@ window.addBackpackItemFromTemplate = async function(templateId) {
     targetArray.push(newItem);
     await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
-    document.getElementById('backpack-add-template').value = '';
 };
 
 window.addBackpackItemManual = function() {

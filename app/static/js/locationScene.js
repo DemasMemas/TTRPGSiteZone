@@ -63,6 +63,9 @@ let containerInteractionMenu = null;
 let containerInteractionState = null;
 let containerExchangeTarget = null;
 let containerInteractionDragState = null;
+let medicalConsumableMenu = null;
+let medicalConsumableMenuState = null;
+let medicalConsumableDragState = null;
 let armedMoveCharacterId = null;
 let movementPreviewGhost = null;
 let movementPreviewLine = null;
@@ -600,6 +603,192 @@ function ensureCombatActionMenu() {
     handlers.document.combatMenuClick = onClick;
 }
 
+function isMedicalConsumableItem(item) {
+    if (!item || typeof item !== 'object') return false;
+    if (item.category === 'consumable') return true;
+    const attrs = item.attributes || {};
+    return Boolean(
+        attrs.consumable ||
+        attrs.direct ||
+        attrs.effects ||
+        attrs.status_additions?.length ||
+        attrs.status_removals?.length
+    );
+}
+
+function getMedicalConsumableEntries(characterData) {
+    return getCharacterTransferEntries(characterData)
+        .filter((entry) => isMedicalConsumableItem(entry.item))
+        .sort((a, b) => {
+            const rootCompare = String(a.rootLabel || '').localeCompare(String(b.rootLabel || ''), 'ru');
+            if (rootCompare !== 0) return rootCompare;
+            return String(a.item?.name || '').localeCompare(String(b.item?.name || ''), 'ru');
+        });
+}
+
+function closeMedicalConsumableMenu() {
+    if (medicalConsumableMenu) {
+        medicalConsumableMenu.style.display = 'none';
+    }
+    medicalConsumableMenuState = null;
+    medicalConsumableDragState = null;
+}
+
+function ensureMedicalConsumableMenu() {
+    if (medicalConsumableMenu) return;
+    medicalConsumableMenu = document.createElement('div');
+    medicalConsumableMenu.id = 'medical-consumable-menu';
+    medicalConsumableMenu.style.cssText = `
+        position: fixed;
+        width: min(520px, calc(100vw - 24px));
+        max-height: min(72vh, 720px);
+        z-index: 1215;
+        display: none;
+        pointer-events: auto;
+        transform: translate(-50%, -50%);
+        background: rgba(14, 18, 26, 0.98);
+        border: 1px solid rgba(255,255,255,0.16);
+        border-radius: 16px;
+        box-shadow: 0 20px 42px rgba(0,0,0,0.45);
+        color: #fff;
+        backdrop-filter: blur(10px);
+        font-family: 'Segoe UI', Arial, sans-serif;
+        overflow: hidden;
+    `;
+    document.body.appendChild(medicalConsumableMenu);
+
+    const onClick = (event) => {
+        if (medicalConsumableMenu && !medicalConsumableMenu.contains(event.target)) {
+            closeMedicalConsumableMenu();
+        }
+    };
+    document.addEventListener('click', onClick);
+    handlers.document.medicalMenuClick = onClick;
+}
+
+async function showMedicalConsumableMenu(characterId) {
+    ensureMedicalConsumableMenu();
+    medicalConsumableMenuState = { characterId };
+
+    const character = await Server.getCharacter(characterId).catch(() => null);
+    const characterData = character?.data || null;
+    const consumables = characterData ? getMedicalConsumableEntries(characterData) : [];
+
+    medicalConsumableMenu.innerHTML = `
+        <div class="medical-menu-drag-handle" style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid rgba(255,255,255,0.08); cursor:move; user-select:none; touch-action:none;">
+            <div style="font-weight:700;">Расходники</div>
+            <button type="button" class="medical-close-btn" style="width:32px; height:32px; border-radius:999px; border:0; background:rgba(255,255,255,0.08); color:#fff; cursor:pointer; font-size:18px; line-height:1;">×</button>
+        </div>
+        <div style="padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.06); opacity:0.8; font-size:13px;">
+            Быстрый список предметов, которые можно использовать прямо из боя.
+        </div>
+        <div class="medical-menu-body" style="padding:12px 14px; overflow:auto; max-height:calc(min(72vh, 720px) - 106px);"></div>
+    `;
+
+    const body = medicalConsumableMenu.querySelector('.medical-menu-body');
+    if (!characterData) {
+        body.innerHTML = '<div style="opacity:0.75;">Не удалось загрузить персонажа</div>';
+    } else if (!consumables.length) {
+        body.innerHTML = '<div style="opacity:0.75;">В инвентаре нет расходников</div>';
+    } else {
+        consumables.forEach((entry) => {
+            const item = entry.item || {};
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.style.cssText = `
+                width:100%;
+                display:flex;
+                justify-content:space-between;
+                align-items:center;
+                gap:12px;
+                padding:10px 12px;
+                margin-bottom:8px;
+                border-radius:12px;
+                border:1px solid rgba(255,255,255,0.10);
+                background:rgba(255,255,255,0.04);
+                color:#fff;
+                cursor:pointer;
+                text-align:left;
+            `;
+            row.innerHTML = `
+                <div style="min-width:0;">
+                    <div style="font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${item.name || 'Расходник'}</div>
+                    <div style="opacity:0.72; font-size:12px;">${entry.rootLabel || 'Инвентарь'}${item.quantity > 1 ? ` · ${item.quantity} шт.` : ''}</div>
+                </div>
+                <div style="flex:0 0 auto; padding:6px 10px; border-radius:999px; background:rgba(108,176,111,0.18); color:#d8ffd8; font-weight:700;">Использовать</div>
+            `;
+            row.onclick = async (event) => {
+                event.stopPropagation();
+                try {
+                    const module = await import('./characterSheet.js');
+                    await module.useCharacterInventoryItem(characterId, entry.path);
+                    closeMedicalConsumableMenu();
+                } catch (error) {
+                    showNotification(error.message || 'Не удалось использовать расходник', 'system');
+                }
+            };
+            body.appendChild(row);
+        });
+    }
+
+    const closeBtn = medicalConsumableMenu.querySelector('.medical-close-btn');
+    if (closeBtn) closeBtn.onclick = () => closeMedicalConsumableMenu();
+
+    const dragHandle = medicalConsumableMenu.querySelector('.medical-menu-drag-handle');
+    if (dragHandle && !dragHandle.dataset.dragBound) {
+        dragHandle.dataset.dragBound = '1';
+        dragHandle.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0) return;
+            if (event.target.closest('button, select, input, textarea, option, label')) return;
+            if (!medicalConsumableMenu) return;
+            const rect = medicalConsumableMenu.getBoundingClientRect();
+            medicalConsumableDragState = {
+                pointerId: event.pointerId,
+                offsetX: event.clientX - rect.left,
+                offsetY: event.clientY - rect.top,
+            };
+            dragHandle.setPointerCapture?.(event.pointerId);
+            event.preventDefault();
+        });
+        const onPointerMove = (event) => {
+            if (!medicalConsumableDragState || medicalConsumableDragState.pointerId !== event.pointerId || !medicalConsumableMenu) return;
+            const rect = medicalConsumableMenu.getBoundingClientRect();
+            const minLeft = 8;
+            const minTop = 8;
+            const maxLeft = Math.max(minLeft, window.innerWidth - rect.width - 8);
+            const maxTop = Math.max(minTop, window.innerHeight - rect.height - 8);
+            let left = event.clientX - medicalConsumableDragState.offsetX;
+            let top = event.clientY - medicalConsumableDragState.offsetY;
+            left = Math.min(Math.max(minLeft, left), maxLeft);
+            top = Math.min(Math.max(minTop, top), maxTop);
+            medicalConsumableMenu.style.left = `${left}px`;
+            medicalConsumableMenu.style.top = `${top}px`;
+        };
+        const stopDrag = (event) => {
+            if (!medicalConsumableDragState) return;
+            if (event && event.pointerId !== undefined && medicalConsumableDragState.pointerId !== event.pointerId) return;
+            medicalConsumableDragState = null;
+        };
+        document.addEventListener('pointermove', onPointerMove);
+        document.addEventListener('pointerup', stopDrag);
+        document.addEventListener('pointercancel', stopDrag);
+    }
+
+    medicalConsumableMenu.style.display = 'block';
+    medicalConsumableMenu.style.visibility = 'hidden';
+
+    const rect = medicalConsumableMenu.getBoundingClientRect();
+    let left = window.innerWidth / 2 - rect.width / 2;
+    let top = window.innerHeight / 2 - rect.height / 2;
+    if (left < 8) left = 8;
+    if (top < 8) top = 8;
+    left = Math.min(left, Math.max(8, window.innerWidth - rect.width - 8));
+    top = Math.min(top, Math.max(8, window.innerHeight - rect.height - 8));
+    medicalConsumableMenu.style.left = `${left}px`;
+    medicalConsumableMenu.style.top = `${top}px`;
+    medicalConsumableMenu.style.visibility = 'visible';
+}
+
 function showCombatActionMenu(clientX, clientY, characterId) {
     ensureCombatActionMenu();
     combatActionMenuCharacterId = characterId;
@@ -628,6 +817,14 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             title: 'Открыть вкладку инвентаря',
             angle: 126,
             action: () => import('./characterSheet.js').then(module => module.openCharacterSheet(characterId, 'inventory')),
+            allowAlways: true,
+        },
+        {
+            label: 'Мед',
+            icon: '✚',
+            title: 'Быстрый выбор расходников',
+            angle: 72,
+            action: () => showMedicalConsumableMenu(characterId),
         },
         {
             label: 'ОП',
@@ -683,7 +880,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     menuItems.forEach((item) => {
         const button = document.createElement('button');
         button.type = 'button';
-        button.textContent = item.label;
+        button.innerHTML = item.icon ? `<span style="font-size:22px; line-height:1;">${item.icon}</span>` : item.label;
         button.title = item.title;
         button.style.cssText = `
             position:absolute;
@@ -704,9 +901,13 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             backdrop-filter: blur(8px);
             padding: 8px;
         `;
-        const allowed = item.label === 'Инвентарь' || hasFullAccess;
+        const allowed = item.allowAlways || hasFullAccess;
         button.disabled = !allowed;
         button.style.opacity = allowed ? '1' : '0.45';
+        if (item.icon) {
+            button.style.fontSize = '22px';
+            button.style.fontWeight = '800';
+        }
         button.onclick = (event) => {
             event.stopPropagation();
             combatActionMenu.style.display = 'none';
@@ -1099,6 +1300,9 @@ function renderCombatHud() {
             <div>ОД: ${combatState.current_character?.action_points_current ?? 0}/${combatState.current_character?.action_points_max ?? 0}</div>
             <div>СД: ${combatState.current_character?.free_actions_current ?? 0}/${combatState.current_character?.free_actions_max ?? 0}</div>
             <div>ОП: ${combatState.current_character?.movement_points_current ?? 0}/${combatState.current_character?.movement_points_max ?? 0}</div>
+            <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
+            <div>Кровопотеря: ${combatState.current_character?.blood ?? 'normal'} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
+            <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
             <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
             ${pendingCombatAction ? `<div style="margin-top:8px; padding:8px 10px; border-radius:10px; background: rgba(255,255,255,0.06);"><strong>Выбор цели:</strong> ${pendingCombatAction.actionKey || 'action'}</div>` : ''}
             <div style="margin-top:10px;">
@@ -3585,13 +3789,16 @@ function setupCharacterDragging() {
             hideStructureInteraction();
             showNotification('Взаимодействие отменено', 'system');
         }
-        if (combatActionMenu) {
-            combatActionMenu.style.display = 'none';
-            combatActionMenuCharacterId = null;
-        }
-        armedMoveCharacterId = null;
-        clearMovementPreview();
-    };
+    if (combatActionMenu) {
+        combatActionMenu.style.display = 'none';
+        combatActionMenuCharacterId = null;
+    }
+    if (medicalConsumableMenu && medicalConsumableMenu.style.display === 'block') {
+        closeMedicalConsumableMenu();
+    }
+    armedMoveCharacterId = null;
+    clearMovementPreview();
+};
     document.addEventListener('keydown', onKeyDown);
     handlers.document.keydown = onKeyDown;
 }

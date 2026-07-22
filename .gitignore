@@ -62,3 +62,10 @@ logs/ttrpg.log
 app/services/__pycache__/combat.cpython-313.pyc
 app/models/__pycache__/location_combat.cpython-313.pyc
 tmp_write_test.txt
+scripts/__pycache__/enrich_consumables.cpython-313.pyc
+app/services/__pycache__/effects.cpython-313.pyc
+app/services/__pycache__/consumable_importer.cpython-313.pyc
+scripts/__pycache__/import_consumables.cpython-313.pyc
+app/services/__pycache__/consumable_effects.cpython-313.pyc
+scripts/__pycache__/import_equipment.cpython-313.pyc
+app/services/__pycache__/equipment_importer.cpython-313.pyc

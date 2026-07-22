@@ -1,0 +1,372 @@
+from __future__ import annotations
+
+import difflib
+import re
+import zipfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+from app.extensions import db
+from app.models.templates import ItemTemplate
+from app.services.consumable_effects import parse_consumable_effects
+
+
+NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+SECTION_HEADER_NAMES = {
+    "Еда",
+    "Кровь",
+    "Обезболивающее",
+    "Стимуляторы",
+    "Восстановление здоровья",
+    "Радиация",
+    "Травмы",
+}
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(str(value).replace(",", ".")))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_weight_float(value: Any, default: float = 0.0) -> float:
+    text = _normalize_text(value).replace(",", ".")
+    if not text:
+        return default
+    if "/" in text:
+        left, right = text.split("/", 1)
+        try:
+            return float(left) / float(right)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return default
+    return _as_float(text, default)
+
+
+def _normalize_consumable_name(value: Any) -> str:
+    text = _normalize_text(value).lower()
+    if text.endswith("]") and "[" in text:
+        text = text[: text.rfind("[")].strip()
+    for prefix in ("ампула ", "капельница "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    text = text.replace("регенаративный", "регенеративный")
+    text = text.replace("б.о.л.т", "б.о.л.т.")
+    return text
+
+
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _parse_signed_amount(text: str, pattern: str) -> Optional[float]:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    sign = -1 if match.group("sign") == "-" else 1
+    raw = match.group("value").replace(",", ".")
+    if "/" in raw:
+        left, right = raw.split("/", 1)
+        try:
+            return sign * (float(left) / float(right))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+    try:
+        return sign * float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_duration(text: str, pattern: str) -> Optional[int]:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return _as_int(match.group(1), None)
+
+
+def _build_effect(effect_type: str, value: Any, *, remaining: Optional[int] = None, tick: str = "turn_end") -> Dict[str, Any]:
+    effect = {
+        "type": effect_type,
+        "name": effect_type,
+        "value": _as_float(value, 0),
+        "tick": tick,
+        "active": True,
+    }
+    if remaining is not None:
+        effect["remaining"] = max(0, _as_int(remaining, 0))
+    return effect
+
+
+def parse_consumable_profile(description: str) -> Dict[str, Any]:
+    return parse_consumable_effects(description)
+
+
+def _read_shared_strings(archive: zipfile.ZipFile) -> List[str]:
+    if "xl/sharedStrings.xml" not in archive.namelist():
+        return []
+    root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+    values: List[str] = []
+    for si in root.findall("m:si", NS):
+        parts: List[str] = []
+        for text_node in si.iterfind(".//m:t", NS):
+            parts.append(text_node.text or "")
+        values.append("".join(parts))
+    return values
+
+
+def _read_sheet_rows(workbook_path: Path, sheet_name: str = "Расходники") -> List[Dict[str, str]]:
+    with zipfile.ZipFile(workbook_path) as archive:
+        shared_strings = _read_shared_strings(archive)
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        rel_targets = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
+
+        target = None
+        for sheet in workbook.findall(".//m:sheet", NS):
+            if sheet.attrib.get("name") == sheet_name:
+                rel_id = sheet.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]
+                target = "xl/" + rel_targets[rel_id]
+                break
+        if not target:
+            raise ValueError(f"Sheet '{sheet_name}' was not found in workbook")
+
+        root = ET.fromstring(archive.read(target))
+        rows: List[Dict[str, str]] = []
+        for row in root.findall(".//m:sheetData/m:row", NS):
+            parsed: Dict[str, str] = {}
+            for cell in row.findall("m:c", NS):
+                ref = cell.attrib.get("r", "")
+                column = "".join(ch for ch in ref if ch.isalpha())
+                cell_type = cell.attrib.get("t")
+                value = ""
+                raw_v = cell.find("m:v", NS)
+                inline = cell.find("m:is", NS)
+                if raw_v is not None and raw_v.text is not None:
+                    value = raw_v.text
+                    if cell_type == "s" and value.isdigit():
+                        value = shared_strings[int(value)]
+                elif inline is not None:
+                    parts: List[str] = []
+                    for text_node in inline.iterfind(".//m:t", NS):
+                        parts.append(text_node.text or "")
+                    value = "".join(parts)
+                parsed[column] = value
+            rows.append(parsed)
+        return rows
+
+
+def parse_consumable_templates(workbook_path: Path) -> List[Dict[str, Any]]:
+    rows = _read_sheet_rows(workbook_path, "Расходники")
+    templates: List[Dict[str, Any]] = []
+    current_section: Optional[str] = None
+
+    for row in rows:
+        name = _normalize_text(row.get("A"))
+        col_b = _normalize_text(row.get("B"))
+        col_c = _normalize_text(row.get("C"))
+        col_d = _normalize_text(row.get("D"))
+        col_e = _normalize_text(row.get("E"))
+        description = _normalize_text(row.get("F"))
+
+        if not name:
+            continue
+        if col_b == "Категория" and col_c == "Цена" and col_d == "Вес" and col_e == "Размер":
+            current_section = name
+            continue
+        if not current_section:
+            continue
+        if name in SECTION_HEADER_NAMES and col_b == "Категория":
+            current_section = name
+            continue
+
+        volume = _as_float(col_e, 0.0)
+        if volume > 1000:
+            volume = 1.0
+
+        profile = parse_consumable_profile(description)
+        template = {
+            "name": name,
+            "category": "consumable",
+            "subcategory": current_section,
+            "item_class": col_d or None,
+            "description": description,
+            "price": _as_int(col_c, 0),
+            "weight": 0.0,
+            "volume": volume,
+            "attributes": {
+                "section": current_section,
+                "import_tier": col_b if col_b else None,
+                "consumable": profile,
+                "effects": profile["effects"],
+                "uses": profile["direct"].get("uses"),
+                "duration": profile["direct"].get("duration"),
+                "delay": profile["direct"].get("delay"),
+                "raw_description": description,
+            },
+            "compatible_ids": [],
+        }
+        templates.append(template)
+
+    return templates
+
+
+def parse_consumable_templates_v2(workbook_path: Path) -> List[Dict[str, Any]]:
+    rows = _read_sheet_rows(workbook_path, "Расходники")
+    templates: List[Dict[str, Any]] = []
+    current_section: Optional[str] = None
+    layout: Optional[str] = None
+
+    def is_new_header(row: Dict[str, str]) -> bool:
+        return (
+            _normalize_text(row.get("B")) == "Вес, кг"
+            and _normalize_text(row.get("C")) == "Категория"
+            and _normalize_text(row.get("D")) == "Цена"
+            and _normalize_text(row.get("E")) == "Размер"
+        )
+
+    def is_old_header(row: Dict[str, str]) -> bool:
+        return (
+            _normalize_text(row.get("B")) == "Категория"
+            and _normalize_text(row.get("C")) == "Цена"
+            and _normalize_text(row.get("D")) == "Вес"
+            and _normalize_text(row.get("E")) == "Размер"
+        )
+
+    for row in rows:
+        name = _normalize_text(row.get("A"))
+        col_b = _normalize_text(row.get("B"))
+        col_c = _normalize_text(row.get("C"))
+        col_d = _normalize_text(row.get("D"))
+        col_e = _normalize_text(row.get("E"))
+        description = _normalize_text(row.get("F"))
+
+        if not name:
+            continue
+        if is_new_header(row):
+            current_section = name
+            layout = "new"
+            continue
+        if is_old_header(row):
+            current_section = name
+            layout = "old"
+            continue
+        if not current_section:
+            continue
+
+        if layout == "new":
+            weight = _as_weight_float(col_b, 0.0)
+            item_class = col_c or None
+            price = _as_int(col_d, 0)
+            volume = _as_weight_float(col_e, 0.0)
+            import_tier = col_c if col_c else None
+        else:
+            weight = _as_weight_float(col_d, 0.0)
+            item_class = col_d or None
+            price = _as_int(col_c, 0)
+            volume = _as_weight_float(col_e, 0.0)
+            import_tier = col_b if col_b else None
+
+        if volume > 1000:
+            volume = 1.0
+
+        profile = parse_consumable_profile(description)
+        templates.append(
+            {
+                "name": name,
+                "category": "consumable",
+                "subcategory": current_section,
+                "item_class": item_class,
+                "description": description,
+                "price": price,
+                "weight": weight,
+                "volume": volume,
+                "attributes": {
+                    "section": current_section,
+                    "import_tier": import_tier,
+                    "consumable": profile,
+                    "effects": profile["effects"],
+                    "uses": profile["direct"].get("uses"),
+                    "duration": profile["direct"].get("duration"),
+                    "delay": profile["direct"].get("delay"),
+                    "raw_description": description,
+                },
+                "compatible_ids": [],
+            }
+        )
+
+    return templates
+
+
+def upsert_consumable_templates(workbook_path: str | Path, session=None) -> Dict[str, int]:
+    path = Path(workbook_path).expanduser().resolve()
+    templates = parse_consumable_templates_v2(path)
+    session = session or db.session
+
+    existing_by_section: Dict[str, List[ItemTemplate]] = {}
+    for item in ItemTemplate.query.filter_by(category="consumable").all():
+        existing_by_section.setdefault(item.subcategory or "", []).append(item)
+
+    inserted = 0
+    updated = 0
+    used_ids: set[int] = set()
+    for data in templates:
+        section = data["subcategory"] or ""
+        candidates = existing_by_section.get(section, [])
+        normalized_name = _normalize_consumable_name(data["name"])
+        item = None
+        best_score = 0.0
+        for candidate in candidates:
+            if candidate.id in used_ids:
+                continue
+            candidate_name = _normalize_consumable_name(candidate.name)
+            if candidate_name == normalized_name:
+                item = candidate
+                break
+            score = difflib.SequenceMatcher(None, candidate_name, normalized_name, autojunk=False).ratio()
+            if score > best_score:
+                best_score = score
+                item = candidate
+
+        if item is not None and _normalize_consumable_name(item.name) != normalized_name and best_score < 0.72:
+            item = None
+
+        if item is None:
+            session.add(ItemTemplate(**data))
+            inserted += 1
+            continue
+        used_ids.add(item.id)
+
+        changed = False
+        for field in ["name", "subcategory", "item_class", "description", "price", "weight", "volume"]:
+            value = data[field]
+            if getattr(item, field) != value:
+                setattr(item, field, value)
+                changed = True
+        if item.attributes != data["attributes"]:
+            item.attributes = data["attributes"]
+            changed = True
+        if item.compatible_ids != data["compatible_ids"]:
+            item.compatible_ids = data["compatible_ids"]
+            changed = True
+        if changed:
+            updated += 1
+
+    session.commit()
+    return {
+        "parsed": len(templates),
+        "inserted": inserted,
+        "updated": updated,
+    }

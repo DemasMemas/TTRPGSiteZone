@@ -1,8 +1,10 @@
 import logging
 from flask import request
 from flask_socketio import emit, join_room, leave_room
+from sqlalchemy.orm.attributes import flag_modified
 from app.extensions import socketio, db
-from app.models import LobbyCharacter, LobbyParticipant
+from app.models import LobbyCharacter, LobbyParticipant, LocationCharacter
+from app.services.effects import normalize_effect_list, sync_health_derived_statuses
 from .utils import get_user_from_token
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,21 @@ def handle_update_character_data(data):
         for key, value in updates.items():
             if hasattr(character, key):
                 setattr(character, key, value)
+
+    if isinstance(character.data, dict):
+        health = character.data.get('health')
+        if isinstance(health, dict):
+            health['effects'] = normalize_effect_list(health.get('effects') or [])
+            sync_health_derived_statuses(health)
+            character.data['health'] = health
+        for loc_char in LocationCharacter.query.filter_by(character_id=character.id).all():
+            if isinstance(health, dict):
+                loc_char.effects = list(health.get('effects') or [])
+                flag_modified(loc_char, 'effects')
+            else:
+                loc_char.effects = []
+                flag_modified(loc_char, 'effects')
+
     db.session.commit()
 
     emit('character_data_updated', {

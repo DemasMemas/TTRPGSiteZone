@@ -10,6 +10,7 @@ from app.models.location import Location
 from app.models.location_character import LocationCharacter
 from app.services.combat import CombatService
 from app.services.exceptions import ServiceError
+from app.services.effects import normalize_effect_list, sync_health_derived_statuses
 from app.sockets.utils import get_user_from_token
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,12 @@ def handle_join_location(data):
         loc_char.free_actions_current = profile['free_actions']
         loc_char.movement_points_max = profile['movement_points']
         loc_char.movement_points_current = profile['movement_points']
+        if loc_char.character and isinstance(loc_char.character.data, dict):
+            health = loc_char.character.data.get('health')
+            if isinstance(health, dict):
+                loc_char.effects = normalize_effect_list(health.get('effects') or [])
+                sync_health_derived_statuses(health)
+                flag_modified(loc_char, 'effects')
         db.session.commit()
 
     join_room(f"location_{location_id}")

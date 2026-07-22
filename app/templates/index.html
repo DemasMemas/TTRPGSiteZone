@@ -3,14 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TTRPG Site</title>
+    <title>Периметр</title>
     <link rel="icon" type="image/png" href="/static/assets/pictures/bg.png">
     <style>
         :root {
-            --panel-bg: rgba(10, 14, 20, 0.78);
-            --panel-border: rgba(255, 255, 255, 0.12);
-            --text-main: #f5f7fb;
-            --text-muted: rgba(245, 247, 251, 0.72);
+            --panel-bg: rgba(9, 12, 10, 0.86);
+            --panel-border: rgba(184, 164, 110, 0.16);
+            --text-main: #f0eadc;
+            --text-muted: rgba(240, 234, 220, 0.72);
+            --accent: #a18a4b;
+            --accent-soft: rgba(161, 138, 75, 0.18);
+            --danger: #a95d4b;
         }
 
         * { box-sizing: border-box; }
@@ -18,12 +21,25 @@
 
         body {
             margin: 0;
-            font-family: "Segoe UI", Arial, sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
             color: var(--text-main);
+            overflow-x: hidden;
             background:
-                linear-gradient(90deg, rgba(7, 10, 16, 0.86) 0%, rgba(7, 10, 16, 0.54) 44%, rgba(7, 10, 16, 0.18) 100%),
+                radial-gradient(circle at top left, rgba(145, 114, 52, 0.05), transparent 30%),
+                radial-gradient(circle at bottom right, rgba(26, 51, 42, 0.14), transparent 28%),
+                linear-gradient(180deg, rgba(5, 7, 6, 0.22) 0%, rgba(5, 7, 6, 0.42) 100%),
                 url("/static/assets/pictures/bg.png") center center / cover no-repeat fixed,
-                #081018;
+                #070a08;
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background:
+                radial-gradient(circle at center, transparent 58%, rgba(0, 0, 0, 0.14) 100%);
+            mix-blend-mode: multiply;
         }
 
         .page {
@@ -31,47 +47,62 @@
             display: flex;
             align-items: center;
             justify-content: flex-start;
-            padding: clamp(24px, 5vw, 72px);
+            padding: clamp(20px, 4vw, 56px);
+            position: relative;
+            z-index: 1;
         }
 
-        .shell { width: min(540px, 100%); }
-        .brand { margin-bottom: 18px; }
-        .brand h1 {
-            margin: 0 0 10px;
-            font-size: clamp(34px, 4vw, 54px);
-            letter-spacing: 0.02em;
-            line-height: 1;
+        .shell {
+            width: min(560px, 100%);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
-        .brand p {
+        .brand {
+            margin-bottom: 0;
+            text-align: left;
+        }
+        .brand h1 {
             margin: 0;
-            max-width: 42ch;
-            color: var(--text-muted);
-            line-height: 1.45;
-            font-size: 15px;
+            font-size: clamp(30px, 3.5vw, 48px);
+            letter-spacing: 0.05em;
+            font-weight: 700;
+            text-transform: uppercase;
+            line-height: 1;
+            text-shadow: 0 0 20px rgba(0, 0, 0, 0.55);
         }
 
         .panel {
-            background: var(--panel-bg);
+            background:
+                linear-gradient(180deg, rgba(18, 22, 18, 0.82), rgba(9, 12, 10, 0.88)),
+                var(--panel-bg);
             border: 1px solid var(--panel-border);
-            border-radius: 24px;
-            padding: 24px;
-            box-shadow: 0 24px 72px rgba(0, 0, 0, 0.42);
-            backdrop-filter: blur(14px);
+            border-radius: 22px;
+            padding: 18px;
+            box-shadow: 0 28px 72px rgba(0, 0, 0, 0.46);
+            backdrop-filter: blur(16px);
         }
 
-        .stack { display: flex; flex-direction: column; gap: 18px; }
-        .section-title { margin: 0 0 8px; font-size: 22px; }
+        .stack { display: flex; flex-direction: column; gap: 8px; }
+        .section-title {
+            margin: 0 0 6px;
+            font-size: 17px;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            color: #e8ddc7;
+            font-weight: 700;
+        }
         .section-block + .section-block {
-            margin-top: 22px;
-            padding-top: 22px;
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(184, 164, 110, 0.12);
         }
 
         .form-group {
             display: flex;
             flex-direction: column;
-            gap: 6px;
-            margin-bottom: 14px;
+            gap: 4px;
+            margin-bottom: 8px;
         }
 
         label {
@@ -83,16 +114,16 @@
             width: 100%;
             padding: 12px 14px;
             border-radius: 14px;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(184, 164, 110, 0.14);
+            background: rgba(5, 8, 6, 0.58);
             color: var(--text-main);
             outline: none;
         }
 
-        input::placeholder { color: rgba(245, 247, 251, 0.45); }
+        input::placeholder { color: rgba(240, 234, 220, 0.42); }
         input:focus, textarea:focus, select:focus {
-            border-color: rgba(125, 211, 252, 0.55);
-            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
+            border-color: rgba(161, 138, 75, 0.6);
+            box-shadow: 0 0 0 3px rgba(161, 138, 75, 0.16);
         }
 
         button {
@@ -104,58 +135,79 @@
             border: none;
             border-radius: 14px;
             cursor: pointer;
-            color: #06111a;
-            background: linear-gradient(180deg, #bdeafe 0%, #67cdf5 100%);
+            color: #11140e;
+            background: linear-gradient(180deg, #9aa06b 0%, #6d7544 100%);
             font-weight: 700;
             transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
-            box-shadow: 0 12px 24px rgba(56, 189, 248, 0.2);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.24);
         }
-        button:hover { transform: translateY(-1px); filter: brightness(1.03); }
+        button:hover { transform: translateY(-1px); filter: brightness(1.05); }
         button:active { transform: translateY(0); }
 
         .button-row {
             display: flex;
             flex-wrap: wrap;
-            gap: 10px;
+            gap: 8px;
             justify-content: flex-start;
         }
 
         .error {
-            color: #ffb4b4;
+            color: #ffb7a6;
             margin-top: 6px;
             min-height: 1.25em;
         }
 
-        .success { color: #b8ffca; margin-top: 6px; }
+        .success { color: #c8e8b0; margin-top: 6px; }
         .hidden { display: none; }
         #auth-section, #app-section { text-align: left; }
         #auth-section button,
         #app-section button { align-self: flex-start; }
+        #app-section > .section-block:first-child {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        #app-section > .section-block:first-child .section-title {
+            margin: 0;
+            text-transform: none;
+            letter-spacing: 0.01em;
+            font-size: 16px;
+        }
+        #app-section > .section-block:first-child .button-row {
+            margin-top: 0;
+            flex-shrink: 0;
+        }
+        #app-section > .section-block:first-child .button-row button {
+            white-space: nowrap;
+        }
 
         #characters-list { list-style: none; padding: 0; }
         #characters-list li {
-            background: rgba(255, 255, 255, 0.06);
-            margin-bottom: 10px;
-            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            margin-bottom: 8px;
+            padding: 9px 10px;
             border-radius: 12px;
+            border: 1px solid rgba(184, 164, 110, 0.1);
         }
 
         .lobby-item {
-            background: rgba(255, 255, 255, 0.06);
-            margin-bottom: 10px;
-            padding: 12px;
+            background: rgba(255, 255, 255, 0.05);
+            margin-bottom: 8px;
+            padding: 10px;
             border-radius: 14px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             gap: 12px;
+            border: 1px solid rgba(184, 164, 110, 0.1);
         }
 
         .lobby-item button { padding: 8px 14px; }
         .delete-btn {
-            background: linear-gradient(180deg, #ff8f8f 0%, #ef4444 100%);
+            background: linear-gradient(180deg, #c2775f 0%, #8d4333 100%);
             color: white;
-            box-shadow: 0 12px 24px rgba(239, 68, 68, 0.18);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.22);
         }
 
         @media (max-width: 720px) {
@@ -164,8 +216,15 @@
                 padding: 18px;
             }
             .panel {
-                padding: 18px;
-                border-radius: 20px;
+                padding: 14px;
+                border-radius: 18px;
+            }
+            .brand h1 {
+                letter-spacing: 0.06em;
+            }
+            #app-section > .section-block:first-child {
+                flex-direction: column;
+                align-items: flex-start;
             }
         }
     </style>
@@ -174,8 +233,7 @@
     <main class="page">
         <div class="shell">
             <div class="brand">
-                <h1>TTRPG Site</h1>
-                <p>Вход, комнаты и подготовка к сессии на фоне вашей карты. Интерфейс теперь уходит влево, чтобы картинка работала как полноценная подложка.</p>
+                <h1>Периметр</h1>
             </div>
 
             <div class="panel">

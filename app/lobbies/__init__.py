@@ -793,6 +793,20 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
         location_character_id=data.get('location_character_id'),
     )
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    characters = LocationCharacter.query.filter_by(location_id=location_id).all()
+    for loc_char in characters:
+        character = loc_char.character
+        if not character or not isinstance(character.data, dict):
+            continue
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': character.id,
+                'updates': {'data': character.data},
+                'updated_by': 0,
+            },
+            room=f"character_{character.id}",
+        )
     return jsonify(state), 200
 
 
@@ -802,6 +816,20 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
 def end_location_combat(lobby_id, location_id, lobby):
     state = CombatService.end_combat(location_id, lobby.gm_id)
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    characters = LocationCharacter.query.filter_by(location_id=location_id).all()
+    for loc_char in characters:
+        character = loc_char.character
+        if not character or not isinstance(character.data, dict):
+            continue
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': character.id,
+                'updates': {'data': character.data},
+                'updated_by': 0,
+            },
+            room=f"character_{character.id}",
+        )
     return jsonify(state), 200
 
 
