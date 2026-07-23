@@ -249,6 +249,12 @@ function handleKeyDown(e) {
             }
             return;
         }
+        const target = e.target;
+        const isInput = target.tagName === 'INPUT'
+            || target.tagName === 'TEXTAREA'
+            || target.tagName === 'SELECT'
+            || target.isContentEditable;
+        if (isInput) return;
         // Alt
         if (e.key === 'Alt') {
             e.preventDefault();

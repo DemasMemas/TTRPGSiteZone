@@ -5,7 +5,7 @@ import heapq
 from app.extensions import db
 from app.models import Location, LocationCharacter, LocationCombatState, LobbyParticipant, LobbyCharacter, LocationObject
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
-from app.services.effects import apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
+from app.services.effects import apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
 from sqlalchemy.orm.attributes import flag_modified
 
 
@@ -87,6 +87,7 @@ class CombatService:
             ),
         )
         action_points = combat_data.get('action_points', data.get('action_points', DEFAULT_ACTION_POINTS))
+        action_points = CombatService._coerce_int(action_points, DEFAULT_ACTION_POINTS) + CombatService._consumable_stat_bonus(data, 'action_points')
         free_actions = combat_data.get('free_actions', data.get('free_actions', DEFAULT_FREE_ACTIONS))
         movement_penalty = CombatService._movement_penalty(loc_char)
         movement_gain = max(0, DEFAULT_CONVERSION_BASE - movement_penalty)
@@ -194,6 +195,10 @@ class CombatService:
         if not isinstance(health, dict):
             return None
 
+        active_effects = normalize_effect_list(health.get('effects') or [])
+        if any(effect.get('type') == 'blood_loss_freeze' and effect.get('active', True) for effect in active_effects):
+            return None
+
         sync_health_derived_statuses(health)
         bleeding = health.get('bleeding') if isinstance(health.get('bleeding'), dict) else {}
         severity = CombatService._coerce_int(bleeding.get('totalSeverity', health.get('bleedingSeverity', 0)), 0)
@@ -246,8 +251,10 @@ class CombatService:
         health = character_data.get('health')
         if not isinstance(health, dict):
             return loc_char
-        health['effects'] = tick_effects(health.get('effects') or [], phase=phase)
-        apply_periodic_effects_to_health(health, health.get('effects') or [], phase=phase)
+        active_effects = normalize_effect_list(health.get('effects') or [])
+        apply_periodic_effects_to_health(health, active_effects, phase=phase)
+        apply_expired_effects_to_health(health, active_effects, phase=phase)
+        health['effects'] = tick_effects(active_effects, phase=phase)
         combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else None
         if isinstance(combat_meta, dict):
             for key in ('consumableModifiers', 'bleedingModifiers'):
@@ -261,6 +268,10 @@ class CombatService:
                         continue
                     remaining = item.get('remaining')
                     if remaining is None:
+                        updated.append(item)
+                        continue
+                    tick_phase = item.get('tick') or 'turn_end'
+                    if tick_phase != phase:
                         updated.append(item)
                         continue
                     next_remaining = max(0, CombatService._coerce_int(remaining, 0) - 1)
@@ -646,6 +657,14 @@ class CombatService:
         loc_char.free_actions_current = profile['free_actions']
         loc_char.movement_points_max = 0
         loc_char.movement_points_current = 0
+        if getattr(loc_char, 'character', None) and isinstance(loc_char.character.data, dict):
+            data = loc_char.character.data
+            health = data.get('health') if isinstance(data.get('health'), dict) else {}
+            meta = health.setdefault('combatMeta', {})
+            meta['consumableUsage'] = {}
+            data['health'] = health
+            loc_char.character.data = data
+            flag_modified(loc_char.character, 'data')
         return loc_char
 
     @staticmethod
@@ -912,6 +931,26 @@ class CombatService:
         )
 
     @staticmethod
+    def adjust_resources(location_id, user_id, location_character_id, action_points=0, movement_points=0):
+        location = CombatService._get_location(location_id)
+        CombatService._ensure_access(location, user_id)
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not state or state.status != 'active':
+            raise ValidationError("Combat is not active")
+        character = LocationCharacter.query.filter_by(id=location_character_id, location_id=location_id).first()
+        if not character:
+            raise NotFoundError("Character not found")
+        if state.current_location_character_id != character.id:
+            raise PermissionDenied("It is not this character's turn")
+        action_points = max(-10, min(10, CombatService._coerce_int(action_points, 0)))
+        movement_points = max(-50, min(50, CombatService._coerce_int(movement_points, 0)))
+        character.action_points_current = max(0, character.action_points_current + action_points)
+        character.movement_points_current = max(0, character.movement_points_current + movement_points)
+        character.last_action = db.func.now()
+        db.session.commit()
+        return CombatService._serialize_character(character, current_turn_id=state.current_location_character_id)
+
+    @staticmethod
     def perform_action(location_id, user_id, location_character_id, action_key):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -1005,6 +1044,8 @@ class CombatService:
 
             character.pos_x, character.pos_y = landing
             character.last_action = db.func.now()
+            CombatService._apply_periodic_health_effects(character, phase='movement_end')
+            CombatService._sync_location_effects_from_character(character)
             db.session.commit()
             state_payload = CombatService._serialize_state(location, state) if state else None
             return character, climb_cost, state_payload
@@ -1045,6 +1086,8 @@ class CombatService:
         character.pos_x = new_x
         character.pos_y = new_y
         character.last_action = db.func.now()
+        CombatService._apply_periodic_health_effects(character, phase='movement_end')
+        CombatService._sync_location_effects_from_character(character)
         db.session.commit()
 
         state_payload = CombatService._serialize_state(location, state) if state else None
@@ -1072,8 +1115,26 @@ class CombatService:
             loc_char.initiative_roll = None
             loc_char.initiative_total = None
             loc_char.movement_points_current = 0
-            CombatService._tick_character_effects(loc_char, phase='turn_end')
-            CombatService._apply_periodic_health_effects(loc_char, phase='turn_end')
+            character = getattr(loc_char, 'character', None)
+            if character and isinstance(character.data, dict):
+                data = character.data
+                health = data.get('health') if isinstance(data.get('health'), dict) else {}
+                meta = health.setdefault('combatMeta', {})
+                for key in ('consumableModifiers', 'bleedingModifiers'):
+                    values = meta.get(key)
+                    if isinstance(values, list):
+                        meta[key] = [value for value in values if not (
+                            isinstance(value, dict)
+                            and (value.get('scope') == 'combat' or value.get('note') == 'hematogen')
+                        )]
+                effects = normalize_effect_list(health.get('effects') or [])
+                untreated = [effect for effect in effects if effect.get('type') == 'untreated_wound']
+                meta['untreatedWoundsAfterCombat'] = len(untreated)
+                health['effects'] = [effect for effect in effects if effect.get('scope') != 'combat']
+                sync_health_derived_statuses(health)
+                data['health'] = health
+                character.data = data
+                flag_modified(character, 'data')
             CombatService._sync_location_effects_from_character(loc_char)
 
         db.session.commit()

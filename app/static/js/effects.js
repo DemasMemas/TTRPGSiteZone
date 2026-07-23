@@ -23,6 +23,24 @@ const EFFECT_TYPE_META = {
     blindness: { label: 'Слепота', group: 'sense' },
     deafness: { label: 'Глухота', group: 'sense' },
     sleep: { label: 'Сон', group: 'critical' },
+    radiation_treatment: { label: 'Выведение радиации', group: 'medical' },
+    blood_recovery: { label: 'Восстановление кровопотери', group: 'medical' },
+    periodic_adjustment: { label: 'Периодический эффект', group: 'status' },
+    delayed_adjustment: { label: 'Отложенный эффект', group: 'status' },
+    deferred_adjustment: { label: 'Отложенный эффект', group: 'status' },
+    delayed_treatment: { label: 'Ожидание действия препарата', group: 'medical' },
+    next_rest_healing: { label: 'Лечение на следующем отдыхе', group: 'medical' },
+    untreated_wound: { label: 'Необработанная рана', group: 'injury' },
+    tourniquet: { label: 'Наложен жгут', group: 'medical' },
+    blood_loss_freeze: { label: 'Стабилизация кровопотери', group: 'medical' },
+    bleeding_prevention: { label: 'Блок новых кровотечений', group: 'medical' },
+    infection_growth_block: { label: 'Блок нарастания заражения', group: 'medical' },
+    analgesia: { label: 'Обезболивание', group: 'medical' },
+    stimulant_crash: { label: 'Последствие стимулятора', group: 'medical' },
+    radiation_filter: { label: 'Защита от входящей радиации', group: 'medical' },
+    temperature_control: { label: 'Контроль температуры', group: 'medical' },
+    limb_trauma_suppression: { label: 'Подавление травмы конечности', group: 'medical' },
+    pain_block: { label: 'Блок новых уровней боли', group: 'medical' },
 };
 
 const TYPE_ALIASES = {
@@ -81,6 +99,15 @@ const TYPE_ALIASES = {
     потеря_органа: 'organ_loss',
 };
 
+[
+    'radiation_treatment', 'blood_recovery', 'periodic_adjustment', 'delayed_adjustment',
+    'deferred_adjustment', 'delayed_treatment', 'next_rest_healing', 'untreated_wound',
+    'tourniquet', 'blood_loss_freeze', 'bleeding_prevention', 'infection_growth_block',
+    'analgesia', 'stimulant_crash', 'radiation_filter', 'temperature_control',
+    'limb_trauma_suppression',
+    'pain_block',
+].forEach(type => { TYPE_ALIASES[type] = type; });
+
 const STATUS_EFFECT_TYPES = new Set([
     'bleeding',
     'pain',
@@ -121,10 +148,10 @@ const BLEEDING_EFFECT_RULES = {
     bleeding_external_medium: { severity: 2, kind: 'external', stage: 'medium', areas: ['wound'] },
     bleeding_external_severe: { severity: 3, kind: 'external', stage: 'severe', areas: ['wound'] },
     bleeding_external_extreme: { severity: 4, kind: 'external', stage: 'critical', areas: ['wound'] },
-    bleeding_internal_light: { severity: 1, kind: 'internal', stage: 'light', areas: ['internal', 'wound'] },
-    bleeding_internal_medium: { severity: 2, kind: 'internal', stage: 'medium', areas: ['internal', 'wound'] },
-    bleeding_internal_severe: { severity: 3, kind: 'internal', stage: 'severe', areas: ['internal', 'wound'] },
-    bleeding_internal_extreme: { severity: 4, kind: 'internal', stage: 'critical', areas: ['internal', 'wound'] },
+    bleeding_internal_light: { severity: 1, kind: 'internal', stage: 'light', areas: ['wound'] },
+    bleeding_internal_medium: { severity: 2, kind: 'internal', stage: 'medium', areas: ['wound'] },
+    bleeding_internal_severe: { severity: 3, kind: 'internal', stage: 'severe', areas: ['wound'] },
+    bleeding_internal_extreme: { severity: 4, kind: 'internal', stage: 'critical', areas: ['wound'] },
 };
 
 const EFFECT_IMPACT_RULES = {
@@ -137,10 +164,10 @@ const EFFECT_IMPACT_RULES = {
     bleeding_external_medium: { areas: ['wound'], requiresMedicineCheck: true, treatment: 'medical' },
     bleeding_external_severe: { areas: ['wound'], requiresMedicineCheck: true, treatment: 'medical' },
     bleeding_external_extreme: { areas: ['wound'], requiresMedicineCheck: true, treatment: 'medical' },
-    bleeding_internal_light: { areas: ['internal', 'wound'], requiresMedicineCheck: true, treatment: 'medical' },
-    bleeding_internal_medium: { areas: ['internal', 'wound'], requiresMedicineCheck: true, treatment: 'medical' },
-    bleeding_internal_severe: { areas: ['internal', 'wound'], requiresMedicineCheck: true, treatment: 'medical' },
-    bleeding_internal_extreme: { areas: ['internal', 'wound'], requiresMedicineCheck: true, treatment: 'medical' },
+    bleeding_internal_light: { areas: ['wound'], requiresMedicineCheck: true, treatment: 'medical' },
+    bleeding_internal_medium: { areas: ['wound'], requiresMedicineCheck: true, treatment: 'medical' },
+    bleeding_internal_severe: { areas: ['wound'], requiresMedicineCheck: true, treatment: 'medical' },
+    bleeding_internal_extreme: { areas: ['wound'], requiresMedicineCheck: true, treatment: 'medical' },
     pain: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
     exhaustion: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
     stress: { areas: ['whole_body', 'mind'], requiresMedicineCheck: true, treatment: 'medical' },
@@ -236,7 +263,7 @@ function getBleedingState(health = {}) {
 
     effects.forEach((effect) => {
         const rule = getBleedingRule(effect.type);
-        if (!rule) return;
+        if (!rule || effect.active === false || effect.closed || effect.suppressed) return;
         const stacks = Math.max(1, toInt(effect.stacks, 1));
         const baseSeverity = Math.max(1, toInt(effect.value, rule.severity || 1));
         const resolvedSeverity = Math.max(rule.severity || 1, baseSeverity) * stacks;
@@ -247,12 +274,15 @@ function getBleedingState(health = {}) {
         breakdown[group].total += resolvedSeverity;
         totalSeverity += resolvedSeverity;
         effectDetails.push({
+            id: effect.id,
             type: effect.type,
             name: effect.name || getEffectMeta(effect.type).label,
             kind: group,
             stage,
             severity: resolvedSeverity,
             stacks,
+            area: effect.area || null,
+            treated: Boolean(effect.treated),
         });
     });
 
@@ -310,7 +340,7 @@ export function normalizeEffect(raw = {}) {
     const value = raw.value ?? raw.amount ?? raw.power ?? 0;
     const duration = raw.duration ?? raw.turns ?? raw.remaining ?? null;
 
-    return {
+    const normalized = {
         id: raw.id || null,
         type,
         name: name || getEffectMeta(type).label,
@@ -323,7 +353,18 @@ export function normalizeEffect(raw = {}) {
         tick: raw.tick || raw.tickPhase || 'manual',
         scope: raw.scope || 'character',
         active: raw.active !== false,
+        area: raw.area || raw.zone || raw.bodyPart || raw.target || null,
     };
+    Object.entries(raw).forEach(([key, entryValue]) => {
+        if (!['type', 'kind', 'effectType', 'turns', 'tickPhase', 'zone', 'bodyPart', 'target'].includes(key)
+            && normalized[key] === undefined) {
+            normalized[key] = entryValue;
+        }
+    });
+    if (['', 'общий', 'generic'].includes(String(normalized.name || '').trim().toLowerCase()) && type !== 'generic') {
+        normalized.name = getEffectMeta(type).label;
+    }
+    return normalized;
 }
 
 export function normalizeEffectList(list) {
@@ -358,7 +399,11 @@ function upsertStatusEffect(health, effect) {
 
     const existingIndex = health.effects.findIndex(item => {
         const current = normalizeEffect(item);
-        return current.type === effect.type && (current.source || null) === (effect.source || null);
+        if (effect.id && current.id === effect.id) return true;
+        if (String(effect.type || '').startsWith('bleeding_')) return false;
+        return current.type === effect.type
+            && (current.source || null) === (effect.source || null)
+            && (current.area || null) === (effect.area || null);
     });
 
     if (existingIndex >= 0) {
@@ -380,16 +425,54 @@ function adjustHealthField(health, field, delta, min = 0, max = null) {
     health[field] = clamp(current + delta, min, max);
 }
 
+function distributeZoneHealing(health, amount) {
+    let remaining = Math.max(0, Math.floor(Number(amount) || 0));
+    const zones = Object.values(health.zones || {}).filter(zone => zone && typeof zone === 'object');
+    zones.forEach((zone) => {
+        const maximum = Math.max(0, Math.round(Number(zone.max || 0)));
+        zone.current = Math.min(maximum, Math.max(0, Math.round(Number(zone.current || 0))));
+    });
+    while (remaining > 0) {
+        const damaged = zones.filter(zone => Number(zone.current || 0) < Number(zone.max || 0));
+        if (!damaged.length) break;
+        const share = Math.floor(remaining / damaged.length);
+        if (share === 0) {
+            damaged.slice(0, remaining).forEach((zone) => {
+                zone.current += 1;
+            });
+            break;
+        }
+        let applied = 0;
+        damaged.forEach((zone) => {
+            const current = Number(zone.current || 0);
+            const maximum = Number(zone.max || 0);
+            const healed = Math.min(share, maximum - current);
+            zone.current = current + healed;
+            applied += healed;
+        });
+        if (applied <= 0) break;
+        remaining -= applied;
+    }
+}
+
+function healHealthAndZones(health, amount) {
+    adjustHealthField(health, 'current', amount, 0, health.max ?? null);
+    distributeZoneHealing(health, amount);
+}
+
 export function applyEffectToHealth(healthInput = {}, rawEffect = {}) {
     const health = healthInput;
     const effect = normalizeEffect(rawEffect);
     const signedValue = Number(effect.value);
     const magnitude = Math.abs(Number.isFinite(signedValue) ? signedValue : toInt(effect.value, 0));
+    const activeEffects = normalizeEffectList(health.effects || []);
+    if (String(effect.type || '').startsWith('bleeding_')
+        && activeEffects.some(item => item.type === 'bleeding_prevention' && item.active !== false)) {
+        return { health, effect, applied: false, summary: 'bleeding_blocked' };
+    }
 
     if (effect.type === 'heal') {
-        const current = toInt(health.current, 0);
-        const max = health.max === undefined || health.max === null ? null : toInt(health.max, null);
-        health.current = clamp(current + magnitude, 0, max);
+        healHealthAndZones(health, magnitude);
         return { health, effect, applied: true, summary: `heal:${magnitude}` };
     }
 
@@ -405,6 +488,11 @@ export function applyEffectToHealth(healthInput = {}, rawEffect = {}) {
     }
 
     if (effect.type === 'pain') {
+        if (signedValue > 0 && activeEffects.some(item => item.blocks_new_pain && item.active !== false)) {
+            health.combatMeta = health.combatMeta || {};
+            health.combatMeta.blockedPain = Number(health.combatMeta.blockedPain || 0) + signedValue;
+            return { health, effect, applied: false, summary: 'pain_blocked' };
+        }
         adjustHealthField(health, 'painLevel', Number.isFinite(signedValue) ? signedValue : magnitude, 0, 10);
         health.combatMeta = health.combatMeta || {};
         health.combatMeta.painIncreased = true;
@@ -443,6 +531,16 @@ export function applyEffectToHealth(healthInput = {}, rawEffect = {}) {
     return { health, effect, applied: true, summary: effect.type };
 }
 
+export function isAlcoholConsumable(item = {}) {
+    const direct = item?.attributes?.consumable?.direct || {};
+    if (item?.attributes?.is_alcohol === true
+        || item?.attributes?.alcohol === true
+        || direct.is_alcohol === true) return true;
+    const section = String(item?.attributes?.section || item?.subcategory || '').trim().toLowerCase();
+    if (section === 'продукты' && Number(direct.intoxication_delta || 0) > 0) return true;
+    return /водка|самогон|вино|пиво|алкогол/i.test(String(item?.name || ''));
+}
+
 export function normalizeCharacterEffects(characterData = {}) {
     if (!characterData || typeof characterData !== 'object') return characterData;
     if (characterData.health && Array.isArray(characterData.health.effects)) {
@@ -458,7 +556,7 @@ export function normalizeCharacterEffects(characterData = {}) {
 export function tickEffect(effect, phase = 'turn_end') {
     const normalized = normalizeEffect(effect);
     if (!normalized.active) return normalized;
-    if (normalized.tick && normalized.tick !== 'manual' && normalized.tick !== phase) {
+    if (normalized.tick === 'manual' || (normalized.tick && normalized.tick !== phase)) {
         return normalized;
     }
 
@@ -505,7 +603,7 @@ export function applyPeriodicEffectsToHealth(healthInput = {}, effectsInput = []
 
         const magnitude = Math.abs(toInt(effect.value, 0));
         if (effect.type === 'regeneration') {
-            adjustHealthField(health, 'current', magnitude, 0, health.max ?? null);
+            healHealthAndZones(health, magnitude);
             applied.push({ type: 'regeneration', delta: magnitude });
         }
     });

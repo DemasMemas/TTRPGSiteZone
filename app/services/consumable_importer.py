@@ -289,6 +289,7 @@ def parse_consumable_templates_v2(workbook_path: Path) -> List[Dict[str, Any]]:
             "section": current_section,
             "import_tier": import_tier,
             "consumable": profile,
+            "is_alcohol": bool(profile["direct"].get("is_alcohol")),
             "effects": profile["effects"],
             "uses": profile["direct"].get("uses"),
             "duration": profile["direct"].get("duration"),

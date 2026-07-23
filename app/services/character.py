@@ -4,6 +4,7 @@ from sqlalchemy.orm import joinedload
 from app.extensions import db
 from app.models import LobbyCharacter, Lobby, LobbyParticipant, LocationCharacter
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+from app.services.health import apply_health_maximums, health_zones_to_location
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +15,13 @@ class CharacterService:
         if not participant:
             raise PermissionDenied("You are not in this lobby")
 
+        character_data = dict(data or {})
+        apply_health_maximums(character_data)
         character = LobbyCharacter(
             lobby_id=lobby_id,
             owner_id=owner_id,
             name=name,
-            data=data or {},
+            data=character_data,
             visible_to=[]
         )
         db.session.add(character)
@@ -83,7 +86,11 @@ class CharacterService:
             character.name = updates['name']
         if 'data' in updates:
             # Можно разрешить менять data всем
-            character.data = updates['data']
+            character_data = dict(updates['data'] or {})
+            health = apply_health_maximums(character_data)
+            character.data = character_data
+            for loc_char in LocationCharacter.query.filter_by(character_id=character.id).all():
+                loc_char.hp_zones = health_zones_to_location(health)
 
         db.session.commit()
         logger.info(f"Character {character_id} updated by user {user_id}")

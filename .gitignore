@@ -69,3 +69,6 @@ scripts/__pycache__/import_consumables.cpython-313.pyc
 app/services/__pycache__/consumable_effects.cpython-313.pyc
 scripts/__pycache__/import_equipment.cpython-313.pyc
 app/services/__pycache__/equipment_importer.cpython-313.pyc
+tests/__pycache__/test_health_profiles.cpython-313.pyc
+app/services/__pycache__/health.cpython-313.pyc
+tests/__pycache__/test_consumable_rules.cpython-313.pyc

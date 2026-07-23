@@ -28,6 +28,24 @@ EFFECT_TYPE_META = {
     "blindness": {"label": "Слепота", "group": "sense"},
     "deafness": {"label": "Глухота", "group": "sense"},
     "sleep": {"label": "Сон", "group": "critical"},
+    "radiation_treatment": {"label": "Выведение радиации", "group": "medical"},
+    "blood_recovery": {"label": "Восстановление кровопотери", "group": "medical"},
+    "periodic_adjustment": {"label": "Периодический эффект", "group": "status"},
+    "delayed_adjustment": {"label": "Отложенный эффект", "group": "status"},
+    "deferred_adjustment": {"label": "Отложенный эффект", "group": "status"},
+    "delayed_treatment": {"label": "Ожидание действия препарата", "group": "medical"},
+    "next_rest_healing": {"label": "Лечение на следующем отдыхе", "group": "medical"},
+    "untreated_wound": {"label": "Необработанная рана", "group": "injury"},
+    "tourniquet": {"label": "Наложен жгут", "group": "medical"},
+    "blood_loss_freeze": {"label": "Стабилизация кровопотери", "group": "medical"},
+    "bleeding_prevention": {"label": "Блок новых кровотечений", "group": "medical"},
+    "infection_growth_block": {"label": "Блок нарастания заражения", "group": "medical"},
+    "analgesia": {"label": "Обезболивание", "group": "medical"},
+    "stimulant_crash": {"label": "Последствие стимулятора", "group": "medical"},
+    "radiation_filter": {"label": "Защита от входящей радиации", "group": "medical"},
+    "temperature_control": {"label": "Контроль температуры", "group": "medical"},
+    "limb_trauma_suppression": {"label": "Подавление травмы конечности", "group": "medical"},
+    "pain_block": {"label": "Блок новых уровней боли", "group": "medical"},
 }
 
 TYPE_ALIASES = {
@@ -84,6 +102,14 @@ TYPE_ALIASES = {
     "organ_loss": "organ_loss",
     "потеряоргана": "organ_loss",
     "потеря_органа": "organ_loss",
+    **{effect_type: effect_type for effect_type in (
+        "radiation_treatment", "blood_recovery", "periodic_adjustment", "delayed_adjustment",
+        "deferred_adjustment", "delayed_treatment", "next_rest_healing", "untreated_wound",
+        "tourniquet", "blood_loss_freeze", "bleeding_prevention", "infection_growth_block",
+        "analgesia", "stimulant_crash", "radiation_filter", "temperature_control",
+        "limb_trauma_suppression",
+        "pain_block",
+    )},
 }
 
 STATUS_EFFECT_TYPES = {
@@ -105,10 +131,10 @@ EFFECT_IMPACT_RULES = {
     "bleeding_external_medium": {"areas": ["wound"], "requiresMedicineCheck": True, "treatment": "medical"},
     "bleeding_external_severe": {"areas": ["wound"], "requiresMedicineCheck": True, "treatment": "medical"},
     "bleeding_external_extreme": {"areas": ["wound"], "requiresMedicineCheck": True, "treatment": "medical"},
-    "bleeding_internal_light": {"areas": ["internal", "wound"], "requiresMedicineCheck": True, "treatment": "medical"},
-    "bleeding_internal_medium": {"areas": ["internal", "wound"], "requiresMedicineCheck": True, "treatment": "medical"},
-    "bleeding_internal_severe": {"areas": ["internal", "wound"], "requiresMedicineCheck": True, "treatment": "medical"},
-    "bleeding_internal_extreme": {"areas": ["internal", "wound"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "bleeding_internal_light": {"areas": ["wound"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "bleeding_internal_medium": {"areas": ["wound"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "bleeding_internal_severe": {"areas": ["wound"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "bleeding_internal_extreme": {"areas": ["wound"], "requiresMedicineCheck": True, "treatment": "medical"},
     "pain": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
     "exhaustion": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
     "stress": {"areas": ["whole_body", "mind"], "requiresMedicineCheck": True, "treatment": "medical"},
@@ -130,6 +156,15 @@ def _to_int(value: Any, default: int = 0) -> int:
         if value is None or value == "":
             return default
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(str(value).replace(",", "."))
     except (TypeError, ValueError):
         return default
 
@@ -223,10 +258,10 @@ BLEEDING_EFFECT_RULES = {
     "bleeding_external_medium": {"severity": 2, "kind": "external", "stage": "medium", "areas": ["wound"]},
     "bleeding_external_severe": {"severity": 3, "kind": "external", "stage": "severe", "areas": ["wound"]},
     "bleeding_external_extreme": {"severity": 4, "kind": "external", "stage": "critical", "areas": ["wound"]},
-    "bleeding_internal_light": {"severity": 1, "kind": "internal", "stage": "light", "areas": ["internal", "wound"]},
-    "bleeding_internal_medium": {"severity": 2, "kind": "internal", "stage": "medium", "areas": ["internal", "wound"]},
-    "bleeding_internal_severe": {"severity": 3, "kind": "internal", "stage": "severe", "areas": ["internal", "wound"]},
-    "bleeding_internal_extreme": {"severity": 4, "kind": "internal", "stage": "critical", "areas": ["internal", "wound"]},
+    "bleeding_internal_light": {"severity": 1, "kind": "internal", "stage": "light", "areas": ["wound"]},
+    "bleeding_internal_medium": {"severity": 2, "kind": "internal", "stage": "medium", "areas": ["wound"]},
+    "bleeding_internal_severe": {"severity": 3, "kind": "internal", "stage": "severe", "areas": ["wound"]},
+    "bleeding_internal_extreme": {"severity": 4, "kind": "internal", "stage": "critical", "areas": ["wound"]},
 }
 
 
@@ -284,7 +319,15 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
         "tick": raw.get("tick") or raw.get("tickPhase") or "manual",
         "scope": raw.get("scope", "character"),
         "active": raw.get("active", True),
+        "area": raw.get("area") or raw.get("zone") or raw.get("bodyPart") or raw.get("target"),
     })
+    # Consumables attach executable metadata (delayed adjustments, expiry
+    # consequences, wound state). Keep it while still normalizing core fields.
+    for key, value in raw.items():
+        if key not in {"type", "kind", "effectType", "turns", "tickPhase", "zone", "bodyPart", "target"}:
+            data.setdefault(key, value)
+    if str(data.get("name") or "").strip().lower() in {"", "общий", "generic"} and effect_type != "generic":
+        data["name"] = get_effect_meta(effect_type)["label"]
     return data
 
 
@@ -317,7 +360,7 @@ def get_bleeding_state(health: Dict[str, Any]) -> Dict[str, Any]:
 
     for effect in effects:
         rule = _bleeding_rule(effect["type"])
-        if not rule:
+        if not rule or not effect.get("active", True) or effect.get("closed") or effect.get("suppressed"):
             continue
         stacks = max(1, _to_int(effect.get("stacks", 1), 1))
         base_severity = max(1, _to_int(effect.get("value", 0), rule.get("severity", 1)))
@@ -330,12 +373,15 @@ def get_bleeding_state(health: Dict[str, Any]) -> Dict[str, Any]:
         breakdown[group]["total"] += resolved_severity
         total_severity += resolved_severity
         effect_details.append({
+            "id": effect.get("id"),
             "type": effect["type"],
             "name": effect.get("name") or get_effect_meta(effect["type"])["label"],
             "kind": group,
             "stage": stage,
             "severity": resolved_severity,
             "stacks": stacks,
+            "area": effect.get("area"),
+            "treated": bool(effect.get("treated", False)),
         })
 
     blood_stage = str((health or {}).get("blood") or (health or {}).get("bloodStage") or "normal").lower()
@@ -413,17 +459,60 @@ def _adjust_field(health: Dict[str, Any], field: str, delta: int, minimum: Optio
     health[field] = _clamp(current + delta, minimum, maximum)
 
 
+def _distribute_zone_healing(health: Dict[str, Any], amount: float) -> None:
+    remaining = max(0, int(_to_float(amount, 0)))
+    zones = [zone for zone in (health.get("zones") or {}).values() if isinstance(zone, dict)]
+    for zone in zones:
+        maximum = max(0, int(round(_to_float(zone.get("max", 0), 0))))
+        zone["current"] = min(maximum, max(0, int(round(_to_float(zone.get("current", 0), 0)))))
+    while remaining > 0:
+        damaged = [
+            zone for zone in zones
+            if _to_float(zone.get("current", 0), 0) < _to_float(zone.get("max", 0), 0)
+        ]
+        if not damaged:
+            break
+        share = remaining // len(damaged)
+        if share == 0:
+            for zone in damaged[:remaining]:
+                zone["current"] += 1
+            break
+        applied = 0
+        for zone in damaged:
+            current = int(zone.get("current", 0))
+            maximum = int(zone.get("max", 0))
+            healed = min(share, maximum - current)
+            zone["current"] = current + healed
+            applied += healed
+        if applied <= 0:
+            break
+        remaining -= applied
+
+
+def _heal_health_and_zones(health: Dict[str, Any], amount: float) -> None:
+    """Heal the shared pool fully and distribute one healing budget over zones."""
+    current = _to_float(health.get("current", 0), 0)
+    max_value = health.get("max")
+    max_value = None if max_value in (None, "") else _to_float(max_value, None)
+    health["current"] = _clamp(current + amount, 0, max_value)
+    _distribute_zone_healing(health, amount)
+
+
 def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str, Any]:
     effect = normalize_effect(raw_effect)
     signed_value = _to_float(effect.get("value", 0), 0)
     magnitude = abs(_to_float(effect.get("value", 0), 0))
     effect_type = effect["type"]
 
+    active_effects = normalize_effect_list(health.get("effects") or [])
+    if effect_type.startswith("bleeding_") and any(
+        item.get("type") == "bleeding_prevention" and item.get("active", True)
+        for item in active_effects
+    ):
+        return health
+
     if effect_type == "heal":
-        current = _to_int(health.get("current", 0), 0)
-        max_value = health.get("max")
-        max_value = None if max_value in (None, "") else _to_int(max_value, None)
-        health["current"] = _clamp(current + magnitude, 0, max_value)
+        _heal_health_and_zones(health, magnitude)
         return health
 
     if effect_type == "regeneration":
@@ -431,7 +520,13 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
         existing = None
         for idx, item in enumerate(health["effects"]):
             current = normalize_effect(item)
-            if current["type"] == effect_type and (current.get("source") or None) == (effect.get("source") or None):
+            same_id = effect.get("id") and current.get("id") == effect.get("id")
+            if same_id or (
+                not effect_type.startswith("bleeding_")
+                and current["type"] == effect_type
+                and (current.get("source") or None) == (effect.get("source") or None)
+                and (current.get("area") or None) == (effect.get("area") or None)
+            ):
                 existing = idx
                 break
         if existing is None:
@@ -449,7 +544,13 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
         return health
 
     if effect_type == "pain":
-        _adjust_field(health, "painLevel", int(signed_value) if float(signed_value).is_integer() else signed_value, 0, 10)
+        pain_delta = int(signed_value) if float(signed_value).is_integer() else signed_value
+        blockers = [item for item in active_effects if item.get("blocks_new_pain") and item.get("active", True)]
+        if pain_delta > 0 and blockers:
+            meta = health.setdefault("combatMeta", {})
+            meta["blockedPain"] = _to_float(meta.get("blockedPain", 0), 0) + pain_delta
+            return health
+        _adjust_field(health, "painLevel", pain_delta, 0, 10)
         meta = health.setdefault("combatMeta", {})
         meta["painIncreased"] = True
         return health
@@ -491,7 +592,13 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
         existing = None
         for idx, item in enumerate(health["effects"]):
             current = normalize_effect(item)
-            if current["type"] == effect_type and (current.get("source") or None) == (effect.get("source") or None):
+            same_id = effect.get("id") and current.get("id") == effect.get("id")
+            if same_id or (
+                not effect_type.startswith("bleeding_")
+                and current["type"] == effect_type
+                and (current.get("source") or None) == (effect.get("source") or None)
+                and (current.get("area") or None) == (effect.get("area") or None)
+            ):
                 existing = idx
                 break
 
@@ -509,7 +616,14 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
     existing = None
     for idx, item in enumerate(health["effects"]):
         current = normalize_effect(item)
-        if current["type"] == effect_type and (current.get("source") or None) == (effect.get("source") or None):
+        if (
+            (effect.get("id") and current.get("id") == effect.get("id"))
+            or (
+                current["type"] == effect_type
+                and (current.get("source") or None) == (effect.get("source") or None)
+                and (current.get("area") or None) == (effect.get("area") or None)
+            )
+        ):
             existing = idx
             break
 
@@ -528,7 +642,7 @@ def tick_effect(effect: Dict[str, Any], phase: str = "turn_end") -> Dict[str, An
     normalized = normalize_effect(effect)
     if not normalized.get("active", True):
         return normalized
-    if normalized.get("tick") not in (None, "manual", phase):
+    if normalized.get("tick") == "manual" or normalized.get("tick") not in (None, phase):
         return normalized
     if normalized.get("remaining") is not None:
         normalized["remaining"] = max(0, _to_int(normalized.get("remaining"), 0) - 1)
@@ -542,14 +656,65 @@ def apply_periodic_effects_to_health(health: Dict[str, Any], effects: Iterable[A
         effect = normalize_effect(raw_effect)
         if not effect.get("active", True):
             continue
-        if effect.get("tick") not in (None, "manual", phase):
+        if effect.get("tick") == "manual" or effect.get("tick") not in (None, phase):
             continue
-        magnitude = abs(_to_int(effect.get("value", 0), 0))
+        magnitude = abs(_to_float(effect.get("value", 0), 0))
         if effect["type"] == "regeneration":
-            current = _to_int(health.get("current", 0), 0)
-            max_value = health.get("max")
-            max_value = None if max_value in (None, "") else _to_int(max_value, None)
-            health["current"] = _clamp(current + magnitude, 0, max_value)
+            _heal_health_and_zones(health, magnitude)
+        elif effect["type"] == "radiation_treatment":
+            _adjust_field(health, "radiation", -magnitude, 0, None)
+        elif effect["type"] == "blood_recovery":
+            order = ["normal", "light", "medium", "severe", "critical"]
+            stage = str(health.get("blood") or health.get("bloodStage") or "normal").lower()
+            index = order.index(stage) if stage in order else 0
+            next_stage = order[max(0, index - max(1, _to_int(effect.get("value", 1), 1)))]
+            health["blood"] = next_stage
+            health["bloodStage"] = next_stage
+        elif effect["type"] == "periodic_adjustment":
+            for adjustment in effect.get("adjustments") or []:
+                if not isinstance(adjustment, dict):
+                    continue
+                field = str(adjustment.get("field") or "").strip()
+                if field:
+                    _adjust_field(health, field, _to_float(adjustment.get("delta", 0), 0), adjustment.get("min", 0), adjustment.get("max"))
+    sync_health_derived_statuses(health)
+    return health
+
+
+def apply_expired_effects_to_health(health: Dict[str, Any], effects: Iterable[Any], phase: str = "turn_end") -> Dict[str, Any]:
+    activated: List[Dict[str, Any]] = []
+    for raw_effect in effects or []:
+        effect = normalize_effect(raw_effect)
+        if effect.get("tick") == "manual" or effect.get("tick") not in (None, phase):
+            continue
+        if effect.get("remaining") is None or _to_int(effect.get("remaining"), 0) > 1:
+            continue
+        for adjustment in effect.get("onExpire") or effect.get("on_expire") or []:
+            if not isinstance(adjustment, dict):
+                continue
+            field = str(adjustment.get("field") or "").strip()
+            if field:
+                _adjust_field(health, field, _to_float(adjustment.get("delta", 0), 0), adjustment.get("min", 0), adjustment.get("max"))
+        if effect.get("type") in {"delayed_adjustment", "delayed_treatment"}:
+            for adjustment in effect.get("adjustments") or []:
+                if not isinstance(adjustment, dict):
+                    continue
+                field = str(adjustment.get("field") or "").strip()
+                if field:
+                    _adjust_field(health, field, _to_float(adjustment.get("delta", 0), 0), adjustment.get("min", 0), adjustment.get("max"))
+        for activated_effect in effect.get("activate_effects") or effect.get("activateEffects") or []:
+            if isinstance(activated_effect, dict):
+                activated.append(activated_effect)
+        if effect.get("type") == "pain_block":
+            meta = health.setdefault("combatMeta", {})
+            blocked = _to_float(meta.pop("blockedPain", 0), 0)
+            returned = blocked * _to_float(effect.get("return_fraction", 1), 1)
+            _adjust_field(health, "painLevel", returned, 0, 10)
+            _adjust_field(health, "exhaustion", _to_float(effect.get("exhaustion_on_expire", 0), 0), 0, 10)
+    for activated_effect in activated:
+        apply_effect_to_health(health, activated_effect)
+    if health.get("max") is not None and health.get("current") is not None:
+        health["current"] = min(_to_float(health.get("current"), 0), _to_float(health.get("max"), 0))
     sync_health_derived_statuses(health)
     return health
 
@@ -558,7 +723,7 @@ def tick_effects(effects: Iterable[Any], phase: str = "turn_end") -> List[Dict[s
     updated = []
     for effect in effects or []:
         normalized = tick_effect(effect, phase=phase)
-        if normalized.get("remaining") == 0 and normalized.get("duration") is not None:
+        if normalized.get("remaining") == 0 and not normalized.get("persist_at_zero"):
             continue
         updated.append(normalized)
     return updated

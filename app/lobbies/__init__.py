@@ -2,6 +2,7 @@
 import json
 import gzip
 import io
+from copy import deepcopy
 from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.extensions import socketio, db
@@ -10,6 +11,7 @@ from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
 from app.services.combat import CombatService
+from app.services.health import apply_health_maximums
 from app.schemas.lobby import LobbyCreateSchema, LobbyDetailSchema, LobbyMySchema, LobbySchema
 from app.schemas.participant import BannedUserSchema
 from app.schemas.character import CharacterSchema, CharacterCreateSchema
@@ -713,7 +715,9 @@ def spawn_character_in_location(lobby_id, location_id):
         action = 'moved'
     else:
         # Создаём нового LocationCharacter
-        hp_zones = character.data.get('health', {}).get('zones', {})
+        character_data = deepcopy(character.data or {})
+        hp_zones = apply_health_maximums(character_data).get('zones', {})
+        character.data = character_data
         zones_dict = {
             'head': {'current': hp_zones.get('head', {}).get('current', 50), 'max': hp_zones.get('head', {}).get('max', 50)},
             'chest': {'current': hp_zones.get('chest', {}).get('current', 150), 'max': hp_zones.get('chest', {}).get('max', 150)},
@@ -848,6 +852,27 @@ def spend_location_combat_resources(lobby_id, location_id, lobby, participant):
         location_character_id=location_character_id,
         action_points=data.get('action_points', 0),
         free_actions=data.get('free_actions', 0),
+        movement_points=data.get('movement_points', 0),
+    )
+    state = CombatService.get_state(location_id, participant.user_id)
+    socketio.emit('combat_character_updated', updated_character, room=f"location_{location_id}")
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(updated_character), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/adjust', methods=['POST'])
+@jwt_required()
+@requires_participant
+def adjust_location_combat_resources(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    location_character_id = data.get('location_character_id')
+    if not location_character_id:
+        return jsonify({'error': 'location_character_id is required'}), 400
+    updated_character = CombatService.adjust_resources(
+        location_id,
+        participant.user_id,
+        location_character_id=location_character_id,
+        action_points=data.get('action_points', 0),
         movement_points=data.get('movement_points', 0),
     )
     state = CombatService.get_state(location_id, participant.user_id)

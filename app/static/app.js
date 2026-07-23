@@ -126,19 +126,28 @@ function showNotification(message, type = 'error') {
     notification.className = `notification ${type}`;
     notification.textContent = message;
     notification.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
         background: ${type === 'error' ? '#f44336' : '#4caf50'};
         color: white;
         padding: 12px 20px;
         border-radius: 8px;
-        z-index: 10000;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         animation: slideIn 0.3s ease;
     `;
-    document.body.appendChild(notification);
-    setTimeout(() => notification.remove(), 5000);
+    let stack = document.getElementById('notification-stack-top-right');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'notification-stack-top-right';
+        stack.className = 'notification-stack top-right';
+        document.body.appendChild(stack);
+    }
+    stack.appendChild(notification);
+    setTimeout(() => {
+        notification.classList.add('is-leaving');
+        setTimeout(() => {
+            notification.remove();
+            if (!stack.children.length) stack.remove();
+        }, 200);
+    }, 4800);
 }
 
 async function createLobby() {

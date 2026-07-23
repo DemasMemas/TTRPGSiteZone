@@ -927,7 +927,7 @@ input[type="number"] {
 
 /* ===== Уведомления ===== */
 .notification {
-  position: fixed;
+  position: relative;
   background: #f44336;
   color: white;
   padding: 12px 20px;
@@ -937,10 +937,44 @@ input[type="number"] {
   animation: slideIn 0.3s ease;
   max-width: 300px;
   word-wrap: break-word;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 .notification.success { background: #4caf50; }
 .notification.system { background: #ffaa00; }
 .notification.error { background: #f44336; }
+
+.notification-stack {
+  position: fixed;
+  z-index: 10000;
+  display: flex;
+  gap: 8px;
+  width: min(340px, calc(100vw - 40px));
+  pointer-events: none;
+}
+.notification-stack.top-right,
+.notification-stack.top-left {
+  top: 20px;
+  flex-direction: column;
+}
+.notification-stack.bottom-right,
+.notification-stack.bottom-left {
+  bottom: 20px;
+  flex-direction: column-reverse;
+}
+.notification-stack.top-right,
+.notification-stack.bottom-right { right: 20px; }
+.notification-stack.top-left,
+.notification-stack.bottom-left { left: 20px; }
+.notification-stack .notification {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+.notification.is-leaving {
+  opacity: 0;
+  transform: translateX(18px);
+}
 
 /* ===== Ползунки ===== */
 input[type=range] {
@@ -1070,5 +1104,136 @@ input[type=range]::-webkit-slider-thumb {
 @media (min-width: 1000px) {
     .cosmetic-grid {
         grid-template-columns: repeat(3, 1fr);
+    }
+}
+
+/* Character health layout */
+.health-vitals-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+    gap: 8px;
+    align-items: start;
+    margin-bottom: 10px;
+}
+.health-field {
+    min-width: 0;
+}
+.health-field label,
+.health-need-field label {
+    display: flex;
+    align-items: flex-end;
+    min-height: 28px;
+    margin-bottom: 4px;
+    line-height: 1.15;
+}
+.health-field-pool,
+.health-field-blood {
+    grid-column: span 2;
+}
+.health-pool-inputs {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: 6px;
+    align-items: center;
+}
+.health-readonly-value {
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    padding: 7px 10px;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.035);
+    box-sizing: border-box;
+}
+.health-compact-panel {
+    margin-bottom: 8px;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 9px;
+    background: rgba(255,255,255,0.03);
+}
+.health-compact-panel summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    min-height: 34px;
+    padding: 6px 10px;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+.health-compact-panel summary::marker {
+    color: rgba(255,255,255,0.5);
+}
+.health-compact-content {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    padding: 0 10px 9px;
+    font-size: 12px;
+    opacity: 0.82;
+}
+.health-compact-note {
+    flex-basis: 100%;
+}
+.health-infection-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(130px, 220px));
+    gap: 8px;
+    padding: 0 10px 10px;
+}
+.health-needs-panel {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(105px, 1fr)) minmax(220px, 2fr);
+    gap: 10px;
+    align-items: end;
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.04);
+}
+.health-need-field {
+    min-width: 0;
+}
+.health-need-field small {
+    display: block;
+    min-height: 15px;
+    margin-top: 2px;
+    opacity: 0.7;
+}
+.health-needs-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+    padding-bottom: 17px;
+}
+.health-needs-actions .btn {
+    min-height: 38px;
+    height: 100%;
+    white-space: normal;
+}
+@media (max-width: 900px) {
+    .health-needs-panel {
+        grid-template-columns: repeat(3, minmax(95px, 1fr));
+    }
+    .health-needs-actions {
+        grid-column: 1 / -1;
+        padding-bottom: 0;
+    }
+}
+@media (max-width: 560px) {
+    .health-field-pool,
+    .health-field-blood {
+        grid-column: span 1;
+    }
+    .health-needs-panel {
+        grid-template-columns: 1fr;
+    }
+    .health-needs-actions {
+        grid-template-columns: 1fr;
+    }
+    .health-infection-fields {
+        grid-template-columns: 1fr;
     }
 }

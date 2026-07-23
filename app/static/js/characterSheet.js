@@ -23,7 +23,7 @@ import { Server } from './api.js';
 import { showNotification } from './utils.js';
 import { lobbyParticipants } from './ui.js';
 import { getSocket } from './socketHandlers.js';
-import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
+import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
 
 // ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
 let currentCharacterId = null;
@@ -1104,6 +1104,8 @@ window.fillBackgroundFromTemplate = async function(select) {
             delete currentCharacterData.basic.background.minuses;
             delete currentCharacterData.basic.background.skillBonuses;
         }
+        ensureHealthMaximums(currentCharacterData);
+        renderHealthTab(currentCharacterData, document.getElementById('health-right-column'));
         scheduleAutoSave();
         return;
     }
@@ -1147,6 +1149,8 @@ window.fillBackgroundFromTemplate = async function(select) {
     currentCharacterData.basic.background.minuses = template.attributes?.minuses || '';
     currentCharacterData.basic.background.skillBonuses = skillBonuses;
 
+    ensureHealthMaximums(currentCharacterData);
+    renderHealthTab(currentCharacterData, document.getElementById('health-right-column'));
     scheduleAutoSave();
 };
 
@@ -1693,12 +1697,90 @@ window.editTemplate = async function(templateId, category) {
     }
 };
 
+function normalizeDailyNeeds(rawNeeds = {}) {
+    const needs = rawNeeds && typeof rawNeeds === 'object' ? rawNeeds : {};
+    const sleptToday = needs.sleptToday === true || String(needs.sleptToday).toLowerCase() === 'true';
+    return {
+        day: Math.max(1, Number(needs.day || 1)),
+        mealsToday: Math.max(0, Math.min(3, Number(needs.mealsToday || 0))),
+        drinksToday: Math.max(0, Math.min(3, Number(needs.drinksToday || 0))),
+        sleptToday,
+        lastDay: needs.lastDay && typeof needs.lastDay === 'object' ? needs.lastDay : null,
+    };
+}
+
+const BASE_HEALTH_MAXIMUMS = {
+    max: 700,
+    zones: {
+        head: 50,
+        chest: 150,
+        abdomen: 120,
+        leftArm: 90,
+        rightArm: 90,
+        leftLeg: 100,
+        rightLeg: 100,
+    },
+};
+
+function hasMountainBackground(data) {
+    const background = data?.basic?.background || {};
+    const name = String(background.name || '').trim().toLocaleLowerCase('ru');
+    const pluses = String(background.pluses || '').trim().toLocaleLowerCase('ru');
+    return name === '\u0433\u043e\u0440\u0430'
+        || (
+            pluses.includes('\u043e\u0431\u0449\u0435\u0435 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0443\u0432\u0435\u043b\u0438\u0447\u0435\u043d\u043e \u043d\u0430 20%')
+            && pluses.includes('\u0437\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0440\u0443\u043a \u0438 \u043d\u043e\u0433 \u0443\u0432\u0435\u043b\u0438\u0447\u0435\u043d\u043e \u043d\u0430 35')
+        );
+}
+
+function ensureHealthMaximums(data) {
+    const health = data.health || (data.health = {});
+    const mountain = hasMountainBackground(data);
+    const profileName = mountain ? 'mountain' : 'base';
+    const profile = {
+        max: mountain ? 840 : BASE_HEALTH_MAXIMUMS.max,
+        zones: { ...BASE_HEALTH_MAXIMUMS.zones },
+    };
+    if (mountain) {
+        ['leftArm', 'rightArm', 'leftLeg', 'rightLeg'].forEach((key) => {
+            profile.zones[key] += 35;
+        });
+    }
+
+    const scaleCurrent = (current, oldMax, newMax) => {
+        const currentNumber = Number(current);
+        const oldMaxNumber = Number(oldMax);
+        if (!Number.isFinite(currentNumber)) return newMax;
+        if (!Number.isFinite(oldMaxNumber) || oldMaxNumber <= 0) {
+            return Math.min(newMax, Math.max(0, currentNumber));
+        }
+        return newMax * Math.min(1, Math.max(0, currentNumber / oldMaxNumber));
+    };
+
+    const profileChanged = health.maximumProfile !== profileName;
+    if (profileChanged || Number(health.max) !== profile.max) {
+        health.current = scaleCurrent(health.current, health.max, profile.max);
+        health.max = profile.max;
+    }
+
+    const zones = health.zones || (health.zones = {});
+    Object.entries(profile.zones).forEach(([key, newMax]) => {
+        const zone = zones[key] || (zones[key] = {});
+        if (profileChanged || Number(zone.max) !== newMax) {
+            zone.current = scaleCurrent(zone.current, zone.max, newMax);
+            zone.max = newMax;
+        }
+    });
+    health.maximumProfile = profileName;
+    return health;
+}
+
 // ========== 12. ВКЛАДКА "ЗДОРОВЬЕ" ==========
 function renderHealthTab(data, container = null) {
     const targetContainer = container || document.getElementById('sheet-tab-health');
     if (!targetContainer) return;
 
-    const health = data.health || {};
+    const health = ensureHealthMaximums(data);
     syncHealthDerivedStatuses(health);
     const zones = health.zones || {};
     const bleeding = health.bleeding || {};
@@ -1731,6 +1813,8 @@ function renderHealthTab(data, container = null) {
         { key: 'infection', label: 'Заражение', value: health.infection, color: '#86d48f' },
     ].filter(item => Number.isFinite(Number(item.value)) && Number(item.value) !== 0);
     const storedEffects = Array.isArray(health.effects) ? normalizeEffectList(health.effects) : [];
+    const needs = normalizeDailyNeeds(health.needs);
+    health.needs = needs;
     const storedEffectChips = storedEffects.map((effect) => {
         const parts = [effect.name || effect.type];
         if (effect.value !== undefined && effect.value !== null && effect.value !== 0) {
@@ -1743,59 +1827,106 @@ function renderHealthTab(data, container = null) {
         }
         return parts.join(' · ');
     });
+    const modifierLabels = {
+        strength: 'Сила', agility: 'Ловкость', accuracy: 'Точность', weight: 'Штраф к весу',
+        will: 'Воля', psy_defense: 'Пси-защита', vision_awareness: 'Внимательность (зрение)',
+        action_points: 'ОД', organ_toughness_multiplier: 'Живучесть органов', rest_heal_multiplier: 'Лечение на отдыхе'
+    };
+    const modifierChips = (health.combatMeta?.consumableModifiers || []).map(modifier => {
+        const label = modifierLabels[modifier.stat] || modifier.stat || 'Модификатор';
+        const value = Number(modifier.value || 0);
+        const remaining = modifier.remaining !== null && modifier.remaining !== undefined ? ` · ост. ${modifier.remaining}` : '';
+        return `${label}: ${value >= 0 ? '+' : ''}${value}${remaining}`;
+    });
     const visibleEffectChips = [
         ...directStatusChips.map((item) => {
             const value = Number(item.value);
             return `${item.label}: ${value >= 0 ? '+' : ''}${value}`;
         }),
-        ...storedEffectChips
+        ...storedEffectChips,
+        ...modifierChips,
     ];
 
     let html = `
         <div class="health-tab">
-            <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 15px;">
-                <div style="width: 180px;">
+            <div class="health-vitals-grid">
+                <div class="health-field health-field-pool">
+                    <label>Общий пул ОЗ</label>
+                    <div class="health-pool-inputs">
+                        <input type="number" min="0" class="form-control" name="health.current" value="${Number(health.current || 0)}">
+                        <span>/</span>
+                        <input type="number" min="1" class="form-control" name="health.max" value="${Number(health.max || 700)}">
+                    </div>
+                </div>
+                <div class="health-field health-field-blood">
                     <label>Кровь</label>
-                    <select class="form-control" name="health.blood" style="width:100%;">${bloodSelect}</select>
-                    <div style="margin-top:6px; font-size:12px; opacity:0.8;">
-                        Группа крови: ${bloodTypeKnown ? formatBloodType(bloodTypeValue) : 'неизвестна'}
-                    </div>
+                    <select class="form-control" name="health.blood">${bloodSelect}</select>
                 </div>
-                <div style="min-width: 220px; flex: 1; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);">
-                    <div style="font-size: 12px; opacity: 0.75; margin-bottom: 4px;">Проверка кровопотери</div>
-                    <div style="font-size: 13px; line-height: 1.45;">
-                        <div>База: 5</div>
-                        <div>Тяжесть: +${bleeding.totalSeverity || 0}</div>
-                        <div>Стадия кровопотери: -${bleeding.stagePenalty || 0}</div>
-                        <div>Модификаторы: ${bleedingModifierTotal >= 0 ? '+' : ''}${bleedingModifierTotal}</div>
-                        <div>Бонус Воли: ${willBonus >= 0 ? '+' : ''}${willBonus}</div>
-                        <div style="margin-top:4px; font-weight:700;">Итог: ${finalBleedingDc}</div>
-                    </div>
-                    <div style="font-size: 12px; opacity: 0.72; margin-top: 6px;">
-                        ${bleedingEffects.length ? bleedingEffects.map(item => `${escapeHtml(item.name || item.type)} (${item.kind === 'internal' ? 'внутр.' : 'внешн.'} ${item.stage || 'light'})`).join(', ') : 'Активных кровотечений нет'}
-                    </div>
+                <div class="health-field health-field-blood-type">
+                    <label>Группа крови</label>
+                    <div class="health-readonly-value">${bloodTypeKnown ? formatBloodType(bloodTypeValue) : 'Неизвестна'}</div>
                 </div>
-                <div style="width: 80px;">
+                <div class="health-field">
                     <label>Стресс</label>
                     <input type="number" class="form-control" name="health.stress" value="${health.stress || 0}">
                 </div>
-                <div style="width: 80px;">
+                <div class="health-field">
                     <label>Ур. боли</label>
                     <input type="number" class="form-control" name="health.painLevel" value="${health.painLevel || 0}">
                 </div>
-                <div style="width: 80px;">
+                <div class="health-field">
                     <label>Истощение</label>
                     <input type="number" class="form-control" name="health.exhaustion" value="${health.exhaustion || 0}">
                 </div>
-                <div style="width: 80px;">
+                <div class="health-field">
                     <label>Радиация</label>
                     <input type="number" class="form-control" name="health.radiation" value="${health.radiation || 0}">
                 </div>
             </div>
+            <details class="health-compact-panel health-blood-check">
+                <summary>
+                    <span>Проверка кровопотери</span>
+                    <strong>Сложность ${finalBleedingDc}</strong>
+                </summary>
+                <div class="health-compact-content">
+                    <span>База 5</span>
+                    <span>Тяжесть +${bleeding.totalSeverity || 0}</span>
+                    <span>Стадия -${bleeding.stagePenalty || 0}</span>
+                    <span>Модификаторы ${bleedingModifierTotal >= 0 ? '+' : ''}${bleedingModifierTotal}</span>
+                    <span>Воля ${willBonus >= 0 ? '+' : ''}${willBonus}</span>
+                    <span class="health-compact-note">${bleedingEffects.length ? bleedingEffects.map(item => `${escapeHtml(item.name || item.type)} (${item.kind === 'internal' ? 'внутр.' : 'внешн.'} ${item.stage || 'light'})`).join(', ') : 'Активных кровотечений нет'}</span>
+                </div>
+            </details>
+            <details class="health-compact-panel health-infection-panel" ${Number(health.infection || 0) > 0 || Number(health.infectionGrowthPerDay || 0) > 0 ? 'open' : ''}>
+                <summary>
+                    <span>Заражение крови</span>
+                    <strong>${Number(health.infection || 0)}%</strong>
+                </summary>
+                <div class="health-infection-fields">
+                    <div class="health-field">
+                        <label>Текущее заражение</label>
+                        <input type="number" min="0" max="100" class="form-control" name="health.infection" value="${health.infection || 0}">
+                    </div>
+                    <div class="health-field">
+                        <label>Нарастание в сутки</label>
+                        <input type="number" min="0" class="form-control" name="health.infectionGrowthPerDay" value="${health.infectionGrowthPerDay || 0}">
+                    </div>
+                </div>
+            </details>
             <div style="margin: 0 0 14px 0; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);">
                 <div style="font-size: 12px; opacity: 0.78; margin-bottom: 8px;">Активные эффекты и состояния</div>
                 <div style="display:flex; flex-wrap:wrap; gap:8px;">
                     ${visibleEffectChips.length ? visibleEffectChips.map((text) => `<span style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.08); font-size:12px;">${escapeHtml(text)}</span>`).join('') : '<span style="opacity:0.7; font-size:12px;">Сейчас нет активных эффектов</span>'}
+                </div>
+            </div>
+            <div class="health-needs-panel">
+                <div class="health-need-field"><label>Еда сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.mealsToday" value="${needs.mealsToday}"><small>${needs.mealsToday}/3</small></div>
+                <div class="health-need-field"><label>Вода сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.drinksToday" value="${needs.drinksToday}"><small>${needs.drinksToday}/3</small></div>
+                <div class="health-need-field"><label>Сон сегодня</label><select class="form-control" name="health.needs.sleptToday"><option value="false" ${!needs.sleptToday ? 'selected' : ''}>Не выполнен</option><option value="true" ${needs.sleptToday ? 'selected' : ''}>Выполнен</option></select><small>&nbsp;</small></div>
+                <div class="health-needs-actions">
+                    <button type="button" class="btn btn-secondary" onclick="performCharacterRest(1)">Отдых 1 час</button>
+                    <button type="button" class="btn btn-primary" onclick="performCharacterRest(8)">Поспать 8 часов</button>
+                    <button type="button" class="btn btn-secondary" onclick="advanceCharacterDayWithoutSleep()" title="Закрывает текущие сутки без отдыха: проверяет еду, воду и сон, начисляет истощение и запускает суточные эффекты.">Следующие сутки без сна</button>
                 </div>
             </div>
             <hr>
@@ -1874,9 +2005,16 @@ function renderHealthTab(data, container = null) {
         const remaining = effect.remaining ?? '';
         const selectedType = effect.type || 'generic';
         effectsHtml += `
-            <div style="display: grid; grid-template-columns: 1.1fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
+            <div style="display: grid; grid-template-columns: 1.1fr 0.85fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
                 <select class="form-control" name="health.effects.${index}.type" style="width:100%;">
                     ${effectTypeOptions.map(opt => `<option value="${opt.value}" ${opt.value === selectedType ? 'selected' : ''}>${opt.label}</option>`).join('')}
+                </select>
+                <select class="form-control" name="health.effects.${index}.area" style="width:100%;">
+                    ${[
+                        ['', 'Источник'], ['head', 'Голова'], ['chest', 'Грудь'], ['abdomen', 'Живот'],
+                        ['leftArm', 'Левая рука'], ['rightArm', 'Правая рука'],
+                        ['leftLeg', 'Левая нога'], ['rightLeg', 'Правая нога']
+                    ].map(([key, label]) => `<option value="${key}" ${key === (effect.area || '') ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
                 <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Значение" style="width:80px;">
                 ${hasRemaining ? `<input type="text" class="form-control number-input" name="health.effects.${index}.remaining" value="${escapeHtml(remaining)}" placeholder="Остаток" data-nullable-number="true" style="width:90px;">` : '<div></div>'}
@@ -1892,16 +2030,19 @@ function renderHealthTab(data, container = null) {
         </div>
         <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">
             <button type="button" class="btn btn-sm" onclick="addEffect()">+ Добавить эффект</button>
-            <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('bleeding', 1, 3, 'Кровотечение')">Кровотечение</button>
             <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('pain', 1, 2, 'Боль')">Боль</button>
             <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('exhaustion', 1, 2, 'Истощение')">Истощение</button>
-            <button type="button" class="btn btn-sm btn-info" onclick="applyQuickEffect('regeneration', 5, 3, 'Регенерация')">Регенерация</button>
-            <button type="button" class="btn btn-sm btn-success" onclick="applyQuickEffect('heal', 10, 0, 'Лечение')">Лечение</button>
         </div>
         </div>
     `;
 
     targetContainer.innerHTML = html;
+}
+
+function refreshHealthPanel(data = currentCharacterData) {
+    const healthContainer = document.getElementById('health-right-column')
+        || document.getElementById('sheet-tab-health');
+    if (healthContainer) renderHealthTab(data, healthContainer);
 }
 
 window.addEffect = function() {
@@ -1911,12 +2052,7 @@ window.addEffect = function() {
         currentCharacterData.health.effects = [];
     }
     currentCharacterData.health.effects.push(createEffectDraft('generic'));
-    const healthContainer = document.getElementById('health-right-column');
-    if (healthContainer) {
-        renderHealthTab(currentCharacterData, healthContainer);
-    } else {
-        renderHealthTab(currentCharacterData);
-    }
+    refreshHealthPanel();
     scheduleAutoSave();
 };
 
@@ -1942,12 +2078,7 @@ window.applyQuickEffect = function(type, value = 1, duration = 0, label = '') {
         currentCharacterData.health.effects.push(effect);
     }
 
-    const healthContainer = document.getElementById('health-right-column');
-    if (healthContainer) {
-        renderHealthTab(currentCharacterData, healthContainer);
-    } else {
-        renderHealthTab(currentCharacterData);
-    }
+    refreshHealthPanel();
 
     normalizeCharacterEffects(currentCharacterData);
     scheduleAutoSave();
@@ -1959,12 +2090,7 @@ window.removeEffect = function(index) {
     updateDataFromFields();
     if (!currentCharacterData.health?.effects) return;
     currentCharacterData.health.effects.splice(index, 1);
-    const healthContainer = document.getElementById('health-right-column');
-    if (healthContainer) {
-        renderHealthTab(currentCharacterData, healthContainer);
-    } else {
-        renderHealthTab(currentCharacterData);
-    }
+    refreshHealthPanel();
     scheduleAutoSave();
 };
 
@@ -4270,6 +4396,103 @@ function updateMagazineWeight(mag) {
     mag.weight = (totalAmmo > 0) ? (mag.loadedWeight || 0.25) : (mag.emptyWeight || 0);
 };
 
+function resolveCharacterDay(health, effects, didSleep) {
+    const needs = normalizeDailyNeeds(health.needs);
+    const sleepSatisfied = didSleep || needs.sleptToday;
+    const missed = [];
+    if (needs.mealsToday < 3) missed.push('еда');
+    if (needs.drinksToday < 3) missed.push('вода');
+    if (!sleepSatisfied) missed.push('сон');
+
+    health.exhaustion = Math.max(0, Math.min(10,
+        Number(health.exhaustion || 0) + missed.length - (didSleep ? 0.5 : 0)
+    ));
+
+    const infectionBlocked = effects.some(effect => effect.type === 'infection_growth_block' && effect.active !== false);
+    if (!infectionBlocked) {
+        health.infection = Math.min(100, Number(health.infection || 0) + Number(health.infectionGrowthPerDay || 0));
+    }
+
+    const updated = [];
+    effects.forEach(effect => {
+        if (!['day_start', 'rest'].includes(effect.tick)) {
+            updated.push(effect);
+            return;
+        }
+        (effect.adjustments || []).forEach(adjustment => {
+            const field = adjustment.field;
+            if (!field) return;
+            const min = adjustment.min ?? 0;
+            const max = adjustment.max ?? null;
+            let value = Number(health[field] || 0) + Number(adjustment.delta || 0);
+            if (min !== null) value = Math.max(min, value);
+            if (max !== null) value = Math.min(max, value);
+            health[field] = value;
+        });
+        if (effect.remaining != null) {
+            effect.remaining = Math.max(0, Number(effect.remaining || 0) - 1);
+            if (effect.remaining <= 0) return;
+        }
+        updated.push(effect);
+    });
+
+    health.needs = {
+        day: needs.day + 1,
+        mealsToday: 0,
+        drinksToday: 0,
+        sleptToday: false,
+        lastDay: {
+            day: needs.day,
+            meals: needs.mealsToday,
+            drinks: needs.drinksToday,
+            slept: sleepSatisfied,
+            missed,
+        },
+    };
+    return updated;
+}
+
+window.advanceCharacterDayWithoutSleep = function() {
+    updateDataFromFields();
+    const health = ensureHealthMaximums(currentCharacterData);
+    health.effects = resolveCharacterDay(health, normalizeEffectList(health.effects || []), false);
+    syncHealthDerivedStatuses(health);
+    refreshHealthPanel();
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Начались следующие сутки', 'success');
+};
+
+window.performCharacterRest = function(hours = 8) {
+    updateDataFromFields();
+    const health = ensureHealthMaximums(currentCharacterData);
+    health.needs = normalizeDailyNeeds(health.needs);
+    let effects = normalizeEffectList(health.effects || []);
+    const restBonus = effects.find(effect => effect.type === 'next_rest_healing');
+    const restModifier = (health.combatMeta?.consumableModifiers || []).find(modifier => modifier?.stat === 'rest_heal_multiplier');
+    const multiplier = Math.max(1, Number(restBonus?.value || restModifier?.value || 1));
+    const maxHealth = Number(health.max || 700);
+    health.max = maxHealth;
+    const fraction = Number(hours) >= 8 ? 0.5 : 0.05;
+    const recovery = maxHealth * fraction * multiplier;
+    applyEffectToHealth(health, { type: 'heal', value: recovery });
+    effects = effects.filter(effect => effect.type !== 'next_rest_healing');
+    if (health.combatMeta?.consumableModifiers) {
+        health.combatMeta.consumableModifiers = health.combatMeta.consumableModifiers.filter(
+            modifier => modifier?.stat !== 'rest_heal_multiplier'
+        );
+    }
+    if (Number(hours) >= 8) {
+        effects = resolveCharacterDay(health, effects, true);
+    }
+    health.effects = effects;
+    syncHealthDerivedStatuses(health);
+    refreshHealthPanel();
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification(`Отдых завершён. Восстановлено ${Math.round(recovery)} здоровья`, 'success');
+};
+
 function getMagazineAmmoCount(mag) {
     if (!mag || !Array.isArray(mag.ammo)) return 0;
     return mag.ammo.reduce((sum, ammoEntry) => sum + (Number(ammoEntry?.quantity) || 0), 0);
@@ -6039,9 +6262,9 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
 // Использование предмета из инвентаря (для расходников, гранат и т.д.)
 async function useItem(item, itemPath, options = {}) {
     if (item.category === 'consumable') {
-        await useConsumable(item, itemPath, options);
+        return await useConsumable(item, itemPath, options);
     } else if (item.category === 'grenade') {
-        await useGrenade(item, itemPath, options);
+        return await useGrenade(item, itemPath, options);
     } else if (item.category === 'device') {
         // Если устройство имеет батарею и разряжено, предложить зарядить
         if (item.attributes?.power !== undefined && item.attributes.power < 100) {
@@ -6054,13 +6277,219 @@ async function useItem(item, itemPath, options = {}) {
     }
 }
 
+const BLEEDING_STAGE_RANK = { light: 1, medium: 2, severe: 3, extreme: 4 };
+
+function getEffectAreaLabel(area) {
+    return ({
+        head: 'голова', chest: 'грудь', abdomen: 'живот', leftArm: 'левая рука',
+        rightArm: 'правая рука', leftLeg: 'левая нога', rightLeg: 'правая нога', internal: 'внутреннее'
+    })[area] || area || 'источник не указан';
+}
+
+function getBleedingInfo(effect) {
+    const match = String(effect?.type || '').match(/^bleeding_(external|internal)_(light|medium|severe|extreme)$/);
+    if (!match) return null;
+    return { kind: match[1], stage: match[2], rank: BLEEDING_STAGE_RANK[match[2]] || 0 };
+}
+
+function collectInventoryEntries(data, predicate) {
+    const found = [];
+    const visit = (items, path) => {
+        if (!Array.isArray(items)) return;
+        items.forEach((entry, index) => {
+            const entryPath = path.concat(index);
+            if (predicate(entry)) found.push({ item: entry, path: entryPath });
+            if (Array.isArray(entry?.contents)) visit(entry.contents, entryPath.concat('contents'));
+        });
+    };
+    visit(data.inventory?.pockets, ['inventory', 'pockets']);
+    visit(data.inventory?.backpack, ['inventory', 'backpack']);
+    (data.equipment?.belt?.pouches || []).forEach((pouch, index) => visit(pouch.contents, ['equipment', 'belt', 'pouches', index, 'contents']));
+    (data.equipment?.vest?.pouches || []).forEach((pouch, index) => visit(pouch.contents, ['equipment', 'vest', 'pouches', index, 'contents']));
+    return found;
+}
+
+function findInventoryItemById(data, itemId) {
+    if (!itemId) return null;
+    return collectInventoryEntries(data, item => item?.id === itemId)[0] || null;
+}
+
+function spendInventoryItemUses(entry, amount = 1) {
+    if (!entry?.item) return false;
+    const item = entry.item;
+    let remaining = Math.max(0, Number(amount) || 0);
+    const maxUses = Math.max(1, Number(item.maxUses ?? item.attributes?.uses ?? 1) || 1);
+    let uses = Math.max(0, Number(item.uses ?? item.attributes?.uses_remaining ?? maxUses) || 0);
+    while (remaining > 0 && Number(item.quantity || 0) > 0) {
+        const spent = Math.min(uses || maxUses, remaining);
+        uses = (uses || maxUses) - spent;
+        remaining -= spent;
+        if (uses <= 0) {
+            item.quantity = Math.max(0, Number(item.quantity || 0) - 1);
+            uses = item.quantity > 0 ? maxUses : 0;
+        }
+    }
+    item.uses = uses;
+    item.maxUses = maxUses;
+    item.attributes = item.attributes || {};
+    item.attributes.uses_remaining = uses;
+    if (item.quantity <= 0) {
+        const currentEntry = findInventoryItemById(currentCharacterData, item.id);
+        removeItemByPath(currentEntry?.path || entry.path);
+    }
+    return remaining <= 0;
+}
+
+function spendWaterRequirement(data, fraction, allowAlcohol = false, consume = true) {
+    const charges = Math.max(1, Math.ceil((Number(fraction) || 0) * 3 - 1e-6));
+    const water = collectInventoryEntries(data, item => String(item?.name || '').trim().toLowerCase() === 'вода')
+        .find(entry => {
+            const maxUses = Math.max(1, Number(entry.item.maxUses ?? entry.item.attributes?.uses ?? 3) || 3);
+            const currentUses = Math.max(0, Number(entry.item.uses ?? entry.item.attributes?.uses_remaining ?? maxUses) || 0);
+            return currentUses + Math.max(0, Number(entry.item.quantity || 0) - 1) * maxUses >= charges;
+        });
+    if (water && (!consume || spendInventoryItemUses(water, charges))) {
+        return { ok: true, source: 'water', itemName: water.item.name || 'Вода', charges };
+    }
+    if (allowAlcohol) {
+        const alcohol = collectInventoryEntries(data, isAlcoholConsumable)
+            .find(entry => Number(entry.item.quantity || 0) > 0);
+        if (alcohol && (!consume || spendInventoryItemUses(alcohol, 1))) {
+            return { ok: true, source: 'alcohol', itemName: alcohol.item.name || 'Алкоголь', charges: 1 };
+        }
+    }
+    return { ok: false, source: null };
+}
+
+function chooseConsumableApplication(title, choices) {
+    if (!Array.isArray(choices) || choices.length === 0) return Promise.resolve(null);
+    if (choices.length === 1) return Promise.resolve(choices[0]);
+    return new Promise(resolve => {
+        document.getElementById('consumable-application-modal')?.remove();
+        const modal = document.createElement('div');
+        modal.id = 'consumable-application-modal';
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width:520px;">
+                <span class="close">&times;</span>
+                <h3>${escapeHtml(title)}</h3>
+                <div class="consumable-application-list" style="display:flex; flex-direction:column; gap:8px;"></div>
+                <div class="form-actions" style="margin-top:12px;"><button type="button" class="btn btn-secondary cancel-btn">Отмена</button></div>
+            </div>`;
+        const finish = value => { modal.remove(); resolve(value); };
+        modal.querySelector('.close').onclick = () => finish(null);
+        modal.querySelector('.cancel-btn').onclick = () => finish(null);
+        modal.addEventListener('click', event => { if (event.target === modal) finish(null); });
+        choices.forEach(choice => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-secondary';
+            button.style.textAlign = 'left';
+            button.textContent = choice.label;
+            button.onclick = () => finish(choice);
+            modal.querySelector('.consumable-application-list').appendChild(button);
+        });
+        document.body.appendChild(modal);
+        modal.style.display = 'flex';
+    });
+}
+
+async function resolveMedicalApplication(direct, health, itemName) {
+    const effects = Array.isArray(health.effects) ? health.effects : [];
+    const applications = Array.isArray(direct.applications) ? direct.applications : [];
+    if (direct.blood_type_test) {
+        const choices = [{ label: 'Определить группу крови персонажа', target: 'character', actionPoints: 0 }];
+        collectInventoryEntries(currentCharacterData, item => String(item?.name || '').trim().toLowerCase() === 'пакет крови')
+            .forEach(entry => choices.push({
+                label: `Определить группу пакета крови${entry.item.attributes?.bloodTypeKnown ? ' (уже известна)' : ''}`,
+                target: 'packet', entry, actionPoints: 0
+            }));
+        const selected = await chooseConsumableApplication(`Применить: ${itemName}`, choices);
+        return selected ? { kind: 'blood_type_test', ...selected } : null;
+    }
+    if (applications.length) {
+        const choices = [];
+        effects.forEach(effect => {
+            const bleed = getBleedingInfo(effect);
+            if (!bleed || effect.closed || effect.suppressed) return;
+            applications.forEach(application => {
+                if (Boolean(application.internal) !== (bleed.kind === 'internal')) return;
+                if (bleed.rank > (BLEEDING_STAGE_RANK[application.max_stage] || 0)) return;
+                if (direct.limb_only && !['leftArm', 'rightArm', 'leftLeg', 'rightLeg'].includes(effect.area)) return;
+                choices.push({
+                    label: `${getEffectAreaLabel(effect.area)}: ${bleed.kind === 'internal' ? 'внутреннее' : 'внешнее'} ${bleed.stage} · ${application.action_points || 1} ОД`,
+                    effect, application, actionPoints: application.action_points || 1,
+                });
+            });
+        });
+        if (!choices.length) throw new Error('Нет подходящего активного кровотечения');
+        const selected = await chooseConsumableApplication(`Применить: ${itemName}`, choices);
+        if (!selected) return null;
+        return { kind: 'bleeding', ...selected };
+    }
+    if (direct.wound_treatment) {
+        const choices = effects.filter(effect => effect.type === 'untreated_wound').map(effect => ({
+            label: `Обработать рану: ${getEffectAreaLabel(effect.area)}`,
+            effect, actionPoints: Number(direct.action_points_cost || 1),
+        }));
+        if (!choices.length) throw new Error('Нет необработанной раны');
+        const selected = await chooseConsumableApplication(`Применить: ${itemName}`, choices);
+        return selected ? { kind: 'wound', ...selected } : null;
+    }
+    if (direct.fracture_splint || direct.cure_fracture || direct.target_body_part) {
+        const choices = effects.filter(effect => ['fracture', 'amputation', 'organ_loss'].includes(effect.type)).map(effect => ({
+            label: `${effect.name || effect.type}: ${getEffectAreaLabel(effect.area)}`,
+            effect, actionPoints: Number(direct.action_points_cost || 1),
+        }));
+        if (!choices.length) throw new Error('Нет подходящей травмы');
+        const selected = await chooseConsumableApplication(`Применить: ${itemName}`, choices);
+        return selected ? { kind: 'injury', ...selected } : null;
+    }
+    const defaultMedicalCost = direct.medical_difficulty !== undefined || direct.application_form === 'injectable' ? 1 : 0;
+    return { kind: 'self', actionPoints: Number(direct.action_points_cost ?? defaultMedicalCost) };
+}
+
 async function useConsumable(item, itemPath, options = {}) {
-    const consumable = item.attributes?.consumable || {};
-    const direct = { ...(consumable.direct || {}) };
+    const template = (allTemplatesCache || []).find(entry => entry.id == item.templateId);
+    const templateAttributes = template?.attributes || {};
+    const itemConsumable = item.attributes?.consumable || {};
+    const templateConsumable = templateAttributes.consumable || {};
+    const consumable = { ...itemConsumable, ...templateConsumable };
+    const direct = { ...(itemConsumable.direct || {}), ...(templateConsumable.direct || {}) };
+    if (direct.requires_water_fraction === undefined) {
+        const requirementText = String(
+            template?.description
+            || templateAttributes.description
+            || item.description
+            || item.attributes?.description
+            || ''
+        ).toLowerCase();
+        const waterMatch = requirementText.match(/(\d+)\s*\/\s*(\d+)[^.]{0,48}бутылк[^\s]*\s+воды/i);
+        if (waterMatch) {
+            const numerator = Number(waterMatch[1]);
+            const denominator = Number(waterMatch[2]);
+            if (numerator > 0 && denominator > 0) {
+                direct.requires_water_fraction = numerator / denominator;
+                const sentence = requirementText
+                    .slice(requirementText.lastIndexOf('.', waterMatch.index) + 1)
+                    .split('.')[0];
+                if (sentence.includes('алкогол')) direct.water_or_alcohol = true;
+            }
+        }
+    }
+    if (direct.target_required && !options.targetCharacterId) {
+        showNotification('Для этого предмета нужно выбрать цель через медицинское действие');
+        return false;
+    }
     const modifiers = Array.isArray(consumable.modifiers) ? consumable.modifiers : [];
     const statusRemovals = Array.isArray(consumable.status_removals) ? consumable.status_removals : [];
     const statusAdditions = Array.isArray(consumable.status_additions) ? consumable.status_additions : [];
-    const health = currentCharacterData.health || {};
+    const targetData = options.targetData || currentCharacterData;
+    const health = targetData.health || {};
+    if (direct.requires_shock && !(health.effects || []).some(effect => ['shock', 'unconsciousness'].includes(effect?.type))) {
+        showNotification('Нашатырь можно применить только к персонажу в болевом шоке');
+        return false;
+    }
     const combatState = window.locationCombatState;
     const isCombatActive = Boolean(combatState && combatState.status === 'active');
     let hasChanges = false;
@@ -6092,7 +6521,11 @@ async function useConsumable(item, itemPath, options = {}) {
         if (direct[key] !== undefined) directEffectTypes.add(type);
     });
 
-    const effects = (item.attributes?.effects || []).filter(effect => {
+    const effects = (
+        Array.isArray(consumable.effects)
+            ? consumable.effects
+            : (templateAttributes.effects || item.attributes?.effects || [])
+    ).filter(effect => {
         if (!effect || effect?.source === 'direct') return false;
         const type = String(effect.type || '').trim().toLowerCase();
         return !directEffectTypes.has(type);
@@ -6146,16 +6579,315 @@ async function useConsumable(item, itemPath, options = {}) {
         hasChanges = true;
     };
 
-    effects.forEach(eff => applyEffect(eff));
+    let application;
+    try {
+        application = await resolveMedicalApplication(direct, health, item.name || 'предмет');
+    } catch (error) {
+        showNotification(error.message || 'Предмет сейчас нельзя применить');
+        return false;
+    }
+    if (!application) return false;
+
+    if (direct.use_limit) {
+        health.combatMeta = health.combatMeta || {};
+        const usage = health.combatMeta.consumableUsage || {};
+        const usageKey = direct.exclusive_group || item.templateId || item.name;
+        if (Number(usage[usageKey] || 0) >= Number(direct.use_limit || 1)) {
+            showNotification('Лимит использования этого препарата исчерпан');
+            return false;
+        }
+    }
+
+    let infusionBonus = 0;
+    if (direct.requires_infusion_tool) {
+        const infusionTools = collectInventoryEntries(currentCharacterData, entry =>
+            /капельница|хирургический набор|набор полного восстановления конечности/i.test(String(entry?.name || ''))
+        );
+        if (!infusionTools.length) {
+            showNotification('Для применения нужна капельница или хирургический набор');
+            return false;
+        }
+        if (infusionTools.some(entry => /капельница/i.test(String(entry.item.name || '')))) infusionBonus = 1;
+    }
+    if (direct.blood_compatibility_required) {
+        const recipientType = Number(health.combatMeta?.bloodType || 0);
+        const packetType = Number(item.attributes?.bloodType || item.attributes?.blood_type || 0);
+        if (!recipientType || !packetType) {
+            showNotification('Сначала нужно определить группу крови получателя и пакета');
+            return false;
+        }
+        const compatibleGroups = { 1: [1], 2: [1, 2], 3: [1, 3], 4: [1, 2, 3, 4] };
+        if (!(compatibleGroups[recipientType] || []).includes(packetType)) {
+            showNotification('Группа крови не подходит');
+            return false;
+        }
+    }
+
+    let waterRequirement = null;
+    let usingWithoutWater = false;
+    if (direct.requires_water_fraction) {
+        const waterCheck = spendWaterRequirement(currentCharacterData, direct.requires_water_fraction, Boolean(direct.water_or_alcohol), false);
+        if (!waterCheck.ok) {
+            if (direct.exhaustion_if_no_water) {
+                direct.exhaustion_delta = Number(direct.exhaustion_delta || 0) + Number(direct.exhaustion_if_no_water || 0);
+                usingWithoutWater = true;
+            } else {
+                showNotification('Для использования не хватает воды');
+                return false;
+            }
+        } else {
+            waterRequirement = {
+                fraction: direct.requires_water_fraction,
+                allowAlcohol: Boolean(direct.water_or_alcohol),
+            };
+        }
+    }
+
+    if (isCombatActive && application.actionPoints > 0) {
+        const actor = combatState?.current_character;
+        if (!actor || actor.character_id !== currentCharacterId) {
+            showNotification('Сейчас не ход этого персонажа');
+            return false;
+        }
+        try {
+            await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
+                location_character_id: actor.location_character_id,
+                action_points: application.actionPoints,
+            });
+        } catch (error) {
+            showNotification(error.message || 'Не хватает ОД');
+            return false;
+        }
+    }
+    const needsMedicineCheck = direct.medical_difficulty !== undefined
+        || ['bleeding', 'wound', 'injury'].includes(application.kind)
+        || direct.requires_infusion_tool;
+    if (needsMedicineCheck) {
+        const medicine = currentCharacterData.skills?.other?.medicine || {};
+        const medicineBase = Number.isFinite(Number(medicine.base)) ? Number(medicine.base) : 10;
+        const medicineSkillBonus = Math.floor((medicineBase - 10) / 2) + Number(medicine.bonus || 0);
+        const medicationBonus = Number(direct.med_bonus || 0) + Number(application.application?.medicine_bonus || 0);
+        const bleedingInfo = getBleedingInfo(application.effect);
+        const bleedingDifficulties = { light: 8, medium: 10, severe: 12, extreme: 14 };
+        let baseDifficulty = Number(direct.medical_difficulty);
+        if (!Number.isFinite(baseDifficulty)) {
+            if (bleedingInfo) {
+                baseDifficulty = bleedingDifficulties[bleedingInfo.stage] || 8;
+            } else if (application.effect?.type === 'fracture') {
+                baseDifficulty = 10;
+            } else if (direct.restore_missing_part || direct.restore_limb_health) {
+                baseDifficulty = 14;
+            } else {
+                baseDifficulty = 4;
+            }
+        }
+        const difficulty = Math.max(1, baseDifficulty - medicineSkillBonus - medicationBonus);
+        const roll = Math.floor(Math.random() * 20) + 1;
+        const checkDetails = `d20: ${roll}, СЛ: ${difficulty} (база ${baseDifficulty}, Медицина ${medicineSkillBonus >= 0 ? '+' : ''}${medicineSkillBonus}, медикамент ${medicationBonus >= 0 ? '+' : ''}${medicationBonus})`;
+        if (roll < difficulty) {
+            if (!direct.not_consumed) {
+                spendInventoryItemUses({ item, path: itemPath }, Number(application.application?.item_uses || 1));
+            }
+            showNotification(`Проверка Медицины провалена. ${checkDetails}. Расходник потрачен.`);
+            if (options.render !== false) renderInventoryTab(currentCharacterData);
+            if (options.save !== false) {
+                scheduleAutoSave();
+                forceSyncCharacter();
+            }
+            return true;
+        }
+        showNotification(`Проверка Медицины успешна. ${checkDetails}`, 'system');
+    }
+
+    if (waterRequirement) {
+        const spent = spendWaterRequirement(
+            currentCharacterData,
+            waterRequirement.fraction,
+            waterRequirement.allowAlcohol,
+            true
+        );
+        if (!spent.ok) {
+            showNotification('Вода исчезла из инвентаря до применения. Предмет не израсходован.');
+            return false;
+        }
+        if (spent.source === 'alcohol') {
+            showNotification(`Для применения потрачено 1 использование: ${spent.itemName}`, 'system');
+        } else {
+            showNotification(`Для применения потрачено ${spent.charges}/3 бутылки воды`, 'system');
+        }
+    } else if (usingWithoutWater) {
+        showNotification('Предмет использован без воды: получен штраф к истощению', 'system');
+    }
+
+    effects.forEach(eff => {
+        if (eff?.source === 'direct') return;
+        const appliedEffect = { ...eff, source: eff.source || item.id || item.name };
+        if (infusionBonus && appliedEffect.type === 'blood_recovery' && appliedEffect.remaining != null) {
+            appliedEffect.remaining = Number(appliedEffect.remaining) + infusionBonus;
+        }
+        applyEffectToHealth(health, appliedEffect);
+        hasChanges = true;
+    });
+
+    if (application.kind === 'bleeding') {
+        const targetId = application.effect.id;
+        health.effects = (health.effects || []).filter(effect => effect.id !== targetId);
+        if (!application.application.treated) {
+            applyEffectToHealth(health, {
+                type: 'untreated_wound', name: 'Необработанная рана', area: application.effect.area,
+                source: targetId || application.effect.source || item.name, tick: 'manual'
+            });
+        }
+        if (direct.tourniquet) {
+            health.effects.forEach(effect => {
+                if (getBleedingInfo(effect) && effect.area === application.effect.area) effect.suppressed = true;
+            });
+            applyEffectToHealth(health, {
+                type: 'tourniquet', name: `Жгут: ${getEffectAreaLabel(application.effect.area)}`,
+                area: application.effect.area, source: item.id || item.name, tick: 'manual'
+            });
+        }
+        hasChanges = true;
+    } else if (application.kind === 'wound') {
+        health.effects = (health.effects || []).filter(effect => effect.id !== application.effect.id);
+        hasChanges = true;
+    } else if (application.kind === 'injury') {
+        if (direct.cure_fracture || direct.fracture_splint) {
+            health.effects = (health.effects || []).filter(effect => effect.id !== application.effect.id);
+        }
+        const zone = health.zones?.[application.effect.area];
+        if (zone && direct.fracture_restore_health) zone.current = Math.max(Number(zone.current || 0), Number(direct.fracture_restore_health));
+        if (zone && direct.restore_limb_health) zone.current = Math.max(Number(zone.current || 0), Number(direct.restore_limb_health));
+        if (direct.close_area_bleeding) {
+            health.effects = (health.effects || []).filter(effect => !(getBleedingInfo(effect) && effect.area === application.effect.area));
+        }
+        hasChanges = true;
+    }
+
+    if (direct.stop_all_bleeding) {
+        health.effects = (health.effects || []).filter(effect => !getBleedingInfo(effect));
+        hasChanges = true;
+    }
+    if (direct.clear_breathless) {
+        health.effects = (health.effects || []).filter(effect => !['breathless', 'shortness_of_breath'].includes(effect?.type));
+        hasChanges = true;
+    }
+
+    if (direct.use_limit) {
+        health.combatMeta = health.combatMeta || {};
+        health.combatMeta.consumableUsage = health.combatMeta.consumableUsage || {};
+        const usageKey = direct.exclusive_group || item.templateId || item.name;
+        health.combatMeta.consumableUsage[usageKey] = Number(health.combatMeta.consumableUsage[usageKey] || 0) + 1;
+        hasChanges = true;
+    }
+
+    if (direct.infection_block_days) {
+        applyEffectToHealth(health, {
+            type: 'infection_growth_block', name: 'Блок нарастания заражения',
+            remaining: Number(direct.infection_block_days), tick: 'day_start', time_unit: 'day', source: item.id || item.name
+        });
+        hasChanges = true;
+    }
+    if (direct.infection_block_chance) {
+        const roll = Math.random() * 100;
+        if (roll < Number(direct.infection_block_chance)) {
+            applyEffectToHealth(health, {
+                type: 'infection_growth_block', name: 'Блок нарастания заражения',
+                remaining: 1, tick: 'day_start', time_unit: 'day', source: item.id || item.name
+            });
+            showNotification(`Нарастание заражения остановлено на сутки (${direct.infection_block_chance}% сработали)`, 'success');
+        } else {
+            showNotification(`Блок заражения не сработал (шанс ${direct.infection_block_chance}%)`, 'system');
+        }
+        hasChanges = true;
+    }
+
+    if (direct.satisfy_sleep || direct.nutrition !== undefined || direct.satisfy_water || /^вода$/i.test(String(item.name || '').trim())) {
+        health.needs = normalizeDailyNeeds(health.needs);
+        if (direct.satisfy_sleep) health.needs.sleptToday = true;
+        if (direct.nutrition !== undefined) health.needs.mealsToday = Math.min(3, health.needs.mealsToday + 1);
+        if (/^вода$/i.test(String(item.name || '').trim()) || direct.satisfy_water) {
+            health.needs.drinksToday = Math.min(3, health.needs.drinksToday + 1);
+        }
+        hasChanges = true;
+    }
+
+    if (direct.blood_collection) {
+        const packetTemplate = (allTemplatesCache || []).find(entry =>
+            entry.category === 'consumable' && String(entry.name || '').trim().toLowerCase() === 'пакет крови'
+        );
+        if (!packetTemplate) {
+            showNotification('Шаблон пакета крови не найден');
+            return false;
+        }
+        const packet = createItemFromTemplate(packetTemplate);
+        const donorBloodType = Number(health.combatMeta?.bloodType || 0);
+        packet.attributes = packet.attributes || {};
+        packet.attributes.bloodType = donorBloodType || null;
+        currentCharacterData.inventory = currentCharacterData.inventory || {};
+        currentCharacterData.inventory.pockets = currentCharacterData.inventory.pockets || [];
+        currentCharacterData.inventory.pockets.push(packet);
+        const order = ['normal', 'light', 'medium', 'severe', 'critical'];
+        const currentStage = String(health.blood || health.bloodStage || 'normal').toLowerCase();
+        health.blood = order[Math.min(order.length - 1, Math.max(0, order.indexOf(currentStage)) + 2)];
+        health.bloodStage = health.blood;
+        hasChanges = true;
+    }
+
+    if (direct.hp_max_delta !== undefined) {
+        health.max = Math.max(1, Number(health.max || 0) + Number(direct.hp_max_delta || 0));
+        hasChanges = true;
+    }
+    if (direct.post_duration_hp_delta !== undefined || direct.hp_max_delta !== undefined) {
+        const onExpire = [];
+        if (direct.post_duration_hp_delta !== undefined) {
+            onExpire.push({ field: 'current', delta: Number(direct.post_duration_hp_delta || 0), min: 0 });
+        }
+        if (direct.hp_max_delta !== undefined) {
+            onExpire.push({ field: 'max', delta: -Number(direct.hp_max_delta || 0), min: 1 });
+        }
+        applyEffectToHealth(health, {
+            type: 'stimulant_crash', name: `${item.name}: окончание действия`,
+            remaining: Number(direct.duration || 1), tick: direct.duration_phase || 'turn_end',
+            source: `${item.id || item.name}:crash`, onExpire
+        });
+        hasChanges = true;
+    }
+    if (direct.organ_toughness_multiplier !== undefined) {
+        health.combatMeta = health.combatMeta || {};
+        health.combatMeta.consumableModifiers = health.combatMeta.consumableModifiers || [];
+        health.combatMeta.consumableModifiers.push({
+            stat: 'organ_toughness_multiplier', value: Number(direct.organ_toughness_multiplier || 1),
+            remaining: Number(direct.duration || 1), tick: direct.duration_phase || 'turn_end', note: item.name
+        });
+        hasChanges = true;
+    }
+    if (direct.action_points_duration) {
+        health.combatMeta = health.combatMeta || {};
+        health.combatMeta.consumableModifiers = health.combatMeta.consumableModifiers || [];
+        health.combatMeta.consumableModifiers.push({
+            stat: 'action_points', value: Number(direct.action_points_delta || 0),
+            remaining: Number(direct.action_points_duration), tick: 'turn_end', note: item.name
+        });
+        hasChanges = true;
+    }
+    if (direct.pain_block_turns) {
+        applyEffectToHealth(health, {
+            type: 'pain_block', name: `${item.name}: блок боли`, value: Number(direct.pain_block_turns),
+            remaining: Number(direct.pain_block_turns), tick: 'turn_end', source: item.id || item.name,
+            blocks_new_pain: true, return_fraction: Number(direct.blocked_pain_return_fraction ?? 1),
+            exhaustion_on_expire: Number(direct.exhaustion_on_expire || 0)
+        });
+        hasChanges = true;
+    }
 
     if (direct.hp !== undefined) {
-        const current = Number(health.current ?? 0);
-        const max = health.max ?? null;
-        let next = current + Number(direct.hp);
-        if (max !== null && max !== undefined && max !== '') {
-            next = Math.min(Number(max), next);
+        const hpDelta = Number(direct.hp);
+        if (hpDelta > 0) {
+            applyEffectToHealth(health, { type: 'heal', value: hpDelta, source: item.id || item.name });
+        } else {
+            health.current = Math.max(0, Number(health.current ?? 0) + hpDelta);
         }
-        health.current = Math.max(0, next);
         hasChanges = true;
     }
     adjust('radiation', direct.radiation_delta, 0, null);
@@ -6188,10 +6920,15 @@ async function useConsumable(item, itemPath, options = {}) {
         }
         modifiers.forEach((modifier) => {
             if (!modifier || typeof modifier !== 'object') return;
+            const stat = String(modifier.stat || 'generic');
+            if (direct[`${stat}_delta`] !== undefined) return;
+            const remaining = modifier.remaining ?? direct.duration ?? null;
+            if (remaining === null || Number(remaining) <= 0) return;
             health.combatMeta.consumableModifiers.push({
-                stat: modifier.stat || 'generic',
+                stat,
                 value: Number(modifier.value ?? 0) || 0,
-                remaining: modifier.remaining ?? null,
+                remaining: Number(remaining),
+                tick: modifier.tick || direct.duration_phase || 'turn_end',
                 note: modifier.note || '',
             });
         });
@@ -6207,12 +6944,13 @@ async function useConsumable(item, itemPath, options = {}) {
             stat: 'bleeding',
             value: Number(direct.bleeding_modifier_delta) || 0,
             remaining: direct.duration ?? null,
-            note: 'consumable',
+            note: itemName.includes('гематоген') ? 'hematogen' : 'consumable',
+            scope: itemName.includes('гематоген') ? 'combat' : 'character',
         });
         hasChanges = true;
     }
 
-    if (direct.bleeding_stop_light_cost !== undefined || direct.bleeding_stop_medium_cost !== undefined) {
+    if (!Array.isArray(direct.applications) && (direct.bleeding_stop_light_cost !== undefined || direct.bleeding_stop_medium_cost !== undefined)) {
         const order = ['bleeding_external_light', 'bleeding_external_medium'];
         const target = Array.isArray(health.effects) ? health.effects.find(effect => order.includes(String(effect?.type || '').trim())) : null;
         if (target) {
@@ -6229,20 +6967,6 @@ async function useConsumable(item, itemPath, options = {}) {
         hasChanges = true;
     }
 
-    if (direct.rest_heal_multiplier !== undefined) {
-        if (!health.combatMeta) health.combatMeta = {};
-        if (!Array.isArray(health.combatMeta.consumableModifiers)) {
-            health.combatMeta.consumableModifiers = [];
-        }
-        health.combatMeta.consumableModifiers.push({
-            stat: 'rest_heal_multiplier',
-            value: Number(direct.rest_heal_multiplier) || 0,
-            remaining: direct.duration ?? null,
-            note: 'rest_bonus',
-        });
-        hasChanges = true;
-    }
-
     if (direct.nutrition !== undefined) {
         if (!health.combatMeta) health.combatMeta = {};
         health.combatMeta.nutrition = Number(health.combatMeta.nutrition || 0) + (Number(direct.nutrition) || 0);
@@ -6251,12 +6975,23 @@ async function useConsumable(item, itemPath, options = {}) {
 
     if (direct.blood_type_test) {
         if (!health.combatMeta) health.combatMeta = {};
-        const result = rollBloodType();
-        health.combatMeta.bloodTypeTested = true;
-        health.combatMeta.bloodTypeKnown = true;
-        health.combatMeta.bloodType = result.bloodType;
-        health.combatMeta.bloodTypeRoll = result.roll;
-        showNotification(`Группа крови определена: ${formatBloodType(result.bloodType)} (d20: ${result.roll})`, 'success');
+        if (application.kind === 'blood_type_test' && application.target === 'packet') {
+            const packet = application.entry?.item;
+            const bloodType = Number(packet?.attributes?.bloodType || packet?.attributes?.blood_type || 0);
+            if (!bloodType) {
+                showNotification('Группа этого пакета не задана ГМом');
+                return false;
+            }
+            packet.attributes.bloodTypeKnown = true;
+            showNotification(`Группа крови в пакете: ${formatBloodType(bloodType)}`, 'success');
+        } else {
+            const result = rollBloodType();
+            health.combatMeta.bloodTypeTested = true;
+            health.combatMeta.bloodTypeKnown = true;
+            health.combatMeta.bloodType = result.bloodType;
+            health.combatMeta.bloodTypeRoll = result.roll;
+            showNotification(`Группа крови определена: ${formatBloodType(result.bloodType)} (d20: ${result.roll})`, 'success');
+        }
         hasChanges = true;
     }
 
@@ -6289,10 +7024,13 @@ async function useConsumable(item, itemPath, options = {}) {
             ['psy_defense', direct.psy_defense_delta],
         ].forEach(([stat, value]) => {
             if (value === undefined) return;
+            const remaining = direct.duration ?? null;
+            if (remaining === null || Number(remaining) <= 0) return;
             health.combatMeta.consumableModifiers.push({
                 stat,
                 value: Number(value) || 0,
-                remaining: direct.duration ?? null,
+                remaining: Number(remaining),
+                tick: direct.duration_phase || 'turn_end',
                 note: 'stat_bonus',
             });
         });
@@ -6326,56 +7064,38 @@ async function useConsumable(item, itemPath, options = {}) {
     }
 
     if (hasChanges) {
-        currentCharacterData.health = health;
-        normalizeCharacterEffects(currentCharacterData);
-        syncHealthDerivedStatuses(currentCharacterData.health);
+        targetData.health = health;
+        normalizeCharacterEffects(targetData);
+        syncHealthDerivedStatuses(targetData.health);
     } else if (effects.length === 0) {
         showNotification('Предмет не имеет эффектов');
         return;
     }
 
-    const currentUses = Number(item.uses ?? item.attributes?.uses ?? item.attributes?.uses_remaining ?? null);
-    const maxUses = Number(item.maxUses ?? item.attributes?.uses ?? item.attributes?.maxUses ?? null);
-    if (Number.isFinite(currentUses) && currentUses > 0) {
-        item.uses = currentUses - 1;
-        item.attributes = item.attributes || {};
-        item.attributes.uses_remaining = Math.max(0, currentUses - 1);
-        if (item.uses <= 0) {
-            if (!direct.not_consumed) {
-                item.quantity -= 1;
-                if (item.quantity > 0 && Number.isFinite(maxUses) && maxUses > 0) {
-                    item.uses = maxUses;
-                    item.maxUses = maxUses;
-                    item.attributes.uses_remaining = maxUses;
-                } else if (item.quantity <= 0) {
-                    removeItemByPath(itemPath);
-                }
-            }
-        }
-    } else if (!direct.not_consumed) {
-        item.quantity -= 1;
-        if (item.quantity <= 0) {
-            removeItemByPath(itemPath);
+    if (!direct.not_consumed) {
+        spendInventoryItemUses({ item, path: itemPath }, Number(application.application?.item_uses || 1));
+    }
+    if (isCombatActive && Number(direct.action_points_delta || 0) !== 0) {
+        const actor = combatState?.current_character;
+        try {
+            await Server.adjustLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
+                location_character_id: actor.location_character_id,
+                action_points: Number(direct.action_points_delta || 0),
+            });
+        } catch (error) {
+            showNotification(error.message || 'Не удалось изменить ОД');
         }
     }
     showNotification(`${item.name} использован`, 'success');
     if (options.render !== false) {
         renderInventoryTab(currentCharacterData);
-        const healthContainer = document.getElementById('health-right-column');
-        if (healthContainer) {
-            renderHealthTab(currentCharacterData, healthContainer);
-        }
-        const sheetHealthContainer = document.getElementById('sheet-tab-health');
-        if (sheetHealthContainer) {
-            renderHealthTab(currentCharacterData, sheetHealthContainer);
-        } else {
-            renderHealthTab(currentCharacterData);
-        }
+        refreshHealthPanel();
     }
     if (options.save !== false) {
         scheduleAutoSave();
         forceSyncCharacter();
     }
+    return true;
 }
 
 async function useGrenade(item, itemPath, options = {}) {
@@ -6422,18 +7142,35 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
             currentCharacterData = loadedCharacter?.data || {};
         }
 
+        if (!allTemplatesCache) {
+            await getAllItemTemplates();
+        }
         normalizeCharacterEffects(currentCharacterData);
 
-        const item = getItemByPath(normalizedPath);
+        let targetData = currentCharacterData;
+        const targetCharacterId = Number(options.targetCharacterId || characterId);
+        if (targetCharacterId !== Number(characterId)) {
+            const loadedTarget = await Server.getCharacter(targetCharacterId);
+            targetData = loadedTarget?.data || {};
+            normalizeCharacterEffects(targetData);
+        }
+
+        const resolvedEntry = options.itemId ? findInventoryItemById(currentCharacterData, options.itemId) : null;
+        const resolvedPath = resolvedEntry?.path || normalizedPath;
+        const item = resolvedEntry?.item || getItemByPath(resolvedPath);
         if (!item) {
             throw new Error('Предмет не найден');
         }
 
-    await useItem(item, normalizedPath, { ...options, render: false, save: false });
+    const applied = await useItem(item, resolvedPath, { ...options, targetData, render: false, save: false });
+    if (applied === false) return false;
     await Server.updateCharacter(characterId, { data: currentCharacterData });
+    if (targetCharacterId !== Number(characterId)) {
+        await Server.updateCharacter(targetCharacterId, { data: targetData });
+    }
     if (currentCharacterId === characterId) {
         renderInventoryTab(currentCharacterData);
-        renderHealthTab(currentCharacterData);
+        refreshHealthPanel();
     }
     } finally {
         if (shouldRestorePreviousState) {
@@ -9494,7 +10231,12 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         useBtn.style.lineHeight = '1';
         useBtn.onclick = (e) => {
             e.stopPropagation();
-            useItem(item, itemPath);
+            const currentEntry = item.id ? findInventoryItemById(currentCharacterData, item.id) : { item: getItemByPath(itemPath), path: itemPath };
+            if (!currentEntry) {
+                showNotification('Предмет больше не найден в инвентаре');
+                return;
+            }
+            useItem(currentEntry.item, currentEntry.path);
         };
         actionsDiv.appendChild(useBtn);
     }
@@ -9943,7 +10685,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
 
                     // Обновляем активную вкладку для немедленного отображения
                     const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
-                    if (activeTab === 'health') renderHealthTab(currentCharacterData);
+                    if (activeTab === 'health') refreshHealthPanel();
                     if (activeTab === 'basic') renderBasicTab(currentCharacterData);
                     else if (activeTab === 'skills') renderSkillsTab(currentCharacterData);
                     else if (activeTab === 'settings') renderSettingsTab(currentCharacterData);

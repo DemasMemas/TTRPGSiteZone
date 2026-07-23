@@ -721,7 +721,30 @@ async function showMedicalConsumableMenu(characterId) {
                 event.stopPropagation();
                 try {
                     const module = await import('./characterSheet.js');
-                    await module.useCharacterInventoryItem(characterId, entry.path);
+                    const direct = item.attributes?.consumable?.direct || {};
+                    const needsTarget = direct.target_required
+                        || direct.application_form === 'injectable'
+                        || direct.requires_injury
+                        || direct.wound_treatment
+                        || direct.requires_infusion_tool;
+                    if (needsTarget) {
+                        const actor = findCombatCharacterByCharacterId(characterId);
+                        if (!actor) throw new Error('Не удалось найти действующего персонажа');
+                        beginPendingCombatAction({
+                            actorCharacterId: characterId,
+                            actorLocationCharacterId: actor.location_character_id,
+                            actionKey: 'use_item',
+                            itemPath: entry.path,
+                            itemId: item.id,
+                            onResolve: ({ targetCharacterId }) => module.useCharacterInventoryItem(
+                                characterId,
+                                entry.path,
+                                { itemId: item.id, targetCharacterId }
+                            ),
+                        });
+                    } else {
+                        await module.useCharacterInventoryItem(characterId, entry.path, { itemId: item.id });
+                    }
                     closeMedicalConsumableMenu();
                 } catch (error) {
                     showNotification(error.message || 'Не удалось использовать расходник', 'system');
@@ -1043,9 +1066,16 @@ async function resolveCombatTargetSelection(targetCharacterId) {
     };
 
     try {
-        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload);
-        if (typeof action.onResolve === 'function') {
-            await action.onResolve({ targetCharacterId, target });
+        if (action.actionKey === 'use_item') {
+            if (typeof action.onResolve === 'function') {
+                const applied = await action.onResolve({ targetCharacterId, target });
+                if (applied === false) return false;
+            }
+        } else {
+            await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload);
+            if (typeof action.onResolve === 'function') {
+                await action.onResolve({ targetCharacterId, target });
+            }
         }
         showNotification(
             `${action.actionKey === 'use_item' ? 'Действие' : 'Атака'} выполнена по ${target.name || 'цели'}`,
