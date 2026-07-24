@@ -4,6 +4,7 @@ import heapq
 
 from app.extensions import db
 from app.models import Location, LocationCharacter, LocationCombatState, LobbyParticipant, LobbyCharacter, LocationObject
+from app.models.templates import ItemTemplate
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 from app.services.effects import apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
 from sqlalchemy.orm.attributes import flag_modified
@@ -17,6 +18,7 @@ DEFAULT_CONVERSION_BASE = 10
 
 ACTION_CATALOG = [
     {'key': 'attack', 'label': 'Атака', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'aim', 'label': 'Прицеливание', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
     {'key': 'defend', 'label': 'Защита', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
     {'key': 'use_item', 'label': 'Использовать предмет', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
     {'key': 'convert_free_action_to_movement', 'label': 'Получить ОП', 'action_points': 2, 'free_actions': 1, 'movement_points': 0},
@@ -696,6 +698,8 @@ class CombatService:
             'movement_points_current': loc_char.movement_points_current or 0,
             'movement_penalty': profile['movement_penalty'],
             'movement_gain': profile['movement_gain'],
+            'aimed_target_character_id': loc_char.aimed_target_character_id,
+            'aimed_weapon_index': loc_char.aimed_weapon_index,
             'hp_zones': loc_char.hp_zones,
             'effects': loc_char.effects,
             'pain_level': CombatService._coerce_int(health.get('painLevel', 0), 0),
@@ -951,7 +955,24 @@ class CombatService:
         return CombatService._serialize_character(character, current_turn_id=state.current_location_character_id)
 
     @staticmethod
-    def perform_action(location_id, user_id, location_character_id, action_key):
+    def perform_action(
+        location_id,
+        user_id,
+        location_character_id,
+        action_key,
+        weapon_index=None,
+        fire_mode=None,
+        shot_count=None,
+        volley_count=None,
+        action_points=None,
+        target_character_id=None,
+        target_character_ids=None,
+        target_object_id=None,
+        area_center_x=None,
+        area_center_y=None,
+        target_x=None,
+        target_y=None,
+    ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
@@ -972,6 +993,140 @@ class CombatService:
         if not action:
             raise ValidationError("Unknown action")
 
+        attack_details = None
+        aim_details = None
+        if action_key == 'aim':
+            weapons = (character.character.data or {}).get('weapons') or []
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            if weapon_index < 0 or weapon_index >= len(weapons):
+                raise ValidationError("Weapon not found")
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError("Aim target not found")
+            aim_details = {
+                'weapon_index': weapon_index,
+                'target_character_id': target_character_id,
+            }
+
+        if action_key == 'attack' and fire_mode:
+            if fire_mode not in {'unaimed', 'rapid', 'aimed', 'burst', 'suppression', 'area'}:
+                raise ValidationError("Unknown fire mode")
+            weapons = (character.character.data or {}).get('weapons') or []
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            if weapon_index < 0 or weapon_index >= len(weapons):
+                raise ValidationError("Weapon not found")
+            weapon = weapons[weapon_index] or {}
+            profile = weapon.get('fireModes') or (weapon.get('attributes') or {}).get('fire_modes')
+            if not profile and weapon.get('templateId'):
+                template = db.session.get(ItemTemplate, weapon.get('templateId'))
+                profile = (template.attributes or {}).get('fire_modes') if template else None
+            profile = profile or {}
+            shots = max(1, CombatService._coerce_int(shot_count, 1))
+            volley_count = CombatService._coerce_int(volley_count, 1)
+            single_options = profile.get('single_shot_options') or [1]
+            supports_burst = bool(profile.get('supports_burst'))
+            machine_gun = bool(profile.get('machine_gun_burst'))
+            burst_size = CombatService._coerce_int(profile.get('burst_size'), 0)
+
+            single_fire = fire_mode in {'unaimed', 'rapid', 'aimed'}
+            requested_action_points = CombatService._coerce_int(action_points, 0)
+            expected_action_points = {
+                'unaimed': 2,
+                'rapid': 1,
+                'aimed': 4,
+                'burst': 3,
+                'area': 5,
+            }.get(fire_mode)
+            if fire_mode == 'suppression':
+                if requested_action_points not in {3, 5}:
+                    raise ValidationError("Suppression costs 3 or 5 action points")
+                expected_action_points = requested_action_points
+            if requested_action_points != expected_action_points:
+                raise ValidationError("Invalid action point cost")
+            allowed_volley_counts = {1}
+            if fire_mode == 'area' or (
+                fire_mode == 'suppression' and expected_action_points == 5
+            ):
+                allowed_volley_counts = {1, 2}
+            if volley_count not in allowed_volley_counts:
+                raise ValidationError("Invalid volley count")
+            if fire_mode == 'rapid' and character.rapid_fire_round == state.round_number:
+                raise ValidationError("Rapid fire can only be used once per turn")
+            if fire_mode == 'aimed' and (
+                character.aimed_target_character_id != target_character_id or
+                character.aimed_weapon_index != weapon_index
+            ):
+                raise ValidationError("Aiming is required before an aimed shot")
+            if single_fire and shots not in single_options:
+                raise ValidationError("Unsupported single-fire option")
+            if not single_fire and not supports_burst:
+                raise ValidationError("Weapon does not support automatic fire")
+            if not single_fire and not machine_gun and shots != burst_size * volley_count:
+                raise ValidationError("Invalid burst size")
+            if not single_fire and machine_gun and (
+                shots < 2 * volley_count or shots % volley_count != 0
+            ):
+                raise ValidationError("Invalid machine gun burst size")
+            if fire_mode == 'suppression':
+                target_object = LocationObject.query.filter_by(
+                    id=target_object_id,
+                    location_id=location_id,
+                ).first()
+                if not target_object:
+                    raise ValidationError("Cover object is required")
+            elif fire_mode == 'area':
+                target_character_ids = list(dict.fromkeys(target_character_ids or []))
+                if not 1 <= len(target_character_ids) <= 3:
+                    raise ValidationError("Area fire requires 1 to 3 targets")
+                targets = LocationCharacter.query.filter(
+                    LocationCharacter.location_id == location_id,
+                    LocationCharacter.character_id.in_(target_character_ids),
+                ).all()
+                if len(targets) != len(target_character_ids):
+                    raise ValidationError("Area fire target not found")
+                area_center_x = CombatService._coerce_int(area_center_x, -1)
+                area_center_y = CombatService._coerce_int(area_center_y, -1)
+                if not (
+                    0 <= area_center_x < location.grid_width and
+                    0 <= area_center_y < location.grid_height
+                ):
+                    raise ValidationError("Area fire center is invalid")
+                if any(
+                    abs(target.pos_x - area_center_x) > 2 or abs(target.pos_y - area_center_y) > 2
+                    for target in targets
+                ):
+                    raise ValidationError("Area fire targets must fit inside a 5 by 5 area")
+            elif not target_character_id:
+                raise ValidationError("Target character is required")
+
+            magazine = weapon.get('installedMagazine') or {}
+            ammo_stacks = magazine.get('ammo')
+            if isinstance(ammo_stacks, list):
+                available_ammo = sum(
+                    max(0, CombatService._coerce_int(stack.get('quantity'), 0))
+                    for stack in ammo_stacks
+                    if isinstance(stack, dict)
+                )
+            else:
+                available_ammo = max(0, CombatService._coerce_int(weapon.get('ammo'), 0))
+            if available_ammo < shots:
+                raise ValidationError("Not enough ammo")
+            attack_details = {
+                'weapon_index': weapon_index,
+                'fire_mode': fire_mode,
+                'shot_count': shots,
+                'volley_count': volley_count,
+                'action_points': expected_action_points,
+                'target_character_id': target_character_id,
+                'target_character_ids': target_character_ids,
+                'target_object_id': target_object_id,
+                'area_center_x': area_center_x,
+                'area_center_y': area_center_y,
+            }
+
         if action_key == 'convert_free_action_to_movement':
             gain = max(0, DEFAULT_CONVERSION_BASE - CombatService._movement_penalty(character))
             if character.free_actions_current >= 1:
@@ -983,9 +1138,27 @@ class CombatService:
             character.movement_points_max += gain
             character.movement_points_current += gain
         else:
-            if character.action_points_current < action['action_points']:
+            action_point_cost = (
+                attack_details['action_points']
+                if action_key == 'attack' and attack_details
+                else action['action_points']
+            )
+            if character.action_points_current < action_point_cost:
                 raise ValidationError("Not enough action points")
-            character.action_points_current -= action['action_points']
+            character.action_points_current -= action_point_cost
+            if action_key == 'attack' and attack_details and fire_mode == 'rapid':
+                character.rapid_fire_round = state.round_number
+            if action_key == 'aim' and aim_details:
+                character.aimed_target_character_id = aim_details['target_character_id']
+                character.aimed_weapon_index = aim_details['weapon_index']
+            elif action_key == 'attack' and attack_details:
+                selected_target = attack_details.get('target_character_id')
+                if selected_target != character.aimed_target_character_id:
+                    character.aimed_target_character_id = None
+                    character.aimed_weapon_index = None
+            else:
+                character.aimed_target_character_id = None
+                character.aimed_weapon_index = None
 
         character.last_action = db.func.now()
         db.session.commit()
@@ -993,6 +1166,8 @@ class CombatService:
             'character': CombatService._serialize_character(character, current_turn_id=state.current_location_character_id),
             'state': CombatService._serialize_state(location, state),
             'action': action_key,
+            'attack': attack_details,
+            'aim': aim_details,
         }
 
     @staticmethod
@@ -1043,6 +1218,8 @@ class CombatService:
                     raise ValidationError("Not enough movement points")
 
             character.pos_x, character.pos_y = landing
+            character.aimed_target_character_id = None
+            character.aimed_weapon_index = None
             character.last_action = db.func.now()
             CombatService._apply_periodic_health_effects(character, phase='movement_end')
             CombatService._sync_location_effects_from_character(character)
@@ -1085,6 +1262,8 @@ class CombatService:
 
         character.pos_x = new_x
         character.pos_y = new_y
+        character.aimed_target_character_id = None
+        character.aimed_weapon_index = None
         character.last_action = db.func.now()
         CombatService._apply_periodic_health_effects(character, phase='movement_end')
         CombatService._sync_location_effects_from_character(character)

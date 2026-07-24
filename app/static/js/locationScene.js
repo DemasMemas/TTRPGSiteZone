@@ -366,6 +366,82 @@ function updateAttackPreview(clientX, clientY) {
         clearAttackPreview();
         return;
     }
+    const actorEntry = characterModels.get(actor.character_id);
+    if (!actorEntry) {
+        clearAttackPreview();
+        return;
+    }
+    if (pendingCombatAction.targetType === 'point') {
+        const point = getPointerWorldPoint(clientX, clientY, actorEntry.model.position.y);
+        if (!point) {
+            clearAttackPreview();
+            return;
+        }
+        if (!attackPreviewLine) {
+            attackPreviewLine = createPreviewLine(0xff8c42);
+            scene.add(attackPreviewLine);
+        }
+        const targetX = Math.floor(point.x);
+        const targetY = Math.floor(point.z);
+        const start = new THREE.Vector3(
+            actorEntry.model.position.x,
+            actorEntry.model.position.y + 1.6,
+            actorEntry.model.position.z
+        );
+        const end = new THREE.Vector3(
+            targetX + 0.5,
+            getTileHeight(targetX, targetY) + 0.35,
+            targetY + 0.5
+        );
+        attackPreviewLine.geometry.setFromPoints([start, end]);
+        return;
+    }
+    if (pendingCombatAction.targetType === 'structure') {
+        const object = getLocationObjectAtScreen(clientX, clientY);
+        if (!object) {
+            clearAttackPreview();
+            return;
+        }
+        if (!attackPreviewLine) {
+            attackPreviewLine = createPreviewLine(0xff8c42);
+            scene.add(attackPreviewLine);
+        }
+        const start = new THREE.Vector3(
+            actorEntry.model.position.x,
+            actorEntry.model.position.y + 1.6,
+            actorEntry.model.position.z
+        );
+        const end = new THREE.Vector3();
+        object.getWorldPosition(end);
+        end.y += 0.5;
+        attackPreviewLine.geometry.setFromPoints([start, end]);
+        return;
+    }
+    if (pendingCombatAction.targetType === 'multi_character' && !pendingCombatAction.areaAnchor) {
+        const point = getPointerWorldPoint(clientX, clientY, actorEntry.model.position.y);
+        if (!point) {
+            clearAttackPreview();
+            return;
+        }
+        if (!attackPreviewLine) {
+            attackPreviewLine = createPreviewLine(0xff8c42);
+            scene.add(attackPreviewLine);
+        }
+        const targetX = Math.floor(point.x);
+        const targetY = Math.floor(point.z);
+        const start = new THREE.Vector3(
+            actorEntry.model.position.x,
+            actorEntry.model.position.y + 1.6,
+            actorEntry.model.position.z
+        );
+        const end = new THREE.Vector3(
+            targetX + 0.5,
+            getTileHeight(targetX, targetY) + 0.35,
+            targetY + 0.5
+        );
+        attackPreviewLine.geometry.setFromPoints([start, end]);
+        return;
+    }
     const targetObj = getCharacterAtScreen(clientX, clientY);
     if (!targetObj || !targetObj.userData?.characterId) {
         clearAttackPreview();
@@ -377,7 +453,6 @@ function updateAttackPreview(clientX, clientY) {
         return;
     }
 
-    const actorEntry = characterModels.get(actor.character_id);
     const targetEntry = characterModels.get(target.character_id);
     if (!actorEntry || !targetEntry) {
         clearAttackPreview();
@@ -641,11 +716,12 @@ function ensureMedicalConsumableMenu() {
     medicalConsumableMenu.style.cssText = `
         position: fixed;
         width: min(520px, calc(100vw - 24px));
-        max-height: min(72vh, 720px);
+        height: min(72vh, 720px);
+        max-height: calc(100vh - 24px);
         z-index: 1215;
         display: none;
+        flex-direction: column;
         pointer-events: auto;
-        transform: translate(-50%, -50%);
         background: rgba(14, 18, 26, 0.98);
         border: 1px solid rgba(255,255,255,0.16);
         border-radius: 16px;
@@ -664,6 +740,54 @@ function ensureMedicalConsumableMenu() {
     };
     document.addEventListener('click', onClick);
     handlers.document.medicalMenuClick = onClick;
+
+    medicalConsumableMenu.addEventListener('pointerdown', (event) => {
+        const dragHandle = event.target.closest('.medical-menu-drag-handle');
+        if (!dragHandle || event.button !== 0) return;
+        if (event.target.closest('button, select, input, textarea, option, label')) return;
+        const rect = medicalConsumableMenu.getBoundingClientRect();
+        medicalConsumableDragState = {
+            pointerId: event.pointerId,
+            offsetX: event.clientX - rect.left,
+            offsetY: event.clientY - rect.top,
+        };
+        dragHandle.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+    });
+
+    document.addEventListener('pointermove', (event) => {
+        if (
+            !medicalConsumableDragState
+            || medicalConsumableDragState.pointerId !== event.pointerId
+            || !medicalConsumableMenu
+        ) return;
+        const rect = medicalConsumableMenu.getBoundingClientRect();
+        const minLeft = 8;
+        const minTop = 8;
+        const maxLeft = Math.max(minLeft, window.innerWidth - rect.width - 8);
+        const maxTop = Math.max(minTop, window.innerHeight - rect.height - 8);
+        const left = Math.min(
+            Math.max(minLeft, event.clientX - medicalConsumableDragState.offsetX),
+            maxLeft
+        );
+        const top = Math.min(
+            Math.max(minTop, event.clientY - medicalConsumableDragState.offsetY),
+            maxTop
+        );
+        medicalConsumableMenu.style.left = `${left}px`;
+        medicalConsumableMenu.style.top = `${top}px`;
+    });
+
+    const stopMedicalMenuDrag = (event) => {
+        if (!medicalConsumableDragState) return;
+        if (
+            event?.pointerId !== undefined
+            && medicalConsumableDragState.pointerId !== event.pointerId
+        ) return;
+        medicalConsumableDragState = null;
+    };
+    document.addEventListener('pointerup', stopMedicalMenuDrag);
+    document.addEventListener('pointercancel', stopMedicalMenuDrag);
 }
 
 async function showMedicalConsumableMenu(characterId) {
@@ -682,7 +806,7 @@ async function showMedicalConsumableMenu(characterId) {
         <div style="padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.06); opacity:0.8; font-size:13px;">
             Быстрый список предметов, которые можно использовать прямо из боя.
         </div>
-        <div class="medical-menu-body" style="padding:12px 14px; overflow:auto; max-height:calc(min(72vh, 720px) - 106px);"></div>
+        <div class="medical-menu-body" style="flex:1 1 auto; min-height:0; padding:12px 14px; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable;"></div>
     `;
 
     const body = medicalConsumableMenu.querySelector('.medical-menu-body');
@@ -757,47 +881,7 @@ async function showMedicalConsumableMenu(characterId) {
     const closeBtn = medicalConsumableMenu.querySelector('.medical-close-btn');
     if (closeBtn) closeBtn.onclick = () => closeMedicalConsumableMenu();
 
-    const dragHandle = medicalConsumableMenu.querySelector('.medical-menu-drag-handle');
-    if (dragHandle && !dragHandle.dataset.dragBound) {
-        dragHandle.dataset.dragBound = '1';
-        dragHandle.addEventListener('pointerdown', (event) => {
-            if (event.button !== 0) return;
-            if (event.target.closest('button, select, input, textarea, option, label')) return;
-            if (!medicalConsumableMenu) return;
-            const rect = medicalConsumableMenu.getBoundingClientRect();
-            medicalConsumableDragState = {
-                pointerId: event.pointerId,
-                offsetX: event.clientX - rect.left,
-                offsetY: event.clientY - rect.top,
-            };
-            dragHandle.setPointerCapture?.(event.pointerId);
-            event.preventDefault();
-        });
-        const onPointerMove = (event) => {
-            if (!medicalConsumableDragState || medicalConsumableDragState.pointerId !== event.pointerId || !medicalConsumableMenu) return;
-            const rect = medicalConsumableMenu.getBoundingClientRect();
-            const minLeft = 8;
-            const minTop = 8;
-            const maxLeft = Math.max(minLeft, window.innerWidth - rect.width - 8);
-            const maxTop = Math.max(minTop, window.innerHeight - rect.height - 8);
-            let left = event.clientX - medicalConsumableDragState.offsetX;
-            let top = event.clientY - medicalConsumableDragState.offsetY;
-            left = Math.min(Math.max(minLeft, left), maxLeft);
-            top = Math.min(Math.max(minTop, top), maxTop);
-            medicalConsumableMenu.style.left = `${left}px`;
-            medicalConsumableMenu.style.top = `${top}px`;
-        };
-        const stopDrag = (event) => {
-            if (!medicalConsumableDragState) return;
-            if (event && event.pointerId !== undefined && medicalConsumableDragState.pointerId !== event.pointerId) return;
-            medicalConsumableDragState = null;
-        };
-        document.addEventListener('pointermove', onPointerMove);
-        document.addEventListener('pointerup', stopDrag);
-        document.addEventListener('pointercancel', stopDrag);
-    }
-
-    medicalConsumableMenu.style.display = 'block';
+    medicalConsumableMenu.style.display = 'flex';
     medicalConsumableMenu.style.visibility = 'hidden';
 
     const rect = medicalConsumableMenu.getBoundingClientRect();
@@ -996,6 +1080,8 @@ export function beginPendingCombatAction(action) {
         actorCharacterId: action.actorCharacterId || activeActor.character_id,
         actorLocationCharacterId: action.actorLocationCharacterId || activeActor.location_character_id,
         createdAt: Date.now(),
+        selectedTargetIds: [],
+        areaAnchor: null,
     };
     closeCombatMenus();
     hideStructureInteraction();
@@ -1003,8 +1089,15 @@ export function beginPendingCombatAction(action) {
     if (typeof window.closeCharacterSheet === 'function' && action.source === 'sheet') {
         window.closeCharacterSheet();
     }
-    const label = action.actionKey === 'use_item' ? 'Использование предмета' : 'Атака';
-    showNotification(`${label}: выберите цель на сцене`, 'system');
+    const label = action.actionKey === 'use_item'
+        ? 'Использование предмета'
+        : (action.actionKey === 'aim' ? 'Прицеливание' : 'Атака');
+    const targetHint = action.targetType === 'structure'
+        ? 'выберите укрытие'
+        : (action.targetType === 'multi_character'
+            ? 'выберите до 3 целей в области 5×5, затем нажмите Enter'
+            : 'выберите цель на сцене');
+    showNotification(`${label}: ${targetHint}`, 'system');
     renderCombatHud();
     return true;
 }
@@ -1055,6 +1148,38 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         showNotification('Нельзя выбрать самого себя в качестве цели', 'system');
         return false;
     }
+    if (action.targetType === 'multi_character') {
+        const selectedIds = action.selectedTargetIds || [];
+        const existingIndex = selectedIds.indexOf(targetCharacterId);
+        if (existingIndex >= 0) {
+            selectedIds.splice(existingIndex, 1);
+            showNotification(`Цель убрана. Выбрано: ${selectedIds.length}/3`, 'system');
+            renderCombatHud();
+            return true;
+        }
+        if (selectedIds.length >= 3) {
+            showNotification('Для огня по области можно выбрать не больше 3 целей', 'system');
+            return false;
+        }
+        if (!action.areaAnchor) {
+            showNotification('Сначала выберите центр области 5×5', 'system');
+            return false;
+        }
+        if (
+            Math.abs((target.x ?? target.pos_x ?? 0) - action.areaAnchor.x) > 2 ||
+            Math.abs((target.y ?? target.pos_y ?? 0) - action.areaAnchor.y) > 2
+        ) {
+            showNotification('Цель находится за пределами выбранной области 5×5', 'system');
+            return false;
+        }
+        selectedIds.push(targetCharacterId);
+        showNotification(
+            `Цель добавлена. Выбрано: ${selectedIds.length}/3. Enter — открыть огонь`,
+            'system'
+        );
+        renderCombatHud();
+        return true;
+    }
 
     const payload = {
         location_character_id: action.actorLocationCharacterId,
@@ -1062,6 +1187,10 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         target_character_id: targetCharacterId,
         weapon_index: action.weaponIndex,
         attack_type: action.attackType,
+        fire_mode: action.fireMode,
+        shot_count: action.shotCount,
+        volley_count: action.volleyCount,
+        action_points: action.actionPoints,
         item_path: action.itemPath,
     };
 
@@ -1078,7 +1207,7 @@ async function resolveCombatTargetSelection(targetCharacterId) {
             }
         }
         showNotification(
-            `${action.actionKey === 'use_item' ? 'Действие' : 'Атака'} выполнена по ${target.name || 'цели'}`,
+            `${action.actionKey === 'use_item' ? 'Действие' : (action.actionKey === 'aim' ? 'Прицеливание' : 'Атака')} выполнено по ${target.name || 'цели'}`,
             'success'
         );
         clearPendingCombatAction();
@@ -1086,6 +1215,141 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         return true;
     } catch (error) {
         showNotification(error.message || 'Не удалось выполнить действие', 'system');
+        return false;
+    }
+}
+
+function selectAreaFireAnchor(clientX, clientY) {
+    const action = pendingCombatAction;
+    if (!action || action.targetType !== 'multi_character' || action.areaAnchor) return false;
+    const actor = findCombatCharacterByCharacterId(action.actorCharacterId);
+    const actorEntry = actor ? characterModels.get(actor.character_id) : null;
+    if (!actorEntry) return false;
+    const point = getPointerWorldPoint(clientX, clientY, actorEntry.model.position.y);
+    if (!point) return false;
+    const x = Math.floor(point.x);
+    const y = Math.floor(point.z);
+    if (
+        x < 0 ||
+        y < 0 ||
+        x >= (currentLocationData?.grid_width || 0) ||
+        y >= (currentLocationData?.grid_height || 0)
+    ) return false;
+    action.areaAnchor = { x, y };
+    clearAttackPreview();
+    showNotification('Область 5×5 выбрана. Отметьте до 3 целей и нажмите Enter', 'system');
+    renderCombatHud();
+    return true;
+}
+
+async function finalizeAreaFire() {
+    const action = pendingCombatAction;
+    if (!action || action.targetType !== 'multi_character') return false;
+    const targetIds = action.selectedTargetIds || [];
+    if (targetIds.length === 0) {
+        showNotification('Выберите хотя бы одну цель', 'system');
+        return false;
+    }
+    try {
+        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+            location_character_id: action.actorLocationCharacterId,
+            action_key: action.actionKey,
+            weapon_index: action.weaponIndex,
+            fire_mode: action.fireMode,
+            shot_count: action.shotCount,
+            volley_count: action.volleyCount,
+            action_points: action.actionPoints,
+            target_character_ids: targetIds,
+            area_center_x: action.areaAnchor.x,
+            area_center_y: action.areaAnchor.y,
+        });
+        if (typeof action.onResolve === 'function') {
+            await action.onResolve({ targetCharacterIds: targetIds });
+        }
+        showNotification(`Огонь по области: выбрано целей ${targetIds.length}`, 'success');
+        clearPendingCombatAction();
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось выполнить огонь по области', 'system');
+        return false;
+    }
+}
+
+async function resolveCombatStructureSelection(clientX, clientY) {
+    const action = pendingCombatAction;
+    if (!action || action.targetType !== 'structure') return false;
+    const object = getLocationObjectAtScreen(clientX, clientY);
+    const locationObject = object?.userData?.locationObject;
+    if (!locationObject?.id) {
+        showNotification('Выберите объект укрытия', 'system');
+        return false;
+    }
+    try {
+        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+            location_character_id: action.actorLocationCharacterId,
+            action_key: action.actionKey,
+            weapon_index: action.weaponIndex,
+            fire_mode: action.fireMode,
+            shot_count: action.shotCount,
+            volley_count: action.volleyCount,
+            action_points: action.actionPoints,
+            target_object_id: locationObject.id,
+        });
+        if (typeof action.onResolve === 'function') {
+            await action.onResolve({ targetObject: locationObject });
+        }
+        showNotification(`Огонь на подавление: ${locationObject.name || 'укрытие'}`, 'success');
+        clearPendingCombatAction();
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось подавить укрытие', 'system');
+        return false;
+    }
+}
+
+async function resolveCombatPointSelection(clientX, clientY) {
+    if (!pendingCombatAction || pendingCombatAction.targetType !== 'point') return false;
+    const action = pendingCombatAction;
+    const actor = findCombatCharacterByCharacterId(action.actorCharacterId);
+    const actorEntry = actor ? characterModels.get(actor.character_id) : null;
+    if (!actor || !actorEntry) {
+        clearPendingCombatAction();
+        return false;
+    }
+    const point = getPointerWorldPoint(clientX, clientY, actorEntry.model.position.y);
+    if (!point) return false;
+    const targetX = Math.floor(point.x);
+    const targetY = Math.floor(point.z);
+    if (
+        targetX < 0 ||
+        targetY < 0 ||
+        targetX >= (currentLocationData?.grid_width || 0) ||
+        targetY >= (currentLocationData?.grid_height || 0)
+    ) {
+        showNotification('Точка стрельбы находится за пределами локации', 'system');
+        return false;
+    }
+    try {
+        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+            location_character_id: action.actorLocationCharacterId,
+            action_key: action.actionKey,
+            weapon_index: action.weaponIndex,
+            fire_mode: action.fireMode,
+            shot_count: action.shotCount,
+            target_x: targetX,
+            target_y: targetY,
+        });
+        if (typeof action.onResolve === 'function') {
+            await action.onResolve({ targetX, targetY });
+        }
+        showNotification(
+            `${action.fireMode === 'suppression' ? 'Подавление' : 'Стрельба по площади'}: ${targetX}, ${targetY}`,
+            'success'
+        );
+        clearPendingCombatAction();
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось выполнить стрельбу', 'system');
         return false;
     }
 }
@@ -1309,6 +1573,9 @@ function renderCombatHud() {
     const visibleOrderLabels = orderLabels.length
         ? orderLabels
         : Array.from(new Set((combatState.characters || []).map((char) => char.name || 'Unknown')));
+    const aimedTarget = (combatState.characters || []).find(
+        char => char.character_id === combatState.current_character?.aimed_target_character_id
+    );
     combatHud.innerHTML = `
         <div class="combat-hud-header" style="
             display:flex;
@@ -1330,11 +1597,20 @@ function renderCombatHud() {
             <div>ОД: ${combatState.current_character?.action_points_current ?? 0}/${combatState.current_character?.action_points_max ?? 0}</div>
             <div>СД: ${combatState.current_character?.free_actions_current ?? 0}/${combatState.current_character?.free_actions_max ?? 0}</div>
             <div>ОП: ${combatState.current_character?.movement_points_current ?? 0}/${combatState.current_character?.movement_points_max ?? 0}</div>
+            ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong></div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
             <div>Кровопотеря: ${combatState.current_character?.blood ?? 'normal'} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
             <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
-            ${pendingCombatAction ? `<div style="margin-top:8px; padding:8px 10px; border-radius:10px; background: rgba(255,255,255,0.06);"><strong>Выбор цели:</strong> ${pendingCombatAction.actionKey || 'action'}</div>` : ''}
+            ${pendingCombatAction ? `<div style="margin-top:8px; padding:8px 10px; border-radius:10px; background: rgba(255,255,255,0.06);"><strong>Выбор:</strong> ${
+                pendingCombatAction.targetType === 'structure'
+                    ? 'укрытие для подавления'
+                    : (pendingCombatAction.targetType === 'multi_character'
+                        ? (pendingCombatAction.areaAnchor
+                            ? `цели в области ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для огня`
+                            : 'центр области 5×5')
+                        : (pendingCombatAction.fireMode || pendingCombatAction.actionKey || 'действие'))
+            }</div>` : ''}
             <div style="margin-top:10px;">
                 ${combatState.status !== 'active' && window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn" style="margin-top:8px;">Начать бой</button>' : ''}
                 ${combatState.status === 'active' ? '<button class="btn btn-sm btn-secondary combat-end-turn-btn" style="margin-top:8px;">Закончить ход</button>' : ''}
@@ -3631,6 +3907,24 @@ function setupCharacterDragging() {
             commitMovementPreview(e.clientX, e.clientY);
             return;
         }
+        if (pendingCombatAction?.targetType === 'point') {
+            e.preventDefault();
+            e.stopPropagation();
+            resolveCombatPointSelection(e.clientX, e.clientY);
+            return;
+        }
+        if (pendingCombatAction?.targetType === 'structure') {
+            e.preventDefault();
+            e.stopPropagation();
+            resolveCombatStructureSelection(e.clientX, e.clientY);
+            return;
+        }
+        if (pendingCombatAction?.targetType === 'multi_character' && !pendingCombatAction.areaAnchor) {
+            e.preventDefault();
+            e.stopPropagation();
+            selectAreaFireAnchor(e.clientX, e.clientY);
+            return;
+        }
         const obj = getCharacterAtScreen(e.clientX, e.clientY);
         if (!obj) return;
         const charId = obj.userData.characterId;
@@ -3808,6 +4102,11 @@ function setupCharacterDragging() {
     handlers.canvas.contextmenu = onContextMenu;
 
     const onKeyDown = (e) => {
+        if (e.key === 'Enter' && pendingCombatAction?.targetType === 'multi_character') {
+            e.preventDefault();
+            finalizeAreaFire();
+            return;
+        }
         if (e.key !== 'Escape') return;
         if (pendingCombatAction) {
             e.preventDefault();
@@ -3823,7 +4122,7 @@ function setupCharacterDragging() {
         combatActionMenu.style.display = 'none';
         combatActionMenuCharacterId = null;
     }
-    if (medicalConsumableMenu && medicalConsumableMenu.style.display === 'block') {
+    if (medicalConsumableMenu && medicalConsumableMenu.style.display !== 'none') {
         closeMedicalConsumableMenu();
     }
     armedMoveCharacterId = null;
@@ -4548,6 +4847,9 @@ async function showContainerInteractionMenu(object) {
         `;
         document.body.appendChild(containerInteractionMenu);
         const onClick = (event) => {
+            if (event.target.closest?.('#inventory-template-picker-modal, #ammo-selection-modal')) {
+                return;
+            }
             if (containerInteractionMenu && !containerInteractionMenu.contains(event.target)) {
                 closeContainerInteractionMenu();
             }
@@ -4571,7 +4873,6 @@ async function showContainerInteractionMenu(object) {
         <div style="padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.06); display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
             <div style="opacity:0.75;">Персонаж:</div>
             <select class="container-character-select form-control" style="width:280px; max-width:100%;"></select>
-            ${window.isGM ? '<button type="button" class="container-add-item-btn btn btn-secondary btn-sm">Добавить предмет</button>' : ''}
         </div>
         <div class="container-exchange-body" style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; padding:12px; overflow:auto; max-height:calc(min(82vh, 760px) - 120px);"></div>
     `;
@@ -4606,8 +4907,6 @@ async function showContainerInteractionMenu(object) {
             localStorage.setItem('selectedLocationCharacterId', String(selectedCharacterId));
         }
 
-        const containerItems = getContainerItems(object);
-        const containerEntries = getContainerTransferEntries(containerItems);
         const character = selectedCharacterId ? await Server.getCharacter(selectedCharacterId).catch(() => null) : null;
         const characterData = character?.data || null;
         const characterEntries = characterData ? getCharacterTransferEntries(characterData) : [];
@@ -4626,7 +4925,7 @@ async function showContainerInteractionMenu(object) {
         rightPanel.innerHTML = `
             <div style="padding:10px 12px; border-bottom:1px solid rgba(255,255,255,0.06); display:flex; justify-content:space-between; gap:10px; align-items:center;">
                 <div style="font-weight:700;">${object.name || object.type || 'Контейнер'}</div>
-                ${window.isGM ? '<button type="button" class="btn btn-sm btn-secondary container-add-item-btn">Добавить</button>' : ''}
+                ${window.isGM ? '<button type="button" class="btn btn-sm btn-secondary container-add-item-btn">Добавить предмет</button>' : ''}
             </div>
             <div class="exchange-list exchange-list-target" style="padding:10px 12px; max-height:100%; overflow:auto;"></div>
         `;
@@ -4672,10 +4971,15 @@ async function showContainerInteractionMenu(object) {
             });
         }
 
-        if (!containerEntries.length) {
-            targetList.innerHTML = '<div style="opacity:0.75;">Пусто</div>';
-        } else {
-            containerEntries.forEach((entry) => {
+        const renderContainerEntries = () => {
+            const currentItems = getContainerItems(object);
+            const currentEntries = getContainerTransferEntries(currentItems);
+            targetList.innerHTML = '';
+            if (!currentEntries.length) {
+                targetList.innerHTML = '<div style="opacity:0.75;">Пусто</div>';
+                return;
+            }
+            currentEntries.forEach((entry) => {
                 targetList.appendChild(buildTransferRow(entry, '←', async (amount = 1) => {
                     if (!selectedCharacterId) {
                         showNotification('Выберите персонажа', 'system');
@@ -4687,7 +4991,7 @@ async function showContainerInteractionMenu(object) {
                         showNotification('Не удалось загрузить персонажа', 'system');
                         return;
                     }
-                    const containerRoot = { contents: [...containerItems] };
+                    const containerRoot = { contents: [...getContainerItems(object)] };
                     const removed = takeItemByPathFromRoot(containerRoot, entry.path, amount);
                     if (!removed) {
                         showNotification('Не удалось переместить предмет', 'system');
@@ -4709,48 +5013,30 @@ async function showContainerInteractionMenu(object) {
                     await showContainerInteractionMenu(object);
                 }));
             });
-        }
+        };
+        renderContainerEntries();
 
         const addBtn = rightPanel.querySelector('.container-add-item-btn');
         if (addBtn) {
             addBtn.onclick = async () => {
-                const templates = window.getAllItemTemplates ? await window.getAllItemTemplates() : [];
-                if (!templates.length) {
-                    showNotification('Не удалось загрузить шаблоны предметов', 'system');
+                if (typeof window.openInventoryTemplatePicker !== 'function') {
+                    showNotification('Не удалось открыть выбор предметов', 'system');
                     return;
                 }
-                const picker = document.createElement('select');
-                picker.className = 'form-control';
-                picker.style.margin = '0 12px 12px';
-                picker.innerHTML = '<option value="">-- Выберите предмет --</option>';
-                templates.forEach((template) => {
-                    const option = document.createElement('option');
-                    option.value = template.id;
-                    option.textContent = `${template.name || template.id} (${template.category || 'item'})`;
-                    picker.appendChild(option);
+
+                await window.openInventoryTemplatePicker('pockets', {
+                    title: `Добавить предмет: ${object.name || object.type || 'Контейнер'}`,
+                    onSelect: async (newItem) => {
+                        const updatedContents = [...getContainerItems(object), newItem];
+                        await Server.updateLocationObject(window.currentLobbyId, object.id, {
+                            properties: { contents: updatedContents },
+                        });
+                        object.properties = { ...(object.properties || {}), contents: updatedContents };
+                        showNotification('Предмет добавлен в контейнер', 'success');
+                        renderContainerEntries();
+                        return true;
+                    },
                 });
-                targetList.prepend(picker);
-                picker.onchange = async () => {
-                    const template = templates.find((item) => String(item.id) === String(picker.value));
-                    if (!template) return;
-                    const newItem = {
-                        id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-                        templateId: template.id,
-                        type: template.subcategory || template.category || 'item',
-                        category: template.category || 'item',
-                        name: template.name || 'Новый предмет',
-                        quantity: 1,
-                        weight: template.effectiveWeight ?? template.weight ?? 0,
-                        volume: template.effectiveVolume ?? template.volume ?? 0,
-                        contents: [],
-                        attributes: template.attributes ? { ...template.attributes } : {},
-                    };
-                    const updatedContents = [...containerItems, newItem];
-                    await Server.updateLocationObject(window.currentLobbyId, object.id, { properties: { contents: updatedContents } });
-                    object.properties = { ...(object.properties || {}), contents: updatedContents };
-                    showNotification('Предмет добавлен в контейнер', 'success');
-                    await showContainerInteractionMenu(object);
-                };
             };
         }
     };

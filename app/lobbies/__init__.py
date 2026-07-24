@@ -896,6 +896,18 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         participant.user_id,
         location_character_id=location_character_id,
         action_key=action_key,
+        weapon_index=data.get('weapon_index'),
+        fire_mode=data.get('fire_mode'),
+        shot_count=data.get('shot_count'),
+        volley_count=data.get('volley_count'),
+        action_points=data.get('action_points'),
+        target_character_id=data.get('target_character_id'),
+        target_character_ids=data.get('target_character_ids'),
+        target_object_id=data.get('target_object_id'),
+        area_center_x=data.get('area_center_x'),
+        area_center_y=data.get('area_center_y'),
+        target_x=data.get('target_x'),
+        target_y=data.get('target_y'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")

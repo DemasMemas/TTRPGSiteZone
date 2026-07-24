@@ -24,6 +24,9 @@ class LocationCharacter(db.Model):
     free_actions_current = db.Column(db.Integer, nullable=False, default=1)
     movement_points_max = db.Column(db.Integer, nullable=False, default=6)
     movement_points_current = db.Column(db.Integer, nullable=False, default=6)
+    rapid_fire_round = db.Column(db.Integer, nullable=True)
+    aimed_target_character_id = db.Column(db.Integer, nullable=True)
+    aimed_weapon_index = db.Column(db.Integer, nullable=True)
 
     hp_zones = db.Column(db.JSON, nullable=False, default=default_hp_zones)
     effects = db.Column(db.JSON, default=empty_list)

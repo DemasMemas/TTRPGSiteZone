@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -22,7 +21,8 @@ def _as_int(value: Any, default: int = 0) -> int:
     try:
         if value is None or value == "":
             return default
-        return int(float(str(value).replace(",", ".")))
+        text = re.sub(r"[\s\u00a0]+", "", str(value)).replace(",", ".")
+        return int(float(text))
     except (TypeError, ValueError):
         return default
 
@@ -31,7 +31,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None or value == "":
             return default
-        text = str(value).replace(",", ".")
+        text = re.sub(r"[\s\u00a0]+", "", str(value)).replace(",", ".")
         if text in {"---", "-", "Нет"}:
             return default
         return float(text)
@@ -141,6 +141,37 @@ def _normalize_equipment_name(value: Any) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def _equipment_alias(value: Any) -> str:
+    text = _normalize_equipment_name(value)
+    text = re.sub(r"[^0-9a-zа-я]+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^(пистолет|револьвер|дробовик|автомат|пп|пулемет|ручной пулемет|"
+        r"магазин|снайперский|самозарядный карабин)\s+",
+        "",
+        text,
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _weapon_aliases(name: Any) -> set[str]:
+    normalized = _normalize_text(name)
+    aliases = {_equipment_alias(normalized)}
+    aliases.update(_equipment_alias(part) for part in re.findall(r"\(([^)]+)\)", normalized))
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", normalized.split("(", 1)[0])
+    aliases.update(
+        _equipment_alias(word)
+        for word in words
+        if len(word) > 1 and word.isupper()
+    )
+    number = re.search(r"(\d+(?:[-\s]\d+)*)\s*$", normalized.split("(", 1)[0])
+    if len(words) >= 2:
+        acronym = "".join(word if len(word) <= 3 and word.isupper() else word[0] for word in words)
+        if number:
+            acronym += " " + number.group(1)
+        aliases.add(_equipment_alias(acronym))
+    return {alias for alias in aliases if alias}
+
+
 def _parse_shared_strings(archive: zipfile.ZipFile) -> List[str]:
     if "xl/sharedStrings.xml" not in archive.namelist():
         return []
@@ -224,9 +255,281 @@ def _ammo_damage_from_row(row: Dict[str, str]) -> Optional[float]:
     return _as_float(damage_raw, 0.0)
 
 
+def _parse_weight(value: Any) -> float:
+    match = re.search(r"-?\d+(?:[.,]\d+)?", _normalize_text(value))
+    return _as_float(match.group(0), 0.0) if match else 0.0
+
+
+def _parse_first_int(value: Any, default: int = 0) -> int:
+    match = re.search(r"-?\d+", _normalize_text(value))
+    return int(match.group(0)) if match else default
+
+
+def _parse_burst_profile(value: Any) -> Dict[str, Any]:
+    raw = _normalize_text(value)
+    lowered = raw.lower()
+    duplex_match = re.search(r"одиночн\w*\s*-\s*(\d+)", lowered)
+    burst_match = re.search(r"очеред\w*\s*(\d+)", lowered)
+    plain_burst_match = re.match(r"^\s*(\d+)", lowered)
+    duplex_size = int(duplex_match.group(1)) if duplex_match else None
+    burst_size = None
+    if burst_match:
+        burst_size = int(burst_match.group(1))
+    elif plain_burst_match and not duplex_size:
+        burst_size = int(plain_burst_match.group(1))
+
+    is_machine_gun = "пулеметн" in lowered or "пулемётн" in lowered
+    supports_burst = bool(burst_size or is_machine_gun)
+    single_options = [1]
+    if duplex_size and duplex_size not in single_options:
+        single_options.append(duplex_size)
+
+    penalty_match = re.search(r"штраф\D*(\d+)", lowered)
+    return {
+        "raw": raw,
+        "single_shot_options": single_options,
+        "duplex_size": duplex_size,
+        "burst_size": burst_size,
+        "burst_penalty": int(penalty_match.group(1)) if penalty_match else None,
+        "machine_gun_burst": is_machine_gun,
+        "supports_burst": supports_burst,
+        "supports_suppression": supports_burst,
+        "supports_area_fire": supports_burst,
+    }
+
+
+def _protection(row: Dict[str, str], columns: tuple[str, str, str, str, str]) -> Dict[str, float]:
+    return {
+        key: round(_as_float(row.get(column), 0.0), 4)
+        for key, column in zip(("physical", "chemical", "thermal", "electric", "radiation"), columns)
+    }
+
+
+def _parse_ranged_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    categories = {
+        "Пистолеты",
+        "Дробовики",
+        "Пистолеты-пулеметы",
+        "Штурмовые винтовки и карабины",
+        "Снайперские винтовки",
+        "Гранатометы",
+        "Пулемёты",
+    }
+    templates: List[Dict[str, Any]] = []
+    subcategory = ""
+    for row in rows:
+        name = _normalize_text(row.get("B"))
+        if name in categories:
+            subcategory = name
+            continue
+        if not subcategory or not name or name == "Параметр минимальной силы для оружия":
+            continue
+        if _normalize_text(row.get("Q")) not in {"1", "2", "3", "Н"}:
+            continue
+
+        burst_profile = _parse_burst_profile(row.get("I"))
+        magazine_raw = _normalize_text(row.get("C"))
+        damage_raw = _normalize_text(row.get("J"))
+        attributes = {
+            "import_source": "equipment_workbook",
+            "magazine_size": _parse_first_int(magazine_raw),
+            "magazine_size_raw": magazine_raw,
+            "accuracy": _as_int(row.get("D")),
+            "noise": _as_int(row.get("E")),
+            "caliber": _canonical_caliber(row.get("F")),
+            "range": _as_int(row.get("G")),
+            "ergonomics": _as_int(row.get("H")),
+            "burst": burst_profile["raw"],
+            "fire_modes": burst_profile,
+            "damage": _as_float(damage_raw) if "/" not in damage_raw else damage_raw,
+            "damage_raw": damage_raw,
+            "max_durability": _as_int(row.get("K"), 100),
+            "fire_rate": _as_int(row.get("L")),
+            "min_strength": _as_int(row.get("N")),
+            "size": _as_int(row.get("P")),
+            "weapon_class": _normalize_text(row.get("Q")),
+            "special_rules": _normalize_text(row.get("R")),
+            "fixedMagazine": False,
+            "raw_row": row,
+        }
+        templates.append(
+            {
+                "name": name,
+                "category": "weapon",
+                "subcategory": subcategory,
+                "item_class": attributes["weapon_class"],
+                "description": attributes["special_rules"],
+                "price": _as_int(row.get("O")),
+                "weight": _as_float(row.get("M")),
+                "volume": float(attributes["size"]),
+                "attributes": attributes,
+                "compatible_ids": [],
+            }
+        )
+    return templates
+
+
+def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    templates: List[Dict[str, Any]] = []
+    ignored = {"Название", "Ваши руки", "Ваш приклад"}
+    for row in rows:
+        name = _normalize_text(row.get("S"))
+        damage_raw = _normalize_text(row.get("U"))
+        if not name or name in ignored or not damage_raw:
+            continue
+        allowed_attacks = []
+        for column in ("AC", "AD", "AE", "AF", "AG", "AH"):
+            attack = _normalize_text(row.get(column))
+            if attack and attack != "-" and attack not in allowed_attacks:
+                allowed_attacks.append(attack)
+        if not allowed_attacks and name != "Нож стреляющий":
+            continue
+        description = _normalize_text(row.get("T"))
+        penetration_match = re.search(r"(-?\d+(?:[.,]\d+)?)\s*%", description)
+        templates.append(
+            {
+                "name": name,
+                "category": "melee_weapon",
+                "subcategory": "Оружие ближнего боя",
+                "item_class": None,
+                "description": description,
+                "price": _as_int(row.get("W")),
+                "weight": _parse_weight(row.get("Y")),
+                "volume": float(_as_int(row.get("Z"))),
+                "attributes": {
+                    "import_source": "equipment_workbook",
+                    "damage": _as_float(damage_raw),
+                    "accuracy": _as_int(row.get("V")),
+                    "armor_piercing": _as_float(penetration_match.group(1)) if penetration_match else 0.0,
+                    "bleeding": _normalize_text(row.get("X")),
+                    "size": _normalize_text(row.get("Z")),
+                    "allowed_attacks": allowed_attacks,
+                    "max_durability": 100,
+                    "raw_row": row,
+                },
+                "compatible_ids": [],
+            }
+        )
+    return templates
+
+
+def _parse_armor(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    templates: List[Dict[str, Any]] = []
+    for row in rows[2:20]:
+        name = _normalize_text(row.get("B"))
+        if not name:
+            continue
+        weight_penalty = _parse_first_int(row.get("M"))
+        attributes = {
+            "import_source": "equipment_workbook",
+            "max_durability": _as_int(row.get("C"), 1),
+            "protection": _protection(row, ("D", "E", "F", "G", "H")),
+            "material": _normalize_text(row.get("I")),
+            "movement_penalty": _parse_first_int(row.get("J")),
+            "container_slots": _as_int(row.get("K")),
+            "inventory_weight_penalty": weight_penalty,
+            "modification_category": _normalize_text(row.get("P")),
+            "protection_zones": ["torso", "arms", "legs"],
+            "raw_row": row,
+        }
+        templates.append(
+            {
+                "name": name,
+                "category": "armor",
+                "subcategory": _normalize_text(row.get("P")),
+                "item_class": _normalize_text(row.get("N")),
+                "description": _normalize_text(row.get("M")),
+                "price": _as_int(row.get("O")),
+                "weight": float(weight_penalty),
+                "volume": _as_float(row.get("L")),
+                "attributes": attributes,
+                "compatible_ids": [],
+            }
+        )
+    return templates
+
+
+def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    templates: List[Dict[str, Any]] = []
+    for row in rows[22:45]:
+        name = _normalize_text(row.get("B"))
+        if not name:
+            continue
+        templates.append(
+            {
+                "name": name,
+                "category": "helmet",
+                "subcategory": _normalize_text(row.get("I")),
+                "item_class": _normalize_text(row.get("N")),
+                "description": _normalize_text(row.get("A")),
+                "price": _as_int(row.get("O")),
+                "weight": _parse_weight(row.get("Q")),
+                "volume": _as_float(row.get("J")),
+                "attributes": {
+                    "import_source": "equipment_workbook",
+                    "max_durability": _as_int(row.get("C"), 1),
+                    "protection": _protection(row, ("D", "E", "F", "G", "H")),
+                    "armor_type": _normalize_text(row.get("I")),
+                    "accuracy_penalty": _normalize_text(row.get("K")),
+                    "ergonomics_penalty": _normalize_text(row.get("L")),
+                    "charisma_bonus": _normalize_text(row.get("M")),
+                    "movement_penalty": _as_int(row.get("P")),
+                    "requires_filter": _normalize_text(row.get("A")) == "Противогазо-шлем",
+                    "protection_zones": ["crown", "back", "ears", "face"],
+                    "raw_row": row,
+                },
+                "compatible_ids": [],
+            }
+        )
+
+    for row in rows[56:61]:
+        name = _normalize_text(row.get("A"))
+        if not name:
+            continue
+        physical_raw = _normalize_text(row.get("C"))
+        templates.append(
+            {
+                "name": name,
+                "category": "helmet",
+                "subcategory": "Встроенный",
+                "item_class": None,
+                "description": "Встроенный в броню шлем",
+                "price": 0,
+                "weight": 0.0,
+                "volume": 0.0,
+                "attributes": {
+                    "import_source": "equipment_workbook",
+                    "embedded": True,
+                    "max_durability": 1,
+                    "protection": {
+                        "physical": _as_float(physical_raw),
+                        "chemical": 0.0,
+                        "thermal": 0.0,
+                        "electric": 0.0,
+                        "radiation": 0.0,
+                    },
+                    "physical_protection_rule": physical_raw if not re.fullmatch(r"-?\d+(?:[.,]\d+)?", physical_raw) else "",
+                    "charisma_penalty": _as_int(row.get("D")),
+                    "accuracy_penalty": _as_int(row.get("E")),
+                    "protection_zones": ["crown", "back", "ears", "face"],
+                    "raw_row": row,
+                },
+                "compatible_ids": [],
+            }
+        )
+    return templates
+
+
 def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
     rows = _read_sheet_rows(workbook_path, "Магазины и Патроны")
-    templates: List[Dict[str, Any]] = []
+    weapon_rows = _read_sheet_rows(workbook_path, "Оружие")
+    armor_rows = _read_sheet_rows(workbook_path, "Броня")
+    templates: List[Dict[str, Any]] = [
+        *_parse_ranged_weapons(weapon_rows),
+        *_parse_melee_weapons(weapon_rows),
+        *_parse_armor(armor_rows),
+        *_parse_helmets(armor_rows),
+    ]
     for row in rows:
         name_a = _normalize_text(row.get("A"))
         has_numeric_capacity = bool(re.fullmatch(r"-?\d+(?:[.,]\d+)?", _normalize_text(row.get("B"))))
@@ -259,6 +562,7 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
                     "weight": 0.0,
                     "volume": _as_float(row.get("E"), 0.0),
                     "attributes": {
+                        "import_source": "equipment_workbook",
                         "caliber": caliber,
                         "capacity": _as_int(row.get("B"), 0),
                         "reload_time_od": reload_time,
@@ -291,6 +595,7 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
         price = _as_int(row.get("M"), 0)
 
         attributes = {
+            "import_source": "equipment_workbook",
             "caliber": caliber,
             "ammo_group": ammo_group,
             "purchase_category": purchase_category,
@@ -323,6 +628,29 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
             }
         )
 
+    detachable_aliases = {
+        _equipment_alias(name)
+        for template in templates
+        if template["category"] == "magazine"
+        for name in template["attributes"].get("compatible_weapon_names", [])
+    }
+    for template in templates:
+        if template["category"] == "weapon":
+            name = template["name"]
+            subcategory = template["subcategory"]
+            aliases = _weapon_aliases(name)
+            explicitly_detachable = bool(aliases & detachable_aliases)
+            generally_detachable = subcategory in {
+                "Пистолеты-пулеметы",
+                "Штурмовые винтовки и карабины",
+                "Пулемёты",
+            }
+            pistol_with_fixed_cylinder = name.startswith("Револьвер") or name == "Нож стреляющий"
+            template["attributes"]["fixedMagazine"] = not (
+                explicitly_detachable or generally_detachable or (
+                    subcategory == "Пистолеты" and not pistol_with_fixed_cylinder
+                )
+            )
     return templates
 
 
@@ -338,29 +666,26 @@ def upsert_equipment_templates(workbook_path: str | Path, session=None) -> Dict[
             session.delete(item)
             removed_headers += 1
 
-    weapon_map: Dict[str, int] = {}
-    for weapon in ItemTemplate.query.filter_by(category="weapon").all():
-        weapon_map[_normalize_equipment_name(weapon.name)] = weapon.id
-
     removed_grenades = 0
     for item in ItemTemplate.query.filter_by(category="ammo").all():
         if _looks_like_grenade_ammo({"A": item.name, "K": item.subcategory or "", "L": item.name, "V": item.description or "", "P": "", "S": ""}):
             session.delete(item)
             removed_grenades += 1
 
+    imported_categories = ["ammo", "magazine", "weapon", "melee_weapon", "armor", "helmet"]
     existing_by_category: Dict[str, List[ItemTemplate]] = {}
-    for item in ItemTemplate.query.filter(ItemTemplate.category.in_(["ammo", "magazine"])).all():
+    for item in ItemTemplate.query.filter(ItemTemplate.category.in_(imported_categories)).all():
         existing_by_category.setdefault(item.category, []).append(item)
 
     inserted = 0
     updated = 0
     used_ids: set[int] = set()
-    for data in templates:
+    ordered_templates = sorted(templates, key=lambda data: data["category"] == "magazine")
+    for data in ordered_templates:
         category = data["category"]
         normalized_name = _normalize_equipment_name(data["name"])
         candidates = existing_by_category.get(category, [])
         item = None
-        best_score = 0.0
         for candidate in candidates:
             if candidate.id in used_ids:
                 continue
@@ -368,24 +693,25 @@ def upsert_equipment_templates(workbook_path: str | Path, session=None) -> Dict[
             if candidate_name == normalized_name:
                 item = candidate
                 break
-            score = difflib.SequenceMatcher(None, candidate_name, normalized_name, autojunk=False).ratio()
-            if score > best_score:
-                best_score = score
-                item = candidate
-        if item is not None and _normalize_equipment_name(item.name) != normalized_name and best_score < 0.72:
-            item = None
 
         if category == "magazine":
+            session.flush()
+            weapon_alias_map: Dict[str, List[int]] = {}
+            for weapon in ItemTemplate.query.filter_by(category="weapon").all():
+                for alias in _weapon_aliases(weapon.name):
+                    weapon_alias_map.setdefault(alias, []).append(weapon.id)
             compatible_ids: List[int] = []
             for weapon_name in data["attributes"].get("compatible_weapon_names", []):
-                weapon_id = weapon_map.get(_normalize_equipment_name(weapon_name))
-                if weapon_id and weapon_id not in compatible_ids:
-                    compatible_ids.append(weapon_id)
+                for weapon_id in weapon_alias_map.get(_equipment_alias(weapon_name), []):
+                    if weapon_id not in compatible_ids:
+                        compatible_ids.append(weapon_id)
             data["attributes"]["compatible_weapons"] = compatible_ids
             data["compatible_ids"] = compatible_ids
 
         if item is None:
-            session.add(ItemTemplate(**data))
+            item = ItemTemplate(**data)
+            session.add(item)
+            existing_by_category.setdefault(category, []).append(item)
             inserted += 1
             continue
 

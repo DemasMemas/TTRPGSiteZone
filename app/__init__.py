@@ -16,10 +16,9 @@
 """
 
 import logging
-import os
 import tempfile
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from flask import Flask, render_template, jsonify, send_from_directory
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
@@ -31,41 +30,94 @@ from app.services.exceptions import (
 from marshmallow import ValidationError as MarshmallowValidationError
 
 
+_PROJECT_LOG_HANDLER = '_ttrpg_file_handler'
+
+
+def _is_project_log_handler(handler):
+    if getattr(handler, _PROJECT_LOG_HANDLER, False):
+        return True
+    return (
+        isinstance(handler, RotatingFileHandler)
+        and Path(getattr(handler, 'baseFilename', '')).name == 'ttrpg.log'
+    )
+
+
+def _remove_log_handler(logger, handler):
+    logger.removeHandler(handler)
+    handler.close()
+
+
 def _configure_logging(app):
-    logs_dir = Path(app.root_path).parent / 'logs'
-    fallback_dir = Path(tempfile.gettempdir())
-    log_path = logs_dir / 'ttrpg.log'
+    logger = app.logger
+    level_name = str(app.config.get('LOG_LEVEL', 'INFO')).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+    logger.propagate = False
 
-    try:
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=10 * 1024 * 1024,
-            backupCount=10,
-            encoding='utf-8',
-        )
-    except OSError:
-        file_handler = RotatingFileHandler(
-            fallback_dir / 'ttrpg.log',
-            maxBytes=10 * 1024 * 1024,
-            backupCount=10,
-            encoding='utf-8',
-        )
+    project_handlers = [
+        handler for handler in logger.handlers
+        if _is_project_log_handler(handler)
+    ]
+    if not app.config.get('LOG_TO_FILE', True):
+        for handler in project_handlers:
+            _remove_log_handler(logger, handler)
+        return None
 
+    configured_path = app.config.get('LOG_FILE')
+    log_path = (
+        Path(configured_path)
+        if configured_path
+        else Path(app.root_path).parent / 'logs' / 'ttrpg.log'
+    )
+    fallback_path = Path(tempfile.gettempdir()) / 'ttrpg.log'
+    max_bytes = int(app.config.get('LOG_MAX_BYTES', 5 * 1024 * 1024))
+    backup_count = int(app.config.get('LOG_BACKUP_COUNT', 3))
+
+    file_handler = next((
+        handler for handler in project_handlers
+        if Path(handler.baseFilename).resolve() == log_path.resolve()
+    ), None)
+    for handler in project_handlers:
+        if handler is not file_handler:
+            _remove_log_handler(logger, handler)
+
+    if file_handler is None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8',
+            )
+        except OSError:
+            file_handler = RotatingFileHandler(
+                fallback_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8',
+            )
+        setattr(file_handler, _PROJECT_LOG_HANDLER, True)
+        logger.addHandler(file_handler)
+
+    file_handler.maxBytes = max_bytes
+    file_handler.backupCount = backup_count
     file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+        '%(asctime)s %(levelname)s [%(name)s]: %(message)s '
+        '[in %(pathname)s:%(lineno)d]'
     ))
-    file_handler.setLevel(logging.INFO)
-    app.logger.addHandler(file_handler)
-    app.logger.setLevel(logging.INFO)
-    app.logger.info('TTRPG application startup')
+    file_handler.setLevel(level)
+    return file_handler
 
 def create_app(config_name='default'):
     app = Flask(__name__)
     app.config.from_object(config_by_name[config_name])
 
     # Настройка логирования в файл
-    _configure_logging(app)
+    file_handler = _configure_logging(app)
+    if file_handler and not getattr(app.logger, '_ttrpg_startup_logged', False):
+        app.logger.info('TTRPG application startup')
+        app.logger._ttrpg_startup_logged = True
 
     # Инициализация расширений
     db.init_app(app)

@@ -752,6 +752,15 @@ function createItemFromTemplate(template, quantity = 1) {
     return item;
 }
 
+function createItemFromTemplateSelection(template, quantity = 1, ammoVariant = null) {
+    const newItem = createItemFromTemplate(template, quantity);
+    if (template.category === 'ammo') {
+        applyAmmoVariantToItem(newItem, template, ammoVariant);
+        updateAmmoWeight(newItem);
+    }
+    return newItem;
+}
+
 function migrateOldItemToNew(oldItem) {
     if (oldItem.id) return oldItem;
 
@@ -3108,6 +3117,129 @@ function renderPdaModifications(items, groupedTemplates) {
     return html;
 }
 
+function getWeaponFireProfile(weapon, template) {
+    const stored = weapon.fireModes || weapon.attributes?.fire_modes || template?.attributes?.fire_modes;
+    if (stored) return stored;
+
+    const raw = String(weapon.burst || template?.attributes?.burst || '').trim();
+    const lower = raw.toLowerCase();
+    const duplexMatch = lower.match(/одиночн\w*\s*-\s*(\d+)/);
+    const burstMatch = lower.match(/очеред\w*\s*(\d+)/);
+    const plainBurstMatch = lower.match(/^\s*(\d+)/);
+    const duplexSize = duplexMatch ? Number(duplexMatch[1]) : null;
+    const burstSize = burstMatch
+        ? Number(burstMatch[1])
+        : (!duplexSize && plainBurstMatch ? Number(plainBurstMatch[1]) : null);
+    const machineGunBurst = lower.includes('пулеметн') || lower.includes('пулемётн');
+    const supportsBurst = Boolean(burstSize || machineGunBurst);
+    return {
+        raw,
+        single_shot_options: duplexSize ? [1, duplexSize] : [1],
+        duplex_size: duplexSize,
+        burst_size: burstSize,
+        machine_gun_burst: machineGunBurst,
+        supports_burst: supportsBurst,
+        supports_suppression: supportsBurst,
+        supports_area_fire: supportsBurst,
+    };
+}
+
+function getWeaponAmmoCount(weapon) {
+    if (Array.isArray(weapon.installedMagazine?.ammo)) {
+        return weapon.installedMagazine.ammo.reduce(
+            (sum, stack) => sum + (Number(stack.quantity) || 0),
+            0
+        );
+    }
+    return Math.max(0, Number(weapon.ammo) || 0);
+}
+
+window.chooseMachineGunBurst = function(weaponIndex, fireMode, actionPoints = 3, volleyCount = 1) {
+    const weapon = currentCharacterData?.weapons?.[weaponIndex];
+    if (!weapon) return;
+    const available = getWeaponAmmoCount(weapon);
+    if (available < 2) {
+        showNotification('Для пулемётной очереди нужно минимум 2 патрона');
+        return;
+    }
+    const fireRate = Math.max(2, Number(weapon.fireRate) || available);
+    const maximum = Math.min(Math.floor(available / volleyCount), fireRate);
+    if (maximum < 2) {
+        showNotification(`Для действия нужно минимум ${2 * volleyCount} патрона`);
+        return;
+    }
+    const answer = window.prompt(`Длина очереди (2-${maximum})`, String(Math.min(5, maximum)));
+    if (answer === null) return;
+    const shots = Number.parseInt(answer, 10);
+    if (!Number.isInteger(shots) || shots < 2 || shots > maximum) {
+        showNotification(`Укажите число от 2 до ${maximum}`);
+        return;
+    }
+    window.useWeaponFromEquipment(weaponIndex, fireMode, shots * volleyCount, actionPoints, volleyCount);
+};
+
+window.aimWeaponFromEquipment = function(weaponIndex) {
+    const actorCharacterId = currentCharacterId;
+    const combatState = window.locationCombatState;
+    if (!combatState || combatState.status !== 'active') {
+        showNotification('Прицеливание используется только в активном бою');
+        return;
+    }
+    if (combatState.current_character?.character_id !== actorCharacterId) {
+        showNotification('Сейчас не ход этого персонажа', 'system');
+        return;
+    }
+    closeCharacterSheet();
+    import('./locationScene.js').then((module) => {
+        module.queueCombatActionFromSheet({
+            actorCharacterId,
+            actionKey: 'aim',
+            weaponIndex,
+            actionPoints: 1,
+            targetType: 'character',
+            source: 'sheet',
+        });
+    });
+};
+
+function renderRangedAttackButtons(weapon, template, index, disabled) {
+    const profile = getWeaponFireProfile(weapon, template);
+    const disabledAttr = disabled ? 'disabled' : '';
+    const buttons = [];
+    const singleOptions = Array.isArray(profile.single_shot_options) && profile.single_shot_options.length
+        ? profile.single_shot_options
+        : [1];
+
+    buttons.push(`<button type="button" class="btn btn-sm btn-secondary" ${disabledAttr} onclick="aimWeaponFromEquipment(${index})">Прицеливание · 1 ОД</button>`);
+    singleOptions.forEach((shots) => {
+        const modeName = shots === 1
+            ? ''
+            : (shots === 2 ? 'Дуплет: ' : (shots === 4 ? 'Двойной дуплет: ' : `${shots} выстрела: `));
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'unaimed', ${shots}, 2)">${modeName}Неприцельный · 2 ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'rapid', ${shots}, 1)">${modeName}Беглый · 1 ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'aimed', ${shots}, 4)">${modeName}Прицельный · 4 ОД</button>`);
+    });
+
+    if (profile.supports_burst) {
+        const machineGun = Boolean(profile.machine_gun_burst);
+        const burstShots = Number(profile.burst_size) || 0;
+        const action = (mode, actionPoints = 3, volleyCount = 1) => machineGun
+            ? `chooseMachineGunBurst(${index}, '${mode}', ${actionPoints}, ${volleyCount})`
+            : `useWeaponFromEquipment(${index}, '${mode}', ${burstShots * volleyCount}, ${actionPoints})`;
+        const burstLabel = machineGun ? 'Пулемётная очередь' : `Очередь x${burstShots}`;
+        buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('burst')}">${burstLabel} · 3 ОД</button>`);
+        if (profile.supports_suppression) {
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('suppression', 3, 1)}">Подавление (1 очередь) · 3 ОД</button>`);
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('suppression', 5, 2)}">Подавление (2 очереди) · 5 ОД</button>`);
+        }
+        if (profile.supports_area_fire) {
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('area', 5, 1)}">По области (1 очередь) · 5 ОД</button>`);
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('area', 5, 2)}">По области (2 очереди) · 5 ОД</button>`);
+        }
+    }
+    return buttons.join('');
+}
+
 async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponModTemplates) {
     const container = document.getElementById('weapons-container');
     if (!container) return;
@@ -3295,7 +3427,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="useMeleeAttack(${index}, '${attackType}')">${attackType}</button>`
             ).join('');
         } else {
-            attackButtonsHtml = `<button type="button" class="btn btn-sm btn-success" ${combatActionDisabled ? 'disabled' : ''} onclick="useWeaponFromEquipment(${index})" style="margin-left: 5px;" title="${combatActionDisabled ? 'Сейчас не ход этого персонажа' : 'Выстрелить'}">🔫 Выстрел</button>`;
+            attackButtonsHtml = renderRangedAttackButtons(weapon, template, index, combatActionDisabled);
         }
 
         let grenadeLauncherHtml = '';
@@ -4996,6 +5128,7 @@ window.equipWeaponFromInventory = async function(itemPath) {
         range: item.range || template.attributes?.range || 0,
         ergonomics: item.ergonomics || template.attributes?.ergonomics || 0,
         burst: item.burst || template.attributes?.burst || '',
+        fireModes: item.fireModes || item.attributes?.fire_modes || template.attributes?.fire_modes || null,
         damage: item.damage || template.attributes?.damage || 0,
         durability: item.durability || template.attributes?.durability || 100,
         maxDurability: item.maxDurability || template.attributes?.max_durability || 100,
@@ -6004,7 +6137,13 @@ function getMeleeAttackModifiers(attackType, baseDamage, baseAP) {
     }
 }
 
-window.useWeaponFromEquipment = function(weaponIndex) {
+window.useWeaponFromEquipment = function(
+    weaponIndex,
+    fireMode = 'unaimed',
+    shotCount = 1,
+    actionPoints = 2,
+    volleyCount = 1
+) {
     const sheetData = currentCharacterData;
     const actorCharacterId = currentCharacterId;
     const weapon = sheetData?.weapons?.[weaponIndex];
@@ -6022,26 +6161,42 @@ window.useWeaponFromEquipment = function(weaponIndex) {
         return;
     }
 
+    const profile = getWeaponFireProfile(
+        weapon,
+        (allTemplatesCache || []).find(template => template.id == weapon.templateId)
+    );
+    const shots = Math.max(1, Number.parseInt(shotCount, 10) || 1);
+    const singleOptions = profile.single_shot_options || [1];
+    const singleMode = ['unaimed', 'rapid', 'aimed'].includes(fireMode);
+    const automaticMode = ['burst', 'suppression', 'area'].includes(fireMode);
+    if (
+        (singleMode && !singleOptions.includes(shots)) ||
+        (automaticMode && !profile.supports_burst) ||
+        (!profile.machine_gun_burst && automaticMode && shots !== Number(profile.burst_size) * volleyCount)
+    ) {
+        showNotification('Этот режим стрельбы недоступен для выбранного оружия');
+        return;
+    }
+    if (getWeaponAmmoCount(weapon) < shots) {
+        showNotification(`Недостаточно патронов: нужно ${shots}`);
+        return;
+    }
+
     const spendAmmo = async () => {
         const mag = weapon.installedMagazine;
         if (mag && Array.isArray(mag.ammo)) {
-            if (mag.ammo.length === 0) {
-                showNotification('Нет магазина или патронов');
-                return false;
-            }
-            const last = mag.ammo[mag.ammo.length - 1];
-            last.quantity -= 1;
-            if (last.quantity <= 0) {
-                mag.ammo.pop();
+            let remaining = shots;
+            while (remaining > 0 && mag.ammo.length > 0) {
+                const last = mag.ammo[mag.ammo.length - 1];
+                const consumed = Math.min(remaining, Number(last.quantity) || 0);
+                last.quantity -= consumed;
+                remaining -= consumed;
+                if (last.quantity <= 0) mag.ammo.pop();
             }
             weapon.ammo = mag.ammo.reduce((sum, a) => sum + a.quantity, 0);
             updateMagazineWeight(mag);
         } else if (typeof weapon.ammo === 'number') {
-            if (weapon.ammo <= 0) {
-                showNotification('Нет патронов');
-                return false;
-            }
-            weapon.ammo -= 1;
+            weapon.ammo -= shots;
         } else {
             showNotification('Нет патронов');
             return false;
@@ -6053,7 +6208,7 @@ window.useWeaponFromEquipment = function(weaponIndex) {
         renderEquipmentTab(sheetData);
         scheduleAutoSave();
         forceSyncCharacter();
-        showNotification(`Выстрел из ${weapon.name}. Осталось патронов: ${weapon.ammo}`, 'system');
+        showNotification(`Выстрелов: ${shots}. ${weapon.name}: осталось ${weapon.ammo} патронов`, 'system');
         return true;
     };
 
@@ -6068,6 +6223,13 @@ window.useWeaponFromEquipment = function(weaponIndex) {
             actorCharacterId,
             actionKey: 'attack',
             weaponIndex,
+            fireMode,
+            shotCount: shots,
+            actionPoints,
+            volleyCount,
+            targetType: fireMode === 'suppression'
+                ? 'structure'
+                : (fireMode === 'area' ? 'multi_character' : 'character'),
             source: 'sheet',
             onResolve: spendAmmo,
         });
@@ -9406,11 +9568,7 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
         return false;
     }
 
-    const newItem = createItemFromTemplate(template, quantity);
-    if (template.category === 'ammo') {
-        applyAmmoVariantToItem(newItem, template, ammoVariant);
-        updateAmmoWeight(newItem);
-    }
+    const newItem = createItemFromTemplateSelection(template, quantity, ammoVariant);
     targetItems.push(newItem);
 
     await renderInventoryTab(currentCharacterData);
@@ -9418,16 +9576,17 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
     return true;
 }
 
-window.openInventoryTemplatePicker = async function(target = 'pockets') {
+window.openInventoryTemplatePicker = async function(target = 'pockets', options = {}) {
     let modal = document.getElementById('inventory-template-picker-modal');
     if (!modal) {
         modal = document.createElement('div');
         modal.id = 'inventory-template-picker-modal';
         modal.className = 'modal';
+        modal.style.zIndex = '1300';
         modal.innerHTML = `
             <div class="modal-content" style="max-width: 980px; width: 92vw; max-height: 85vh; overflow-y:auto;">
                 <span class="close" onclick="closeInventoryTemplatePicker()">&times;</span>
-                <h3>Добавить предмет в инвентарь</h3>
+                <h3 class="inventory-template-picker-title">Добавить предмет в инвентарь</h3>
                 <div class="form-group">
                     <label>Поиск</label>
                     <input type="text" id="inventory-template-picker-search" class="form-control" placeholder="Название, калибр, категория...">
@@ -9438,6 +9597,11 @@ window.openInventoryTemplatePicker = async function(target = 'pockets') {
     }
 
     modal._inventoryTarget = getInventoryTargetPath(target);
+    modal._templateSelectionHandler = typeof options.onSelect === 'function'
+        ? options.onSelect
+        : null;
+    const title = modal.querySelector('.inventory-template-picker-title');
+    if (title) title.textContent = options.title || 'Добавить предмет в инвентарь';
     modal.style.display = 'flex';
     bindBackdropClose(modal, closeInventoryTemplatePicker);
 
@@ -9476,9 +9640,15 @@ window.selectInventoryTemplate = async function(templateId) {
     if (!template) return;
     const picker = document.getElementById('inventory-template-picker-modal');
     const target = picker?._inventoryTarget || getInventoryTargetPath('pockets');
+    const selectionHandler = picker?._templateSelectionHandler || null;
     if (template.category === 'ammo') {
         closeInventoryTemplatePicker();
-        openAmmoSelectionModal(templateId, target);
+        openAmmoSelectionModal(templateId, target, selectionHandler);
+        return;
+    }
+
+    if (selectionHandler) {
+        await selectionHandler(createItemFromTemplateSelection(template), template);
         return;
     }
 
@@ -9509,12 +9679,13 @@ window.closeAmmoSelectionModal = function() {
     if (modal) modal.style.display = 'none';
 };
 
-window.openAmmoSelectionModal = async function(initialTemplateId = null, target = 'pockets') {
+window.openAmmoSelectionModal = async function(initialTemplateId = null, target = 'pockets', selectionHandler = null) {
     let modal = document.getElementById('ammo-selection-modal');
     if (!modal) {
         modal = document.createElement('div');
         modal.id = 'ammo-selection-modal';
         modal.className = 'modal';
+        modal.style.zIndex = '1310';
         modal.innerHTML = `
             <div class="modal-content" style="max-width: 900px; width: 92vw; max-height: 85vh; overflow-y:auto;">
                 <span class="close" onclick="closeAmmoSelectionModal()">&times;</span>
@@ -9541,6 +9712,9 @@ window.openAmmoSelectionModal = async function(initialTemplateId = null, target 
     }
 
     modal._inventoryTarget = getInventoryTargetPath(target);
+    modal._templateSelectionHandler = typeof selectionHandler === 'function'
+        ? selectionHandler
+        : null;
     modal.style.display = 'flex';
     bindBackdropClose(modal, closeAmmoSelectionModal);
 
@@ -9650,7 +9824,12 @@ window.confirmAmmoSelection = async function() {
     }
 
     const ammoVariant = chosenVariant || normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect);
-    const added = await addTemplateItemToInventory(templateId, modal._inventoryTarget, quantity, ammoVariant);
+    const added = modal._templateSelectionHandler
+        ? await modal._templateSelectionHandler(
+            createItemFromTemplateSelection(template, quantity, ammoVariant),
+            template
+        )
+        : await addTemplateItemToInventory(templateId, modal._inventoryTarget, quantity, ammoVariant);
     if (added) closeAmmoSelectionModal();
 };
 
