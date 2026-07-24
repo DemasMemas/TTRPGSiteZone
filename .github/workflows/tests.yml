@@ -10,10 +10,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
@@ -24,7 +24,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run Python tests with coverage
-        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=35
+        run: python -m pytest tests --cov=app --cov-report=term-missing --cov-fail-under=35
 
       - name: Check JavaScript syntax
         run: |

@@ -109,13 +109,13 @@ python scripts/import_consumables.py "path/to/Снаряжение.xlsx"
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q
+python -m pytest tests -q
 ```
 
 Запуск с отчётом о покрытии:
 
 ```bash
-pytest --cov=app --cov-report=term-missing
+python -m pytest tests --cov=app --cov-report=term-missing
 ```
 
 В репозитории настроен GitHub Actions workflow: при каждом `push` и `pull request` он запускает Python-тесты, контролирует минимальное покрытие и проверяет синтаксис основных JavaScript-модулей.
