@@ -2,6 +2,7 @@
 from functools import wraps
 from flask import jsonify
 from flask_jwt_extended import get_jwt_identity
+from app.extensions import db
 from app.models import Lobby, LobbyParticipant
 from app.services.exceptions import NotFoundError, PermissionDenied
 
@@ -41,7 +42,7 @@ def requires_participant(f):
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
 
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             return jsonify({'error': 'Lobby not found'}), 404
 
@@ -72,7 +73,7 @@ def requires_gm(f):
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
 
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             return jsonify({'error': 'Lobby not found'}), 404
 

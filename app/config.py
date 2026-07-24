@@ -34,8 +34,18 @@ class ProductionConfig(Config):
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
 
 
+class TestingConfig(Config):
+    """Isolated configuration used by the automated test suite."""
+
+    TESTING = True
+    SQLALCHEMY_DATABASE_URI = 'sqlite://'
+    JWT_SECRET_KEY = 'test-jwt-secret-that-is-at-least-32-bytes'
+    SECRET_KEY = 'test-app-secret-that-is-at-least-32-bytes'
+
+
 config_by_name = {
     'development': DevelopmentConfig,
     'production': ProductionConfig,
+    'testing': TestingConfig,
     'default': DevelopmentConfig,
 }

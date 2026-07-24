@@ -93,7 +93,7 @@ class LobbyService:
     @staticmethod
     def get_lobby(lobby_id, user_id):
         """Получение информации о комнмате (с проверкой участия)."""
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 
@@ -106,7 +106,7 @@ class LobbyService:
     @staticmethod
     def delete_lobby(lobby_id, gm_id):
         """Мягкое удаление комнаты (только GM)."""
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 

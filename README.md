@@ -105,12 +105,20 @@ python scripts/import_consumables.py "path/to/Снаряжение.xlsx"
 
 ## Тесты
 
-Тесты написаны в формате `pytest`. Установите `pytest` отдельно как инструмент разработки и запустите:
+Тестовый набор включает unit-тесты игровой логики и интеграционные проверки HTTP API в изолированной SQLite-базе. Установите зависимости разработчика:
 
 ```bash
-pip install pytest
+pip install -r requirements-dev.txt
 pytest -q
 ```
+
+Запуск с отчётом о покрытии:
+
+```bash
+pytest --cov=app --cov-report=term-missing
+```
+
+В репозитории настроен GitHub Actions workflow: при каждом `push` и `pull request` он запускает Python-тесты, контролирует минимальное покрытие и проверяет синтаксис основных JavaScript-модулей.
 
 Проверка синтаксиса основных JavaScript-модулей:
 

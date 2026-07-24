@@ -71,7 +71,11 @@ def create_app(config_name='default'):
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
-    socketio.init_app(app, cors_allowed_origins="*")
+    socketio.init_app(
+        app,
+        cors_allowed_origins="*",
+        async_mode="threading" if app.testing else None,
+    )
 
     # Регистрация blueprint'ов
     from app.auth import auth_bp

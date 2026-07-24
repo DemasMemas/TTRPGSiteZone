@@ -10,7 +10,7 @@ class ParticipantService:
     @staticmethod
     def join_lobby(user_id, lobby_id):
         """Добавляет пользователя в комнату (если он уже не участник)."""
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 
@@ -38,7 +38,7 @@ class ParticipantService:
     @staticmethod
     def leave_lobby(user_id, lobby_id):
         """Пользователь покидает комнату."""
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 
@@ -55,7 +55,7 @@ class ParticipantService:
     @staticmethod
     def ban_user(gm_id, lobby_id, target_user_id):
         """ГМ банит участника."""
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 
@@ -84,7 +84,7 @@ class ParticipantService:
     @staticmethod
     def unban_user(gm_id, lobby_id, target_user_id):
         """ГМ разбанивает участника."""
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 
@@ -107,7 +107,7 @@ class ParticipantService:
     @staticmethod
     def get_banned_list(gm_id, lobby_id):
         """Возвращает список забаненных пользователей."""
-        lobby = Lobby.query.get(lobby_id)
+        lobby = db.session.get(Lobby, lobby_id)
         if not lobby or not lobby.is_active:
             raise NotFoundError("Lobby not found")
 

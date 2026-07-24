@@ -36,7 +36,7 @@ def login():
 @jwt_required()
 def profile():
     current_user_id = get_jwt_identity()
-    user = User.query.get(current_user_id)
+    user = db.session.get(User, int(current_user_id))
     schema = UserProfileSchema()
     return jsonify(schema.dump(user)), 200
 
@@ -48,7 +48,7 @@ def update_color():
     color = data.get('color')
     if not color or not re.match(r'^#[0-9a-fA-F]{6}$', color):
         return jsonify({'error': 'Invalid color format. Use #RRGGBB'}), 400
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user:
         return jsonify({'error': 'User not found'}), 404
     user.color = color
