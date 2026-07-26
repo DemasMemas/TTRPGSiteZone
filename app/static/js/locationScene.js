@@ -51,6 +51,10 @@ let animationFrameId = null;
 let combatState = null;
 let combatHud = null;
 let combatHudDragState = null;
+const storedCombatHudCollapsed = window.localStorage.getItem('combatHudCollapsed');
+let combatHudCollapsed = storedCombatHudCollapsed === null
+    ? null
+    : storedCombatHudCollapsed === '1';
 let combatActionMenu = null;
 let combatActionMenuCharacterId = null;
 let pendingCombatAction = null;
@@ -67,6 +71,9 @@ let medicalConsumableMenu = null;
 let medicalConsumableMenuState = null;
 let medicalConsumableDragState = null;
 let armedMoveCharacterId = null;
+let armedMovementType = null;
+let movementTypeMenu = null;
+let postureMenu = null;
 let movementPreviewGhost = null;
 let movementPreviewLine = null;
 let movementPreviewHint = null;
@@ -82,6 +89,74 @@ let attackPreviewLine = null;
 let movementMapCache = new Map();
 let movementMapVersion = 0;
 let locationObjectPickCache = { key: null, result: null };
+
+const COMBAT_MOVEMENT_TYPES = {
+    walk: {
+        label: 'Ходьба',
+        icon: '🚶',
+        maxDistance: 10,
+        divisor: 1,
+        actionPoints: 0,
+        freeActions: 0,
+        summary: '1 м = 1 ОП',
+    },
+    correction: {
+        label: 'Корректировка',
+        icon: '↔',
+        maxDistance: 3,
+        divisor: null,
+        actionPoints: 0,
+        freeActions: 1,
+        summary: 'До 3 м без траты ОП',
+    },
+    run: {
+        label: 'Бег',
+        icon: '🏃',
+        maxDistance: 20,
+        divisor: 2,
+        actionPoints: 2,
+        freeActions: 0,
+        summary: '1 ОП за каждые 2 м',
+    },
+    sprint: {
+        label: 'Спринт',
+        icon: '»',
+        maxDistance: 30,
+        divisor: 3,
+        actionPoints: 4,
+        freeActions: 0,
+        summary: '1 ОП за каждые 3 м',
+    },
+};
+const COMBAT_POSTURES = {
+    standing: {
+        label: 'Стоя',
+        icon: '↑',
+        movementMultiplier: 1,
+        walkMaxDistance: 10,
+        shootingBonus: 0,
+        ergonomicsBonus: 0,
+        stealthBonus: 0,
+    },
+    sitting: {
+        label: 'Сидя',
+        icon: '↘',
+        movementMultiplier: 2,
+        walkMaxDistance: 5,
+        shootingBonus: 1,
+        ergonomicsBonus: 10,
+        stealthBonus: 2,
+    },
+    prone: {
+        label: 'Лёжа',
+        icon: '▬',
+        movementMultiplier: 3,
+        walkMaxDistance: 3,
+        shootingBonus: 2,
+        ergonomicsBonus: 20,
+        stealthBonus: 4,
+    },
+};
 let buildMode = 'terrain';
 let structurePreset = 'wall';
 let structureWidth = 3;
@@ -290,7 +365,103 @@ function buildRoutePoints(startX, startY, endX, endY, movingCharacterId = null) 
         pushPoint(x + 0.5, getTileHeight(x, y) + 0.4, y + 0.5);
     });
 
-    return { points, cost: path.cost };
+    const climbCost = path.path.slice(1).reduce((sum, [x, y]) => {
+        const profile = getTileMovementProfile(x, y, movingCharacterId);
+        return sum + Math.max(0, Number(profile.climbCost) || 0);
+    }, 0);
+    return {
+        points,
+        path: path.path,
+        cost: path.cost,
+        climbCost,
+        distance: Math.max(0, path.path.length - 1),
+    };
+}
+
+function getMovementModeRouteCost(route, movementType = 'walk') {
+    const mode = COMBAT_MOVEMENT_TYPES[movementType] || COMBAT_MOVEMENT_TYPES.walk;
+    const posture = combatState?.current_character?.posture || 'standing';
+    const postureProfile = COMBAT_POSTURES[posture] || COMBAT_POSTURES.standing;
+    if (!route) return { movementPoints: Infinity, distance: Infinity };
+    const climbCost = Math.max(0, Number(route.climbCost) || 0);
+    const travelCost = Math.max(0, (Number(route.cost) || 0) - climbCost);
+    const travelMovementPoints = mode.divisor === null
+        ? 0
+        : Math.ceil((travelCost * postureProfile.movementMultiplier) / mode.divisor);
+    const movementPoints = travelMovementPoints + climbCost;
+    return {
+        movementPoints,
+        travelMovementPoints,
+        climbCost,
+        distance: Math.max(0, Number(route.distance) || 0),
+    };
+}
+
+function getMovementModeAvailability(movementType, route = null) {
+    const mode = COMBAT_MOVEMENT_TYPES[movementType] || COMBAT_MOVEMENT_TYPES.walk;
+    const current = combatState?.current_character || {};
+    const posture = current.posture || 'standing';
+    const postureProfile = current.posture_modifiers || {};
+    const maxDistance = movementType === 'walk'
+        ? Number(postureProfile.walk_max_distance) || COMBAT_POSTURES[posture]?.walkMaxDistance || mode.maxDistance
+        : mode.maxDistance;
+    const round = Math.max(1, Number(combatState?.round_number) || 1);
+    const usedMode = current.movement_mode_this_turn || null;
+    const usedDistance = movementType === 'correction'
+        ? Number(current.correction_distance_this_turn) || 0
+        : Number(current.movement_distance_this_turn) || 0;
+    const routeCost = getMovementModeRouteCost(route, movementType);
+    const availableMovement = Number(current.movement_points_current) || 0;
+    const climbActionPoints = routeCost.climbCost >= 10 ? 3 : 1;
+    const usesClimbAction = Boolean(
+        route
+        && routeCost.climbCost > 0
+        && routeCost.movementPoints > availableMovement
+        && routeCost.travelMovementPoints <= availableMovement
+        && (Number(current.action_points_current) || 0) >= mode.actionPoints + climbActionPoints
+    );
+    let reason = '';
+
+    if (usedMode && usedMode !== movementType) {
+        reason = 'В этом ходу уже выбран другой вид движения';
+    } else if (routeCost.climbCost > 0 && posture !== 'standing') {
+        reason = 'Перед перелезанием нужно встать';
+    } else if (movementType === 'run' && posture !== 'standing') {
+        reason = 'Бег возможен только стоя';
+    } else if (movementType === 'sprint' && posture !== 'standing') {
+        reason = 'Спринт возможен только стоя';
+    } else if (movementType === 'correction' && posture === 'prone') {
+        reason = 'Корректировка недоступна лёжа';
+    } else if (
+        ['run', 'sprint'].includes(movementType)
+        && (Number(current.strenuous_movement_blocked_until_round) || 0) >= round
+    ) {
+        reason = 'Бег и спринт недоступны из-за одышки';
+    } else if ((Number(current.action_points_current) || 0) < mode.actionPoints) {
+        reason = `Нужно ${mode.actionPoints} ОД`;
+    } else if ((Number(current.free_actions_current) || 0) < mode.freeActions) {
+        reason = 'Нужно 1 СД';
+    } else if (usedDistance >= maxDistance) {
+        reason = 'Лимит дистанции в этом ходу исчерпан';
+    } else if (route && usedDistance + routeCost.distance > maxDistance) {
+        reason = `Превышен лимит ${maxDistance} м`;
+    } else if (
+        route
+        && routeCost.movementPoints > availableMovement
+        && !usesClimbAction
+    ) {
+        reason = 'Недостаточно ОП';
+    }
+
+    return {
+        allowed: !reason,
+        reason,
+        usedDistance,
+        remainingDistance: Math.max(0, maxDistance - usedDistance),
+        usesClimbAction,
+        climbActionPoints: usesClimbAction ? climbActionPoints : 0,
+        ...routeCost,
+    };
 }
 
 function updateMovementPreview(clientX, clientY) {
@@ -320,7 +491,7 @@ function updateMovementPreview(clientX, clientY) {
 
     if (!movementPreviewLine?.userData || movementPreviewLine.userData.targetKey !== targetKey || !points) {
         route = buildRoutePoints(startX, startY, targetX, targetY, movementPreviewCharacterId);
-        cost = route?.cost ?? Math.max(Math.abs(targetX - startX), Math.abs(targetY - startY));
+        cost = getMovementModeRouteCost(route, armedMovementType || 'walk').movementPoints;
         points = route?.points || [
             new THREE.Vector3(startX + 0.5, getTileHeight(startX, startY) + 0.4, startY + 0.5),
             new THREE.Vector3(targetX + 0.5, getTileHeight(targetX, targetY) + 0.4, targetY + 0.5),
@@ -335,9 +506,12 @@ function updateMovementPreview(clientX, clientY) {
         movementPreviewLastTargetKey = targetKey;
     }
     const available = combatState?.current_character?.movement_points_current ?? 0;
+    const movementType = armedMovementType || 'walk';
+    const movementMode = COMBAT_MOVEMENT_TYPES[movementType] || COMBAT_MOVEMENT_TYPES.walk;
+    const availability = getMovementModeAvailability(movementType, route);
 
     if (!movementPreviewLine) {
-        movementPreviewLine = createPreviewLine(cost <= available || window.isGM ? 0x54d17a : 0xff6b6b);
+        movementPreviewLine = createPreviewLine(availability.allowed ? 0x54d17a : 0xff6b6b);
         scene.add(movementPreviewLine);
         movementPreviewLine.userData = {
             targetKey,
@@ -346,14 +520,20 @@ function updateMovementPreview(clientX, clientY) {
             points,
         };
     }
+    movementPreviewLine.material.color.setHex(availability.allowed ? 0x54d17a : 0xff6b6b);
     movementPreviewLine.geometry.setFromPoints(points);
 
     const hint = ensureMovementPreviewHint();
-    hint.textContent = route ? `ОП: ${cost}/${available}` : 'Путь заблокирован';
+    const costLabel = availability.usesClimbAction
+        ? `ОП ${availability.travelMovementPoints}/${available} + ${availability.climbActionPoints} ОД`
+        : `ОП ${cost}/${available}`;
+    hint.textContent = route
+        ? `${movementMode.label}: ${availability.distance} м · ${costLabel}`
+        : 'Путь заблокирован';
     hint.style.left = `${clientX + 14}px`;
     hint.style.top = `${clientY + 14}px`;
     hint.style.display = 'block';
-    hint.style.color = cost <= available || window.isGM ? '#d7ffe5' : '#ffd0d0';
+    hint.style.color = availability.allowed ? '#d7ffe5' : '#ffd0d0';
 }
 
 function updateAttackPreview(clientX, clientY) {
@@ -503,16 +683,16 @@ function commitMovementPreview(clientX, clientY) {
     const startX = movementPreviewStartX ?? entry.posX;
     const startY = movementPreviewStartY ?? entry.posY;
     const route = buildRoutePoints(startX, startY, targetX, targetY, movementPreviewCharacterId);
-    const cost = route?.cost ?? Math.max(Math.abs(targetX - startX), Math.abs(targetY - startY));
-    const available = combatState?.current_character?.movement_points_current ?? 0;
+    const movementType = armedMovementType || 'walk';
+    const availability = getMovementModeAvailability(movementType, route);
 
     if (!route) {
         showNotification('Путь к выбранной клетке заблокирован', 'system');
         return false;
     }
 
-    if (combatState?.status === 'active' && cost > available) {
-        showNotification('Недостаточно ОП для этого перемещения', 'system');
+    if (combatState?.status === 'active' && !availability.allowed) {
+        showNotification(availability.reason || 'Это перемещение недоступно', 'system');
         return false;
     }
 
@@ -522,11 +702,13 @@ function commitMovementPreview(clientX, clientY) {
             location_id: window.currentLocationId,
             character_id: movementPreviewCharacterId,
             x: targetX,
-            y: targetY
+            y: targetY,
+            movement_mode: movementType,
         });
     }
     clearMovementPreview();
     armedMoveCharacterId = null;
+    armedMovementType = null;
     return true;
 }
 
@@ -591,6 +773,8 @@ function closeCombatMenus() {
     }
     contextMenuCharacterId = null;
     combatActionMenuCharacterId = null;
+    closeMovementTypeMenu();
+    closePostureMenu();
 }
 
 function updateCombatHudPosition(left, top) {
@@ -605,6 +789,7 @@ function ensureCombatHudDragging() {
     const onPointerDown = (event) => {
         const header = event.target.closest?.('.combat-hud-header');
         if (!header || !combatHud.contains(header)) return;
+        if (event.target.closest?.('button')) return;
         if (event.button !== 0) return;
         combatHudDragState = {
             offsetX: event.clientX - combatHud.getBoundingClientRect().left,
@@ -920,6 +1105,14 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             action: () => import('./characterSheet.js').then(module => module.openCharacterSheet(characterId, 'equipment')),
         },
         {
+            label: 'Положение',
+            icon: '↕',
+            title: 'Встать, сесть или лечь',
+            angle: -162,
+            requiresCombat: true,
+            action: () => showPostureMenu(characterId),
+        },
+        {
             label: 'Инвентарь',
             title: 'Открыть вкладку инвентаря',
             angle: 126,
@@ -1008,7 +1201,8 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             backdrop-filter: blur(8px);
             padding: 8px;
         `;
-        const allowed = item.allowAlways || hasFullAccess;
+        const allowed = (item.allowAlways || hasFullAccess)
+            && (!item.requiresCombat || combatState?.status === 'active');
         button.disabled = !allowed;
         button.style.opacity = allowed ? '1' : '0.45';
         if (item.icon) {
@@ -1043,7 +1237,272 @@ function getCombatMenuState() {
     return { current, canAct };
 }
 
-function beginCharacterMoveMode(characterId) {
+function closeMovementTypeMenu() {
+    if (movementTypeMenu) movementTypeMenu.style.display = 'none';
+}
+
+function closePostureMenu() {
+    if (postureMenu) postureMenu.style.display = 'none';
+}
+
+function ensurePostureMenu() {
+    if (postureMenu) return postureMenu;
+    postureMenu = document.createElement('div');
+    postureMenu.id = 'combat-posture-menu';
+    postureMenu.style.cssText = `
+        position:fixed;
+        inset:0;
+        z-index:1235;
+        display:none;
+        align-items:center;
+        justify-content:center;
+        padding:16px;
+        background:rgba(4, 7, 10, 0.58);
+        backdrop-filter:blur(3px);
+    `;
+    postureMenu.addEventListener('pointerdown', (event) => {
+        if (event.target === postureMenu) closePostureMenu();
+    });
+    document.body.appendChild(postureMenu);
+    return postureMenu;
+}
+
+function posturePaymentLabel(option) {
+    if (option.resource === 'action') return `${option.cost} ОД`;
+    return `${option.cost} ОП`;
+}
+
+function movementModeSummary(key, mode, posture) {
+    if (key !== 'walk') return mode.summary;
+    if (posture === 'sitting') return 'Сидя: 1 м = 2 ОП, не более 5 м';
+    if (posture === 'prone') return 'Ползком: 1 м = 3 ОП, не более 3 м';
+    return mode.summary;
+}
+
+function showPostureMenu(characterId) {
+    const character = findCombatCharacterByCharacterId(characterId);
+    if (!character || combatState?.status !== 'active') {
+        showNotification('Смена положения доступна во время боя', 'system');
+        return;
+    }
+    if (!canActWithCombatCharacter(character)) {
+        showNotification('Сейчас не ход этого персонажа', 'system');
+        return;
+    }
+
+    const menu = ensurePostureMenu();
+    const currentPosture = character.posture || 'standing';
+    menu.innerHTML = `
+        <div class="posture-panel" style="
+            width:min(620px, calc(100vw - 32px));
+            max-height:calc(100vh - 32px);
+            overflow-y:auto;
+            padding:18px;
+            border-radius:16px;
+            border:1px solid rgba(255,255,255,0.16);
+            background:rgba(14,18,26,0.98);
+            color:#fff;
+            box-shadow:0 24px 60px rgba(0,0,0,0.48);
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:14px;">
+                <div>
+                    <div style="font-size:19px; font-weight:800;">Смена положения</div>
+                    <div style="margin-top:3px; opacity:0.7; font-size:12px;">
+                        Сейчас: ${COMBAT_POSTURES[currentPosture]?.label || 'Стоя'} ·
+                        ОД ${character.action_points_current ?? 0} · ОП ${character.movement_points_current ?? 0}
+                    </div>
+                </div>
+                <button type="button" class="posture-close" style="
+                    width:34px; height:34px; border:0; border-radius:50%;
+                    background:rgba(255,255,255,0.08); color:#fff; cursor:pointer;
+                    font-size:20px;
+                ">×</button>
+            </div>
+            <div class="posture-options" style="display:grid; gap:10px;"></div>
+        </div>
+    `;
+
+    const options = menu.querySelector('.posture-options');
+    Object.entries(COMBAT_POSTURES).forEach(([targetPosture, profile]) => {
+        if (targetPosture === currentPosture) return;
+        const paymentOptions = character.posture_change_options?.[targetPosture] || [];
+        const card = document.createElement('div');
+        card.style.cssText = `
+            display:grid;
+            grid-template-columns:46px minmax(0, 1fr) auto;
+            gap:12px;
+            align-items:center;
+            padding:13px;
+            border-radius:13px;
+            border:1px solid rgba(184,164,110,0.3);
+            background:rgba(184,164,110,0.07);
+        `;
+        card.innerHTML = `
+            <span style="font-size:28px; text-align:center;">${profile.icon}</span>
+            <span>
+                <strong style="display:block; font-size:15px;">${profile.label}</strong>
+                <span style="display:block; margin-top:4px; font-size:12px; opacity:0.75;">
+                    Стрельба +${profile.shootingBonus} · Эргономика +${profile.ergonomicsBonus} ·
+                    Скрытность +${profile.stealthBonus}
+                </span>
+            </span>
+            <span class="posture-payment-buttons" style="display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end;"></span>
+        `;
+        const paymentButtons = card.querySelector('.posture-payment-buttons');
+        paymentOptions.forEach((option) => {
+            const available = option.resource === 'action'
+                ? Number(character.action_points_current) >= option.cost
+                : Number(character.movement_points_current) >= option.cost;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.disabled = !available;
+            button.textContent = posturePaymentLabel(option);
+            button.title = available ? `Перейти в положение «${profile.label}»` : 'Недостаточно ресурсов';
+            button.style.cssText = `
+                min-width:58px;
+                padding:8px 10px;
+                border-radius:9px;
+                border:1px solid rgba(255,255,255,0.16);
+                background:${available ? 'rgba(184,164,110,0.2)' : 'rgba(255,255,255,0.04)'};
+                color:#fff;
+                cursor:${available ? 'pointer' : 'not-allowed'};
+                opacity:${available ? '1' : '0.42'};
+            `;
+            button.onclick = async () => {
+                menu.querySelectorAll('button').forEach((item) => {
+                    item.disabled = true;
+                });
+                try {
+                    await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                        location_character_id: character.location_character_id,
+                        action_key: 'change_posture',
+                        posture: targetPosture,
+                        payment: option.resource,
+                    });
+                    closePostureMenu();
+                    showNotification(`Положение изменено: ${profile.label}`, 'success');
+                } catch (error) {
+                    showNotification(error.message || 'Не удалось изменить положение', 'system');
+                    showPostureMenu(characterId);
+                }
+            };
+            paymentButtons.appendChild(button);
+        });
+        options.appendChild(card);
+    });
+
+    menu.querySelector('.posture-close').onclick = closePostureMenu;
+    menu.style.display = 'flex';
+}
+
+function ensureMovementTypeMenu() {
+    if (movementTypeMenu) return movementTypeMenu;
+    movementTypeMenu = document.createElement('div');
+    movementTypeMenu.id = 'combat-movement-type-menu';
+    movementTypeMenu.style.cssText = `
+        position:fixed;
+        inset:0;
+        z-index:1230;
+        display:none;
+        align-items:center;
+        justify-content:center;
+        padding:16px;
+        background:rgba(4, 7, 10, 0.58);
+        backdrop-filter:blur(3px);
+    `;
+    movementTypeMenu.addEventListener('pointerdown', (event) => {
+        if (event.target === movementTypeMenu) closeMovementTypeMenu();
+    });
+    document.body.appendChild(movementTypeMenu);
+    return movementTypeMenu;
+}
+
+function showMovementTypeMenu(characterId) {
+    const menu = ensureMovementTypeMenu();
+    const current = combatState?.current_character || {};
+    menu.innerHTML = `
+        <div class="movement-type-panel" style="
+            width:min(680px, calc(100vw - 32px));
+            max-height:calc(100vh - 32px);
+            overflow-y:auto;
+            padding:18px;
+            border-radius:16px;
+            border:1px solid rgba(255,255,255,0.16);
+            background:rgba(14,18,26,0.98);
+            color:#fff;
+            box-shadow:0 24px 60px rgba(0,0,0,0.48);
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:14px;">
+                <div>
+                    <div style="font-size:19px; font-weight:800;">Выберите вид движения</div>
+                    <div style="margin-top:3px; opacity:0.7; font-size:12px;">
+                        ОД ${current.action_points_current ?? 0} · СД ${current.free_actions_current ?? 0} · ОП ${current.movement_points_current ?? 0}
+                    </div>
+                </div>
+                <button type="button" class="movement-type-close" style="
+                    width:34px; height:34px; border:0; border-radius:50%;
+                    background:rgba(255,255,255,0.08); color:#fff; cursor:pointer;
+                    font-size:20px;
+                ">×</button>
+            </div>
+            <div class="movement-type-options" style="
+                display:grid;
+                grid-template-columns:repeat(auto-fit, minmax(230px, 1fr));
+                gap:10px;
+            "></div>
+        </div>
+    `;
+
+    const options = menu.querySelector('.movement-type-options');
+    Object.entries(COMBAT_MOVEMENT_TYPES).forEach(([key, mode]) => {
+        const availability = getMovementModeAvailability(key);
+        const movementSummary = movementModeSummary(key, mode, current.posture || 'standing');
+        const resourceCost = [
+            mode.actionPoints ? `${mode.actionPoints} ОД` : null,
+            mode.freeActions ? `${mode.freeActions} СД` : null,
+        ].filter(Boolean).join(' · ') || 'Без ОД и СД';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.disabled = !availability.allowed;
+        button.style.cssText = `
+            display:grid;
+            grid-template-columns:42px minmax(0, 1fr);
+            gap:11px;
+            align-items:start;
+            min-height:112px;
+            padding:13px;
+            border-radius:13px;
+            border:1px solid ${availability.allowed ? 'rgba(184,164,110,0.36)' : 'rgba(255,255,255,0.08)'};
+            background:${availability.allowed ? 'rgba(184,164,110,0.09)' : 'rgba(255,255,255,0.025)'};
+            color:#fff;
+            text-align:left;
+            cursor:${availability.allowed ? 'pointer' : 'not-allowed'};
+            opacity:${availability.allowed ? '1' : '0.48'};
+        `;
+        button.innerHTML = `
+            <span style="font-size:27px; line-height:1;">${mode.icon}</span>
+            <span>
+                <strong style="display:block; font-size:15px;">${mode.label}</strong>
+                <span style="display:block; margin-top:5px; font-size:12px; opacity:0.78;">${movementSummary}</span>
+                <span style="display:block; margin-top:3px; font-size:12px; opacity:0.78;">
+                    ${resourceCost} · осталось ${availability.remainingDistance} м
+                </span>
+                ${availability.reason ? `<span style="display:block; margin-top:6px; font-size:11px; color:#ffb0a8;">${availability.reason}</span>` : ''}
+            </span>
+        `;
+        button.onclick = () => {
+            closeMovementTypeMenu();
+            beginCharacterMoveMode(characterId, key);
+        };
+        options.appendChild(button);
+    });
+
+    const closeButton = menu.querySelector('.movement-type-close');
+    if (closeButton) closeButton.onclick = closeMovementTypeMenu;
+    menu.style.display = 'flex';
+}
+
+function beginCharacterMoveMode(characterId, movementType = 'walk') {
     if (!isCurrentCombatTurnForCharacter(characterId)) {
         showNotification('Сейчас не ход этого персонажа', 'system');
         return false;
@@ -1052,7 +1511,10 @@ function beginCharacterMoveMode(characterId) {
     pendingCombatAction = null;
     clearAttackPreview();
     initializeMovementPreview(characterId);
-    showNotification('Теперь перетащите этого персонажа ЛКМ', 'system');
+    armedMovementType = movementType;
+    const label = COMBAT_MOVEMENT_TYPES[movementType]?.label || 'Движение';
+    showNotification(`${label}: выберите конечную клетку ЛКМ`, 'system');
+    return true;
 }
 
 export function beginPendingCombatAction(action) {
@@ -1127,7 +1589,11 @@ export function startCharacterMoveMode(characterId) {
         return false;
     }
     hideStructureInteraction();
-    return beginCharacterMoveMode(characterId);
+    if (combatState?.status === 'active') {
+        showMovementTypeMenu(characterId);
+        return true;
+    }
+    return beginCharacterMoveMode(characterId, 'walk');
 }
 
 async function resolveCombatTargetSelection(targetCharacterId) {
@@ -1362,6 +1828,7 @@ function createCharacterModel(userId) {
     const bodyMat = new THREE.MeshStandardMaterial({ color });
     const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.position.y = 0.35;
+    body.userData.posturePart = 'body';
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
@@ -1369,6 +1836,7 @@ function createCharacterModel(userId) {
     const headMat = new THREE.MeshStandardMaterial({ color: 0xffddbb });
     const head = new THREE.Mesh(headGeo, headMat);
     head.position.y = 0.8;
+    head.userData.posturePart = 'head';
     head.castShadow = true;
     head.receiveShadow = true;
     group.add(head);
@@ -1420,9 +1888,38 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         effects,
         posX,
         posY,
+        posture: 'standing',
         controlledBy: resolvedControlledBy ?? fallbackOwnerId
     });
+    const combatCharacter = findCombatCharacterByCharacterId(characterId);
+    if (combatCharacter?.posture) {
+        applyCharacterPostureVisual(characterId, combatCharacter.posture);
+    }
     invalidateMovementMapCache();
+}
+
+function applyCharacterPostureVisual(characterId, posture = 'standing') {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry) return;
+    const normalized = COMBAT_POSTURES[posture] ? posture : 'standing';
+    const labelOffset = normalized === 'prone' ? 0.62 : normalized === 'sitting' ? 0.88 : 1.2;
+    const tileHeight = getTileHeight(entry.posX, entry.posY);
+    const body = entry.model.children.find((child) => child.userData?.posturePart === 'body');
+    const head = entry.model.children.find((child) => child.userData?.posturePart === 'head');
+    entry.model.scale.set(1, 1, 1);
+    if (body && head) {
+        body.rotation.z = normalized === 'prone' ? Math.PI / 2 : 0;
+        body.scale.set(1, normalized === 'sitting' ? 0.68 : 1, 1);
+        body.position.set(0, normalized === 'prone' ? 0.25 : normalized === 'sitting' ? 0.25 : 0.35, 0);
+        head.position.set(
+            normalized === 'prone' ? 0.48 : 0,
+            normalized === 'prone' ? 0.22 : normalized === 'sitting' ? 0.58 : 0.8,
+            0,
+        );
+    }
+    entry.model.userData.posture = normalized;
+    entry.label.position.y = tileHeight + labelOffset;
+    entry.posture = normalized;
 }
 
 export function updateCharacterPosition(characterId, posX, posY) {
@@ -1430,7 +1927,8 @@ export function updateCharacterPosition(characterId, posX, posY) {
     if (!entry) return;
     const tileHeight = getTileHeight(posX, posY);
     entry.model.position.set(posX + 0.5, tileHeight, posY + 0.5);
-    entry.label.position.set(posX + 0.5, tileHeight + 1.2, posY + 0.5);
+    const labelOffset = entry.posture === 'prone' ? 0.62 : entry.posture === 'sitting' ? 0.88 : 1.2;
+    entry.label.position.set(posX + 0.5, tileHeight + labelOffset, posY + 0.5);
     entry.posX = posX;
     entry.posY = posY;
     invalidateMovementMapCache();
@@ -1576,6 +2074,11 @@ function renderCombatHud() {
     const aimedTarget = (combatState.characters || []).find(
         char => char.character_id === combatState.current_character?.aimed_target_character_id
     );
+    const isCollapsed = combatHudCollapsed ?? combatState.status !== 'active';
+    const compactStatus = combatState.status === 'active'
+        ? `Раунд ${combatState.round_number || 0} · ${combatState.current_character?.name || 'нет хода'} · ${combatState.current_character?.posture_label || 'Стоя'}`
+        : 'бой не активен';
+    combatHud.style.minWidth = isCollapsed ? '230px' : '260px';
     combatHud.innerHTML = `
         <div class="combat-hud-header" style="
             display:flex;
@@ -1587,13 +2090,36 @@ function renderCombatHud() {
             cursor:move;
             user-select:none;
         ">
-            <div style="font-weight:700; font-size:15px;">Бой</div>
-            <div style="font-size:12px; opacity:0.75;">перетащи меня</div>
+            <div style="min-width:0;">
+                <div style="font-weight:700; font-size:15px;">Бой</div>
+                <div style="font-size:11px; opacity:0.7; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${compactStatus}</div>
+            </div>
+            <button
+                type="button"
+                class="combat-hud-collapse-btn"
+                aria-label="${isCollapsed ? 'Развернуть панель боя' : 'Свернуть панель боя'}"
+                aria-expanded="${isCollapsed ? 'false' : 'true'}"
+                title="${isCollapsed ? 'Развернуть' : 'Свернуть'}"
+                style="
+                    flex:0 0 30px;
+                    width:30px;
+                    height:30px;
+                    padding:0;
+                    border:1px solid rgba(255,255,255,0.16);
+                    border-radius:8px;
+                    background:rgba(255,255,255,0.07);
+                    color:#fff;
+                    font-size:18px;
+                    line-height:1;
+                    cursor:pointer;
+                "
+            >${isCollapsed ? '+' : '−'}</button>
         </div>
-        <div style="padding:12px 14px; font-size:13px; line-height:1.45;">
+        <div class="combat-hud-body" style="display:${isCollapsed ? 'none' : 'block'}; padding:12px 14px; font-size:13px; line-height:1.45;">
             <div>Статус: <strong>${combatState.status || 'idle'}</strong></div>
             <div>Раунд: <strong>${combatState.round_number || 0}</strong></div>
             <div>Ход: <strong>${combatState.current_character?.name || 'нет'}</strong></div>
+            <div>Положение: <strong>${combatState.current_character?.posture_label || 'Стоя'}</strong></div>
             <div>ОД: ${combatState.current_character?.action_points_current ?? 0}/${combatState.current_character?.action_points_max ?? 0}</div>
             <div>СД: ${combatState.current_character?.free_actions_current ?? 0}/${combatState.current_character?.free_actions_max ?? 0}</div>
             <div>ОП: ${combatState.current_character?.movement_points_current ?? 0}/${combatState.current_character?.movement_points_max ?? 0}</div>
@@ -1622,6 +2148,16 @@ function renderCombatHud() {
         </div>
     `;
     ensureCombatHudDragging();
+    const collapseBtn = combatHud.querySelector('.combat-hud-collapse-btn');
+    if (collapseBtn) {
+        collapseBtn.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            combatHudCollapsed = !isCollapsed;
+            window.localStorage.setItem('combatHudCollapsed', combatHudCollapsed ? '1' : '0');
+            renderCombatHud();
+        };
+    }
     const startBtn = combatHud.querySelector('.combat-start-btn');
     if (startBtn) {
         startBtn.onclick = async () => {
@@ -1670,6 +2206,9 @@ function renderCombatHud() {
 export function setCombatState(state) {
     combatState = state || null;
     window.locationCombatState = combatState;
+    (combatState?.characters || []).forEach((character) => {
+        applyCharacterPostureVisual(character.character_id, character.posture);
+    });
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
     renderCombatHud();
 }
@@ -4108,6 +4647,14 @@ function setupCharacterDragging() {
             return;
         }
         if (e.key !== 'Escape') return;
+        if (movementTypeMenu && movementTypeMenu.style.display !== 'none') {
+            e.preventDefault();
+            closeMovementTypeMenu();
+        }
+        if (postureMenu && postureMenu.style.display !== 'none') {
+            e.preventDefault();
+            closePostureMenu();
+        }
         if (pendingCombatAction) {
             e.preventDefault();
             clearPendingCombatAction();
@@ -4126,6 +4673,7 @@ function setupCharacterDragging() {
         closeMedicalConsumableMenu();
     }
     armedMoveCharacterId = null;
+    armedMovementType = null;
     clearMovementPreview();
 };
     document.addEventListener('keydown', onKeyDown);

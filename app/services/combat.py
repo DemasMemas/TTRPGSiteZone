@@ -15,10 +15,81 @@ DEFAULT_FREE_ACTIONS = 1
 DEFAULT_MOVEMENT_POINTS = 6
 DEFAULT_CONVERSION_BASE = 10
 
+POSTURES = {
+    'standing': {
+        'label': 'Стоя',
+        'movement_multiplier': 1,
+        'walk_max_distance': 10,
+        'shooting_bonus': 0,
+        'ergonomics_bonus': 0,
+        'stealth_bonus': 0,
+        'can_run': True,
+        'can_sprint': True,
+        'can_correction': True,
+        'can_use_low_cover': False,
+    },
+    'sitting': {
+        'label': 'Сидя',
+        'movement_multiplier': 2,
+        'walk_max_distance': 5,
+        'shooting_bonus': 1,
+        'ergonomics_bonus': 10,
+        'stealth_bonus': 2,
+        'can_run': False,
+        'can_sprint': False,
+        'can_correction': True,
+        'can_use_low_cover': True,
+    },
+    'prone': {
+        'label': 'Лёжа',
+        'movement_multiplier': 3,
+        'walk_max_distance': 3,
+        'shooting_bonus': 2,
+        'ergonomics_bonus': 20,
+        'stealth_bonus': 4,
+        'can_run': False,
+        'can_sprint': False,
+        'can_correction': False,
+        'can_use_low_cover': True,
+    },
+}
+
+MOVEMENT_MODES = {
+    'walk': {
+        'label': 'Ходьба',
+        'max_distance': 10,
+        'movement_divisor': 1,
+        'action_points': 0,
+        'free_actions': 0,
+    },
+    'correction': {
+        'label': 'Корректировка',
+        'max_distance': 3,
+        'movement_divisor': None,
+        'action_points': 0,
+        'free_actions': 1,
+    },
+    'run': {
+        'label': 'Бег',
+        'max_distance': 20,
+        'movement_divisor': 2,
+        'action_points': 2,
+        'free_actions': 0,
+    },
+    'sprint': {
+        'label': 'Спринт',
+        'max_distance': 30,
+        'movement_divisor': 3,
+        'action_points': 4,
+        'free_actions': 0,
+    },
+}
+
 
 ACTION_CATALOG = [
     {'key': 'attack', 'label': 'Атака', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
     {'key': 'aim', 'label': 'Прицеливание', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'change_posture', 'label': 'Смена положения', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'defend', 'label': 'Защита', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
     {'key': 'use_item', 'label': 'Использовать предмет', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
     {'key': 'convert_free_action_to_movement', 'label': 'Получить ОП', 'action_points': 2, 'free_actions': 1, 'movement_points': 0},
@@ -34,6 +105,67 @@ class CombatService:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _posture_key(loc_char):
+        posture = str(getattr(loc_char, 'posture', None) or 'standing').lower()
+        return posture if posture in POSTURES else 'standing'
+
+    @staticmethod
+    def _posture_change_options(loc_char, target_posture):
+        source = CombatService._posture_key(loc_char)
+        target = str(target_posture or '').lower()
+        if target not in POSTURES:
+            raise ValidationError("Unknown posture")
+        if source == target:
+            raise ValidationError("Character is already in this posture")
+
+        data = loc_char.character.data if loc_char.character and isinstance(loc_char.character.data, dict) else {}
+        agility_bonus = CombatService._skill_modifier(data, 'skills.physical.agility')
+        transition = frozenset((source, target))
+        if transition == frozenset(('standing', 'sitting')):
+            return [{'resource': 'movement', 'cost': max(0, 5 - agility_bonus)}]
+        if transition == frozenset(('sitting', 'prone')):
+            return [
+                {'resource': 'movement', 'cost': 4},
+                {'resource': 'action', 'cost': 1},
+            ]
+        if transition == frozenset(('standing', 'prone')):
+            return [{'resource': 'movement', 'cost': max(0, 8 - agility_bonus)}]
+        raise ValidationError("Unsupported posture transition")
+
+    @staticmethod
+    def _validate_posture_movement(posture, movement_mode):
+        posture_key = posture if posture in POSTURES else 'standing'
+        posture_profile = POSTURES[posture_key]
+        if movement_mode == 'run' and not posture_profile['can_run']:
+            raise ValidationError("Running is only possible while standing")
+        if movement_mode == 'sprint' and not posture_profile['can_sprint']:
+            raise ValidationError("Sprinting is only possible while standing")
+        if movement_mode == 'correction' and not posture_profile['can_correction']:
+            raise ValidationError("Correction movement is unavailable while prone")
+        return posture_profile
+
+    @staticmethod
+    def _movement_route_cost(path, movement_mode, posture='standing'):
+        mode = MOVEMENT_MODES.get(movement_mode)
+        if not mode:
+            raise ValidationError("Unknown movement mode")
+        posture_profile = POSTURES.get(posture, POSTURES['standing'])
+        route = path if isinstance(path, dict) else {}
+        route_tiles = route.get('path') if isinstance(route.get('path'), list) else []
+        distance = max(0, len(route_tiles) - 1)
+        raw_cost = max(0, CombatService._coerce_int(route.get('cost'), distance))
+        climb_cost = max(0, CombatService._coerce_int(route.get('climb_cost'), 0))
+        travel_cost = max(0, raw_cost - climb_cost)
+        divisor = mode['movement_divisor']
+        adjusted_travel_cost = travel_cost * posture_profile['movement_multiplier']
+        movement_cost = 0 if divisor is None else math.ceil(adjusted_travel_cost / divisor)
+        return {
+            'distance': distance,
+            'movement_points': movement_cost + climb_cost,
+            'climb_cost': climb_cost,
+        }
 
     @staticmethod
     def _get_location(location_id):
@@ -110,15 +242,104 @@ class CombatService:
         equipment = data.get('equipment', {}) if isinstance(data, dict) else {}
         armor = equipment.get('armor', {}) if isinstance(equipment, dict) else {}
 
-        raw_penalty = (
+        armor_penalty = (
             armor.get('movementPenalty')
             if isinstance(armor, dict) else None
         )
-        if raw_penalty is None and isinstance(armor, dict):
-            raw_penalty = armor.get('movement_penalty')
-        if raw_penalty is None:
-            raw_penalty = data.get('movementPenalty', data.get('movement_penalty', 0))
-        return max(0, CombatService._coerce_int(raw_penalty, 0))
+        if armor_penalty is None and isinstance(armor, dict):
+            armor_penalty = armor.get('movement_penalty')
+
+        weight_penalty = CombatService._inventory_movement_penalty(data)
+        temporary_penalty = CombatService._consumable_stat_bonus(data, 'movement_points')
+        return max(
+            0,
+            CombatService._coerce_int(armor_penalty, 0)
+            + weight_penalty
+            + temporary_penalty,
+        )
+
+    @staticmethod
+    def _item_total_weight(item):
+        if not isinstance(item, dict):
+            return 0.0
+        category = item.get('category')
+        quantity = max(0, CombatService._coerce_int(item.get('quantity'), 1))
+        try:
+            base_weight = float(item.get('weight') or 0)
+        except (TypeError, ValueError):
+            base_weight = 0.0
+
+        if category == 'magazine':
+            ammo = item.get('ammo') if isinstance(item.get('ammo'), list) else []
+            current_ammo = sum(
+                max(0, CombatService._coerce_int(stack.get('quantity'), 0))
+                for stack in ammo
+                if isinstance(stack, dict)
+            )
+            weight_key = 'loadedWeight' if current_ammo > 0 else 'emptyWeight'
+            try:
+                base_weight = float(item.get(weight_key) or 0)
+            except (TypeError, ValueError):
+                base_weight = 0.0
+        elif category == 'ammo':
+            if quantity <= 0:
+                return 0.0
+            try:
+                single_volume = float(item.get('volume') or 0.02)
+            except (TypeError, ValueError):
+                single_volume = 0.02
+            return 0.1 if single_volume * quantity < 0.5 else 0.25
+
+        total = base_weight * max(1, quantity)
+        for key in ('contents', 'installedModules'):
+            nested = item.get(key)
+            if isinstance(nested, list):
+                total += sum(CombatService._item_total_weight(child) for child in nested)
+        return total
+
+    @staticmethod
+    def _inventory_movement_penalty(character_data):
+        if not isinstance(character_data, dict):
+            return 0
+        inventory = character_data.get('inventory')
+        inventory = inventory if isinstance(inventory, dict) else {}
+        equipment = character_data.get('equipment')
+        equipment = equipment if isinstance(equipment, dict) else {}
+
+        carried_items = []
+        for key in ('backpack', 'pockets'):
+            values = inventory.get(key)
+            if isinstance(values, list):
+                carried_items.extend(values)
+        for group in ('belt', 'vest'):
+            container = equipment.get(group)
+            pouches = container.get('pouches') if isinstance(container, dict) else []
+            for pouch in pouches if isinstance(pouches, list) else []:
+                if isinstance(pouch, dict) and isinstance(pouch.get('contents'), list):
+                    carried_items.extend(pouch['contents'])
+        weapons = character_data.get('weapons')
+        if isinstance(weapons, list):
+            carried_items.extend(weapons)
+
+        total_weight = sum(CombatService._item_total_weight(item) for item in carried_items)
+        strength_bonus = CombatService._skill_modifier(
+            character_data,
+            'skills.physical.strength',
+        )
+        weight_per_penalty = max(0.5, 5 * (1 + strength_bonus * 0.1))
+        backpack_reduction = 0
+        backpack_template_id = CombatService._coerce_int(inventory.get('backpackModel'), 0)
+        if backpack_template_id:
+            template = db.session.get(ItemTemplate, backpack_template_id)
+            attributes = template.attributes if template and isinstance(template.attributes, dict) else {}
+            backpack_reduction = max(
+                0,
+                CombatService._coerce_int(attributes.get('weight_reduction'), 0),
+            )
+        return max(
+            0,
+            math.floor(total_weight / weight_per_penalty) - backpack_reduction,
+        )
 
     @staticmethod
     def _skill_modifier(character_data, skill_path):
@@ -659,6 +880,9 @@ class CombatService:
         loc_char.free_actions_current = profile['free_actions']
         loc_char.movement_points_max = 0
         loc_char.movement_points_current = 0
+        loc_char.movement_mode_this_turn = None
+        loc_char.movement_distance_this_turn = 0
+        loc_char.correction_distance_this_turn = 0
         if getattr(loc_char, 'character', None) and isinstance(loc_char.character.data, dict):
             data = loc_char.character.data
             health = data.get('health') if isinstance(data.get('health'), dict) else {}
@@ -673,6 +897,16 @@ class CombatService:
     def _serialize_character(loc_char, current_turn_id=None):
         character = loc_char.character
         profile = CombatService._combat_profile(loc_char)
+        posture = CombatService._posture_key(loc_char)
+        posture_profile = POSTURES[posture]
+        posture_change_options = {}
+        for target_posture in POSTURES:
+            if target_posture == posture:
+                continue
+            posture_change_options[target_posture] = CombatService._posture_change_options(
+                loc_char,
+                target_posture,
+            )
         data = character.data if character and isinstance(character.data, dict) else {}
         health = data.get('health') if isinstance(data, dict) else {}
         if not isinstance(health, dict):
@@ -698,6 +932,24 @@ class CombatService:
             'movement_points_current': loc_char.movement_points_current or 0,
             'movement_penalty': profile['movement_penalty'],
             'movement_gain': profile['movement_gain'],
+            'movement_mode_this_turn': loc_char.movement_mode_this_turn,
+            'movement_distance_this_turn': loc_char.movement_distance_this_turn or 0,
+            'correction_distance_this_turn': loc_char.correction_distance_this_turn or 0,
+            'strenuous_movement_blocked_until_round': loc_char.strenuous_movement_blocked_until_round or 0,
+            'posture': posture,
+            'posture_label': posture_profile['label'],
+            'posture_change_options': posture_change_options,
+            'posture_modifiers': {
+                'shooting_bonus': posture_profile['shooting_bonus'],
+                'ergonomics_bonus': posture_profile['ergonomics_bonus'],
+                'stealth_bonus': posture_profile['stealth_bonus'],
+                'movement_multiplier': posture_profile['movement_multiplier'],
+                'walk_max_distance': posture_profile['walk_max_distance'],
+                'can_run': posture_profile['can_run'],
+                'can_sprint': posture_profile['can_sprint'],
+                'can_correction': posture_profile['can_correction'],
+                'can_use_low_cover': posture_profile['can_use_low_cover'],
+            },
             'aimed_target_character_id': loc_char.aimed_target_character_id,
             'aimed_weapon_index': loc_char.aimed_weapon_index,
             'hp_zones': loc_char.hp_zones,
@@ -815,6 +1067,7 @@ class CombatService:
             loc_char.initiative_bonus = profile['initiative_bonus']
             loc_char.initiative_roll = random.randint(1, 20)
             loc_char.initiative_total = loc_char.initiative_roll + loc_char.initiative_bonus
+            loc_char.strenuous_movement_blocked_until_round = 0
             CombatService._prepare_character_for_turn(loc_char)
             CombatService._sync_location_effects_from_character(loc_char)
 
@@ -972,6 +1225,8 @@ class CombatService:
         area_center_y=None,
         target_x=None,
         target_y=None,
+        posture=None,
+        payment=None,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -995,6 +1250,33 @@ class CombatService:
 
         attack_details = None
         aim_details = None
+        posture_details = None
+        if action_key == 'change_posture':
+            target_posture = str(posture or '').lower()
+            options = CombatService._posture_change_options(character, target_posture)
+            selected_payment = str(payment or 'movement').lower()
+            selected = next(
+                (option for option in options if option['resource'] == selected_payment),
+                None,
+            )
+            if not selected:
+                raise ValidationError("Invalid posture payment method")
+            if selected_payment == 'movement':
+                if character.movement_points_current < selected['cost']:
+                    raise ValidationError("Not enough movement points")
+                character.movement_points_current -= selected['cost']
+            else:
+                if character.action_points_current < selected['cost']:
+                    raise ValidationError("Not enough action points")
+                character.action_points_current -= selected['cost']
+            source_posture = CombatService._posture_key(character)
+            character.posture = target_posture
+            posture_details = {
+                'from': source_posture,
+                'to': target_posture,
+                **selected,
+            }
+
         if action_key == 'aim':
             weapons = (character.character.data or {}).get('weapons') or []
             weapon_index = CombatService._coerce_int(weapon_index, -1)
@@ -1125,6 +1407,10 @@ class CombatService:
                 'target_object_id': target_object_id,
                 'area_center_x': area_center_x,
                 'area_center_y': area_center_y,
+                'posture': CombatService._posture_key(character),
+                'posture_shooting_bonus': POSTURES[CombatService._posture_key(character)]['shooting_bonus'],
+                'posture_ergonomics_bonus': POSTURES[CombatService._posture_key(character)]['ergonomics_bonus'],
+                'shooter_movement_mode': character.movement_mode_this_turn,
             }
 
         if action_key == 'convert_free_action_to_movement':
@@ -1137,6 +1423,9 @@ class CombatService:
                 raise ValidationError("Not enough action points")
             character.movement_points_max += gain
             character.movement_points_current += gain
+        elif action_key == 'change_posture':
+            character.aimed_target_character_id = None
+            character.aimed_weapon_index = None
         else:
             action_point_cost = (
                 attack_details['action_points']
@@ -1168,10 +1457,21 @@ class CombatService:
             'action': action_key,
             'attack': attack_details,
             'aim': aim_details,
+            'posture_change': posture_details,
         }
 
     @staticmethod
-    def move_character(location_id, user_id, character_id, new_x, new_y, special_action=None, object_id=None, climb_mode=None):
+    def move_character(
+        location_id,
+        user_id,
+        character_id,
+        new_x,
+        new_y,
+        special_action=None,
+        object_id=None,
+        climb_mode=None,
+        movement_mode=None,
+    ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
@@ -1192,6 +1492,8 @@ class CombatService:
             raise PermissionDenied("It is not this character's turn")
 
         if special_action == 'climb':
+            if CombatService._posture_key(character) != 'standing':
+                raise ValidationError("Stand up before climbing")
             climb_object = None
             if object_id is not None:
                 climb_object = LocationObject.query.filter_by(
@@ -1250,15 +1552,82 @@ class CombatService:
         cost = path['cost']
         climb_cost = path.get('climb_cost', 0)
         if state and state.status == 'active':
-            if cost <= character.movement_points_current:
-                character.movement_points_current -= cost
-            elif climb_cost > 0:
-                ap_cost = 3 if climb_cost >= 10 else 1
-                if character.action_points_current < ap_cost:
+            movement_mode = str(movement_mode or '').lower()
+            mode = MOVEMENT_MODES.get(movement_mode)
+            if not mode:
+                raise ValidationError("Choose a movement mode")
+            posture = CombatService._posture_key(character)
+            posture_profile = CombatService._validate_posture_movement(posture, movement_mode)
+
+            current_round = max(1, state.round_number or 1)
+            if (
+                movement_mode in {'run', 'sprint'}
+                and (character.strenuous_movement_blocked_until_round or 0) >= current_round
+            ):
+                raise ValidationError("Running and sprinting are blocked by exhaustion")
+
+            route_cost = CombatService._movement_route_cost(path, movement_mode, posture)
+            distance = route_cost['distance']
+            movement_cost = route_cost['movement_points']
+            if distance <= 0:
+                return character, 0, CombatService._serialize_state(location, state)
+
+            used_mode = character.movement_mode_this_turn
+            if used_mode and used_mode != movement_mode:
+                raise ValidationError("Movement modes cannot be mixed in one turn")
+            if movement_mode == 'correction':
+                used_distance = character.correction_distance_this_turn or 0
+            else:
+                used_distance = character.movement_distance_this_turn or 0
+
+            max_distance = (
+                posture_profile['walk_max_distance']
+                if movement_mode == 'walk'
+                else mode['max_distance']
+            )
+            if used_distance + distance > max_distance:
+                raise ValidationError(
+                    f"{mode['label']} distance is limited to {max_distance} meters per turn"
+                )
+            if character.action_points_current < mode['action_points']:
+                raise ValidationError("Not enough action points")
+            if character.free_actions_current < mode['free_actions']:
+                raise ValidationError("Not enough free actions")
+
+            if movement_cost <= character.movement_points_current:
+                character.movement_points_current -= movement_cost
+            elif (
+                route_cost['climb_cost'] > 0
+                and character.movement_points_current >= movement_cost - route_cost['climb_cost']
+            ):
+                ap_cost = 3 if route_cost['climb_cost'] >= 10 else 1
+                if character.action_points_current < mode['action_points'] + ap_cost:
                     raise ValidationError("Not enough movement points")
+                character.movement_points_current -= movement_cost - route_cost['climb_cost']
                 character.action_points_current -= ap_cost
             else:
                 raise ValidationError("Not enough movement points")
+
+            character.action_points_current -= mode['action_points']
+            character.free_actions_current -= mode['free_actions']
+            if movement_mode == 'correction':
+                character.movement_mode_this_turn = movement_mode
+                character.correction_distance_this_turn = used_distance + distance
+            else:
+                character.movement_mode_this_turn = movement_mode
+                character.movement_distance_this_turn = used_distance + distance
+
+            if movement_mode == 'run':
+                character.strenuous_movement_blocked_until_round = max(
+                    character.strenuous_movement_blocked_until_round or 0,
+                    current_round + 1,
+                )
+            elif movement_mode == 'sprint':
+                character.strenuous_movement_blocked_until_round = max(
+                    character.strenuous_movement_blocked_until_round or 0,
+                    current_round + 2,
+                )
+            cost = movement_cost
 
         character.pos_x = new_x
         character.pos_y = new_y
@@ -1294,6 +1663,10 @@ class CombatService:
             loc_char.initiative_roll = None
             loc_char.initiative_total = None
             loc_char.movement_points_current = 0
+            loc_char.movement_mode_this_turn = None
+            loc_char.movement_distance_this_turn = 0
+            loc_char.correction_distance_this_turn = 0
+            loc_char.strenuous_movement_blocked_until_round = 0
             character = getattr(loc_char, 'character', None)
             if character and isinstance(character.data, dict):
                 data = character.data

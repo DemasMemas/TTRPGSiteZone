@@ -852,6 +852,32 @@ function getTotalWeight(item) {
     return total;
 }
 
+function getSkillRollModifier(data, skillPath) {
+    const parts = skillPath.split('.');
+    let skill = data?.skills;
+    for (const part of parts) {
+        if (!skill || typeof skill !== 'object') return 0;
+        skill = skill[part];
+    }
+    const base = Number(skill?.base);
+    const permanentBonus = Number(skill?.bonus) || 0;
+    const baseModifier = Number.isFinite(base) ? Math.floor((base - 10) / 2) : 0;
+    const modifiers = data?.health?.combatMeta?.consumableModifiers;
+    const temporaryBonus = Array.isArray(modifiers)
+        ? modifiers.reduce((sum, modifier) => {
+            if (!modifier || modifier.stat !== skillPath.split('.').pop()) return sum;
+            if (modifier.remaining !== undefined && Number(modifier.remaining) <= 0) return sum;
+            return sum + (Number(modifier.value) || 0);
+        }, 0)
+        : 0;
+    return baseModifier + permanentBonus + temporaryBonus;
+}
+
+function getWeightPerMovementPenalty(data) {
+    const strengthBonus = getSkillRollModifier(data, 'physical.strength');
+    return Math.max(0.5, 5 * (1 + strengthBonus * 0.1));
+}
+
 function applyModifier(base, mod) {
     if (mod === undefined || mod === null || mod === '') return base;
     const str = String(mod).trim();
@@ -8623,13 +8649,17 @@ async function renderInventoryTab(data) {
 
     const rawTotalWeight = pockets.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0) +
                            backpack.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0);
-    const movePenaltyFromWeight = Math.floor(rawTotalWeight / 5);
+    const weightPerPenalty = getWeightPerMovementPenalty(data);
+    const movePenaltyFromWeight = Math.floor(rawTotalWeight / weightPerPenalty);
     const movePenalty = Math.max(0, movePenaltyFromWeight - backpackWeightReduction);
 
     let html = `
         <div style="display: flex; gap: 20px; margin-bottom: 15px;">
             <div><strong>Общий вес:</strong> <span id="total-weight-display">${rawTotalWeight}</span></div>
-            <div><strong>Штраф перемещения:</strong> <span id="move-penalty-display">${movePenalty}</span></div>
+            <div>
+                <strong>Штраф перемещения:</strong> <span id="move-penalty-display">${movePenalty}</span>
+                <small style="opacity:0.65;">(1 за <span id="move-penalty-weight-step">${weightPerPenalty.toFixed(1)}</span> кг)</small>
+            </div>
         </div>
         ${window.isGM ? `<div style="margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
             <button type="button" class="btn btn-sm btn-primary" onclick="openCreateInventoryItemModal()">➕ Создать предмет</button>
@@ -10027,10 +10057,13 @@ function recalculateInventoryTotals() {
         backpackFillSpan.textContent = `Заполнено: ${backpackVolume.toFixed(1)} / ${backpackLimit}`;
     }
 
-    const movePenaltyFromWeight = Math.floor(totalWeight / 5);
+    const weightPerPenalty = getWeightPerMovementPenalty(currentCharacterData);
+    const movePenaltyFromWeight = Math.floor(totalWeight / weightPerPenalty);
     const movePenalty = Math.max(0, movePenaltyFromWeight - backpackWeightReduction);
     const movePenaltySpan = document.getElementById('move-penalty-display');
     if (movePenaltySpan) movePenaltySpan.textContent = movePenalty;
+    const weightStepSpan = document.getElementById('move-penalty-weight-step');
+    if (weightStepSpan) weightStepSpan.textContent = weightPerPenalty.toFixed(1);
 
     // Заполненность карманов
     const pocketMaxVolume = inv.pocketMaxVolume || 10;

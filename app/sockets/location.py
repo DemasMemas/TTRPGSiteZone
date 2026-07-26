@@ -168,6 +168,7 @@ def handle_move_in_location(data):
     special_action = data.get('special_action')
     object_id = data.get('object_id')
     climb_mode = data.get('climb_mode')
+    movement_mode = data.get('movement_mode')
     if not all([token, location_id, character_id, new_x is not None, new_y is not None]):
         return
 
@@ -186,6 +187,7 @@ def handle_move_in_location(data):
             special_action,
             object_id,
             climb_mode,
+            movement_mode,
         )
     except ServiceError as exc:
         emit('error', {'message': str(exc)}, room=request.sid)
@@ -198,6 +200,7 @@ def handle_move_in_location(data):
             'x': moved_character.pos_x,
             'y': moved_character.pos_y,
             'movement_cost': cost,
+            'movement_mode': movement_mode,
         },
         room=f"location_{location_id}",
     )

@@ -908,6 +908,8 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         area_center_y=data.get('area_center_y'),
         target_x=data.get('target_x'),
         target_y=data.get('target_y'),
+        posture=data.get('posture'),
+        payment=data.get('payment'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
