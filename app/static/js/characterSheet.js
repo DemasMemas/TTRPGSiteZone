@@ -941,7 +941,57 @@ function getSkillRollModifier(data, skillPath) {
             return sum + (Number(modifier.value) || 0);
         }, 0)
         : 0;
-    return baseModifier + permanentBonus + temporaryBonus;
+    return baseModifier + permanentBonus + temporaryBonus + getHealthRollModifier(data, skillPath);
+}
+
+function getHealthRollModifier(data, skillPath, options = {}) {
+    const health = data?.health || {};
+    let modifier = 0;
+    if (options.includePain !== false) modifier -= Number(health.painLevel) || 0;
+    modifier -= Number(health.exhaustion) || 0;
+    const bleeding = health.bleeding || {};
+    modifier -= Number(bleeding.totalSeverity ?? health.bleedingSeverity) || 0;
+
+    const temperature = Number(health.temperature);
+    if (temperature >= 30 && temperature <= 33) modifier -= 7;
+    else if (temperature >= 38 && temperature <= 39) modifier -= 3;
+    else if (temperature >= 40 && temperature < 41) modifier -= 7;
+
+    Object.values(health.zones || {}).forEach(zone => {
+        if (!zone || typeof zone !== 'object') return;
+        const penalties = zone.penalties || {};
+        modifier -= Number(zone.rollPenalty ?? zone.roll_penalty ?? zone.skillPenalty ?? 0) || 0;
+        modifier -= Number(penalties.all ?? penalties.roll ?? 0) || 0;
+        modifier -= Number(penalties[skillPath] ?? 0) || 0;
+        modifier -= Number(skillPath.startsWith('physical.') ? penalties.physical : penalties.other) || 0;
+    });
+
+    (Array.isArray(health.effects) ? health.effects : []).forEach(effect => {
+        if (!effect || effect.active === false || (effect.remaining != null && Number(effect.remaining) <= 0)) return;
+        const penalties = effect.modifiers || {};
+        modifier -= Number(effect.rollPenalty ?? effect.roll_penalty ?? effect.skillPenalty ?? 0) || 0;
+        modifier -= Number(penalties.all ?? 0) || 0;
+        modifier -= Number(penalties[skillPath] ?? 0) || 0;
+        modifier -= Number(skillPath.startsWith('physical.') ? penalties.physical : penalties.other) || 0;
+        if (effect.type === 'stimulant_crash') {
+            modifier -= Number(effect.phase_penalty ?? effect.value ?? 0) || 0;
+        }
+    });
+
+    if (skillPath === 'physical.will') {
+        const psyState = Number(health.psyState ?? health.psy_state) || 0;
+        modifier -= psyState >= 10 ? 1 : 0;
+    }
+    return modifier;
+}
+
+function hasHealthRollDisadvantage(data, skillPath) {
+    const psyState = Number(data?.health?.psyState ?? data?.health?.psy_state) || 0;
+    return (
+        skillPath === 'physical.shooting' && psyState >= 30
+    ) || (
+        skillPath === 'physical.will' && psyState >= 40
+    );
 }
 
 function getWeightPerMovementPenalty(data) {
@@ -11957,21 +12007,27 @@ window.rollSkill = function(skillPath, skillLabel) {
     // Можно добавить другие бонусы по необходимости (например, от артефактов, контейнеров и т.д.)
 
     // Итоговый бонус: собственный бонус навыка + модификатор от базы + харизма + экипировка
-    const totalBonus = bonus + selfMod + charismaMod + equipmentBonus;
+    const statusModifier = getHealthRollModifier(currentCharacterData, skillPath);
+    const totalBonus = bonus + selfMod + charismaMod + equipmentBonus + statusModifier;
 
-    const dice = Math.floor(Math.random() * 20) + 1;
+    const firstDice = Math.floor(Math.random() * 20) + 1;
+    const disadvantaged = hasHealthRollDisadvantage(currentCharacterData, skillPath);
+    const secondDice = disadvantaged ? Math.floor(Math.random() * 20) + 1 : firstDice;
+    const dice = disadvantaged ? Math.min(firstDice, secondDice) : firstDice;
     const total = dice + totalBonus;
 
     let modStr = `модификатор навыка = ${selfMod}`;
     if (charismaMod !== 0) modStr += ` + харизма = ${charismaMod}`;
     if (bonus !== 0) modStr += ` + бонус навыка = ${bonus}`;
     if (equipmentBonus !== 0) modStr += ` + экипировка = ${equipmentBonus}`;
+    if (statusModifier !== 0) modStr += ` + состояния = ${statusModifier}`;
 
-    showNotification(`🎲 ${skillLabel}: бросок к20 = ${dice}, ${modStr}, итог = ${total}`, 'system');
+    const disadvantageText = disadvantaged ? ', Помеха' : '';
+    showNotification(`🎲 ${skillLabel}: бросок к20 = ${dice}${disadvantaged ? ` (${firstDice}/${secondDice})` : ''}${disadvantageText}, ${modStr}, итог = ${total}`, 'system');
 
     const socket = getSocket();
     if (socket && currentLobbyId) {
-        const message = `🎲 ${skillLabel}: бросок к20 = ${dice}, ${modStr}, итог = **${total}**`;
+        const message = `🎲 ${skillLabel}: бросок к20 = ${dice}${disadvantaged ? ` (${firstDice}/${secondDice}), Помеха` : ''}, ${modStr}, итог = **${total}**`;
         socket.emit('send_message', {
             token: localStorage.getItem('access_token'),
             lobby_id: currentLobbyId,

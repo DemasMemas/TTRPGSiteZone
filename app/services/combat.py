@@ -453,8 +453,14 @@ class CombatService:
 
         posture = CombatService._posture_key(loc_char)
         posture_bonus = POSTURES[posture]['ergonomics_bonus']
-        shooting_value = CombatService._skill_value(data, 'skills.physical.shooting')
-        tactics_value = CombatService._skill_value(data, 'skills.other.tactics')
+        shooting_value = (
+            CombatService._skill_value(data, 'skills.physical.shooting')
+            + CombatService._health_roll_modifier(data, 'skills.physical.shooting')
+        )
+        tactics_value = (
+            CombatService._skill_value(data, 'skills.other.tactics')
+            + CombatService._health_roll_modifier(data, 'skills.other.tactics')
+        )
         effective_value = max(
             0,
             weapon_ergonomics
@@ -715,7 +721,80 @@ class CombatService:
         )
 
     @staticmethod
-    def _skill_modifier(character_data, skill_path):
+    def _health_roll_modifier(character_data, skill_path, include_pain=True):
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        if not isinstance(health, dict):
+            return 0
+        modifier = 0
+        if include_pain:
+            modifier -= CombatService._coerce_int(health.get('painLevel'), 0)
+        modifier -= CombatService._coerce_int(health.get('exhaustion'), 0)
+        bleeding = health.get('bleeding') if isinstance(health.get('bleeding'), dict) else {}
+        modifier -= CombatService._coerce_int(bleeding.get('totalSeverity', health.get('bleedingSeverity')), 0)
+
+        temperature = CombatService._coerce_float(health.get('temperature'), 36.0)
+        if 30 <= temperature <= 33:
+            modifier -= 7
+        elif 38 <= temperature <= 39:
+            modifier -= 3
+        elif 40 <= temperature < 41:
+            modifier -= 7
+
+        for zone in (health.get('zones') or {}).values():
+            if not isinstance(zone, dict):
+                continue
+            penalties = zone.get('penalties') if isinstance(zone.get('penalties'), dict) else {}
+            modifier -= CombatService._coerce_int(zone.get('rollPenalty', zone.get('roll_penalty')), 0)
+            modifier -= CombatService._coerce_int(zone.get('skillPenalty'), 0)
+            modifier -= CombatService._coerce_int(penalties.get('all', penalties.get('roll')), 0)
+            modifier -= CombatService._coerce_int(penalties.get(skill_path), 0)
+            modifier -= CombatService._coerce_int(
+                penalties.get('physical' if skill_path.startswith('skills.physical.') else 'other'), 0
+            )
+
+        for effect in normalize_effect_list(health.get('effects') or []):
+            if not effect.get('active', True):
+                continue
+            if effect.get('remaining') is not None and CombatService._coerce_float(effect.get('remaining'), 0) <= 0:
+                continue
+            modifiers = effect.get('modifiers') if isinstance(effect.get('modifiers'), dict) else {}
+            modifier -= CombatService._coerce_int(
+                effect.get('rollPenalty', effect.get('roll_penalty', effect.get('skillPenalty', 0))), 0
+            )
+            modifier -= CombatService._coerce_int(modifiers.get('all'), 0)
+            modifier -= CombatService._coerce_int(modifiers.get(skill_path), 0)
+            modifier -= CombatService._coerce_int(
+                modifiers.get('physical' if skill_path.startswith('skills.physical.') else 'other'), 0
+            )
+            if effect.get('type') == 'stimulant_crash':
+                modifier -= CombatService._coerce_int(effect.get('phase_penalty', effect.get('value', 0)), 0)
+
+        if skill_path == 'skills.physical.will':
+            psy_state = CombatService._coerce_int(health.get('psyState', health.get('psy_state')), 0)
+            modifier -= 1 if psy_state >= 10 else 0
+        return modifier
+
+    @staticmethod
+    def _has_roll_disadvantage(character_data, skill_path):
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        if not isinstance(health, dict):
+            return False
+        psy_state = CombatService._coerce_int(health.get('psyState', health.get('psy_state')), 0)
+        return (
+            skill_path == 'skills.physical.shooting' and psy_state >= 30
+        ) or (
+            skill_path == 'skills.physical.will' and psy_state >= 40
+        )
+
+    @staticmethod
+    def _coerce_float(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _skill_modifier(character_data, skill_path, include_pain=True):
         current = character_data if isinstance(character_data, dict) else {}
         for part in skill_path.split('.'):
             if not isinstance(current, dict):
@@ -729,7 +808,12 @@ class CombatService:
             bonus = current.get('bonus', 0)
             base_mod = math.floor((CombatService._coerce_int(base, 10) - 10) / 2)
         temp_bonus = CombatService._consumable_stat_bonus(character_data, skill_path.split('.')[-1])
-        return base_mod + CombatService._coerce_int(bonus, 0) + temp_bonus
+        return (
+            base_mod
+            + CombatService._coerce_int(bonus, 0)
+            + temp_bonus
+            + CombatService._health_roll_modifier(character_data, skill_path, include_pain)
+        )
 
     @staticmethod
     def _consumable_stat_bonus(character_data, stat_name):
@@ -804,8 +888,11 @@ class CombatService:
         stage = str(health.get('blood') or health.get('bloodStage') or 'normal').lower()
         stage_penalty = CombatService._coerce_int(bleeding.get('stagePenalty', 0), 0)
         modifier_total = CombatService._bleeding_modifier_total(health)
-        will_bonus = CombatService._skill_modifier(character_data, 'skills.physical.will')
+        will_bonus = CombatService._skill_modifier(character_data, 'skills.physical.will', include_pain=False)
         roll = random.randint(1, 20)
+        # Проверка кровопотери не является обычной проверкой Воли и не получает
+        # Помеху от пси-состояния.
+        disadvantage = False
         total = roll + will_bonus
         difficulty = max(0, 5 + severity - stage_penalty + modifier_total - will_bonus)
         success = total >= difficulty
@@ -819,6 +906,7 @@ class CombatService:
             'severity': severity,
             'stagePenalty': stage_penalty,
             'modifierTotal': modifier_total,
+            'disadvantage': disadvantage,
             'success': success,
         }
 
@@ -2038,6 +2126,14 @@ class CombatService:
                     ergonomics_profile['accuracy_modifier']
                     if accuracy_in_range
                     else 0
+                ),
+                'shooting_roll_modifier': CombatService._health_roll_modifier(
+                    data,
+                    'skills.physical.shooting',
+                ),
+                'shooting_disadvantage': CombatService._has_roll_disadvantage(
+                    data,
+                    'skills.physical.shooting',
                 ),
                 'aim_accuracy_bonus': CombatService._aim_bonus_for_target(
                     character,
