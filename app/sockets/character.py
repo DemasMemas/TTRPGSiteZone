@@ -138,4 +138,4 @@ def handle_update_character_data(data):
         'updated_by': user.id
     }, room=f"character_{character_id}", include_self=False)
 
-    logger.info(f"Character {character_id} updated by {user.id}")
+    logger.debug("Character %s updated by %s", character_id, user.id)

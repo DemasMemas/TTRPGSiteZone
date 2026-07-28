@@ -531,6 +531,7 @@ function scheduleAutoSave() {
     if (!currentCharacterCanEdit) return;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
+        autoSaveTimer = null;
         if (currentCharacterId) {
             updateDataFromFields();
             const socket = getSocket();
@@ -551,6 +552,10 @@ function scheduleAutoSave() {
 
 function forceSyncCharacter() {
     if (!currentCharacterCanEdit) return;
+    if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+    }
     const socket = getSocket();
     if (socket && currentCharacterId) {
         socket.emit('update_character_data', {
@@ -11758,8 +11763,6 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
                     else if (activeTab === 'skills') renderSkillsTab(currentCharacterData);
                     else if (activeTab === 'settings') renderSettingsTab(currentCharacterData);
                     else if (activeTab === 'notes') renderNotesTab(currentCharacterData);
-
-                    showNotification('Данные персонажа обновлены', 'system', 'bottom-left');
                 }
             });
         }

@@ -157,7 +157,7 @@ class CharacterService:
                 loc_char.hp_zones = health_zones_to_location(health)
 
         db.session.commit()
-        logger.info(f"Character {character_id} updated by user {user_id}")
+        logger.debug("Character %s updated by user %s", character_id, user_id)
         return character
 
     @staticmethod
