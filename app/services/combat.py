@@ -1,12 +1,13 @@
 import math
 import random
 import heapq
+import re
 
 from app.extensions import db
 from app.models import Location, LocationCharacter, LocationCombatState, LobbyParticipant, LobbyCharacter, LocationObject
 from app.models.templates import ItemTemplate
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
-from app.services.effects import advance_timed_effects, apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
+from app.services.effects import advance_timed_effects, apply_effect_to_health, apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
 from sqlalchemy.orm.attributes import flag_modified
 
 
@@ -787,6 +788,262 @@ class CombatService:
         )
 
     @staticmethod
+    def _item_attributes(item):
+        if not isinstance(item, dict):
+            return {}
+        attributes = item.get('attributes')
+        return attributes if isinstance(attributes, dict) else {}
+
+    @staticmethod
+    def _template_attributes(item):
+        attributes = CombatService._item_attributes(item)
+        template_id = CombatService._coerce_int(item.get('templateId'), 0) if isinstance(item, dict) else 0
+        if template_id:
+            template = db.session.get(ItemTemplate, template_id)
+            if template and isinstance(template.attributes, dict):
+                merged = dict(template.attributes)
+                merged.update(attributes)
+                return merged
+        return attributes
+
+    @staticmethod
+    def _parse_percent(value, default=0.0):
+        if isinstance(value, (int, float)):
+            return float(value)
+        match = re.search(r'-?\d+(?:[.,]\d+)?', str(value or ''))
+        if not match:
+            return default
+        try:
+            return float(match.group(0).replace(',', '.'))
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _random_hit_zone(roll, aimed_zone=None, melee=False):
+        if aimed_zone in {'head', 'chest', 'abdomen', 'left_arm', 'right_arm', 'left_leg', 'right_leg'}:
+            return aimed_zone
+        if melee:
+            return {
+                1: 'right_leg', 2: 'left_leg', 3: 'abdomen',
+                4: 'chest', 5: 'left_arm', 6: 'right_arm',
+            }.get(random.randint(1, 6), 'chest')
+        if roll <= 3:
+            return 'left_arm'
+        if roll <= 6:
+            return 'left_leg'
+        if roll <= 9:
+            return 'abdomen'
+        if roll <= 12:
+            return 'right_leg'
+        if roll <= 14:
+            return 'abdomen'
+        if roll <= 19:
+            return 'chest'
+        return 'head'
+
+    @staticmethod
+    def _weapon_damage_profile(weapon, attack_type=None):
+        attributes = CombatService._template_attributes(weapon)
+        damage = CombatService._coerce_float(attributes.get('damage', weapon.get('damage', 0)), 0)
+        penetration = CombatService._parse_percent(
+            attributes.get('armor_piercing', attributes.get('penetration', weapon.get('armor_piercing', 0))),
+            0,
+        )
+        if -1 < penetration < 1:
+            penetration *= 100
+        bleeding = attributes.get('bleeding', attributes.get('bleeding_level', ''))
+        if attack_type:
+            attack_modifiers = attributes.get('attack_modifiers') or {}
+            selected = attack_modifiers.get(attack_type) if isinstance(attack_modifiers, dict) else None
+            if isinstance(selected, dict):
+                damage += CombatService._coerce_float(selected.get('damage'), 0)
+                penetration += CombatService._parse_percent(selected.get('armor_piercing'), 0)
+            else:
+                attack_name = str(attack_type).lower()
+                if 'кол' in attack_name:
+                    damage *= 1.25
+                    penetration += 10
+                elif 'реж' in attack_name:
+                    damage *= 0.75
+                    penetration = max(0, penetration - 10)
+                elif 'всп' in attack_name:
+                    damage *= 1.35
+                    penetration += 10
+                elif 'круг' in attack_name:
+                    penetration = max(0, penetration - 10)
+        return {
+            'damage': max(0, damage),
+            'armor_piercing': penetration,
+            'bleeding': bleeding,
+            'accuracy': attributes.get('accuracy', weapon.get('accuracy', 0)),
+            'effective_range': CombatService._coerce_int(
+                attributes.get('effective_range', attributes.get('range', weapon.get('range', 0))), 0
+            ),
+            'damage_type': attributes.get('damage_type', 'physical'),
+        }
+
+    @staticmethod
+    def _ranged_damage_profile(weapon):
+        magazine = weapon.get('installedMagazine') or {}
+        stacks = magazine.get('ammo') if isinstance(magazine, dict) else []
+        stack = next((item for item in stacks or [] if isinstance(item, dict) and CombatService._coerce_int(item.get('quantity'), 0) > 0), None)
+        if not stack:
+            return CombatService._weapon_damage_profile(weapon), None
+        return CombatService._weapon_damage_profile(stack), stack
+
+    @staticmethod
+    def _target_armor(target_data, zone):
+        equipment = target_data.get('equipment') if isinstance(target_data, dict) else {}
+        equipment = equipment if isinstance(equipment, dict) else {}
+        candidates = []
+        for slot in ('armor', 'helmet', 'gasMask'):
+            item = equipment.get(slot)
+            if isinstance(item, dict):
+                attrs = CombatService._template_attributes(item)
+                protection = attrs.get('protection') if isinstance(attrs.get('protection'), dict) else {}
+                candidates.append(protection)
+        zone_group = 'head' if zone == 'head' else ('torso' if zone in {'chest', 'abdomen'} else zone)
+        total = 0.0
+        details = []
+        for protection in candidates:
+            value = protection.get(zone_group, protection.get('physical', 0))
+            parsed = max(0.0, min(100.0, CombatService._parse_percent(value, 0)))
+            if parsed:
+                total = max(total, parsed)
+                details.append(parsed)
+        return total, details
+
+    @staticmethod
+    def _apply_attack_damage(target, damage, zone, profile, *, bleeding_bonus=0):
+        character = target.character
+        data = dict(character.data or {})
+        health = data.setdefault('health', {})
+        maximum = CombatService._coerce_float(health.get('max'), 700)
+        health['max'] = maximum
+        current = CombatService._coerce_float(health.get('current'), maximum)
+        health['current'] = max(0, current - damage)
+        zones = health.setdefault('zones', {})
+        zone_key = zone
+        camel_zone = {
+            'left_arm': 'leftArm', 'right_arm': 'rightArm',
+            'left_leg': 'leftLeg', 'right_leg': 'rightLeg',
+        }.get(zone, zone)
+        if camel_zone in zones:
+            zone_key = camel_zone
+        zone_data = zones.setdefault(zone_key, {'current': 0, 'max': 0})
+        zone_max = CombatService._coerce_float(zone_data.get('max'), 0)
+        zone_data['max'] = zone_max
+        zone_data['current'] = max(0, CombatService._coerce_float(zone_data.get('current'), zone_max) - damage)
+        bleeding_type = str(profile.get('bleeding') or '').lower()
+        bleeding_map = {'легкое': 'light', 'лёгкое': 'light', 'среднее': 'medium', 'сильное': 'severe', 'экстремальное': 'extreme'}
+        stage = next((suffix for label, suffix in bleeding_map.items() if label in bleeding_type), None)
+        if stage:
+            kind = 'internal' if 'внут' in bleeding_type else 'external'
+            apply_effect_to_health(health, {
+                'type': f'bleeding_{kind}_{stage}',
+                'area': zone_key,
+                'value': 1 + max(0, bleeding_bonus),
+                'source': 'combat_attack',
+            })
+        trauma_roll = None
+        trauma = None
+        if damage >= 11:
+            trauma_roll = random.randint(1, 100)
+            threshold = {
+                'head': 0,
+                'chest': 50,
+                'abdomen': 30,
+                'left_arm': 70,
+                'right_arm': 70,
+                'left_leg': 70,
+                'right_leg': 70,
+            }.get(zone, 70)
+            if trauma_roll >= threshold:
+                trauma = {'type': 'additional_trauma', 'area': zone_key, 'roll': trauma_roll}
+                effects = normalize_effect_list(health.get('effects') or [])
+                effects.append(trauma)
+                health['effects'] = effects
+                if zone in {'left_arm', 'right_arm', 'left_leg', 'right_leg'}:
+                    apply_effect_to_health(health, {
+                        'type': 'fracture', 'area': zone_key, 'source': 'combat_attack'
+                    })
+                elif zone == 'chest':
+                    apply_effect_to_health(health, {
+                        'type': 'bleeding_internal_light', 'area': zone_key,
+                        'source': 'combat_attack'
+                    })
+                elif zone == 'abdomen':
+                    apply_effect_to_health(health, {
+                        'type': 'bleeding_internal_medium', 'area': zone_key,
+                        'source': 'combat_attack'
+                    })
+                elif zone == 'head':
+                    apply_effect_to_health(health, {
+                        'type': 'pain', 'value': 1, 'source': 'combat_attack'
+                    })
+        sync_health_derived_statuses(health)
+        character.data = data
+        flag_modified(character, 'data')
+        target.hp_zones = health.get('zones') or target.hp_zones
+        flag_modified(target, 'hp_zones')
+        health['lastTrauma'] = trauma
+        return health
+
+    @staticmethod
+    def _resolve_attack(target, attacker, attack_details, *, melee=False, attack_type=None, aimed_zone=None, forced_roll=None):
+        attacker_data = attacker.character.data if attacker.character and isinstance(attacker.character.data, dict) else {}
+        target_data = target.character.data if target.character and isinstance(target.character.data, dict) else {}
+        weapon = ((attacker_data.get('weapons') or [])[attack_details['weapon_index']])
+        if melee:
+            profile = CombatService._weapon_damage_profile(weapon, attack_type)
+            skill = CombatService._skill_modifier(attacker_data, 'skills.physical.melee')
+            difficulty = 12 - skill - CombatService._parse_percent(profile.get('accuracy', 0), 0)
+            roll = forced_roll if forced_roll is not None else random.randint(1, 20)
+            hit = roll == 20 or (roll != 1 and roll >= difficulty)
+            result = {'roll': roll, 'difficulty': difficulty, 'hit': hit, 'mode': 'melee'}
+            if not hit:
+                return result
+            zone = CombatService._random_hit_zone(random.randint(1, 6), aimed_zone, melee=True)
+            strength_bonus = CombatService._skill_modifier(attacker_data, 'skills.physical.strength')
+            profile['damage'] *= max(0, 1 + 0.1 * strength_bonus)
+        else:
+            profile, _ = CombatService._ranged_damage_profile(weapon)
+            difficulty = attack_details['hit_difficulty']
+            roll = forced_roll if forced_roll is not None else random.randint(1, 20)
+            hit = roll == 20 or (roll != 1 and roll >= difficulty)
+            result = {'roll': roll, 'difficulty': difficulty, 'hit': hit, 'mode': attack_details['fire_mode']}
+            if not hit:
+                return result
+            zone = CombatService._random_hit_zone(random.randint(1, 20), aimed_zone)
+            if attack_details.get('target_distance') is not None and profile.get('effective_range', 0):
+                distance_over = max(0, attack_details['target_distance'] - profile['effective_range'])
+                if distance_over:
+                    profile['damage'] *= max(0.1, 1 - 0.05 * distance_over)
+                    profile['armor_piercing'] = max(0, profile['armor_piercing'] - 5 * distance_over)
+        armor, armor_layers = CombatService._target_armor(target_data, zone)
+        effective_armor = max(0.0, armor - profile['armor_piercing'])
+        penetration_deficit = max(0.0, effective_armor)
+        damage_reduction_steps = math.ceil(penetration_deficit / 5) if penetration_deficit else 0
+        damage_multiplier = max(0.0, 1 - damage_reduction_steps * 0.25)
+        final_damage = max(0, round(profile['damage'] * damage_multiplier))
+        health = CombatService._apply_attack_damage(target, final_damage, zone, profile)
+        result.update({
+            'zone': zone,
+            'base_damage': profile['damage'],
+            'armor': armor,
+            'armor_piercing': profile['armor_piercing'],
+            'effective_armor': effective_armor,
+            'penetration_deficit': penetration_deficit,
+            'damage_multiplier': damage_multiplier,
+            'damage': final_damage,
+            'health': health.get('current'),
+            'zone_health': (
+                health.get('zones') or {}
+            ).get({'left_arm': 'leftArm', 'right_arm': 'rightArm', 'left_leg': 'leftLeg', 'right_leg': 'rightLeg'}.get(zone, zone), {}).get('current'),
+        })
+        return result
+
+    @staticmethod
     def _coerce_float(value, default=0.0):
         try:
             return float(value)
@@ -1460,6 +1717,15 @@ class CombatService:
         }
 
     @staticmethod
+    def _can_end_turn_for_character(loc_char, user_id, is_gm=False):
+        if is_gm:
+            return True
+        character = getattr(loc_char, 'character', None)
+        if character and character.owner_id == user_id:
+            return True
+        return loc_char.controlled_by == user_id
+
+    @staticmethod
     def _serialize_state(location, state):
         characters = CombatService._unique_location_characters(
             LocationCharacter.query.filter_by(location_id=location.id).all()
@@ -1610,6 +1876,8 @@ class CombatService:
         ).first()
         if not current_character:
             raise NotFoundError("Current character not found")
+        if not CombatService._can_end_turn_for_character(current_character, user_id, is_gm=is_gm):
+            raise PermissionDenied("You do not control this character")
 
         state.turn_order = list(dict.fromkeys(state.turn_order or []))
         current_index = state.turn_order.index(current_character_id)
@@ -1693,6 +1961,8 @@ class CombatService:
         character = LocationCharacter.query.filter_by(id=location_character_id, location_id=location_id).first()
         if not character:
             raise NotFoundError("Character not found")
+
+        data = character.character.data if character.character and isinstance(character.character.data, dict) else {}
         if state.current_location_character_id != character.id:
             raise PermissionDenied("It is not this character's turn")
         action_points = max(-10, min(10, CombatService._coerce_int(action_points, 0)))
@@ -1722,6 +1992,8 @@ class CombatService:
         target_x=None,
         target_y=None,
         posture=None,
+        attack_type=None,
+        target_zone=None,
         payment=None,
         magazine_template_id=None,
         inventory_retrieval_action_points=None,
@@ -1754,6 +2026,7 @@ class CombatService:
         reload_details = None
         cover_details = None
         brace_details = None
+        resolved_hits = []
         if action_key == 'take_cover':
             cover_object = LocationObject.query.filter_by(
                 id=target_object_id,
@@ -1969,6 +2242,40 @@ class CombatService:
                 ),
             }
 
+        if action_key == 'attack' and not fire_mode:
+            if not target_character_id:
+                raise ValidationError("Target character is required")
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError("Target character not found")
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            weapons = (character.character.data or {}).get('weapons') or []
+            if weapon_index < 0 or weapon_index >= len(weapons):
+                raise ValidationError("Weapon not found")
+            weapon = weapons[weapon_index] or {}
+            if weapon_index != character.drawn_weapon_index:
+                raise ValidationError("Draw this weapon first")
+            distance = max(abs(character.pos_x - target.pos_x), abs(character.pos_y - target.pos_y))
+            if distance > 2:
+                raise ValidationError("Melee target is out of range")
+            profile = CombatService._weapon_damage_profile(weapon, attack_type)
+            melee_bonus = CombatService._skill_modifier(
+                character.character.data or {}, 'skills.physical.melee'
+            )
+            accuracy = CombatService._coerce_int(profile.get('accuracy'), 0)
+            attack_details = {
+                'weapon_index': weapon_index,
+                'attack_type': attack_type,
+                'action_points': 3,
+                'target_character_id': target_character_id,
+                'target_distance': distance,
+                'melee': True,
+                'hit_difficulty': 12 - melee_bonus - accuracy,
+            }
+
         if action_key == 'attack' and fire_mode:
             if fire_mode not in {'unaimed', 'rapid', 'aimed', 'burst', 'suppression', 'area'}:
                 raise ValidationError("Unknown fire mode")
@@ -2175,6 +2482,26 @@ class CombatService:
                     )
                 ),
             }
+            shooting_bonus = CombatService._skill_modifier(
+                data, 'skills.physical.shooting'
+            )
+            weapon_accuracy = CombatService._coerce_int(
+                weapon.get('accuracy', (weapon.get('attributes') or {}).get('accuracy')), 0
+            )
+            hit_difficulty = 12 - shooting_bonus - weapon_accuracy
+            hit_difficulty -= attack_details['ergonomics_accuracy_applied']
+            hit_difficulty -= attack_details['posture_shooting_bonus']
+            hit_difficulty += CombatService._coerce_int(
+                attack_details['aim_accuracy_bonus'] * -1, 0
+            )
+            if attack_details['shooter_movement_mode'] in {'run', 'sprint'}:
+                hit_difficulty += 2
+            elif attack_details['shooter_movement_mode'] == 'walk':
+                hit_difficulty += 0
+            if range_target and range_target.movement_mode_this_turn in {'run', 'sprint'}:
+                hit_difficulty += 2
+            if target_distance is not None and weapon_range and target_distance > weapon_range:
+                hit_difficulty += 2
             if range_target:
                 cover_analysis = CombatService._cover_analysis(
                     location_id,
@@ -2184,6 +2511,8 @@ class CombatService:
                 if not cover_analysis['targetable']:
                     raise ValidationError("Target is fully behind cover")
                 attack_details['cover'] = cover_analysis
+                hit_difficulty += cover_analysis.get('accuracy_penalty', 0)
+            attack_details['hit_difficulty'] = max(1, hit_difficulty)
 
         if action_key == 'convert_free_action_to_movement':
             gain = max(0, DEFAULT_CONVERSION_BASE - CombatService._movement_penalty(character))
@@ -2229,6 +2558,62 @@ class CombatService:
                     CombatService._clear_aim(character)
             else:
                 CombatService._clear_aim(character)
+
+        if action_key == 'attack' and attack_details:
+            if attack_details.get('melee'):
+                target = LocationCharacter.query.filter_by(
+                    location_id=location_id,
+                    character_id=attack_details['target_character_id'],
+                ).first()
+                resolved_hits.append(CombatService._resolve_attack(
+                    target, character, attack_details,
+                    melee=True,
+                    attack_type=attack_type,
+                    aimed_zone=target_zone,
+                ))
+            elif fire_mode not in {'suppression'}:
+                targets = []
+                if fire_mode == 'area':
+                    targets = [
+                        LocationCharacter.query.filter_by(
+                            location_id=location_id, character_id=target_id
+                        ).first()
+                        for target_id in (target_character_ids or [])
+                    ]
+                    targets = [item for item in targets if item]
+                else:
+                    target = LocationCharacter.query.filter_by(
+                        location_id=location_id,
+                        character_id=target_character_id,
+                    ).first()
+                    if target:
+                        targets = [target]
+                if fire_mode == 'area':
+                    primary = targets[0] if targets else None
+                    if primary:
+                        first = CombatService._resolve_attack(
+                            primary, character, attack_details, aimed_zone=target_zone
+                        )
+                        resolved_hits.append(first)
+                        if first.get('hit'):
+                            extra_hits = min(2, max(0, (first['roll'] - first['difficulty']) // 4))
+                            for index in range(extra_hits):
+                                target = targets[(index + 1) % len(targets)]
+                                resolved_hits.append(CombatService._resolve_attack(
+                                    target, character, attack_details,
+                                    aimed_zone=target_zone, forced_roll=20
+                                ))
+                else:
+                    for index in range(attack_details['shot_count']):
+                        if not targets:
+                            break
+                        target = targets[index % len(targets)]
+                        resolved_hits.append(CombatService._resolve_attack(
+                            target, character, attack_details, aimed_zone=target_zone
+                        ))
+            attack_details['results'] = resolved_hits
+            attack_details['hits'] = sum(1 for item in resolved_hits if item.get('hit'))
+            attack_details['damage_total'] = sum(item.get('damage', 0) for item in resolved_hits)
 
         character.last_action = db.func.now()
         db.session.commit()

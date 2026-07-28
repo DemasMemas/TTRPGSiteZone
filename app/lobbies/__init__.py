@@ -927,6 +927,8 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         target_x=data.get('target_x'),
         target_y=data.get('target_y'),
         posture=data.get('posture'),
+        attack_type=data.get('attack_type'),
+        target_zone=data.get('target_zone'),
         payment=data.get('payment'),
         magazine_template_id=data.get('magazine_template_id'),
         inventory_retrieval_action_points=data.get('inventory_retrieval_action_points'),

@@ -205,6 +205,20 @@ function getAmmoVariantLabels(value) {
 }
 
 function getItemCaliber(item) {
+    const isLoadingDevice = item?.category === 'magazine'
+        && (
+            item?.attributes?.isLoader === true
+            || item?.attributes?.loadingDevice === true
+            || /лента|спидлоадер/i.test(String(item?.name || ''))
+        );
+    if (isLoadingDevice) {
+        const loadedAmmo = Array.isArray(item?.ammo) ? item.ammo.find(entry => entry?.quantity > 0) : null;
+        const value = item?.attributes?.caliber
+            ?? loadedAmmo?.attributes?.caliber
+            ?? loadedAmmo?.caliber
+            ?? '';
+        return normalizeBaseCaliberText(value);
+    }
     const value = item?.attributes?.caliber
         ?? item?.caliber
         ?? (item?.category === 'grenade' ? item?.name : null)
@@ -212,7 +226,7 @@ function getItemCaliber(item) {
         ?? item?.attributes?.ammo_group
         ?? item?.attributes?.magazine_caliber
         ?? '';
-    return normalizeCaliberText(value);
+    return normalizeBaseCaliberText(value);
 }
 
 function normalizeCaliberText(value) {
@@ -221,10 +235,17 @@ function normalizeCaliberText(value) {
         .toLowerCase()
         .replace(/^граната\s*/u, '')
         .replace(/аср/g, 'acp')
-        .replace(/[×*]/g, 'x')
+        .replace(/[×*хХ]/g, 'x')
         .replace(/\s+/g, '')
         .replace(/\./g, '')
         .replace(/[^a-zа-яё0-9x+-]/gu, '');
+}
+
+function normalizeBaseCaliberText(value) {
+    const normalized = normalizeCaliberText(value);
+    const numericCaliber = normalized.match(/^(\d+(?:\.\d+)?x\d+)/i);
+    if (numericCaliber) return numericCaliber[1];
+    return normalized;
 }
 
 const AMMO_VARIANT_MODIFIERS = {
@@ -4274,7 +4295,11 @@ window.reloadFixedMagazine = async function(weaponIndex) {
     const collectLoaders = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (isAmmoLoadingDevice(item) && getItemCaliber(item) === caliber) {
+            if (
+                isAmmoLoadingDevice(item)
+                && isLoaderCompatible(item, caliber)
+                && canLoadFixedWeaponFromDevice(weaponTemplate, item)
+            ) {
                 const total = item.ammo ? item.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
                 if (total > 0) {
                     loaderItems.push({ item, path: path.concat(idx) });
@@ -4332,6 +4357,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
             </div>
             <div class="form-actions" style="margin-top:15px;">
                 <button class="btn btn-primary" id="confirm-fixed-reload-btn">Зарядить</button>
+                ${window.locationCombatState?.status !== 'active' ? '<button class="btn btn-success" id="reload-fixed-full-btn">Зарядить до полного</button>' : ''}
                 <button class="btn btn-secondary" onclick="document.getElementById('fixed-reload-modal').remove()">Отмена</button>
             </div>
         </div>
@@ -4369,6 +4395,42 @@ window.reloadFixedMagazine = async function(weaponIndex) {
         if (ammoSelect.value !== '') loaderSelect.selectedIndex = -1;
     });
     if (loaderItems.length && ammoItems.length) ammoSelect.selectedIndex = -1;
+
+    const fullReloadButton = modal.querySelector('#reload-fixed-full-btn');
+    if (fullReloadButton) {
+        fullReloadButton.onclick = () => {
+            const selectedLoaderIdx = loaderSelect.value;
+            const selectedAmmoIdx = ammoSelect.value;
+            const selected = selectedLoaderIdx !== '' && loaderItems.length > 0
+                ? loaderItems[selectedLoaderIdx]
+                : (selectedAmmoIdx !== '' && ammoItems.length > 0 ? ammoItems[selectedAmmoIdx] : null);
+            if (!selected) {
+                showNotification('Выберите подавач, ленту или патроны');
+                return;
+            }
+            const amount = Math.min(needed, ammoSourceCount(selected.item));
+            if (amount <= 0) {
+                showNotification(`Нет патронов калибра ${caliber}`);
+                return;
+            }
+            const fixedMagazine = { ammo: Array.isArray(weapon.fixedAmmo) ? weapon.fixedAmmo : [] };
+            transferAmmoFromSource(fixedMagazine, selected.item, amount);
+            weapon.fixedAmmo = fixedMagazine.ammo;
+            weapon.ammo = currentAmmo + amount;
+            if (ammoLoadingKind(selected.item) === 'loose') {
+                if (selected.item.quantity <= 0) removeItemByPath(selected.path);
+                else updateAmmoWeight(selected.item);
+            } else {
+                updateMagazineWeight(selected.item);
+            }
+            modal.remove();
+            renderEquipmentTab(currentCharacterData);
+            renderInventoryTab(currentCharacterData);
+            scheduleAutoSave();
+            forceSyncCharacter();
+            showNotification(`Магазин заполнен: добавлено ${amount} патронов`, 'success');
+        };
+    }
 
     // Кнопка подтверждения с замыканием нужных данных
     modal.querySelector('#confirm-fixed-reload-btn').onclick = async () => {
@@ -4777,7 +4839,8 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     if (needed <= 0) { showNotification('Магазин полон'); return; }
 
     const caliber = getItemCaliber(mag);
-    if (!caliber) {
+    const loadingTarget = isAmmoLoadingDevice(mag);
+    if (!caliber && !loadingTarget) {
         showNotification('У магазина не указан калибр');
         return;
     }
@@ -4795,7 +4858,11 @@ window.reloadMagazineFromInventory = async function(pathStr) {
                     || isAmmoLoadingDevice(item)
                 )
                 && (
-                    getItemCaliber(item) === caliber
+                    !caliber
+                        ? ['ammo', 'grenade'].includes(item.category)
+                        : (isAmmoLoadingDevice(item)
+                            ? canLoadMagazineFromDevice(mag, item, caliber)
+                            : getItemCaliber(item) === caliber)
                 )
                 && ammoSourceCount(item) > 0
             ) {
@@ -4829,6 +4896,7 @@ window.reloadMagazineFromInventory = async function(pathStr) {
                 <select id="ammo-select" class="form-control" size="5"></select>
                 <div class="form-actions" style="margin-top:15px;">
                     <button class="btn btn-primary" onclick="confirmReloadMagazine('${pathStr}')">Зарядить</button>
+                    <button class="btn btn-success" id="reload-inventory-full-btn">Зарядить до полного</button>
                     <button class="btn btn-secondary" onclick="document.getElementById('ammo-select-modal').style.display='none'">Отмена</button>
                 </div>
             </div>
@@ -4845,6 +4913,40 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     });
     modal._ammoList = ammoItems;
     modal._magPath = pathStr;
+    const fullReloadButton = modal.querySelector('#reload-inventory-full-btn');
+    if (fullReloadButton) {
+        fullReloadButton.style.display = window.locationCombatState?.status === 'active' ? 'none' : '';
+        fullReloadButton.onclick = () => {
+            const selected = modal._ammoList[select.value];
+            const targetPath = modal._magPath.split(',').map(p => isNaN(p) ? p : parseInt(p));
+            const target = getItemByPath(targetPath);
+            if (!selected || !target) return;
+            const amount = Math.min(
+                Math.max(0, (target.attributes?.capacity || 30) - getMagazineAmmoCount(target)),
+                ammoSourceCount(selected.item),
+            );
+            if (amount <= 0) {
+                showNotification('Магазин уже полон или источник пуст');
+                return;
+            }
+            transferAmmoFromSource(target, selected.item, amount);
+            if (!getItemCaliber(target)) {
+                target.attributes = target.attributes || {};
+                target.attributes.caliber = getItemCaliber(selected.item);
+            }
+            if (ammoLoadingKind(selected.item) === 'loose') {
+                if (selected.item.quantity <= 0) removeItemByPath(selected.path);
+                else updateAmmoWeight(selected.item);
+            } else {
+                updateMagazineWeight(selected.item);
+            }
+            modal.style.display = 'none';
+            renderInventoryTab(currentCharacterData);
+            scheduleAutoSave();
+            forceSyncCharacter();
+            showNotification(`Магазин заполнен: добавлено ${amount} патронов`, 'success');
+        };
+    }
     modal.style.display = 'flex';
 };
 
@@ -4916,6 +5018,10 @@ window.confirmReloadMagazine = async function(pathStr) {
     if (!sameMagazine) await stowActiveWeaponForLoading();
 
     transferAmmoFromSource(mag, ammoItem, plan.quantity);
+    if (!getItemCaliber(mag)) {
+        mag.attributes = mag.attributes || {};
+        mag.attributes.caliber = getItemCaliber(ammoItem);
+    }
     if (ammoLoadingKind(ammoItem) === 'loose') {
         if (ammoItem.quantity <= 0) removeItemByPath(selected.path);
         else updateAmmoWeight(ammoItem);
@@ -7257,12 +7363,55 @@ async function inventoryItemPreparationPayments(item, itemPath, role) {
 
 function ammoLoadingKind(item) {
     const name = String(item?.name || '');
-    if (/лент/i.test(name)) return 'belt';
+    if (isAmmoLoadingDevice(item) || Array.isArray(item?.ammo) || /лент/i.test(name)) return 'belt';
     return 'loose';
 }
 
 function isAmmoLoadingDevice(item) {
-    return item?.category === 'magazine' && /лент/i.test(String(item.name || ''));
+    return item?.category === 'magazine'
+        && (
+            item.attributes?.isLoader === true
+            || item.attributes?.loadingDevice === true
+            || /лент|спидлоадер/i.test(String(item.name || ''))
+        );
+}
+
+function isLoaderCompatible(item, caliber) {
+    if (!item || item.category !== 'magazine') return false;
+    const loaderCaliber = getItemCaliber(item);
+    // A loader without a known caliber cannot be used as a loaded source.
+    // This also prevents old generic belt templates from bypassing matching.
+    if (!loaderCaliber || !caliber) return false;
+    return loaderCaliber === caliber;
+}
+
+function isBeltLoader(item) {
+    return /лента/i.test(String(item?.name || ''));
+}
+
+function isSpeedloader(item) {
+    return /спидлоадер/i.test(String(item?.name || ''));
+}
+
+function isRevolverWeapon(template) {
+    return /револьвер/i.test(String(template?.name || ''));
+}
+
+function isSniperWeapon(template) {
+    return /снайпер/i.test(String(template?.subcategory || ''))
+        || /снайпер/i.test(String(template?.name || ''));
+}
+
+function canLoadFixedWeaponFromDevice(template, device) {
+    if (isSpeedloader(device)) return isRevolverWeapon(template);
+    if (isBeltLoader(device)) return isSniperWeapon(template);
+    return false;
+}
+
+function canLoadMagazineFromDevice(magazine, device, caliber) {
+    if (!isLoaderCompatible(device, caliber)) return false;
+    if (isSpeedloader(device)) return false;
+    return isBeltLoader(device) && magazine?.category === 'magazine';
 }
 
 function isAmmoFeederTool(item) {

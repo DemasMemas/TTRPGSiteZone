@@ -583,6 +583,9 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
                 or name_a.startswith("Барабанный Магазин")
                 or name_a.startswith("Клипса")
                 or name_a.startswith("Пулеметный короб")
+                or "Подавач" in name_a
+                or "Лента" in name_a
+                or "Спидлоадер" in name_a
             )
         ):
             caliber = _canonical_caliber(row.get("G"))
@@ -609,6 +612,8 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
                         "compatible_weapon_names": compatible_weapon_names,
                         "compatible_weapons": [],
                         "isLoader": is_loader,
+                        "universalLoader": is_loader and not caliber,
+                        "loadingDevice": is_loader,
                         "raw_row": row,
                     },
                     "compatible_ids": [],

@@ -3,6 +3,7 @@ from app.models import (
     Lobby,
     LobbyCharacter,
     LobbyParticipant,
+    LocationCombatState,
     Location,
     LocationCharacter,
 )
@@ -285,6 +286,70 @@ def test_edit_permission_implies_visibility_and_allows_sheet_update(
     assert stored.visible_to == [editor["id"]]
     assert stored.editable_to == [editor["id"]]
     assert stored.data["notes"] == "Shared edit"
+
+
+def test_only_gm_or_controller_can_end_combat_turn(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("combat-end-gm")
+    controller = create_user("combat-end-controller")
+    spectator = create_user("combat-end-spectator")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, controller, auth_headers)
+    join_lobby(client, lobby, spectator, auth_headers)
+    controller_character = create_character(client, lobby, controller, auth_headers)
+    spectator_character = create_character(client, lobby, spectator, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Combat arena",
+        world_tile_x=0,
+        world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    controller_loc_char = LocationCharacter(
+        location_id=location.id,
+        character_id=controller_character["id"],
+        controlled_by=controller["id"],
+    )
+    spectator_loc_char = LocationCharacter(
+        location_id=location.id,
+        character_id=spectator_character["id"],
+        controlled_by=spectator["id"],
+    )
+    db.session.add_all([controller_loc_char, spectator_loc_char])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[spectator_loc_char.id, controller_loc_char.id],
+        current_location_character_id=spectator_loc_char.id,
+    ))
+    db.session.commit()
+
+    forbidden = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(controller),
+        json={},
+    )
+    allowed_for_controller = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(spectator),
+        json={},
+    )
+    allowed_for_gm = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(gm),
+        json={},
+    )
+
+    assert forbidden.status_code == 403
+    assert allowed_for_controller.status_code == 200
+    assert allowed_for_gm.status_code == 200
 
 
 def test_player_may_move_existing_item_but_cannot_add_another(

@@ -1721,6 +1721,14 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         action_points: action.actionPoints,
         item_path: action.itemPath,
     };
+    if (action.fireMode === 'aimed') {
+        const zone = window.prompt(
+            'Зона попадания: head, chest, abdomen, left_arm, right_arm, left_leg, right_leg',
+            'chest'
+        );
+        if (zone === null) return false;
+        payload.target_zone = zone.trim().toLowerCase();
+    }
 
     try {
         if (action.actionKey === 'use_item') {
@@ -1730,6 +1738,15 @@ async function resolveCombatTargetSelection(targetCharacterId) {
             }
         } else {
             const result = await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload);
+            const attack = result?.attack;
+            if (attack?.results?.length) {
+                const hits = attack.results.filter(item => item.hit);
+                const damage = attack.damage_total || 0;
+                showNotification(
+                    `Бросок: ${hits.length}/${attack.results.length}, урон: ${damage}`,
+                    hits.length ? 'success' : 'system'
+                );
+            }
             const cover = result?.attack?.cover;
             if (cover && cover.grade !== 'none') {
                 const labels = {
@@ -2220,7 +2237,7 @@ function renderCombatHud() {
             }</div>` : ''}
             <div style="margin-top:10px;">
                 ${combatState.status !== 'active' && window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn" style="margin-top:8px;">Начать бой</button>' : ''}
-                ${combatState.status === 'active' ? '<button class="btn btn-sm btn-secondary combat-end-turn-btn" style="margin-top:8px;">Закончить ход</button>' : ''}
+                ${combatState.status === 'active' && combatState.current_character && canActWithCombatCharacter(combatState.current_character) ? '<button class="btn btn-sm btn-secondary combat-end-turn-btn" style="margin-top:8px;">Закончить ход</button>' : ''}
                 ${combatState.status === 'active' && window.isGM ? '<button class="btn btn-sm btn-danger combat-end-combat-btn" style="margin-top:8px; margin-left:6px;">Закончить бой</button>' : ''}
             </div>
             <div style="margin-top:8px; font-size:12px; opacity:0.75;">
