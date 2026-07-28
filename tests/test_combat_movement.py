@@ -124,6 +124,27 @@ def test_strength_bonus_changes_weight_per_movement_penalty(strength, weight):
     assert CombatService._inventory_movement_penalty(character_data) == 1
 
 
+def test_equipped_backpack_reduces_weight_penalty():
+    character_data = {
+        "skills": {
+            "physical": {
+                "strength": {"base": 10, "bonus": 0},
+            },
+        },
+        "inventory": {
+            "backpack": [{"category": "item", "weight": 12, "quantity": 1}],
+        },
+        "equipment": {
+            "backpack": {
+                "category": "backpack",
+                "attributes": {"limit": 40, "weight_reduction": 1},
+            },
+        },
+    }
+
+    assert CombatService._inventory_movement_penalty(character_data) == 1
+
+
 @pytest.mark.parametrize(
     ("posture", "expected_cost"),
     [

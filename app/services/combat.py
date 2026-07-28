@@ -685,10 +685,10 @@ class CombatService:
         )
         weight_per_penalty = max(0.5, 5 * (1 + strength_bonus * 0.1))
         backpack_reduction = 0
-        backpack_template_id = CombatService._coerce_int(inventory.get('backpackModel'), 0)
-        if backpack_template_id:
-            template = db.session.get(ItemTemplate, backpack_template_id)
-            attributes = template.attributes if template and isinstance(template.attributes, dict) else {}
+        backpack = equipment.get('backpack')
+        if isinstance(backpack, dict):
+            attributes = backpack.get('attributes')
+            attributes = attributes if isinstance(attributes, dict) else {}
             backpack_reduction = max(
                 0,
                 CombatService._coerce_int(attributes.get('weight_reduction'), 0),
@@ -837,7 +837,7 @@ class CombatService:
         health['effects'] = tick_effects(active_effects, phase=phase)
         combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else None
         if isinstance(combat_meta, dict):
-            for key in ('consumableModifiers', 'bleedingModifiers'):
+            for key in ('bleedingModifiers',):
                 items = combat_meta.get(key)
                 if not isinstance(items, list):
                     continue

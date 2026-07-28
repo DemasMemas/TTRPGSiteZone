@@ -443,7 +443,7 @@
                         <button type="button" class="btn btn-secondary" onclick="exportCharacter()">Экспорт JSON</button>
                         <input type="file" id="import-character-file" accept=".json" style="display: none;" onchange="importCharacter(this.files[0])">
                         <button type="button" class="btn btn-secondary" onclick="document.getElementById('import-character-file').click()">Импорт JSON</button>
-                        <button type="button" class="btn btn-danger" onclick="closeCharacterSheet()">Закрыть</button>
+                        <button type="button" class="btn btn-danger" data-sheet-control onclick="closeCharacterSheet()">Закрыть</button>
                     </div>
                 </form>
             </div>

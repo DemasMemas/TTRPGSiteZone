@@ -329,6 +329,11 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
             data.setdefault(key, value)
     if str(data.get("name") or "").strip().lower() in {"", "общий", "generic"} and effect_type != "generic":
         data["name"] = get_effect_meta(effect_type)["label"]
+    max_hours = _to_int(data.get("max_hours"), 0)
+    if data.get("remaining") is None and max_hours > 0:
+        data["remaining"] = max_hours
+        data["duration"] = data.get("duration") or max_hours
+        data["time_unit"] = "hour"
     return data
 
 
@@ -747,6 +752,10 @@ def advance_timed_effects(
         effect = normalize_effect(raw_effect)
         unit = str(effect.get("time_unit") or "").lower()
         tick = str(effect.get("tick") or "")
+        if effect.get("remaining") is None and _to_float(effect.get("max_hours"), 0) > 0:
+            effect["remaining"] = _to_float(effect.get("max_hours"), 0)
+            effect["time_unit"] = "hour"
+            unit = "hour"
         if not unit:
             unit = {
                 "time_elapsed": "minute",
@@ -793,6 +802,50 @@ def advance_timed_effects(
             item for item in (effect.get("activate_effects") or effect.get("activateEffects") or [])
             if isinstance(item, dict)
         )
+
+    combat_meta = health.get("combatMeta")
+    if isinstance(combat_meta, dict):
+        modifiers = combat_meta.get("consumableModifiers")
+        if isinstance(modifiers, list):
+            active_modifiers = []
+            for raw_modifier in modifiers:
+                if not isinstance(raw_modifier, dict):
+                    active_modifiers.append(raw_modifier)
+                    continue
+                modifier = dict(raw_modifier)
+                remaining = modifier.get("remaining")
+                if remaining is None:
+                    active_modifiers.append(modifier)
+                    continue
+                unit = str(modifier.get("time_unit") or "").lower()
+                tick = str(modifier.get("tick") or "turn_end")
+                if not unit:
+                    unit = {
+                        "turn_end": "second",
+                        "time_elapsed": "minute",
+                        "movement_end": "movement",
+                        "hour_start": "hour",
+                    }.get(tick, "")
+                if unit not in unit_seconds:
+                    active_modifiers.append(modifier)
+                    continue
+                seconds_per_unit = max(
+                    0.001,
+                    _to_float(
+                        modifier.get("seconds_per_unit"),
+                        6 if tick == "turn_end" else unit_seconds[unit],
+                    ),
+                )
+                remaining_seconds = _to_float(
+                    modifier.get("remaining_seconds"),
+                    _to_float(remaining, 0) * seconds_per_unit,
+                ) - elapsed
+                if remaining_seconds <= 0:
+                    continue
+                modifier["remaining_seconds"] = remaining_seconds
+                modifier["remaining"] = max(1, math.ceil(remaining_seconds / seconds_per_unit))
+                active_modifiers.append(modifier)
+            combat_meta["consumableModifiers"] = active_modifiers
 
     health["effects"] = survivors
     for effect in activated:

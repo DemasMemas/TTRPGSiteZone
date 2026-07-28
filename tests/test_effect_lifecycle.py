@@ -200,3 +200,44 @@ def test_rest_expires_minute_and_turn_effects():
     assert advance_timed_effects(
         health, effects, 3600, include_turn_effects=True
     ) == []
+
+
+def test_elapsed_time_expires_consumable_stat_modifiers():
+    health = {
+        "combatMeta": {
+            "consumableModifiers": [
+                {"stat": "strength", "value": 5, "remaining": 2, "tick": "turn_end"},
+                {"stat": "accuracy", "value": 5, "remaining": 3, "tick": "turn_end"},
+            ],
+        },
+    }
+
+    advance_timed_effects(health, [], 12)
+
+    assert health["combatMeta"]["consumableModifiers"] == [
+        {
+            "stat": "accuracy",
+            "value": 5,
+            "remaining": 1,
+            "remaining_seconds": 6,
+            "tick": "turn_end",
+        },
+    ]
+
+
+def test_radiation_filter_uses_max_hours_as_duration():
+    health = {}
+    effects = [{
+        "type": "radiation_filter",
+        "name": "Incoming radiation reduction",
+        "remaining": None,
+        "max_hours": 24,
+        "tick": "movement_end",
+    }]
+
+    effects = advance_timed_effects(health, effects, 8 * 3600)
+
+    assert effects[0]["remaining"] == 16
+    assert effects[0]["time_unit"] == "hour"
+    assert effects[0]["remaining_seconds"] == 16 * 3600
+    assert advance_timed_effects(health, effects, 16 * 3600) == []

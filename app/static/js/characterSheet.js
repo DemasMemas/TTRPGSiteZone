@@ -49,7 +49,6 @@ let vestTemplateEditorPouches = [];
 // Кеш шаблонов для текущей комнаты
 let templatesCache = {};
 let currentLobbyId = null;
-let cachedBackpackTemplates = [];
 export function setCurrentLobbyId(id) {
     currentLobbyId = id;
 }
@@ -527,6 +526,12 @@ function updateDataFromFields() {
     }
 }
 
+function renderCreatedByPlayerBadge(item) {
+    return item?.createdByPlayer
+        ? '<span class="created-by-player-badge" title="Предмет добавлен игроком" style="display:inline-block; margin-left:8px; padding:2px 6px; border-radius:4px; font-size:11px; color:#d8c58a; border:1px solid rgba(216,197,138,.45);">Создано игроком</span>'
+        : '';
+}
+
 function scheduleAutoSave() {
     if (!currentCharacterCanEdit) return;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
@@ -705,7 +710,7 @@ function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, 
  * @param {number} quantity - количество (для стакающихся)
  * @returns {Object} экземпляр Item
  */
-function createItemFromTemplate(template, quantity = 1) {
+function createItemFromTemplate(template, quantity = 1, options = {}) {
     const item = {
         id: generateItemId(),
         templateId: template.id,
@@ -724,9 +729,10 @@ function createItemFromTemplate(template, quantity = 1) {
         installedModules: [],
         contents: [],
         isContainer: template.category === 'container' || template.category === 'backpack' || template.category === 'pouch',
-        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask', 'device', 'detector'].includes(template.category),
+        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask', 'device', 'detector', 'backpack'].includes(template.category),
         isStackable: ['consumable', 'crafting_material', 'artifact', 'ammo'].includes(template.category)
     };
+    if (options.createdByPlayer) item.createdByPlayer = true;
 
     if (template.category === 'magazine') {
         item.caliber = template.attributes?.caliber || template.subcategory || null;
@@ -763,8 +769,8 @@ function createItemFromTemplate(template, quantity = 1) {
     return item;
 }
 
-function createItemFromTemplateSelection(template, quantity = 1, ammoVariant = null) {
-    const newItem = createItemFromTemplate(template, quantity);
+function createItemFromTemplateSelection(template, quantity = 1, ammoVariant = null, options = {}) {
+    const newItem = createItemFromTemplate(template, quantity, options);
     if (template.category === 'ammo') {
         applyAmmoVariantToItem(newItem, template, ammoVariant);
         updateAmmoWeight(newItem);
@@ -790,7 +796,7 @@ function migrateOldItemToNew(oldItem) {
         installedModules: [],
         contents: oldItem.contents || [], // <-- важно
         isContainer: oldItem.category === 'container' || oldItem.category === 'backpack' || oldItem.category === 'pouch',
-        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask'].includes(oldItem.category),
+        isEquippable: ['weapon', 'armor', 'helmet', 'gas_mask', 'backpack'].includes(oldItem.category),
         isStackable: ['consumable', 'crafting_material', 'artifact'].includes(oldItem.category)
     };
 }
@@ -1074,7 +1080,7 @@ async function renderBasicTab(data) {
             </div>
             <div style="width: 100px;">
                 <label>Возраст</label>
-                <input type="number" class="form-control number-input" name="basic.age" value="${basic.age !== undefined ? basic.age : ''}" style="width:100%;">
+                <input type="number" class="form-control number-input" name="basic.age" value="${basic.age ?? ''}" style="width:100%;">
             </div>
             <div style="min-width: 200px;">
                 <label>Организация</label>
@@ -2449,10 +2455,10 @@ async function renderEquipmentTab(data) {
     let weaponTemplates = [], helmetTemplates = [], gasMaskTemplates = [], armorTemplates = [];
     let modificationTemplates = [];
     try {
-        weaponTemplates = await loadTemplatesForLobby('weapon');
-        helmetTemplates = await loadTemplatesForLobby('helmet');
-        gasMaskTemplates = await loadTemplatesForLobby('gas_mask');
-        armorTemplates = await loadTemplatesForLobby('armor');
+        weaponTemplates = (await loadTemplatesForLobby('weapon')).filter(t => window.isGM || t.source !== 'local');
+        helmetTemplates = (await loadTemplatesForLobby('helmet')).filter(t => window.isGM || t.source !== 'local');
+        gasMaskTemplates = (await loadTemplatesForLobby('gas_mask')).filter(t => window.isGM || t.source !== 'local');
+        armorTemplates = (await loadTemplatesForLobby('armor')).filter(t => window.isGM || t.source !== 'local');
         modificationTemplates = await loadTemplatesForLobby('modification');
     } catch (e) {
         console.error('Failed to load templates', e);
@@ -2508,7 +2514,7 @@ async function renderEquipmentTab(data) {
             <div class="equipment-row" style="display: flex; gap: 10px;">
                 <div class="equipment-main-block" style="flex: 2;">
                     <div class="block-header">
-                        <h4>Шлем</h4>
+                        <h4>Шлем ${renderCreatedByPlayerBadge(helmet)}</h4>
                         <div style="display: flex; gap: 10px;">
                             ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateHelmetTemplateModal()">➕ Создать кастом</button>` : ''}
                             ${helmet.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipHelmet()">Снять</button>` : ''}
@@ -2588,7 +2594,7 @@ async function renderEquipmentTab(data) {
             <div class="equipment-row">
                 <div class="equipment-main-block">
                     <div class="block-header">
-                        <h4>Противогаз</h4>
+                        <h4>Противогаз ${renderCreatedByPlayerBadge(gasMask)}</h4>
                         <div style="display: flex; gap: 10px;">
                             ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateGasMaskTemplateModal()">➕ Создать кастом</button>` : ''}
                             ${gasMask.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipGasMask()">Снять</button>` : ''}
@@ -2657,7 +2663,7 @@ async function renderEquipmentTab(data) {
             <div class="equipment-row" style="display: flex; gap: 10px;">
                 <div class="equipment-main-block" style="flex: 2;">
                     <div class="block-header">
-                        <h4>Броня</h4>
+                        <h4>Броня ${renderCreatedByPlayerBadge(armor)}</h4>
                         <div style="display: flex; gap: 10px;">
                             ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateArmorTemplateModal()">➕ Создать кастом</button>` : ''}
                             ${armor.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipArmor()">Снять</button>` : ''}
@@ -3661,6 +3667,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
 
         weaponsHtml.push(`
             <div style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
+                ${renderCreatedByPlayerBadge(weapon)}
                 ${modelBlock}
                 ${fieldsHtml}
                 ${slotsHtml}
@@ -4075,85 +4082,6 @@ window.reloadInstalledMagazine = async function(weaponIndex) {
     const weapon = currentCharacterData.weapons?.[weaponIndex];
     if (!weapon?.installedMagazine) return;
     showNotification('Сначала снимите отъёмный магазин с оружия');
-    return;
-    /*
-     * Kept temporarily for compatibility with stale open sheets. The active UI
-     * no longer exposes this action; detachable magazines are loaded in hand.
-     */
-    const magazine = weapon.installedMagazine;
-    const needed = Math.max(0, Number(magazine.capacity || 0) - getMagazineAmmoCount(magazine));
-    if (!needed) {
-        showNotification('Магазин полон');
-        return;
-    }
-    const caliber = getItemCaliber(magazine);
-    const sources = collectInventoryEntries(currentCharacterData, item =>
-        (
-            item.category === 'ammo'
-            || isAmmoLoadingDevice(item)
-        )
-        && getItemCaliber(item) === caliber
-        && ammoSourceCount(item) > 0
-    );
-    if (!sources.length) {
-        showNotification(`Нет патронов калибра ${caliber}`);
-        return;
-    }
-    const selected = await chooseConsumableApplication(
-        'Источник патронов',
-        sources.map(entry => ({
-            ...entry,
-            label: `${entry.item.name} (${ammoSourceCount(entry.item)} патр.)`,
-        }))
-    );
-    if (!selected) return;
-    const plans = magazineLoadingPlans(selected.item, needed, magazine);
-    const plan = await chooseConsumableApplication('Способ зарядки', plans);
-    if (!plan) return;
-
-    const state = currentCharacterData.combatMagazineLoading || {};
-    const prepared = state.targetType === 'installed'
-        && Number(state.weaponIndex) === Number(weaponIndex);
-    const sourceKey = selected.item.id || selected.path.join('.');
-    const sameSource = prepared && state.sourceId === sourceKey;
-    const paymentGroups = [];
-    if (!prepared) {
-        paymentGroups.push([
-            { actionPoints: 1, freeActions: 1 },
-            { actionPoints: 2, freeActions: 0 },
-        ]);
-    }
-    if (!sameSource) {
-        paymentGroups.push(await inventoryItemPreparationPayments(selected.item, selected.path, 'ammo'));
-    }
-    paymentGroups.push(plan.payments);
-    try {
-        if (!await chooseAndSpendCombatPayment('Оплата зарядки магазина', paymentGroups)) return;
-    } catch (error) {
-        showNotification(error.message || 'Не хватает ОД или СД', 'system');
-        return;
-    }
-    if (!prepared) await stowActiveWeaponForLoading();
-
-    transferAmmoFromSource(magazine, selected.item, plan.quantity);
-    weapon.ammo = getMagazineAmmoCount(magazine);
-    if (ammoLoadingKind(selected.item) === 'loose') {
-        if (selected.item.quantity <= 0) removeItemByPath(selected.path);
-        else updateAmmoWeight(selected.item);
-    }
-    currentCharacterData.combatMagazineLoading = {
-        targetType: 'installed',
-        weaponIndex,
-        sourceId: sourceKey,
-    };
-    if (getMagazineAmmoCount(magazine) >= magazine.capacity || ammoSourceCount(selected.item) <= 0) {
-        delete currentCharacterData.combatMagazineLoading;
-    }
-    renderEquipmentTab(currentCharacterData);
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification(`Заряжено ${plan.quantity} патронов`, 'success');
 };
 
 window.unequipMagazineFromWeapon = function(weaponIndex) {
@@ -5038,6 +4966,7 @@ window.performCharacterRest = function(hours = 8) {
         );
     }
     if (Number(hours) >= 8) {
+        health.intoxication = Math.max(0, Number(health.intoxication || 0) - 75);
         effects = resolveCharacterDay(health, effects, true);
     }
     health.effects = effects;
@@ -5211,6 +5140,7 @@ window.selectWeaponModel = async function(index) {
     };
     applyTemplateToObject(weapon, template, mapping);
     weapon.model = template.name;
+    weapon.createdByPlayer = !window.isGM;
 
     await renderEquipmentTab(currentCharacterData);
     scheduleAutoSave();
@@ -5236,6 +5166,7 @@ window.fillHelmetFromPreset = async function(select) {
     helmet.name = template.name;
     helmet.weight = template.weight;
     helmet.volume = template.volume;
+    helmet.createdByPlayer = !window.isGM;
 
     initArmorStagedDurability(helmet, template);
 
@@ -5265,6 +5196,7 @@ window.fillGasMaskFromPreset = async function(select) {
     gasMask.name = template.name;
     gasMask.weight = template.weight;
     gasMask.volume = template.volume;
+    gasMask.createdByPlayer = !window.isGM;
     gasMask.isWorn = gasMask.isWorn || false;
 
     initArmorStagedDurability(gasMask, template);
@@ -5294,9 +5226,10 @@ window.fillArmorFromPreset = async function(select) {
     armor.name = template.name;
     armor.weight = template.weight;
     armor.volume = template.volume;
+    armor.createdByPlayer = !window.isGM;
 
     const containerSlots = template.attributes?.container_slots || 0;
-    armorToEquip.containers = Array(containerSlots).fill().map(() => ({ item: null }));
+    armor.containers = Array(containerSlots).fill().map(() => ({ item: null }));
 
     initArmorStagedDurability(armor, template);
 
@@ -5332,6 +5265,7 @@ window.equipArmorFromInventory = async function(itemPath) {
     }
     const armorToEquip = {
         templateId: template.id,
+        createdByPlayer: Boolean(item.createdByPlayer),
         name: template.name,
         weight: template.weight,
         volume: template.volume,
@@ -5398,6 +5332,7 @@ window.equipHelmetFromInventory = async function(itemPath) {
     }
     const helmetToEquip = {
         templateId: template.id,
+        createdByPlayer: Boolean(item.createdByPlayer),
         name: template.name,
         weight: template.weight,
         volume: template.volume,
@@ -5462,6 +5397,7 @@ window.equipGasMaskFromInventory = async function(itemPath) {
     }
     const gasMaskToEquip = {
         templateId: template.id,
+        createdByPlayer: Boolean(item.createdByPlayer),
         name: template.name,
         weight: template.weight,
         volume: template.volume,
@@ -5543,6 +5479,7 @@ window.equipWeaponFromInventory = async function(itemPath) {
     // Создаём объект оружия для экипировки (всё как было)
     const weaponToEquip = {
         templateId: template.id,
+        createdByPlayer: Boolean(item.createdByPlayer),
         name: template.name,
         model: template.name,
         weight: template.weight,
@@ -5595,6 +5532,7 @@ window.equipMeleeWeaponFromInventory = async function(itemPath) {
 
     const weaponToEquip = {
         templateId: item.templateId || template.id,
+        createdByPlayer: Boolean(item.createdByPlayer),
         name: template.name,
         category: 'melee_weapon',
         weight: template.weight,
@@ -5651,6 +5589,7 @@ window.equipBeltFromInventory = async function(itemPath) {
     }
 
     const beltToEquip = {
+        createdByPlayer: Boolean(item.createdByPlayer),
         templateId: template.id,
         name: template.name,
         weight: template.weight,
@@ -5703,6 +5642,7 @@ window.equipVestFromInventory = async function(itemPath) {
     }
 
     const vestToEquip = {
+        createdByPlayer: Boolean(item.createdByPlayer),
         templateId: template.id,
         name: template.name,
         weight: template.weight,
@@ -5740,6 +5680,74 @@ window.equipVestFromInventory = async function(itemPath) {
     scheduleAutoSave();
     forceSyncCharacter();
     showNotification('Разгрузка надета', 'success');
+};
+
+window.equipBackpackFromInventory = async function(itemPath) {
+    const item = getItemByPath(itemPath);
+    if (!item || item.category !== 'backpack') {
+        showNotification('Этот предмет нельзя надеть как рюкзак');
+        return;
+    }
+    currentCharacterData.equipment = currentCharacterData.equipment || {};
+    if (currentCharacterData.equipment.backpack) {
+        showNotification('Сначала снимите экипированный рюкзак');
+        return;
+    }
+
+    const contents = Array.isArray(item.contents) ? item.contents : [];
+    const backpackToEquip = {
+        ...item,
+        quantity: 1,
+        isContainer: true,
+        isEquippable: true,
+    };
+    delete backpackToEquip.contents;
+
+    if (!removeItemByPath(itemPath)) {
+        showNotification('Не удалось найти рюкзак в инвентаре');
+        return;
+    }
+
+    currentCharacterData.inventory = currentCharacterData.inventory || {};
+    currentCharacterData.inventory.backpack = contents;
+    delete currentCharacterData.inventory.backpackModel;
+    currentCharacterData.equipment.backpack = backpackToEquip;
+
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Рюкзак экипирован', 'success');
+};
+
+window.unequipBackpack = async function() {
+    const backpack = currentCharacterData.equipment?.backpack;
+    if (!backpack) {
+        showNotification('Рюкзак не экипирован');
+        return;
+    }
+
+    currentCharacterData.inventory = currentCharacterData.inventory || {};
+    currentCharacterData.inventory.pockets = Array.isArray(currentCharacterData.inventory.pockets)
+        ? currentCharacterData.inventory.pockets
+        : [];
+    const contents = Array.isArray(currentCharacterData.inventory.backpack)
+        ? currentCharacterData.inventory.backpack
+        : [];
+    currentCharacterData.inventory.pockets.push({
+        ...backpack,
+        quantity: 1,
+        contents,
+        isContainer: true,
+        isEquippable: true,
+    });
+    currentCharacterData.inventory.backpack = [];
+    delete currentCharacterData.inventory.backpackModel;
+    delete currentCharacterData.equipment.backpack;
+
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Рюкзак снят вместе с содержимым', 'success');
 };
 
 window.equipDetectorFromInventory = async function(itemPath) {
@@ -5844,6 +5852,7 @@ window.equipHeadphonesFromInventory = async function(itemPath) {
         return;
     }
     const headphonesToEquip = {
+        createdByPlayer: Boolean(item.createdByPlayer),
         templateId: template.id,
         name: template.name,
         deafeningCoef: item.deafeningCoef ?? template.attributes?.deafening_coef ?? 0,
@@ -5929,6 +5938,7 @@ window.equipGlassesFromInventory = async function(itemPath) {
         return;
     }
     const glassesToEquip = {
+        createdByPlayer: Boolean(item.createdByPlayer),
         templateId: template.id,
         name: template.name,
         charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
@@ -6000,6 +6010,7 @@ window.equipGlovesFromInventory = async function(itemPath) {
         return;
     }
     const glovesToEquip = {
+        createdByPlayer: Boolean(item.createdByPlayer),
         templateId: template.id,
         name: template.name,
         charismaBonus: item.charismaBonus ?? template.attributes?.charisma_bonus ?? 0,
@@ -9407,37 +9418,28 @@ async function renderInventoryTab(data) {
     const pocketMaxVolume = inv.pocketMaxVolume || 10;
     const pocketFill = pockets.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
 
-    // Загружаем шаблоны рюкзаков
-    let backpackTemplates = [];
-    try {
-        backpackTemplates = await loadTemplatesForLobby('backpack');
-        cachedBackpackTemplates = backpackTemplates;
-    } catch (e) {
-        console.error('Failed to load backpack templates', e);
-    }
-
     // Загружаем все возможные шаблоны предметов
     const allTemplates = await getAllItemTemplates();
 
     // Фильтруем нужные категории из allTemplates
-    const helmetTemplates = allTemplates.filter(t => t.category === 'helmet');
-    const gasMaskTemplates = allTemplates.filter(t => t.category === 'gas_mask');
+    const visibleTemplates = window.isGM ? allTemplates : allTemplates.filter(t => t.source !== 'local');
+    const helmetTemplates = visibleTemplates.filter(t => t.category === 'helmet');
+    const gasMaskTemplates = visibleTemplates.filter(t => t.category === 'gas_mask');
     const pouchTemplates = allTemplates.filter(t => t.category === 'pouch');
     const modificationTemplates = allTemplates.filter(t => t.category === 'modification');
     const vestTemplates = allTemplates.filter(t => t.category === 'vest');
 
     // Группируем для селекторов в карманах/рюкзаке
     const groupedByCategory = {};
-    allTemplates.forEach(t => {
+    visibleTemplates.forEach(t => {
         const group = t.categoryDisplay || 'Прочее';
         if (!groupedByCategory[group]) groupedByCategory[group] = [];
         groupedByCategory[group].push(t);
     });
 
-    const selectedBackpackId = inv.backpackModel ? parseInt(inv.backpackModel, 10) : null;
-    const selectedBackpack = backpackTemplates.find(t => t.id === selectedBackpackId);
-    const backpackLimit = selectedBackpack ? selectedBackpack.attributes?.limit || 0 : 0;
-    const backpackWeightReduction = selectedBackpack ? selectedBackpack.attributes?.weight_reduction || 0 : 0;
+    const equippedBackpack = eq.backpack || null;
+    const backpackLimit = Number(equippedBackpack?.attributes?.limit || equippedBackpack?.attributes?.capacity || 0);
+    const backpackWeightReduction = Number(equippedBackpack?.attributes?.weight_reduction || 0);
     const backpackFill = backpack.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
 
     const rawTotalWeight = pockets.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0) +
@@ -9456,7 +9458,6 @@ async function renderInventoryTab(data) {
         </div>
         ${window.isGM ? `<div style="margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
             <button type="button" class="btn btn-sm btn-primary" onclick="openCreateInventoryItemModal()">➕ Создать предмет</button>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateBackpackTemplateModal()">➕ Создать рюкзак</button>
             <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateVestTemplateModal()">➕ Создать разгрузку</button>
             <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateModuleTemplateModal()">➕ Создать модуль</button>
             <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateMagazineTemplateModal()">➕ Создать магазин</button>
@@ -9471,12 +9472,15 @@ async function renderInventoryTab(data) {
             <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker()">➕ Добавить предмет</button>
         </div>
         <button type="button" class="btn btn-sm btn-secondary" onclick="addPocketItemManual()">📝 Свой предмет</button>` : ''}
+        ${!window.isGM ? `<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker()">➕ Добавить предмет</button>
+        </div>` : ''}
 
         <!-- Пояс -->
         ${eq.belt?.templateId ? `
         <div class="equipment-group" style="margin-top: 20px;">
             <div class="equipment-header" style="display: flex; align-items: center; justify-content: space-between;">
-                <h4>Пояс</h4>
+                <h4>Пояс ${renderCreatedByPlayerBadge(eq.belt)}</h4>
                 <button type="button" class="btn btn-sm btn-danger" onclick="unequipBelt()">Снять</button>
             </div>
             <div style="margin-bottom: 10px;">
@@ -9510,7 +9514,7 @@ async function renderInventoryTab(data) {
         ${eq.vest?.templateId ? `
         <div class="equipment-group" style="margin-top: 20px;">
             <div class="equipment-header" style="display: flex; align-items: center; justify-content: space-between;">
-                <h4>Разгрузка</h4>
+                <h4>Разгрузка ${renderCreatedByPlayerBadge(eq.vest)}</h4>
                 <button type="button" class="btn btn-sm btn-danger" onclick="unequipVest()">Снять</button>
             </div>
             <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: flex-end;">
@@ -9548,21 +9552,20 @@ async function renderInventoryTab(data) {
 
         <h4 style="margin-top:20px;">Рюкзак</h4>
         <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
-            <label>Модель:</label>
-            <select name="inventory.backpackModel" class="form-control" onchange="onBackpackModelChange(this)" style="width: 200px;">
-                <option value="">-- Без рюкзака --</option>
-                ${backpackTemplates.map(t => `<option value="${t.id}" ${selectedBackpackId === t.id ? 'selected' : ''}>${t.name} (лимит ${t.attributes?.limit || 0}, снижение веса ${t.attributes?.weight_reduction || 0})</option>`).join('')}
-            </select>
-            <span id="backpack-fill-display">Заполнено: ${backpackFill} / ${backpackLimit}</span>
+            ${equippedBackpack ? `
+                <strong>${escapeHtml(equippedBackpack.name || 'Рюкзак')}</strong>
+                <span id="backpack-fill-display">Заполнено: ${backpackFill} / ${backpackLimit}</span>
+                <button type="button" class="btn btn-sm btn-danger" onclick="unequipBackpack()">Снять</button>
+            ` : '<span style="opacity:0.7;">Рюкзак не экипирован. Наденьте рюкзак из инвентаря.</span>'}
         </div>
-        <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
+        ${equippedBackpack ? `<div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="backpack-container"></div>
-        ${window.isGM ? `<div style="margin-top:10px;">
+        <div style="margin-top:10px;">
             <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker('backpack')">➕ Добавить предмет</button>
         </div>
-        <button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>` : ''}
+        ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>` : ''}` : ''}
     `;
 
     container.innerHTML = html;
@@ -9582,12 +9585,16 @@ async function renderInventoryTab(data) {
     const backpackItems = Array.isArray(inv.backpack)
         ? inv.backpack.map(item => migrateOldItemToNew(item))
         : [];
-    renderBackpackNew(backpackItems, groupedByCategory, allTemplates);
+    if (equippedBackpack) {
+        renderBackpackNew(backpackItems, groupedByCategory, allTemplates);
+    }
 
     const pocketsContainerEl = document.getElementById('pockets-container');
     const backpackContainerEl = document.getElementById('backpack-container');
     if (pocketsContainerEl) setupDropTarget(pocketsContainerEl, ['inventory', 'pockets'], { capacity: pocketMaxVolume, contents: pockets });
-    if (backpackContainerEl) setupDropTarget(backpackContainerEl, ['inventory', 'backpack'], { capacity: backpackLimit, contents: backpack });
+    if (backpackContainerEl && equippedBackpack) {
+        setupDropTarget(backpackContainerEl, ['inventory', 'backpack'], { capacity: backpackLimit, contents: backpack });
+    }
 
     recalculateInventoryTotals();
 
@@ -10378,15 +10385,15 @@ function getInventoryTargetItems(targetPath) {
 }
 
 async function addTemplateItemToInventory(templateId, target, quantity = 1, ammoVariant = null) {
-    if (!window.isGM) {
-        showNotification('Только ГМ может добавлять предметы');
-        return false;
-    }
     if (!templateId) return false;
 
     const allTemplates = await getAllItemTemplates();
     const template = allTemplates.find(t => t.id == templateId);
     if (!template) return false;
+    if (!window.isGM && template.source === 'local') {
+        showNotification('Игроки могут добавлять только глобальные предметы');
+        return false;
+    }
 
     const targetPath = getInventoryTargetPath(target);
     const targetItems = getInventoryTargetItems(targetPath);
@@ -10395,7 +10402,9 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
         return false;
     }
 
-    const newItem = createItemFromTemplateSelection(template, quantity, ammoVariant);
+    const newItem = createItemFromTemplateSelection(template, quantity, ammoVariant, {
+        createdByPlayer: !window.isGM,
+    });
     targetItems.push(newItem);
 
     await rerenderContainer(targetPath, null, { keepExpanded: true });
@@ -10405,10 +10414,6 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
 }
 
 window.openInventoryTemplatePicker = async function(target = 'pockets', options = {}) {
-    if (!window.isGM) {
-        showNotification('Только ГМ может добавлять предметы');
-        return;
-    }
     let modal = document.getElementById('inventory-template-picker-modal');
     if (!modal) {
         modal = document.createElement('div');
@@ -10453,7 +10458,7 @@ window.openInventoryTemplatePicker = async function(target = 'pockets', options 
     content.innerHTML = 'Загрузка...';
 
     const render = async () => {
-        const templates = await getAllItemTemplates();
+        const templates = (await getAllItemTemplates()).filter(t => window.isGM || t.source !== 'local');
         content.innerHTML = renderInventoryTemplatePicker(templates, searchInput.value);
     };
 
@@ -10467,7 +10472,7 @@ window.openInventoryTemplatePicker = async function(target = 'pockets', options 
 };
 
 window.selectInventoryTemplate = async function(templateId) {
-    const allTemplates = await getAllItemTemplates();
+    const allTemplates = (await getAllItemTemplates()).filter(t => window.isGM || t.source !== 'local');
     const template = allTemplates.find(t => t.id === templateId);
     if (!template) return;
     const picker = document.getElementById('inventory-template-picker-modal');
@@ -10480,7 +10485,9 @@ window.selectInventoryTemplate = async function(templateId) {
     }
 
     if (selectionHandler) {
-        await selectionHandler(createItemFromTemplateSelection(template), template);
+        await selectionHandler(createItemFromTemplateSelection(template, 1, null, {
+            createdByPlayer: !window.isGM,
+        }), template);
         return;
     }
 
@@ -10660,7 +10667,9 @@ window.confirmAmmoSelection = async function() {
         : normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect);
     const added = modal._templateSelectionHandler
         ? await modal._templateSelectionHandler(
-            createItemFromTemplateSelection(template, quantity, ammoVariant),
+            createItemFromTemplateSelection(template, quantity, ammoVariant, {
+                createdByPlayer: !window.isGM,
+            }),
             template
         )
         : await addTemplateItemToInventory(templateId, modal._inventoryTarget, quantity, ammoVariant);
@@ -10807,10 +10816,9 @@ function recalculateInventoryTotals() {
 
     // Рюкзак – только его собственное содержимое
     const backpackItems = Array.isArray(inv.backpack) ? inv.backpack.map(item => migrateOldItemToNew(item)) : [];
-    const selectedBackpackId = inv.backpackModel ? parseInt(inv.backpackModel, 10) : null;
-    const selectedBackpack = cachedBackpackTemplates.find(t => t.id === selectedBackpackId);
-    const backpackLimit = selectedBackpack ? selectedBackpack.attributes?.limit || 0 : 0;
-    const backpackWeightReduction = selectedBackpack ? selectedBackpack.attributes?.weight_reduction || 0 : 0;
+    const equippedBackpack = eq.backpack || null;
+    const backpackLimit = Number(equippedBackpack?.attributes?.limit || equippedBackpack?.attributes?.capacity || 0);
+    const backpackWeightReduction = Number(equippedBackpack?.attributes?.weight_reduction || 0);
 
     let totalWeight = 0;
     let totalVolume = 0;
@@ -10878,15 +10886,6 @@ function recalculateInventoryTotals() {
     const pocketFillSpan = document.getElementById('pocket-fill-display');
     if (pocketFillSpan) pocketFillSpan.textContent = pocketFill.toFixed(1);
 }
-
-window.onBackpackModelChange = async function(select) {
-    updateDataFromFields();
-    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
-    currentCharacterData.inventory.backpackModel = select.value;
-    cachedBackpackTemplates = await loadTemplatesForLobby('backpack');
-    recalculateInventoryTotals();
-    scheduleAutoSave();
-};
 
 window.selectPocketItem = async function(index, selectedId) {
     const id = parseInt(selectedId, 10);
@@ -11031,6 +11030,19 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         itemDiv._toggleIcon = toggleIcon;
     }
     nameWrapper.appendChild(nameCell);
+    if (item.createdByPlayer) {
+        const createdBadge = document.createElement('span');
+        createdBadge.className = 'created-by-player-badge';
+        createdBadge.title = 'Предмет добавлен игроком';
+        createdBadge.textContent = 'Создано игроком';
+        createdBadge.style.marginLeft = '8px';
+        createdBadge.style.padding = '2px 6px';
+        createdBadge.style.borderRadius = '4px';
+        createdBadge.style.fontSize = '11px';
+        createdBadge.style.color = '#d8c58a';
+        createdBadge.style.border = '1px solid rgba(216,197,138,.45)';
+        nameWrapper.appendChild(createdBadge);
+    }
 
     // ОБЁРТКА ДЛЯ ПЕРЕТАСКИВАНИЯ
     const nameDragZone = document.createElement('span');
@@ -11168,7 +11180,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     actionsDiv.appendChild(dropBtn);
 
     // Надеть
-    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'detector', 'melee_weapon',
+    const equippableCategories = ['armor', 'helmet', 'gas_mask', 'weapon', 'belt', 'vest', 'backpack', 'detector', 'melee_weapon',
     'device', 'headphones', 'glasses', 'gloves', 'jewelry'];
     if (item.isEquippable || equippableCategories.includes(item.category)) {
         const equipBtn = document.createElement('button');
@@ -11190,6 +11202,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             else if (category === 'weapon') equipWeaponFromInventory(itemPath);
             else if (category === 'belt') equipBeltFromInventory(itemPath);
             else if (category === 'vest') equipVestFromInventory(itemPath);
+            else if (category === 'backpack') equipBackpackFromInventory(itemPath);
             else if (category === 'device' || category === 'detector') equipDetectorFromInventory(itemPath);
             else if (category === 'melee_weapon') equipMeleeWeaponFromInventory(itemPath);
             else if (category === 'headphones') equipHeadphonesFromInventory(itemPath);
@@ -11735,7 +11748,11 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
                 control.disabled = true;
             });
             sheet?.querySelectorAll('button').forEach(button => {
-                if (!button.classList.contains('tab-btn') && !button.classList.contains('close')) {
+                if (
+                    !button.classList.contains('tab-btn')
+                    && !button.classList.contains('close')
+                    && !button.hasAttribute('data-sheet-control')
+                ) {
                     button.disabled = true;
                 }
             });

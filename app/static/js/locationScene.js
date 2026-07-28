@@ -1122,41 +1122,6 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             action: () => showPostureMenu(characterId),
         },
         {
-            label: 'Укрытие',
-            icon: '◒',
-            title: combatCharacter?.cover_object_id ? 'Покинуть укрытие' : 'Занять соседнее укрытие',
-            angle: 258,
-            requiresCombat: true,
-            action: async () => {
-                if (combatCharacter?.cover_object_id) {
-                    try {
-                        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
-                            location_character_id: combatCharacter.location_character_id,
-                            action_key: 'leave_cover',
-                        });
-                        showNotification('Персонаж покинул укрытие', 'success');
-                    } catch (error) {
-                        showNotification(error.message || 'Не удалось покинуть укрытие', 'system');
-                    }
-                    return;
-                }
-                beginPendingCombatAction({
-                    actorCharacterId: characterId,
-                    actorLocationCharacterId: combatCharacter?.location_character_id,
-                    actionKey: 'take_cover',
-                    targetType: 'structure',
-                });
-            },
-        },
-        {
-            label: 'Упор',
-            icon: '⊥',
-            title: 'Поставить активное оружие на упор',
-            angle: 294,
-            requiresCombat: true,
-            action: () => showBracePaymentMenu(characterId),
-        },
-        {
             label: 'Инвентарь',
             title: 'Открыть вкладку инвентаря',
             angle: 118,
@@ -2485,7 +2450,30 @@ function getStructureActions(object) {
     if ((LOW_CLIMB_OBJECT_TYPES.has(object.type) || HIGH_CLIMB_OBJECT_TYPES.has(object.type) || object.properties?.climbable) && !actions.includes('climb')) {
         actions.push('climb');
     }
+    if (combatState?.status === 'active' && isStructureCoverObject(object)) {
+        const actorId = pendingStructureAction?.actorCharacterId;
+        const combatCharacter = findCombatCharacterByCharacterId(actorId);
+        const occupiesThisCover = Number(combatCharacter?.cover_object_id) === Number(object.id);
+        actions.push(occupiesThisCover ? 'leave_cover' : 'take_cover');
+        if (
+            occupiesThisCover
+            && combatCharacter?.drawn_weapon_index !== null
+            && combatCharacter?.drawn_weapon_index !== undefined
+            && !combatCharacter?.weapon_braced
+        ) {
+            actions.push('brace_weapon');
+        }
+    }
     return [...new Set(actions)];
+}
+
+function isStructureCoverObject(object) {
+    const properties = object?.properties || {};
+    const type = String(object?.type || '').toLowerCase();
+    if (properties.cover_enabled === false) return false;
+    if (['floor', 'ground_item', 'campfire', 'anomaly'].includes(type)) return false;
+    if (type === 'door' && properties.is_open) return false;
+    return getObjectTraversalHeight(object) >= 0.3;
 }
 
 function getActionRequirement(object, actionKey) {
@@ -2498,6 +2486,9 @@ function getStructureActionLabel(object, actionKey) {
     if (actionKey === 'move') return 'Переставить';
     if (actionKey === 'rotate') return 'Повернуть';
     if (actionKey === 'climb') return 'Перелезть';
+    if (actionKey === 'take_cover') return 'Занять укрытие';
+    if (actionKey === 'leave_cover') return 'Покинуть укрытие';
+    if (actionKey === 'brace_weapon') return 'Поставить оружие на упор';
     return actionKey;
 }
 
@@ -2507,6 +2498,9 @@ function getStructureActionIcon(actionKey) {
     if (actionKey === 'move') return '⤢';
     if (actionKey === 'rotate') return '↻';
     if (actionKey === 'climb') return '↑';
+    if (actionKey === 'take_cover') return '◒';
+    if (actionKey === 'leave_cover') return '○';
+    if (actionKey === 'brace_weapon') return '⊥';
     return '•';
 }
 
@@ -3269,6 +3263,41 @@ async function executeStructureAction(object, actionKey) {
 
     if (actionKey === 'climb') {
         return performClimbAction(object, actorCharacterId);
+    }
+
+    if (actionKey === 'take_cover' || actionKey === 'leave_cover') {
+        const combatCharacter = findCombatCharacterByCharacterId(actorCharacterId);
+        if (!combatCharacter?.location_character_id) {
+            showNotification('Не удалось найти персонажа в бою', 'system');
+            return false;
+        }
+        try {
+            await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                location_character_id: combatCharacter.location_character_id,
+                action_key: actionKey,
+                target_object_id: actionKey === 'take_cover' ? object.id : undefined,
+            });
+            hideStructureInteraction();
+            showNotification(
+                actionKey === 'take_cover' ? 'Укрытие занято' : 'Персонаж покинул укрытие',
+                'success'
+            );
+            return true;
+        } catch (error) {
+            showNotification(
+                error.message || (actionKey === 'take_cover'
+                    ? 'Не удалось занять укрытие'
+                    : 'Не удалось покинуть укрытие'),
+                'system'
+            );
+            return false;
+        }
+    }
+
+    if (actionKey === 'brace_weapon') {
+        hideStructureInteraction();
+        showBracePaymentMenu(actorCharacterId);
+        return true;
     }
 
     if (actionKey === 'move') {

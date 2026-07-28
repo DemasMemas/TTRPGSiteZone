@@ -364,6 +364,12 @@ export function normalizeEffect(raw = {}) {
     if (['', 'общий', 'generic'].includes(String(normalized.name || '').trim().toLowerCase()) && type !== 'generic') {
         normalized.name = getEffectMeta(type).label;
     }
+    const maxHours = toInt(normalized.max_hours, 0);
+    if (normalized.remaining === null && maxHours > 0) {
+        normalized.remaining = maxHours;
+        normalized.duration = normalized.duration ?? maxHours;
+        normalized.time_unit = 'hour';
+    }
     return normalized;
 }
 
@@ -583,6 +589,11 @@ export function advanceTimedEffects(health = {}, effectsInput = [], elapsedSecon
 
     normalizeEffectList(effectsInput).forEach(effect => {
         let unit = String(effect.time_unit || '').toLowerCase();
+        if (effect.remaining == null && Number(effect.max_hours || 0) > 0) {
+            effect.remaining = Number(effect.max_hours);
+            effect.time_unit = 'hour';
+            unit = 'hour';
+        }
         if (!unit) {
             unit = {
                 time_elapsed: 'minute',
@@ -616,6 +627,34 @@ export function advanceTimedEffects(health = {}, effectsInput = [], elapsedSecon
             entry => entry && typeof entry === 'object'
         ));
     });
+    const modifiers = health.combatMeta?.consumableModifiers;
+    if (Array.isArray(modifiers)) {
+        health.combatMeta.consumableModifiers = modifiers.filter(modifier => {
+            if (!modifier || typeof modifier !== 'object' || modifier.remaining == null) return true;
+            let unit = String(modifier.time_unit || '').toLowerCase();
+            const tick = String(modifier.tick || 'turn_end');
+            if (!unit) {
+                unit = {
+                    turn_end: 'second',
+                    time_elapsed: 'minute',
+                    movement_end: 'movement',
+                    hour_start: 'hour',
+                }[tick] || '';
+            }
+            if (!unitSeconds[unit]) return true;
+            const secondsPerUnit = Math.max(
+                0.001,
+                Number(modifier.seconds_per_unit || (tick === 'turn_end' ? 6 : unitSeconds[unit]))
+            );
+            const remainingSeconds = Number(
+                modifier.remaining_seconds ?? (Number(modifier.remaining) * secondsPerUnit)
+            ) - Math.max(0, Number(elapsedSeconds) || 0);
+            if (remainingSeconds <= 0) return false;
+            modifier.remaining_seconds = remainingSeconds;
+            modifier.remaining = Math.max(1, Math.ceil(remainingSeconds / secondsPerUnit));
+            return true;
+        });
+    }
     health.effects = survivors;
     activated.forEach(effect => applyEffectToHealth(health, effect));
     syncHealthDerivedStatuses(health);

@@ -484,7 +484,7 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         templates.append(
             {
                 "name": name,
-                "category": "helmet",
+                "category": "gas_mask" if name.lower().startswith(("противогаз", "респиратор")) else "helmet",
                 "subcategory": _normalize_text(row.get("I")),
                 "item_class": _normalize_text(row.get("N")),
                 "description": _normalize_text(row.get("A")),
@@ -724,7 +724,7 @@ def upsert_equipment_templates(workbook_path: str | Path, session=None) -> Dict[
             session.delete(item)
             removed_grenades += 1
 
-    imported_categories = ["ammo", "magazine", "weapon", "melee_weapon", "armor", "helmet"]
+    imported_categories = ["ammo", "magazine", "weapon", "melee_weapon", "armor", "helmet", "gas_mask"]
     existing_by_category: Dict[str, List[ItemTemplate]] = {}
     for item in ItemTemplate.query.filter(ItemTemplate.category.in_(imported_categories)).all():
         existing_by_category.setdefault(item.category, []).append(item)
