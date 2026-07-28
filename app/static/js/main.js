@@ -270,6 +270,15 @@ window.enterLocation = async function(locationId) {
                             <label id="loc-structure-depth-field">Глубина <input id="loc-structure-depth" type="number" min="0.1" max="30" step="0.1" value="0.2" style="width:58px;"></label>
                             <label id="loc-structure-height-field">Высота <input id="loc-structure-height" type="number" min="0.1" max="20" step="0.1" value="2.4" style="width:58px;"></label>
                             <label id="loc-structure-rotation-field">Поворот <select id="loc-structure-rotation" class="form-control" style="width:auto;"><option value="0">0°</option><option value="1.5707963267948966">90°</option><option value="3.141592653589793">180°</option><option value="4.71238898038469">270°</option></select></label>
+                            <label>Класс укрытия <select id="loc-structure-cover-class" class="form-control" style="width:auto;">
+                                <option value="conditional">Условное</option>
+                                <option value="flimsy">Хлипкое</option>
+                                <option value="medium" selected>Средней прочности</option>
+                                <option value="strong">Прочное</option>
+                                <option value="very_strong">Очень прочное</option>
+                                <option value="titanium">Титановое</option>
+                                <option value="special">Особое</option>
+                            </select></label>
                             <label>Цвет <input id="loc-structure-color" type="color" value="#8b6b4f"></label>
                             <span style="font-size:12px; opacity:.8;">Выберите структуру и кликните по тайлу</span>
                         </div>

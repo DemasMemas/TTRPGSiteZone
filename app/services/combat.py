@@ -85,6 +85,16 @@ MOVEMENT_MODES = {
     },
 }
 
+COVER_CLASSES = {
+    'conditional': {'label': 'Условное', 'max_hp': 25, 'physical_protection': 0},
+    'flimsy': {'label': 'Хлипкое', 'max_hp': 50, 'physical_protection': 5},
+    'medium': {'label': 'Средней прочности', 'max_hp': 100, 'physical_protection': 20},
+    'strong': {'label': 'Прочное', 'max_hp': 200, 'physical_protection': 40},
+    'very_strong': {'label': 'Очень прочное', 'max_hp': 400, 'physical_protection': 60},
+    'titanium': {'label': 'Титановое', 'max_hp': 800, 'physical_protection': 90},
+    'special': {'label': 'Особое', 'max_hp': 200, 'physical_protection': 0},
+}
+
 
 ACTION_CATALOG = [
     {'key': 'attack', 'label': 'Атака', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
@@ -96,6 +106,9 @@ ACTION_CATALOG = [
     {'key': 'defend', 'label': 'Защита', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
     {'key': 'use_item', 'label': 'Использовать предмет', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
     {'key': 'convert_free_action_to_movement', 'label': 'Получить ОП', 'action_points': 2, 'free_actions': 1, 'movement_points': 0},
+    {'key': 'take_cover', 'label': 'Занять укрытие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'leave_cover', 'label': 'Покинуть укрытие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'brace_weapon', 'label': 'Поставить оружие на упор', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
 ]
 
 
@@ -108,6 +121,172 @@ class CombatService:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _cover_profile(obj):
+        properties = dict(getattr(obj, 'properties', {}) or {})
+        cover_class = str(properties.get('cover_class') or 'medium').lower()
+        base = COVER_CLASSES.get(cover_class, COVER_CLASSES['medium'])
+        max_hp = max(1, CombatService._coerce_int(properties.get('cover_max_hp'), base['max_hp']))
+        current_hp = max(0, min(max_hp, CombatService._coerce_int(properties.get('cover_hp'), max_hp)))
+        base_protection = max(
+            0,
+            min(100, CombatService._coerce_int(
+                properties.get('cover_base_physical_protection'),
+                base['physical_protection'],
+            )),
+        )
+        current_protection = max(
+            0,
+            min(base_protection, CombatService._coerce_int(
+                properties.get('cover_physical_protection'),
+                round(base_protection * current_hp / max_hp),
+            )),
+        )
+        return {
+            'class': cover_class,
+            'label': base['label'],
+            'hp': current_hp,
+            'max_hp': max_hp,
+            'base_physical_protection': base_protection,
+            'physical_protection': current_protection,
+            'mesh_hit_chance': 25 if properties.get('mesh_cover') else 100,
+        }
+
+    @staticmethod
+    def _is_cover_object(obj):
+        properties = getattr(obj, 'properties', {}) or {}
+        obj_type = str(getattr(obj, 'type', '') or '').lower()
+        if properties.get('cover_enabled') is False:
+            return False
+        if obj_type in {'floor', 'ground_item', 'campfire', 'anomaly'}:
+            return False
+        if obj_type == 'door' and properties.get('is_open'):
+            return False
+        return CombatService._object_height(obj) >= 0.3
+
+    @staticmethod
+    def apply_cover_damage(obj, damage, damage_type):
+        profile = CombatService._cover_profile(obj)
+        damage = max(0, CombatService._coerce_int(damage, 0))
+        remaining_hp = max(0, profile['hp'] - damage)
+        properties = dict(obj.properties or {})
+        properties.update({
+            'cover_class': profile['class'],
+            'cover_max_hp': profile['max_hp'],
+            'cover_hp': remaining_hp,
+            'cover_base_physical_protection': profile['base_physical_protection'],
+            'cover_physical_protection': round(
+                profile['base_physical_protection'] * remaining_hp / profile['max_hp']
+            ),
+        })
+        obj.properties = properties
+        flag_modified(obj, 'properties')
+        destroyed = str(damage_type or '').lower() in {'explosive', 'blast', 'взрывной'} and remaining_hp <= 0
+        if destroyed:
+            LocationCharacter.query.filter_by(cover_object_id=obj.id).update({
+                'cover_object_id': None,
+                'weapon_braced': False,
+                'braced_weapon_index': None,
+            })
+            db.session.delete(obj)
+        return {'destroyed': destroyed, **CombatService._cover_profile(obj)}
+
+    @staticmethod
+    def _line_object_entry(shooter, target, obj):
+        width, depth = CombatService._object_dimensions(obj)
+        center_x = float(obj.tile_x) + 0.5
+        center_y = float(obj.tile_y) + 0.5
+        bounds = (
+            center_x - width / 2,
+            center_x + width / 2,
+            center_y - depth / 2,
+            center_y + depth / 2,
+        )
+        start_x = float(shooter.pos_x) + 0.5
+        start_y = float(shooter.pos_y) + 0.5
+        end_x = float(target.pos_x) + 0.5
+        end_y = float(target.pos_y) + 0.5
+        dx = end_x - start_x
+        dy = end_y - start_y
+        lower, upper = 0.0, 1.0
+        for origin, delta, minimum, maximum in (
+            (start_x, dx, bounds[0], bounds[1]),
+            (start_y, dy, bounds[2], bounds[3]),
+        ):
+            if abs(delta) < 1e-9:
+                if origin < minimum or origin > maximum:
+                    return None
+                continue
+            first = (minimum - origin) / delta
+            second = (maximum - origin) / delta
+            if first > second:
+                first, second = second, first
+            lower = max(lower, first)
+            upper = min(upper, second)
+            if lower > upper:
+                return None
+        if lower <= 0.01 or lower >= 0.99:
+            return None
+        return lower
+
+    @staticmethod
+    def _cover_analysis(location_id, shooter, target):
+        shooter_eye = {'standing': 1.65, 'sitting': 1.05, 'prone': 0.35}[
+            CombatService._posture_key(shooter)
+        ]
+        zone_heights = {
+            'standing': {
+                'left_leg': 0.55, 'right_leg': 0.55, 'abdomen': 1.0,
+                'chest': 1.35, 'left_arm': 1.25, 'right_arm': 1.25, 'head': 1.7,
+            },
+            'sitting': {
+                'left_leg': 0.25, 'right_leg': 0.25, 'abdomen': 0.55,
+                'chest': 0.85, 'left_arm': 0.8, 'right_arm': 0.8, 'head': 1.1,
+            },
+            'prone': {
+                'left_leg': 0.2, 'right_leg': 0.2, 'abdomen': 0.25,
+                'chest': 0.3, 'left_arm': 0.3, 'right_arm': 0.3, 'head': 0.4,
+            },
+        }[CombatService._posture_key(target)]
+        blocked = {}
+        objects = LocationObject.query.filter_by(location_id=location_id).all()
+        for obj in objects:
+            if not CombatService._is_cover_object(obj):
+                continue
+            entry = CombatService._line_object_entry(shooter, target, obj)
+            if entry is None:
+                continue
+            height = CombatService._object_height(obj)
+            for zone, target_height in zone_heights.items():
+                ray_height = shooter_eye + (target_height - shooter_eye) * entry
+                if ray_height <= height:
+                    previous = blocked.get(zone)
+                    if not previous or entry < previous['distance_factor']:
+                        blocked[zone] = {
+                            'object_id': obj.id,
+                            'object_name': obj.name or obj.type,
+                            'object_height': height,
+                            'distance_factor': round(entry, 4),
+                            **CombatService._cover_profile(obj),
+                        }
+        blocked_count = len(blocked)
+        if blocked_count == 0:
+            grade, accuracy_penalty, disadvantage, targetable = 'none', 0, False, True
+        elif blocked_count <= 3:
+            grade, accuracy_penalty, disadvantage, targetable = 'half', 2, False, True
+        elif blocked_count < len(zone_heights):
+            grade, accuracy_penalty, disadvantage, targetable = 'three_quarters', 2, True, True
+        else:
+            grade, accuracy_penalty, disadvantage, targetable = 'full', 0, False, False
+        return {
+            'grade': grade,
+            'blocked_zones': list(blocked),
+            'zones': blocked,
+            'accuracy_penalty': accuracy_penalty,
+            'disadvantage': disadvantage,
+            'targetable': targetable,
+        }
 
     @staticmethod
     def _persistent_weapon_index(loc_char):
@@ -1138,6 +1317,9 @@ class CombatService:
             'aimed_target_character_id': loc_char.aimed_target_character_id,
             'aimed_weapon_index': loc_char.aimed_weapon_index,
             'aim_accuracy_bonus': max(0, CombatService._coerce_int(loc_char.aim_accuracy_bonus, 0)),
+            'cover_object_id': loc_char.cover_object_id,
+            'weapon_braced': bool(loc_char.weapon_braced),
+            'braced_weapon_index': loc_char.braced_weapon_index,
             'hp_zones': loc_char.hp_zones,
             'effects': loc_char.effects,
             'pain_level': CombatService._coerce_int(health.get('painLevel', 0), 0),
@@ -1445,6 +1627,73 @@ class CombatService:
         posture_details = None
         draw_details = None
         reload_details = None
+        cover_details = None
+        brace_details = None
+        if action_key == 'take_cover':
+            cover_object = LocationObject.query.filter_by(
+                id=target_object_id,
+                location_id=location_id,
+            ).first()
+            if not cover_object:
+                raise ValidationError("Cover object not found")
+            if not CombatService._is_cover_object(cover_object):
+                raise ValidationError("Object cannot be used as cover")
+            footprint = CombatService._object_footprint_tiles(cover_object)
+            distance = min(
+                (
+                    max(abs(character.pos_x - tile_x), abs(character.pos_y - tile_y))
+                    for tile_x, tile_y in footprint
+                ),
+                default=999,
+            )
+            if distance > 1:
+                raise ValidationError("Character must be adjacent to cover")
+            height = CombatService._object_height(cover_object)
+            if height <= 1.05 and CombatService._posture_key(character) == 'standing':
+                raise ValidationError("Sit down before taking low cover")
+            character.cover_object_id = cover_object.id
+            character.weapon_braced = False
+            character.braced_weapon_index = None
+            cover_details = {
+                'occupied': True,
+                'object_id': cover_object.id,
+                'height': height,
+                **CombatService._cover_profile(cover_object),
+            }
+
+        if action_key == 'leave_cover':
+            character.cover_object_id = None
+            character.weapon_braced = False
+            character.braced_weapon_index = None
+            cover_details = {'occupied': False}
+
+        if action_key == 'brace_weapon':
+            if character.drawn_weapon_index is None:
+                raise ValidationError("Draw a weapon first")
+            cover_object = db.session.get(LocationObject, character.cover_object_id)
+            if not cover_object or cover_object.location_id != location_id:
+                raise ValidationError("Take cover first")
+            payment_key = str(payment or '').lower()
+            costs = {
+                'action': ('action_points_current', 1),
+                'free': ('free_actions_current', 1),
+                'movement': ('movement_points_current', 3),
+            }
+            if payment_key not in costs:
+                raise ValidationError("Choose action, free, or movement payment")
+            field, cost = costs[payment_key]
+            if getattr(character, field) < cost:
+                raise ValidationError("Not enough resources")
+            setattr(character, field, getattr(character, field) - cost)
+            character.weapon_braced = True
+            character.braced_weapon_index = character.drawn_weapon_index
+            brace_details = {
+                'weapon_index': character.drawn_weapon_index,
+                'payment': payment_key,
+                'cost': cost,
+                'accuracy_bonus': 1,
+                'ergonomics_bonus': 10,
+            }
         if action_key == 'change_posture':
             target_posture = str(posture or '').lower()
             options = CombatService._posture_change_options(character, target_posture)
@@ -1465,6 +1714,12 @@ class CombatService:
                 character.action_points_current -= selected['cost']
             source_posture = CombatService._posture_key(character)
             character.posture = target_posture
+            character.weapon_braced = False
+            character.braced_weapon_index = None
+            if target_posture == 'standing' and character.cover_object_id:
+                occupied_cover = db.session.get(LocationObject, character.cover_object_id)
+                if occupied_cover and CombatService._object_height(occupied_cover) <= 1.05:
+                    character.cover_object_id = None
             posture_details = {
                 'from': source_posture,
                 'to': target_posture,
@@ -1737,7 +1992,30 @@ class CombatService:
                     target_character_id,
                     weapon_index,
                 ),
+                'weapon_braced': bool(
+                    character.weapon_braced
+                    and character.braced_weapon_index == weapon_index
+                ),
+                'brace_accuracy_bonus': (
+                    1
+                    if character.weapon_braced and character.braced_weapon_index == weapon_index
+                    else 0
+                ),
+                'brace_ergonomics_bonus': (
+                    10
+                    if character.weapon_braced and character.braced_weapon_index == weapon_index
+                    else 0
+                ),
             }
+            if range_target:
+                cover_analysis = CombatService._cover_analysis(
+                    location_id,
+                    character,
+                    range_target,
+                )
+                if not cover_analysis['targetable']:
+                    raise ValidationError("Target is fully behind cover")
+                attack_details['cover'] = cover_analysis
 
         if action_key == 'convert_free_action_to_movement':
             gain = max(0, DEFAULT_CONVERSION_BASE - CombatService._movement_penalty(character))
@@ -1795,6 +2073,8 @@ class CombatService:
             'posture_change': posture_details,
             'draw_weapon': draw_details,
             'reload_weapon': reload_details,
+            'cover': cover_details,
+            'brace_weapon': brace_details,
         }
 
     @staticmethod
@@ -1967,6 +2247,9 @@ class CombatService:
 
         character.pos_x = new_x
         character.pos_y = new_y
+        character.cover_object_id = None
+        character.weapon_braced = False
+        character.braced_weapon_index = None
         CombatService._clear_aim(character)
         character.last_action = db.func.now()
         CombatService._apply_periodic_health_effects(character, phase='movement_end')

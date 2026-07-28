@@ -1,7 +1,8 @@
 import pytest
+from types import SimpleNamespace
 
 from app.models import LobbyCharacter, LocationCharacter
-from app.services.combat import CombatService
+from app.services.combat import COVER_CLASSES, CombatService
 from app.services.exceptions import ValidationError
 
 
@@ -226,6 +227,65 @@ def test_posture_allows_compatible_movement_modes(posture, movement_mode):
     profile = CombatService._validate_posture_movement(posture, movement_mode)
 
     assert profile
+
+
+@pytest.mark.parametrize(
+    ("cover_class", "max_hp", "protection"),
+    [
+        ("conditional", 25, 0),
+        ("flimsy", 50, 5),
+        ("medium", 100, 20),
+        ("strong", 200, 40),
+        ("very_strong", 400, 60),
+        ("titanium", 800, 90),
+    ],
+)
+def test_cover_class_profiles(cover_class, max_hp, protection):
+    cover = SimpleNamespace(properties={"cover_class": cover_class})
+
+    profile = CombatService._cover_profile(cover)
+
+    assert COVER_CLASSES[cover_class]["max_hp"] == max_hp
+    assert profile["hp"] == max_hp
+    assert profile["physical_protection"] == protection
+
+
+def test_damaged_cover_loses_physical_protection_proportionally():
+    cover = SimpleNamespace(properties={
+        "cover_class": "strong",
+        "cover_max_hp": 200,
+        "cover_hp": 50,
+    })
+
+    profile = CombatService._cover_profile(cover)
+
+    assert profile["physical_protection"] == 10
+
+
+def test_object_between_shooter_and_target_intersects_fire_line():
+    shooter = SimpleNamespace(pos_x=0, pos_y=0)
+    target = SimpleNamespace(pos_x=4, pos_y=0)
+    cover = SimpleNamespace(
+        tile_x=2,
+        tile_y=0,
+        type="wall",
+        properties={"dimensions": {"width": 1, "depth": 1}},
+    )
+
+    assert CombatService._line_object_entry(shooter, target, cover) == pytest.approx(0.375)
+
+
+def test_object_outside_fire_line_does_not_intersect():
+    shooter = SimpleNamespace(pos_x=0, pos_y=0)
+    target = SimpleNamespace(pos_x=4, pos_y=0)
+    cover = SimpleNamespace(
+        tile_x=2,
+        tile_y=2,
+        type="wall",
+        properties={"dimensions": {"width": 1, "depth": 1}},
+    )
+
+    assert CombatService._line_object_entry(shooter, target, cover) is None
 
 
 @pytest.mark.parametrize(

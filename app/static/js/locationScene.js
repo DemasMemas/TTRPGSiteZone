@@ -190,6 +190,15 @@ const LOW_CLIMB_OBJECT_TYPES = new Set(['table', 'chair', 'chest', 'box', 'barri
 const HIGH_CLIMB_OBJECT_TYPES = new Set(['fence']);
 const TOO_HIGH_OBJECT_TYPES = new Set(['tree', 'rock', 'house', 'tent', 'wall', 'shelf', 'anomaly']);
 const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'ground_item']);
+const COVER_CLASS_DEFAULTS = {
+    conditional: { label: 'Условное', maxHp: 25, protection: 0 },
+    flimsy: { label: 'Хлипкое', maxHp: 50, protection: 5 },
+    medium: { label: 'Средней прочности', maxHp: 100, protection: 20 },
+    strong: { label: 'Прочное', maxHp: 200, protection: 40 },
+    very_strong: { label: 'Очень прочное', maxHp: 400, protection: 60 },
+    titanium: { label: 'Титановое', maxHp: 800, protection: 90 },
+    special: { label: 'Особое', maxHp: 200, protection: 0 },
+};
 
 // Хранилище обработчиков для удаления
 const handlers = {
@@ -1113,6 +1122,41 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             action: () => showPostureMenu(characterId),
         },
         {
+            label: 'Укрытие',
+            icon: '◒',
+            title: combatCharacter?.cover_object_id ? 'Покинуть укрытие' : 'Занять соседнее укрытие',
+            angle: 258,
+            requiresCombat: true,
+            action: async () => {
+                if (combatCharacter?.cover_object_id) {
+                    try {
+                        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                            location_character_id: combatCharacter.location_character_id,
+                            action_key: 'leave_cover',
+                        });
+                        showNotification('Персонаж покинул укрытие', 'success');
+                    } catch (error) {
+                        showNotification(error.message || 'Не удалось покинуть укрытие', 'system');
+                    }
+                    return;
+                }
+                beginPendingCombatAction({
+                    actorCharacterId: characterId,
+                    actorLocationCharacterId: combatCharacter?.location_character_id,
+                    actionKey: 'take_cover',
+                    targetType: 'structure',
+                });
+            },
+        },
+        {
+            label: 'Упор',
+            icon: '⊥',
+            title: 'Поставить активное оружие на упор',
+            angle: 294,
+            requiresCombat: true,
+            action: () => showBracePaymentMenu(characterId),
+        },
+        {
             label: 'Инвентарь',
             title: 'Открыть вкладку инвентаря',
             angle: 118,
@@ -1395,6 +1439,59 @@ function showPostureMenu(characterId) {
     menu.style.display = 'flex';
 }
 
+function showBracePaymentMenu(characterId) {
+    const character = findCombatCharacterByCharacterId(characterId);
+    if (!character?.cover_object_id) {
+        showNotification('Сначала займите укрытие', 'system');
+        return;
+    }
+    if (character.drawn_weapon_index === null || character.drawn_weapon_index === undefined) {
+        showNotification('Сначала возьмите оружие в руки', 'system');
+        return;
+    }
+    const options = [
+        { payment: 'action', label: '1 ОД', available: Number(character.action_points_current) >= 1 },
+        { payment: 'free', label: '1 СД', available: Number(character.free_actions_current) >= 1 },
+        { payment: 'movement', label: '3 ОП', available: Number(character.movement_points_current) >= 3 },
+    ];
+    const menu = ensurePostureMenu();
+    menu.innerHTML = `
+        <div style="width:min(430px, calc(100vw - 32px)); padding:18px; border-radius:16px; border:1px solid rgba(255,255,255,0.16); background:rgba(14,18,26,0.98); color:#fff; box-shadow:0 24px 60px rgba(0,0,0,0.48);">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                <div>
+                    <div style="font-size:19px; font-weight:800;">Поставить оружие на упор</div>
+                    <div style="margin-top:4px; opacity:0.72; font-size:12px;">Точность +1 · Эргономика +10</div>
+                </div>
+                <button type="button" class="brace-close btn btn-sm btn-secondary">×</button>
+            </div>
+            <div class="brace-options" style="display:flex; gap:9px; margin-top:16px;"></div>
+        </div>`;
+    const container = menu.querySelector('.brace-options');
+    options.forEach(option => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-primary';
+        button.textContent = option.label;
+        button.disabled = !option.available;
+        button.onclick = async () => {
+            try {
+                await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                    location_character_id: character.location_character_id,
+                    action_key: 'brace_weapon',
+                    payment: option.payment,
+                });
+                closePostureMenu();
+                showNotification('Оружие установлено на упор', 'success');
+            } catch (error) {
+                showNotification(error.message || 'Не удалось поставить оружие на упор', 'system');
+            }
+        };
+        container.appendChild(button);
+    });
+    menu.querySelector('.brace-close').onclick = closePostureMenu;
+    menu.style.display = 'flex';
+}
+
 function ensureMovementTypeMenu() {
     if (movementTypeMenu) return movementTypeMenu;
     movementTypeMenu = document.createElement('div');
@@ -1667,7 +1764,21 @@ async function resolveCombatTargetSelection(targetCharacterId) {
                 if (applied === false) return false;
             }
         } else {
-            await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload);
+            const result = await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload);
+            const cover = result?.attack?.cover;
+            if (cover && cover.grade !== 'none') {
+                const labels = {
+                    half: 'укрытие 1/2',
+                    three_quarters: 'укрытие 3/4',
+                    full: 'полное укрытие',
+                };
+                const penalty = cover.accuracy_penalty ? `, точность -${cover.accuracy_penalty}` : '';
+                const disadvantage = cover.disadvantage ? ', помеха' : '';
+                showNotification(
+                    `${labels[cover.grade] || 'укрытие'}${penalty}${disadvantage}. Закрыты: ${(cover.blocked_zones || []).join(', ')}`,
+                    'system'
+                );
+            }
             if (typeof action.onResolve === 'function') {
                 await action.onResolve({ targetCharacterId, target });
             }
@@ -1764,7 +1875,12 @@ async function resolveCombatStructureSelection(clientX, clientY) {
         if (typeof action.onResolve === 'function') {
             await action.onResolve({ targetObject: locationObject });
         }
-        showNotification(`Огонь на подавление: ${locationObject.name || 'укрытие'}`, 'success');
+        showNotification(
+            action.actionKey === 'take_cover'
+                ? `Укрытие занято: ${locationObject.name || 'объект'}`
+                : `Огонь на подавление: ${locationObject.name || 'укрытие'}`,
+            'success'
+        );
         clearPendingCombatAction();
         return true;
     } catch (error) {
@@ -3748,7 +3864,41 @@ function showObjectContextMenu(clientX, clientY, object) {
     }
     createContextMenu();
     contextMenu.innerHTML = '';
-    const actions = [{ label: 'Осмотреть', action: () => showNotification(object.name || object.type, 'system') }];
+    const coverClass = object.properties?.cover_class || 'medium';
+    const coverDefaults = COVER_CLASS_DEFAULTS[coverClass] || COVER_CLASS_DEFAULTS.medium;
+    const coverHp = object.properties?.cover_hp ?? object.properties?.cover_max_hp ?? coverDefaults.maxHp;
+    const coverProtection = object.properties?.cover_physical_protection ?? coverDefaults.protection;
+    const actions = [{
+        label: 'Осмотреть',
+        action: () => showNotification(
+            `${object.name || object.type}: ${coverDefaults.label}, ОЗ ${coverHp}/${object.properties?.cover_max_hp ?? coverDefaults.maxHp}, защита ${coverProtection}%`,
+            'system'
+        )
+    }];
+    if (window.isGM) {
+        actions.push({
+            label: `Класс укрытия: ${coverDefaults.label}`,
+            action: async () => {
+                const keys = Object.keys(COVER_CLASS_DEFAULTS);
+                const promptText = keys
+                    .map(key => `${key} — ${COVER_CLASS_DEFAULTS[key].label}`)
+                    .join('\n');
+                const selected = window.prompt(`Выберите класс укрытия:\n${promptText}`, coverClass);
+                if (!selected || !COVER_CLASS_DEFAULTS[selected]) return;
+                const profile = COVER_CLASS_DEFAULTS[selected];
+                await updateInteractiveObject(object.id, {
+                    properties: {
+                        cover_class: selected,
+                        cover_max_hp: profile.maxHp,
+                        cover_hp: profile.maxHp,
+                        cover_base_physical_protection: profile.protection,
+                        cover_physical_protection: profile.protection,
+                    }
+                });
+                showNotification(`Класс укрытия изменён: ${profile.label}`, 'success');
+            }
+        });
+    }
     getObjectActions(object).forEach(action => {
         if (action === 'toggle_door') {
             const isOpen = Boolean(object.properties?.is_open);
@@ -3952,6 +4102,8 @@ function updateBuildPreview() {
 async function placeStructureAtTile(x, z) {
     if (!window.currentLobbyId || !currentLocationId) return;
     const dimensions = getStructureDimensions();
+    const selectedCoverClass = document.getElementById('loc-structure-cover-class')?.value || 'medium';
+    const coverProfile = COVER_CLASS_DEFAULTS[selectedCoverClass] || COVER_CLASS_DEFAULTS.medium;
     try {
         const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, {
             name: structurePreset,
@@ -3962,6 +4114,11 @@ async function placeStructureAtTile(x, z) {
                 dimensions,
                 color: structureColor,
                 rotation: structureRotation,
+                cover_class: selectedCoverClass,
+                cover_max_hp: coverProfile.maxHp,
+                cover_hp: coverProfile.maxHp,
+                cover_base_physical_protection: coverProfile.protection,
+                cover_physical_protection: coverProfile.protection,
                 interactions: objectInteractions[structurePreset] || [],
                 interaction_requirements: (objectInteractions[structurePreset] || []).reduce((rules, action) => {
                     rules[action] = interactionRequirements[action];

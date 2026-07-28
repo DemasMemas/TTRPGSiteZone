@@ -34,9 +34,13 @@ class LocationCharacter(db.Model):
     aimed_target_character_id = db.Column(db.Integer, nullable=True)
     aimed_weapon_index = db.Column(db.Integer, nullable=True)
     aim_accuracy_bonus = db.Column(db.Integer, nullable=False, default=0)
+    cover_object_id = db.Column(db.Integer, db.ForeignKey('location_objects.id'), nullable=True)
+    weapon_braced = db.Column(db.Boolean, nullable=False, default=False)
+    braced_weapon_index = db.Column(db.Integer, nullable=True)
 
     hp_zones = db.Column(db.JSON, nullable=False, default=default_hp_zones)
     effects = db.Column(db.JSON, default=empty_list)
 
     location = db.relationship('Location', backref='location_participants')
     character = db.relationship('LobbyCharacter')
+    cover_object = db.relationship('LocationObject', foreign_keys=[cover_object_id])
