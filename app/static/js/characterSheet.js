@@ -218,6 +218,7 @@ function normalizeCaliberText(value) {
     return String(value || '')
         .trim()
         .toLowerCase()
+        .replace(/аср/g, 'acp')
         .replace(/[×*]/g, 'x')
         .replace(/\s+/g, '')
         .replace(/\./g, '')
@@ -3180,6 +3181,108 @@ function getWeaponAmmoCount(weapon) {
     return Math.max(0, Number(weapon.ammo) || 0);
 }
 
+function getManualCycleType(weapon, template = null) {
+    const explicit = weapon?.manualCycle
+        || weapon?.attributes?.manual_cycle
+        || template?.attributes?.manual_cycle;
+    if (explicit) return explicit;
+    const name = String(weapon?.name || template?.name || '').toLowerCase();
+    if (
+        ['суслик', 'малинова', 'мачеха 51', 'свет-99', 'пылесос'].some(value => name.includes(value))
+        || /(?:^|\s)ау(?:\s|$)/i.test(name)
+    ) {
+        return 'bolt';
+    }
+    if (
+        ['гора б88', 'гора 580б2', 'ремень 787', 'спаситель 70', 'д-2', 'д2']
+            .some(value => name.includes(value))
+    ) {
+        return 'pump';
+    }
+    return null;
+}
+
+function getCombatWeaponErgonomics(weaponIndex) {
+    const current = window.locationCombatState?.current_character;
+    if (!current || current.character_id !== currentCharacterId) return null;
+    return (current.weapon_ergonomics || []).find(
+        (profile) => Number(profile.weapon_index) === Number(weaponIndex)
+    ) || null;
+}
+
+function isSelectedWeaponIndex(value, weaponIndex) {
+    return value !== null
+        && value !== undefined
+        && Number(value) === Number(weaponIndex);
+}
+
+function formatActionPointModifier(value) {
+    const numeric = Number(value) || 0;
+    if (numeric === 0) return 'без изменений';
+    return `${numeric > 0 ? '+' : ''}${numeric} ОД`;
+}
+
+window.drawWeaponFromEquipment = async function(weaponIndex) {
+    const combatState = window.locationCombatState;
+    const actor = combatState?.current_character;
+    if (!combatState || combatState.status !== 'active') {
+        currentCharacterData.activeWeaponIndex = weaponIndex;
+        renderEquipmentTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification('Оружие взято в руки', 'success');
+        return;
+    }
+    if (actor?.character_id !== currentCharacterId) {
+        showNotification('Достать оружие можно только в свой ход', 'system');
+        return;
+    }
+    try {
+        await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
+            location_character_id: actor.location_character_id,
+            action_key: 'draw_weapon',
+            weapon_index: weaponIndex,
+        });
+        currentCharacterData.activeWeaponIndex = weaponIndex;
+        renderEquipmentTab(currentCharacterData);
+        showNotification('Оружие подготовлено', 'success');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось достать оружие', 'system');
+    }
+};
+
+window.cycleWeaponFromEquipment = async function(weaponIndex) {
+    const weapon = currentCharacterData?.weapons?.[weaponIndex];
+    if (!weapon?.requiresManualCycle) return;
+    const readyIndex = window.locationCombatState?.status === 'active'
+        ? window.locationCombatState?.current_character?.drawn_weapon_index
+        : currentCharacterData?.activeWeaponIndex;
+    if (!isSelectedWeaponIndex(readyIndex, weaponIndex)) {
+        showNotification('Сначала возьмите это оружие в руки', 'system');
+        return;
+    }
+    const template = (allTemplatesCache || []).find(entry => entry.id == weapon.templateId);
+    const cycleType = getManualCycleType(weapon, template);
+    const specialization = weaponSpecializationKey(template);
+    const level = currentCharacterData?.skills?.specialized?.[specialization]?.level || 'unfamiliar';
+    const actionPoints = cycleType === 'pump' && level === 'professional' ? 0 : 1;
+    try {
+        const paid = await chooseAndSpendCombatPayment(
+            cycleType === 'pump' ? 'Дослать патрон' : 'Передёрнуть затвор',
+            [[{ actionPoints, freeActions: 0 }]]
+        );
+        if (!paid) return;
+    } catch (error) {
+        showNotification(error.message || 'Не хватает ОД', 'system');
+        return;
+    }
+    weapon.requiresManualCycle = false;
+    renderEquipmentTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification(cycleType === 'pump' ? 'Патрон дослан в патронник' : 'Затвор передёрнут', 'success');
+};
+
 window.chooseMachineGunBurst = function(weaponIndex, fireMode, actionPoints = 3, volleyCount = 1) {
     const weapon = currentCharacterData?.weapons?.[weaponIndex];
     if (!weapon) return;
@@ -3232,6 +3335,43 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     const profile = getWeaponFireProfile(weapon, template);
     const disabledAttr = disabled ? 'disabled' : '';
     const buttons = [];
+    const ergonomics = getCombatWeaponErgonomics(index);
+    const aimedActionPoints = ergonomics?.aimed_shot_action_points ?? 4;
+    const combatState = window.locationCombatState;
+    const drawnWeaponIndex = combatState?.current_character?.drawn_weapon_index;
+    const persistentWeaponIndex = currentCharacterData?.activeWeaponIndex;
+    const isCombatActive = combatState?.status === 'active';
+    const requiresDraw = combatState?.status === 'active'
+        && combatState.current_character?.character_id === currentCharacterId
+        && (drawnWeaponIndex === null
+            || drawnWeaponIndex === undefined
+            || Number(drawnWeaponIndex) !== Number(index));
+    if (requiresDraw) {
+        const drawCost = ergonomics?.draw_action_points ?? 4;
+        return `<button type="button" class="btn btn-sm btn-primary" ${disabledAttr} onclick="drawWeaponFromEquipment(${index})">Достать оружие · ${drawCost} ОД</button>`;
+    }
+    if (!isCombatActive && weapon.requiresManualCycle && !isSelectedWeaponIndex(persistentWeaponIndex, index)) {
+        return `<button type="button" class="btn btn-sm btn-primary" onclick="drawWeaponFromEquipment(${index})">Взять в руки</button>`;
+    }
+    if (weapon.requiresManualCycle) {
+        const cycleType = getManualCycleType(weapon, template);
+        const specialization = weaponSpecializationKey(template);
+        const level = currentCharacterData?.skills?.specialized?.[specialization]?.level || 'unfamiliar';
+        const cycleCost = cycleType === 'pump' && level === 'professional' ? 0 : 1;
+        return `<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="cycleWeaponFromEquipment(${index})">${cycleType === 'pump' ? 'Дослать патрон' : 'Передёрнуть затвор'} · ${cycleCost} ОД</button>`;
+    }
+    if (!isCombatActive) {
+        if (isSelectedWeaponIndex(persistentWeaponIndex, index)) {
+            buttons.push('<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>');
+        } else {
+            buttons.push(`<button type="button" class="btn btn-sm btn-primary" onclick="drawWeaponFromEquipment(${index})">Взять в руки</button>`);
+        }
+    } else if (
+        combatState.current_character?.character_id === currentCharacterId
+        && isSelectedWeaponIndex(drawnWeaponIndex, index)
+    ) {
+        buttons.push('<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>');
+    }
     const singleOptions = Array.isArray(profile.single_shot_options) && profile.single_shot_options.length
         ? profile.single_shot_options
         : [1];
@@ -3243,7 +3383,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
             : (shots === 2 ? 'Дуплет: ' : (shots === 4 ? 'Двойной дуплет: ' : `${shots} выстрела: `));
         buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'unaimed', ${shots}, 2)">${modeName}Неприцельный · 2 ОД</button>`);
         buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'rapid', ${shots}, 1)">${modeName}Беглый · 1 ОД</button>`);
-        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'aimed', ${shots}, 4)">${modeName}Прицельный · 4 ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'aimed', ${shots}, ${aimedActionPoints})">${modeName}Прицельный · ${aimedActionPoints} ОД</button>`);
     });
 
     if (profile.supports_burst) {
@@ -3293,14 +3433,12 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
 
     const columns = [
         { key: 'name', label: 'Название', width: 200, type: 'text' },
-        { key: 'magazine', label: 'Магазин', width: 60, type: 'text' },
         { key: 'accuracy', label: 'Точность', width: 60, type: 'number' },
         { key: 'noise', label: 'Шум', width: 40, type: 'number' },
-        { key: 'ammo', label: 'Патроны', width: 75, type: 'text' },
+        { key: 'caliber', label: 'Калибр', width: 90, type: 'text', readonly: true },
         { key: 'range', label: 'Дальность', width: 60, type: 'number' },
         { key: 'ergonomics', label: 'Эргономика', width: 70, type: 'number' },
         { key: 'burst', label: 'Очередь', width: 75, type: 'text' },
-        { key: 'damage', label: 'Урон', width: 50, type: 'number' },
         { key: 'durability', label: 'Прочность', width: 60, type: 'number' },
         { key: 'fireRate', label: 'Скорострельность', width: 105, type: 'number' },
         { key: 'weight', label: 'Вес', width: 50, type: 'number' }
@@ -3313,6 +3451,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
 
         const template = weapon.templateId ? (weaponTemplates.find(t => t.id == weapon.templateId) || (allTemplatesCache || []).find(t => t.id == weapon.templateId)) : null;
         const isMelee = template?.category === 'melee_weapon';
+        const combatErgonomics = isMelee ? null : getCombatWeaponErgonomics(index);
 
         let fieldsHtml = '';
         if (isMelee) {
@@ -3337,18 +3476,24 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 : null;
 
             columns.forEach(col => {
-                const baseValue = weapon[col.key] !== undefined ? weapon[col.key] : (col.type === 'number' ? 0 : '');
+                const templateValue = template?.attributes?.[col.key];
+                const baseValue = col.key === 'caliber'
+                    ? (templateValue || weapon.caliber || '')
+                    : (weapon[col.key] !== undefined ? weapon[col.key] : (col.type === 'number' ? 0 : ''));
                 let effectiveValue = null;
                 if (effectiveStats && (col.key === 'accuracy' || col.key === 'noise' || col.key === 'range' || col.key === 'ergonomics')) {
                     effectiveValue = effectiveStats[col.key];
+                }
+                if (col.key === 'ergonomics' && combatErgonomics) {
+                    effectiveValue = combatErgonomics.value;
                 }
 
                 fieldsHtml += `
                     <div style="width: ${col.width}px;">
                         <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;">${col.label}</div>
                         ${col.type === 'number'
-                            ? `<input type="number" class="form-control number-input" name="weapons.${index}.${col.key}" value="${baseValue}" style="width: 100%;">`
-                            : `<input type="text" class="form-control" name="weapons.${index}.${col.key}" value="${escapeHtml(baseValue)}" placeholder="${col.label}" style="width: 100%;">`
+                            ? `<input type="number" class="form-control number-input" name="weapons.${index}.${col.key}" value="${baseValue}" style="width: 100%;"${col.readonly ? ' readonly' : ''}>`
+                            : `<input type="text" class="form-control" name="weapons.${index}.${col.key}" value="${escapeHtml(baseValue)}" placeholder="${col.label}" style="width: 100%;"${col.readonly ? ' readonly' : ''}>`
                         }
                         ${effectiveValue !== null && effectiveValue !== baseValue ?
                             `<div style="font-size: 0.7rem; color: #4caf50; text-align: center;">${effectiveValue}</div>` : ''}
@@ -3356,6 +3501,17 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 `;
             });
             fieldsHtml += '</div>';
+            if (combatErgonomics) {
+                fieldsHtml += `
+                    <div style="display:flex; flex-wrap:wrap; gap:7px; margin:-2px 0 10px; font-size:12px;">
+                        <span class="badge">Итоговая эргономика: ${combatErgonomics.value}</span>
+                        <span class="badge">Достать: ${combatErgonomics.draw_action_points} ОД</span>
+                        <span class="badge">Перезарядка: ${formatActionPointModifier(combatErgonomics.reload_action_points_modifier)}</span>
+                        <span class="badge">Прицельный: ${combatErgonomics.aimed_shot_action_points} ОД</span>
+                        <span class="badge">Точность в дальности: ${combatErgonomics.accuracy_modifier > 0 ? '+' : ''}${combatErgonomics.accuracy_modifier}</span>
+                    </div>
+                `;
+            }
         }
 
         let modelBlock = '';
@@ -3449,7 +3605,12 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         let attackButtonsHtml = '';
         if (isMelee) {
             const allowedAttacks = template?.attributes?.allowed_attacks || [];
-            attackButtonsHtml = allowedAttacks.map(attackType =>
+            const drawnWeaponIndex = combatState?.current_character?.drawn_weapon_index;
+            const activeWeaponIndex = isCombatActive ? drawnWeaponIndex : currentCharacterData?.activeWeaponIndex;
+            const handsButton = isSelectedWeaponIndex(activeWeaponIndex, index)
+                ? '<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>'
+                : `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="drawWeaponFromEquipment(${index})">${isCombatActive ? 'Достать оружие' : 'Взять в руки'}</button>`;
+            attackButtonsHtml = handsButton + allowedAttacks.map(attackType =>
                 `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="useMeleeAttack(${index}, '${attackType}')">${attackType}</button>`
             ).join('');
         } else {
@@ -3733,7 +3894,11 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
     const collectMagazines = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'magazine') {
+            if (
+                item.category === 'magazine'
+                && !isAmmoFeederTool(item)
+                && !isAmmoLoadingDevice(item)
+            ) {
                 // Проверка калибра
                 const itemCaliber = getItemCaliber(item);
                 if (weaponCaliber && itemCaliber && itemCaliber !== weaponCaliber) return;
@@ -3787,18 +3952,18 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
     });
 
     // Кнопка подтверждения использует актуальный weaponIndex и список
-    modal.querySelector('#confirm-magazine-btn').onclick = () => {
+    modal.querySelector('#confirm-magazine-btn').onclick = async () => {
         const idx = select.value;
         if (idx === '') return;
         const selected = inventoryMagazines[idx];
         modal.remove();
-        confirmEquipMagazineDirect(weaponIndex, selected);
+        await confirmEquipMagazineDirect(weaponIndex, selected);
     };
 
     modal.style.display = 'flex';
 };
 
-function confirmEquipMagazineDirect(weaponIndex, selected) {
+async function confirmEquipMagazineDirect(weaponIndex, selected) {
     const weapon = currentCharacterData.weapons[weaponIndex];
     if (!weapon) return;
 
@@ -3808,6 +3973,29 @@ function confirmEquipMagazineDirect(weaponIndex, selected) {
         const weaponTemplateId = Number(weapon.templateId);
         if (!compatible.includes(weaponTemplateId)) {
             showNotification('Этот магазин не подходит к данному оружию');
+            return;
+        }
+    }
+
+    const combatState = window.locationCombatState;
+    if (combatState?.status === 'active') {
+        const actor = combatState.current_character;
+        if (actor?.character_id !== currentCharacterId) {
+            showNotification('Сменить магазин можно только в свой ход', 'system');
+            return;
+        }
+        try {
+            const access = await calculateInventoryAccess(selected.item, selected.path);
+            await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
+                location_character_id: actor.location_character_id,
+                action_key: 'reload_weapon',
+                weapon_index: weaponIndex,
+                magazine_template_id: selected.item.templateId,
+                inventory_retrieval_action_points: access.retrievalActionPoints,
+                inventory_use_action_discount: access.useActionDiscount,
+            });
+        } catch (error) {
+            showNotification(error.message || 'Не удалось сменить магазин', 'system');
             return;
         }
     }
@@ -3837,7 +4025,9 @@ function confirmEquipMagazineDirect(weaponIndex, selected) {
                 caliber: getItemCaliber(oldMag),
                 capacity: oldMag.capacity,
                 emptyWeight: oldMag.emptyWeight,
-                loadedWeight: oldMag.loadedWeight
+                loadedWeight: oldMag.loadedWeight,
+                ergonomics: oldMag.ergonomics || 0,
+                reload_time_od: oldMag.reloadTimeActionPoints || 0
             }
         };
         Object.defineProperty(oldItem, 'currentAmmo', {
@@ -3857,6 +4047,8 @@ function confirmEquipMagazineDirect(weaponIndex, selected) {
         capacity: selected.item.attributes?.capacity || 30,
         emptyWeight: selected.item.emptyWeight || 0,
         loadedWeight: selected.item.loadedWeight || 0,
+        ergonomics: selected.item.attributes?.ergonomics || 0,
+        reloadTimeActionPoints: selected.item.attributes?.reload_time_od || 0,
         ammo: selected.item.ammo ? selected.item.ammo.map(a => ({ ...a })) : [],
         sourcePath: selected.path
     };
@@ -3868,6 +4060,91 @@ function confirmEquipMagazineDirect(weaponIndex, selected) {
     forceSyncCharacter();
     showNotification('Магазин установлен', 'success');
 }
+
+window.reloadInstalledMagazine = async function(weaponIndex) {
+    const weapon = currentCharacterData.weapons?.[weaponIndex];
+    if (!weapon?.installedMagazine) return;
+    showNotification('Сначала снимите отъёмный магазин с оружия');
+    return;
+    /*
+     * Kept temporarily for compatibility with stale open sheets. The active UI
+     * no longer exposes this action; detachable magazines are loaded in hand.
+     */
+    const magazine = weapon.installedMagazine;
+    const needed = Math.max(0, Number(magazine.capacity || 0) - getMagazineAmmoCount(magazine));
+    if (!needed) {
+        showNotification('Магазин полон');
+        return;
+    }
+    const caliber = getItemCaliber(magazine);
+    const sources = collectInventoryEntries(currentCharacterData, item =>
+        (
+            item.category === 'ammo'
+            || isAmmoLoadingDevice(item)
+        )
+        && getItemCaliber(item) === caliber
+        && ammoSourceCount(item) > 0
+    );
+    if (!sources.length) {
+        showNotification(`Нет патронов калибра ${caliber}`);
+        return;
+    }
+    const selected = await chooseConsumableApplication(
+        'Источник патронов',
+        sources.map(entry => ({
+            ...entry,
+            label: `${entry.item.name} (${ammoSourceCount(entry.item)} патр.)`,
+        }))
+    );
+    if (!selected) return;
+    const plans = magazineLoadingPlans(selected.item, needed, magazine);
+    const plan = await chooseConsumableApplication('Способ зарядки', plans);
+    if (!plan) return;
+
+    const state = currentCharacterData.combatMagazineLoading || {};
+    const prepared = state.targetType === 'installed'
+        && Number(state.weaponIndex) === Number(weaponIndex);
+    const sourceKey = selected.item.id || selected.path.join('.');
+    const sameSource = prepared && state.sourceId === sourceKey;
+    const paymentGroups = [];
+    if (!prepared) {
+        paymentGroups.push([
+            { actionPoints: 1, freeActions: 1 },
+            { actionPoints: 2, freeActions: 0 },
+        ]);
+    }
+    if (!sameSource) {
+        paymentGroups.push(await inventoryItemPreparationPayments(selected.item, selected.path, 'ammo'));
+    }
+    paymentGroups.push(plan.payments);
+    try {
+        if (!await chooseAndSpendCombatPayment('Оплата зарядки магазина', paymentGroups)) return;
+    } catch (error) {
+        showNotification(error.message || 'Не хватает ОД или СД', 'system');
+        return;
+    }
+    if (!prepared) await stowActiveWeaponForLoading();
+
+    transferAmmoFromSource(magazine, selected.item, plan.quantity);
+    weapon.ammo = getMagazineAmmoCount(magazine);
+    if (ammoLoadingKind(selected.item) === 'loose') {
+        if (selected.item.quantity <= 0) removeItemByPath(selected.path);
+        else updateAmmoWeight(selected.item);
+    }
+    currentCharacterData.combatMagazineLoading = {
+        targetType: 'installed',
+        weaponIndex,
+        sourceId: sourceKey,
+    };
+    if (getMagazineAmmoCount(magazine) >= magazine.capacity || ammoSourceCount(selected.item) <= 0) {
+        delete currentCharacterData.combatMagazineLoading;
+    }
+    renderEquipmentTab(currentCharacterData);
+    renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification(`Заряжено ${plan.quantity} патронов`, 'success');
+};
 
 window.unequipMagazineFromWeapon = function(weaponIndex) {
     const weapon = currentCharacterData.weapons[weaponIndex];
@@ -3891,7 +4168,9 @@ window.unequipMagazineFromWeapon = function(weaponIndex) {
             caliber: mag.caliber,
             capacity: mag.capacity,
             emptyWeight: mag.emptyWeight,
-            loadedWeight: mag.loadedWeight
+            loadedWeight: mag.loadedWeight,
+            ergonomics: mag.ergonomics || 0,
+            reload_time_od: mag.reloadTimeActionPoints || 0
         }
     };
     Object.defineProperty(restoredItem, 'currentAmmo', {
@@ -3941,7 +4220,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
     const collectLoaders = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'magazine' && item.isLoader && getItemCaliber(item) === caliber) {
+            if (isAmmoLoadingDevice(item) && getItemCaliber(item) === caliber) {
                 const total = item.ammo ? item.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
                 if (total > 0) {
                     loaderItems.push({ item, path: path.concat(idx) });
@@ -4026,9 +4305,16 @@ window.reloadFixedMagazine = async function(weaponIndex) {
     ammoItems.forEach((entry, idx) => {
         const opt = document.createElement('option');
         opt.value = idx;
-        opt.textContent = `${entry.item.name} (${entry.item.quantity} шт.)`;
+        opt.textContent = `${entry.item.name} (${ammoSourceCount(entry.item)} патр.)`;
         ammoSelect.appendChild(opt);
     });
+    loaderSelect.addEventListener('change', () => {
+        if (loaderSelect.value !== '') ammoSelect.selectedIndex = -1;
+    });
+    ammoSelect.addEventListener('change', () => {
+        if (ammoSelect.value !== '') loaderSelect.selectedIndex = -1;
+    });
+    if (loaderItems.length && ammoItems.length) ammoSelect.selectedIndex = -1;
 
     // Кнопка подтверждения с замыканием нужных данных
     modal.querySelector('#confirm-fixed-reload-btn').onclick = async () => {
@@ -4044,61 +4330,64 @@ window.reloadFixedMagazine = async function(weaponIndex) {
             return;
         }
 
-        // Приоритет: спидлоадер
-        if (selectedLoaderIdx !== '' && loaderItems.length > 0) {
-            const selected = loaderItems[selectedLoaderIdx];
-            const loader = selected.item;
-            const totalInLoader = loader.ammo.reduce((sum, a) => sum + a.quantity, 0);
-            const toTake = Math.min(needed, totalInLoader);
-
-            // Уменьшаем патроны в спидлоадере
-            let remaining = toTake;
-            for (let i = loader.ammo.length - 1; i >= 0 && remaining > 0; i--) {
-                const ammoEntry = loader.ammo[i];
-                const takeFromThis = Math.min(ammoEntry.quantity, remaining);
-                ammoEntry.quantity -= takeFromThis;
-                remaining -= takeFromThis;
-                if (ammoEntry.quantity <= 0) {
-                    loader.ammo.splice(i, 1);
-                }
-            }
-            weapon.ammo = currentAmmo + toTake;
-            updateMagazineWeight(loader);
-
-            modal.remove();
-            renderEquipmentTab(currentCharacterData);
-            renderInventoryTab(currentCharacterData);
-            scheduleAutoSave();
-            forceSyncCharacter();
-            showNotification(`Заряжено ${toTake} патронов из спидлоадера`, 'success');
+        const selected = selectedLoaderIdx !== '' && loaderItems.length > 0
+            ? loaderItems[selectedLoaderIdx]
+            : (selectedAmmoIdx !== '' && ammoItems.length > 0 ? ammoItems[selectedAmmoIdx] : null);
+        if (!selected) {
+            showNotification('Выберите подавач, ленту или патроны');
             return;
         }
 
-        // Иначе патроны
-        if (selectedAmmoIdx !== '' && ammoItems.length > 0) {
-            const selected = ammoItems[selectedAmmoIdx];
-            const ammoItem = selected.item;
-            const available = ammoItem.quantity || 1;
-            const toTake = Math.min(needed, available);
+        const state = currentCharacterData.combatMagazineLoading || {};
+        const prepared = state.targetType === 'fixed' && Number(state.weaponIndex) === Number(weaponIndex);
+        const sourceKey = selected.item.id || selected.path.join('.');
+        const sameSource = prepared && state.sourceId === sourceKey;
+        const plans = fixedMagazineLoadingPlans(weaponTemplate, selected.item, needed, prepared);
+        if (!plans.length) {
+            showNotification('Недостаточно патронов для выбранного способа зарядки');
+            return;
+        }
+        const plan = await chooseConsumableApplication('Способ перезарядки', plans);
+        if (!plan) return;
 
-            weapon.ammo = currentAmmo + toTake;
-            ammoItem.quantity -= toTake;
-            if (ammoItem.quantity <= 0) {
-                removeItemByPath(selected.path);
-            } else {
-                updateAmmoWeight(ammoItem);
-            }
-
-            modal.remove();
-            renderEquipmentTab(currentCharacterData);
-            renderInventoryTab(currentCharacterData);
-            scheduleAutoSave();
-            forceSyncCharacter();
-            showNotification(`Заряжено ${toTake} патронов (${ammoItem.name})`, 'success');
+        const paymentGroups = [];
+        if (!prepared && !plan.includesStart) {
+            paymentGroups.push([{ actionPoints: 1, freeActions: 0 }]);
+        }
+        if (!sameSource) {
+            paymentGroups.push(await inventoryItemPreparationPayments(selected.item, selected.path, 'ammo'));
+        }
+        paymentGroups.push(plan.payments);
+        try {
+            if (!await chooseAndSpendCombatPayment('Оплата перезарядки', paymentGroups)) return;
+        } catch (error) {
+            showNotification(error.message || 'Не хватает ОД или СД', 'system');
             return;
         }
 
-        showNotification('Выберите спидлоадер или патроны');
+        const fixedMagazine = { ammo: Array.isArray(weapon.fixedAmmo) ? weapon.fixedAmmo : [] };
+        transferAmmoFromSource(fixedMagazine, selected.item, plan.quantity);
+        weapon.fixedAmmo = fixedMagazine.ammo;
+        weapon.ammo = currentAmmo + plan.quantity;
+        if (ammoLoadingKind(selected.item) === 'loose') {
+            if (selected.item.quantity <= 0) removeItemByPath(selected.path);
+            else updateAmmoWeight(selected.item);
+        }
+        currentCharacterData.combatMagazineLoading = {
+            targetType: 'fixed',
+            weaponIndex,
+            sourceId: sourceKey,
+        };
+        if (weapon.ammo >= maxAmmo || ammoSourceCount(selected.item) <= 0) {
+            delete currentCharacterData.combatMagazineLoading;
+        }
+
+        modal.remove();
+        renderEquipmentTab(currentCharacterData);
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification(`Заряжено ${plan.quantity} патронов (${selected.item.name})`, 'success');
     };
 
     modal.style.display = 'flex';
@@ -4324,6 +4613,10 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
     const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
     const mag = getItemByPath(path);
     if (!mag || mag.category !== 'magazine') return;
+    if (isAmmoFeederTool(mag)) {
+        showNotification('Подавач не хранит патроны');
+        return;
+    }
 
     const cap = mag.attributes?.capacity || 30;
     const totalAmmo = mag.ammo ? mag.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
@@ -4365,6 +4658,12 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
 
         const selected = ammoItems[0];
         const ammoItem = selected.item;
+        try {
+            await spendInventoryAccessForCombat(ammoItem, selected.path, 0);
+        } catch (error) {
+            showNotification(error.message || 'Не хватает ОД, чтобы достать патрон', 'system');
+            return;
+        }
         ammoItem.quantity -= 1;
         if (ammoItem.quantity <= 0) removeItemByPath(selected.path);
         else updateAmmoWeight(ammoItem);
@@ -4413,6 +4712,10 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
     const mag = getItemByPath(path);
     if (!mag || mag.category !== 'magazine') return;
+    if (isAmmoFeederTool(mag)) {
+        showNotification('Подавач используется при зарядке другого магазина');
+        return;
+    }
 
     const cap = mag.attributes?.capacity || 30;
     const cur = getMagazineAmmoCount(mag);
@@ -4420,14 +4723,28 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     if (needed <= 0) { showNotification('Магазин полон'); return; }
 
     const caliber = getItemCaliber(mag);
-    if (!caliber) { showNotification('У магазина не указан калибр'); return; }
+    if (!caliber) {
+        showNotification('У магазина не указан калибр');
+        return;
+    }
 
     // Собираем ВСЕ подходящие патроны (включая разные типы)
     const ammoItems = [];
     const collectAmmo = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'ammo' && getItemCaliber(item) === caliber && item.quantity > 0) {
+            if (
+                item !== mag
+                &&
+                (
+                    item.category === 'ammo'
+                    || isAmmoLoadingDevice(item)
+                )
+                && (
+                    getItemCaliber(item) === caliber
+                )
+                && ammoSourceCount(item) > 0
+            ) {
                 ammoItems.push({ item, path: path.concat(idx) });
             }
             if (item.contents) collectAmmo(item.contents, path.concat(idx, 'contents'));
@@ -4469,7 +4786,7 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     ammoItems.forEach((entry, idx) => {
         const opt = document.createElement('option');
         opt.value = idx;
-        opt.textContent = `${entry.item.name} (${entry.item.quantity} шт.)`;
+        opt.textContent = `${entry.item.name} (${ammoSourceCount(entry.item)} патр.)`;
         select.appendChild(opt);
     });
     modal._ammoList = ammoItems;
@@ -4477,36 +4794,94 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     modal.style.display = 'flex';
 };
 
-window.confirmReloadMagazine = function(pathStr) {
+window.confirmReloadMagazine = async function(pathStr) {
     const modal = document.getElementById('ammo-select-modal');
     const select = document.getElementById('ammo-select');
     const selected = modal._ammoList[select.value];
     if (!selected) return;
 
-    const mag = getItemByPath(modal._magPath.split(',').map(p => isNaN(p) ? p : parseInt(p)));
+    const targetPath = modal._magPath.split(',').map(p => isNaN(p) ? p : parseInt(p));
+    const mag = getItemByPath(targetPath);
     if (!mag) return;
 
     const cap = mag.attributes?.capacity || 30;
     const totalAmmo = mag.ammo ? mag.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
     const needed = cap - totalAmmo;
     const ammoItem = selected.item;
-    const available = ammoItem.quantity || 1;
-    const toTake = Math.min(needed, available);
+    const feederTools = collectInventoryEntries(
+        currentCharacterData,
+        item => isAmmoFeederTool(item)
+    );
+    const plans = magazineLoadingPlans(ammoItem, needed, mag, feederTools.length > 0);
+    if (!plans.length) {
+        showNotification('Недостаточно патронов для выбранного способа зарядки');
+        return;
+    }
+    const plan = await chooseConsumableApplication('Способ зарядки', plans);
+    if (!plan) return;
 
-    addAmmoToMagazine(mag, ammoItem, toTake);
-    ammoItem.quantity -= toTake;
-    if (ammoItem.quantity <= 0) {
-        removeItemByPath(selected.path);
-    } else {
-        updateAmmoWeight(ammoItem);
+    const state = currentCharacterData.combatMagazineLoading || {};
+    const targetKey = mag.id || targetPath.join('.');
+    const sourceKey = ammoItem.id || selected.path.join('.');
+    const sameMagazine = state.targetType === 'inventory' && state.targetId === targetKey;
+    const sameSource = sameMagazine && state.sourceId === sourceKey;
+    let feederTool = null;
+    let feederKey = null;
+    let sameFeeder = false;
+    if (plan.usesFeeder) {
+        feederTool = feederTools.length === 1
+            ? feederTools[0]
+            : await chooseConsumableApplication(
+                'Выберите подавач',
+                feederTools.map(entry => ({
+                    ...entry,
+                    label: entry.item.name,
+                }))
+            );
+        if (!feederTool) return;
+        feederKey = feederTool.item.id || feederTool.path.join('.');
+        sameFeeder = sameMagazine && state.feederId === feederKey;
+    }
+    const paymentGroups = [];
+    if (!sameMagazine) {
+        paymentGroups.push(await inventoryItemPreparationPayments(mag, targetPath, 'magazine'));
+    }
+    if (!sameSource) {
+        paymentGroups.push(await inventoryItemPreparationPayments(ammoItem, selected.path, 'ammo'));
+    }
+    if (feederTool && !sameFeeder) {
+        paymentGroups.push(await inventoryItemPreparationPayments(feederTool.item, feederTool.path, 'ammo'));
+    }
+    paymentGroups.push(plan.payments);
+    try {
+        if (!await chooseAndSpendCombatPayment('Оплата зарядки магазина', paymentGroups)) return;
+    } catch (error) {
+        showNotification(error.message || 'Не хватает ОД или СД');
+        return;
+    }
+    if (!sameMagazine) await stowActiveWeaponForLoading();
+
+    transferAmmoFromSource(mag, ammoItem, plan.quantity);
+    if (ammoLoadingKind(ammoItem) === 'loose') {
+        if (ammoItem.quantity <= 0) removeItemByPath(selected.path);
+        else updateAmmoWeight(ammoItem);
     }
     updateMagazineWeight(mag);
+    currentCharacterData.combatMagazineLoading = {
+        targetType: 'inventory',
+        targetId: targetKey,
+        sourceId: sourceKey,
+        feederId: feederKey,
+    };
+    if (getMagazineAmmoCount(mag) >= cap || ammoSourceCount(ammoItem) <= 0) {
+        delete currentCharacterData.combatMagazineLoading;
+    }
 
     modal.style.display = 'none';
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
     forceSyncCharacter();
-    showNotification(`Заряжено ${toTake} патронов (${ammoItem.name})`, 'success');
+    showNotification(`Заряжено ${plan.quantity} патронов (${ammoItem.name})`, 'success');
 };
 
 window.unloadMagazineToInventory = async function(pathStr) {
@@ -4799,10 +5174,9 @@ window.selectWeaponModel = async function(index) {
     if (!template) return;
 
     const mapping = {
-        'magazine': 'magazine_size',
         'accuracy': 'accuracy',
         'noise': 'noise',
-        'ammo': 'ammo',
+        'caliber': 'caliber',
         'range': 'range',
         'ergonomics': 'ergonomics',
         'burst': 'burst',
@@ -5160,7 +5534,6 @@ window.equipWeaponFromInventory = async function(itemPath) {
         maxDurability: item.maxDurability || template.attributes?.max_durability || 100,
         fireRate: item.fireRate || template.attributes?.fire_rate || 0,
         caliber: item.caliber || template.attributes?.caliber,
-        magazine_size: item.magazine_size || template.attributes?.magazine_size || 0,
         modifications: item.modifications || [],
         installedModules: installedModulesCopy,
         installedMagazine: item.installedMagazine || null,
@@ -6068,6 +6441,11 @@ window.unequipWeapon = async function(weaponIndex) {
 
     // Удаляем оружие из экипировки
     currentCharacterData.weapons.splice(weaponIndex, 1);
+    if (Number(currentCharacterData.activeWeaponIndex) === Number(weaponIndex)) {
+        delete currentCharacterData.activeWeaponIndex;
+    } else if (Number(currentCharacterData.activeWeaponIndex) > Number(weaponIndex)) {
+        currentCharacterData.activeWeaponIndex -= 1;
+    }
 
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
@@ -6227,6 +6605,9 @@ window.useWeaponFromEquipment = function(
             showNotification('Нет патронов');
             return false;
         }
+        const template = (allTemplatesCache || []).find(entry => entry.id == weapon.templateId);
+        const cycleType = getManualCycleType(weapon, template);
+        if (cycleType) weapon.requiresManualCycle = true;
 
         if (actorCharacterId && sheetData) {
             await Server.updateCharacter(actorCharacterId, { data: sheetData });
@@ -6406,11 +6787,17 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
         select.appendChild(opt);
     });
 
-    modal.querySelector('#confirm-grenade-btn').onclick = () => {
+    modal.querySelector('#confirm-grenade-btn').onclick = async () => {
         const idx = select.value;
         if (idx === '') return;
         const selected = grenadeItems[idx];
         const grenade = selected.item;
+        try {
+            await spendInventoryAccessForCombat(grenade, selected.path, 0);
+        } catch (error) {
+            showNotification(error.message || 'Не хватает ОД, чтобы достать гранату', 'system');
+            return;
+        }
         modal.remove();
 
         // Обработка стопки: если гранат больше 1, создаём копию и уменьшаем исходную
@@ -6496,6 +6883,350 @@ function collectInventoryEntries(data, predicate) {
     (data.equipment?.vest?.pouches || []).forEach((pouch, index) => visit(pouch.contents, ['equipment', 'vest', 'pouches', index, 'contents']));
     return found;
 }
+
+function getInventoryValueByPath(data, path) {
+    return (Array.isArray(path) ? path : []).reduce(
+        (value, key) => value === null || value === undefined ? undefined : value[key],
+        data
+    );
+}
+
+function getInventoryItemTemplate(item) {
+    return (allTemplatesCache || []).find(template => Number(template.id) === Number(item?.templateId)) || null;
+}
+
+function getInventoryItemCategory(item) {
+    return String(item?.category || getInventoryItemTemplate(item)?.category || '').trim().toLowerCase();
+}
+
+function getInventoryItemAccessActionPoints(item) {
+    const template = getInventoryItemTemplate(item);
+    const attributes = { ...(template?.attributes || {}), ...(item?.attributes || {}) };
+    const candidates = [
+        item?.accessActionPoints,
+        item?.access_action_points,
+        attributes.accessActionPoints,
+        attributes.access_action_points,
+        attributes.retrievalActionPoints,
+        attributes.retrieval_action_points,
+        attributes.openActionPoints,
+        attributes.open_action_points,
+        attributes.caseAccessActionPoints,
+        attributes.case_access_action_points,
+        attributes.accessCostOd,
+        attributes.access_cost_od,
+    ];
+    const value = candidates.find(candidate => Number.isFinite(Number(candidate)));
+    return Math.max(0, Number(value) || 0);
+}
+
+function getInventoryQuickAccessCategory(item) {
+    const template = getInventoryItemTemplate(item);
+    const category = getInventoryItemCategory(item);
+    if (category !== 'consumable') return category;
+    const section = String(
+        item?.subcategory
+        || item?.attributes?.section
+        || template?.subcategory
+        || template?.attributes?.section
+        || ''
+    ).trim().toLowerCase();
+    return section === 'продукты' ? 'consumable' : 'med';
+}
+
+function isItemCompatibleWithPouch(item, pouch) {
+    const template = getInventoryItemTemplate(pouch)
+        || (allTemplatesCache || []).find(entry => Number(entry.id) === Number(pouch?.type));
+    const allowed = pouch?.allowed_categories
+        || pouch?.allowedCategories
+        || pouch?.attributes?.allowed_categories
+        || template?.attributes?.allowed_categories;
+    if (!Array.isArray(allowed) || allowed.length === 0) return true;
+    const category = getInventoryQuickAccessCategory(item);
+    return allowed.map(value => String(value).toLowerCase()).includes(category);
+}
+
+async function calculateInventoryAccess(item, itemPath) {
+    if (!Array.isArray(allTemplatesCache) || allTemplatesCache.length === 0) {
+        await getAllItemTemplates();
+    }
+    const path = Array.isArray(itemPath) ? itemPath : [];
+    let baseActionPoints = 0;
+    let quickAccessDiscount = 0;
+    let source = 'unknown';
+
+    if (path[0] === 'inventory' && path[1] === 'pockets') {
+        baseActionPoints = 1;
+        source = 'pockets';
+    } else if (path[0] === 'inventory' && path[1] === 'backpack') {
+        baseActionPoints = 2;
+        source = 'backpack';
+    } else if (path[0] === 'equipment' && ['belt', 'vest'].includes(path[1]) && path[2] === 'pouches') {
+        const pouch = getInventoryValueByPath(currentCharacterData, path.slice(0, 4));
+        if (isItemCompatibleWithPouch(item, pouch)) {
+            baseActionPoints = 1;
+            const tactics = Number(currentCharacterData?.skills?.other?.tactics?.base) || 0;
+            quickAccessDiscount = tactics >= 15 ? 2 : 1;
+            source = 'compatible_pouch';
+        } else {
+            baseActionPoints = 2;
+            source = 'incompatible_pouch';
+        }
+    }
+
+    path.forEach((part, index) => {
+        if (part !== 'contents') return;
+        if (path[0] === 'equipment' && path[2] === 'pouches' && index === 4) return;
+        const container = getInventoryValueByPath(currentCharacterData, path.slice(0, index));
+        baseActionPoints += getInventoryItemAccessActionPoints(container);
+    });
+
+    const retrievalActionPoints = Math.max(0, baseActionPoints - quickAccessDiscount);
+    return {
+        source,
+        baseActionPoints,
+        quickAccessDiscount,
+        retrievalActionPoints,
+        useActionDiscount: Math.max(0, quickAccessDiscount - baseActionPoints),
+    };
+}
+
+async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints = 0) {
+    const combatState = window.locationCombatState;
+    if (!combatState || combatState.status !== 'active') {
+        return { totalActionPoints: 0, access: null };
+    }
+    const actor = combatState.current_character;
+    if (!actor || actor.character_id !== currentCharacterId) {
+        throw new Error('Сейчас не ход этого персонажа');
+    }
+    const access = await calculateInventoryAccess(item, itemPath);
+    const useActionPoints = Math.max(
+        0,
+        Number(baseUseActionPoints || 0) - access.useActionDiscount
+    );
+    const totalActionPoints = access.retrievalActionPoints + useActionPoints;
+    await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
+        location_character_id: actor.location_character_id,
+        action_points: totalActionPoints,
+    });
+    return { totalActionPoints, useActionPoints, access };
+}
+
+function combineCombatPayments(groups) {
+    return groups.reduce((combined, group) => {
+        const variants = Array.isArray(group) && group.length ? group : [{ actionPoints: 0, freeActions: 0 }];
+        return combined.flatMap(current => variants.map(option => ({
+            actionPoints: current.actionPoints + Number(option.actionPoints || 0),
+            freeActions: current.freeActions + Number(option.freeActions || 0),
+        })));
+    }, [{ actionPoints: 0, freeActions: 0 }]).filter((option, index, all) =>
+        all.findIndex(candidate =>
+            candidate.actionPoints === option.actionPoints
+            && candidate.freeActions === option.freeActions
+        ) === index
+    );
+}
+
+async function chooseAndSpendCombatPayment(title, groups) {
+    const combatState = window.locationCombatState;
+    if (!combatState || combatState.status !== 'active') return true;
+    const actor = combatState.current_character;
+    if (!actor || actor.character_id !== currentCharacterId) {
+        throw new Error('Сейчас не ход этого персонажа');
+    }
+    const choices = combineCombatPayments(groups)
+        .filter(option =>
+            option.actionPoints <= Number(actor.action_points_current || 0)
+            && option.freeActions <= Number(actor.free_actions_current || 0)
+        )
+        .map(option => ({
+            ...option,
+            label: [
+                option.actionPoints ? `${option.actionPoints} ОД` : '',
+                option.freeActions ? `${option.freeActions} СД` : '',
+            ].filter(Boolean).join(' + ') || '0 ОД',
+        }));
+    if (!choices.length) throw new Error('Не хватает ОД или СД');
+    const selected = await chooseConsumableApplication(title, choices);
+    if (!selected) return false;
+    await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
+        location_character_id: actor.location_character_id,
+        action_points: selected.actionPoints,
+        free_actions: selected.freeActions,
+    });
+    return true;
+}
+
+async function stowActiveWeaponForLoading() {
+    const combatState = window.locationCombatState;
+    if (combatState?.status === 'active') {
+        const actor = combatState.current_character;
+        if (!actor || actor.character_id !== currentCharacterId) {
+            throw new Error('Сейчас не ход этого персонажа');
+        }
+        await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
+            location_character_id: actor.location_character_id,
+            action_key: 'stow_weapon',
+        });
+    }
+    delete currentCharacterData.activeWeaponIndex;
+}
+
+async function inventoryItemPreparationPayments(item, itemPath, role) {
+    const access = await calculateInventoryAccess(item, itemPath);
+    const quick = access.source === 'pockets' || access.source === 'compatible_pouch';
+    if (role === 'magazine') {
+        return quick
+            ? [{ actionPoints: 0, freeActions: 1 }, { actionPoints: 1, freeActions: 0 }]
+            : [{ actionPoints: Math.max(1, access.retrievalActionPoints), freeActions: 0 }];
+    }
+    return quick
+        ? [{ actionPoints: 0, freeActions: 1 }, { actionPoints: 1, freeActions: 0 }]
+        : [{ actionPoints: 1, freeActions: 1 }, { actionPoints: 2, freeActions: 0 }];
+}
+
+function ammoLoadingKind(item) {
+    const name = String(item?.name || '');
+    if (/лент/i.test(name)) return 'belt';
+    return 'loose';
+}
+
+function isAmmoLoadingDevice(item) {
+    return item?.category === 'magazine' && /лент/i.test(String(item.name || ''));
+}
+
+function isAmmoFeederTool(item) {
+    return item?.category === 'magazine'
+        && (
+            item.attributes?.loadingTool === 'feeder'
+            || /подавач/i.test(String(item.name || ''))
+        );
+}
+
+function isAmmoClip(item) {
+    return /клипс/i.test(String(item?.name || ''));
+}
+
+function ammoSourceCount(item) {
+    if (ammoLoadingKind(item) === 'loose') return Math.max(0, Number(item.quantity || 0));
+    return (item.ammo || []).reduce((sum, stack) => sum + Math.max(0, Number(stack.quantity || 0)), 0);
+}
+
+function magazineLoadingPlans(source, needed, targetMagazine = null, hasFeeder = false) {
+    const kind = ammoLoadingKind(source);
+    const available = Math.min(needed, ammoSourceCount(source));
+    if (isAmmoClip(targetMagazine)) {
+        return available >= needed && needed > 0 ? [{
+            quantity: needed,
+            label: `Зарядить клипсу (${needed} патр.)`,
+            payments: [{ actionPoints: 2, freeActions: 0 }],
+        }] : [];
+    }
+    if (kind === 'belt') {
+        return available > 0 ? [{
+            quantity: available,
+            label: `Вставить ленту (${available} патр.)`,
+            payments: [{ actionPoints: 2, freeActions: 0 }, { actionPoints: 1, freeActions: 1 }],
+        }] : [];
+    }
+    const sizes = [1, 3];
+    const plans = sizes.filter(size => available >= size).map(size => ({
+        quantity: size,
+        label: `Россыпь: ${size} патрон${size === 1 ? '' : 'а'}`,
+        payments: size === sizes[0]
+            ? [{ actionPoints: 0, freeActions: 1 }, { actionPoints: 1, freeActions: 0 }]
+            : [{ actionPoints: 2, freeActions: 0 }, { actionPoints: 1, freeActions: 1 }],
+    }));
+    if (kind === 'loose' && hasFeeder) {
+        const feederTiers = [
+            { limit: 10, paymentIndex: 0 },
+            { limit: 20, paymentIndex: 1 },
+        ];
+        feederTiers.forEach(({ limit, paymentIndex }) => {
+            if (available <= 0 || (paymentIndex === 1 && available <= 10)) return;
+            const quantity = Math.min(limit, available);
+            plans.push({
+                quantity,
+                label: `Подавач: ${quantity} патронов${quantity < limit ? ` (тариф до ${limit})` : ''}`,
+                usesFeeder: true,
+                payments: paymentIndex === 0
+                    ? [{ actionPoints: 0, freeActions: 1 }, { actionPoints: 1, freeActions: 0 }]
+                    : [{ actionPoints: 2, freeActions: 0 }, { actionPoints: 1, freeActions: 1 }],
+            });
+        });
+    }
+    return plans;
+}
+
+function transferAmmoFromSource(magazine, source, quantity) {
+    let remaining = quantity;
+    if (ammoLoadingKind(source) === 'loose') {
+        addAmmoToMagazine(magazine, source, quantity);
+        source.quantity -= quantity;
+        return;
+    }
+    magazine.ammo = Array.isArray(magazine.ammo) ? magazine.ammo : [];
+    source.ammo = Array.isArray(source.ammo) ? source.ammo : [];
+    while (remaining > 0 && source.ammo.length) {
+        const stack = source.ammo[source.ammo.length - 1];
+        const moved = Math.min(remaining, Number(stack.quantity || 0));
+        const target = magazine.ammo.find(entry => getAmmoStackKey(entry) === getAmmoStackKey(stack));
+        if (target) target.quantity += moved;
+        else magazine.ammo.push({ ...stack, quantity: moved });
+        stack.quantity -= moved;
+        remaining -= moved;
+        if (stack.quantity <= 0) source.ammo.pop();
+    }
+    updateMagazineWeight(source);
+}
+
+function weaponSpecializationKey(template) {
+    const category = String(template?.subcategory || '').toLowerCase();
+    if (category.includes('дробов')) return 'shotguns';
+    if (category.includes('снайпер')) return 'sniperRifles';
+    if (category.includes('пистолет') && category.includes('пулем')) return 'smgs';
+    if (category.includes('пистолет')) return 'pistols';
+    if (category.includes('штурм') || category.includes('карабин')) return 'assaultRifles';
+    if (category.includes('гранатом')) return 'grenadeLaunchers';
+    if (category.includes('пулем')) return 'machineGuns';
+    return null;
+}
+
+function fixedMagazineLoadingPlans(template, source, needed, prepared) {
+    const sourceKind = ammoLoadingKind(source);
+    if (sourceKind !== 'loose') return magazineLoadingPlans(source, needed);
+    const specialization = weaponSpecializationKey(template);
+    const level = currentCharacterData?.skills?.specialized?.[specialization]?.level || 'unfamiliar';
+    const quantity = level === 'professional' ? 2 : 1;
+    const plans = [];
+    if (
+        !prepared
+        && Number(template?.attributes?.fire_modes?.duplex_size || 0) >= 2
+        && needed >= 2
+        && ammoSourceCount(source) >= 2
+    ) {
+        plans.push({
+            quantity: 2,
+            label: 'Начать перезарядку и зарядить дуплетом 2 патрона',
+            payments: [{ actionPoints: 2, freeActions: 0 }],
+            includesStart: true,
+        });
+    }
+    if (needed >= quantity && ammoSourceCount(source) >= quantity) {
+        plans.push({
+            quantity,
+            label: `Зарядить ${quantity} патрон${quantity === 1 ? '' : 'а'} (${level === 'professional' ? 'Профессионал' : level === 'familiar' ? 'Знаком' : 'Не знаком'})`,
+            payments: [{
+                actionPoints: level === 'unfamiliar' ? 2 : 1,
+                freeActions: 0,
+            }],
+        });
+    }
+    return plans;
+}
+
+window.calculateInventoryAccess = calculateInventoryAccess;
 
 function findInventoryItemById(data, itemId) {
     if (!itemId) return null;
@@ -6831,17 +7562,9 @@ async function useConsumable(item, itemPath, options = {}) {
         }
     }
 
-    if (isCombatActive && application.actionPoints > 0) {
-        const actor = combatState?.current_character;
-        if (!actor || actor.character_id !== currentCharacterId) {
-            showNotification('Сейчас не ход этого персонажа');
-            return false;
-        }
+    if (isCombatActive) {
         try {
-            await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
-                location_character_id: actor.location_character_id,
-                action_points: application.actionPoints,
-            });
+            await spendInventoryAccessForCombat(item, itemPath, application.actionPoints);
         } catch (error) {
             showNotification(error.message || 'Не хватает ОД');
             return false;
@@ -7292,6 +8015,12 @@ async function useGrenade(item, itemPath, options = {}) {
         return;
     }
 
+    try {
+        await spendInventoryAccessForCombat(item, itemPath, 0);
+    } catch (error) {
+        showNotification(error.message || 'Не хватает ОД, чтобы достать гранату', 'system');
+        return false;
+    }
     showNotification(`Вы метнули ${item.name}. Эффект: ${item.attributes?.effect || 'взрыв'}`, 'system');
     item.quantity -= 1;
     if (item.quantity <= 0) {
@@ -7304,6 +8033,7 @@ async function useGrenade(item, itemPath, options = {}) {
         scheduleAutoSave();
         forceSyncCharacter();
     }
+    return true;
 }
 
 export async function useCharacterInventoryItem(characterId, itemPath, options = {}) {
@@ -8183,10 +8913,6 @@ window.openCreateWeaponTemplateModal = function(weaponIndex, template = null) {
                     <label>Объём</label>
                     <input type="number" id="template-volume" class="form-control number-input" value="0" step="0.1">
                 </div>
-                <div class="form-group">
-                    <label>Размер магазина</label>
-                    <input type="number" id="template-magazineSize" class="form-control number-input" value="0">
-                </div>
                 <hr>
                 <h4>Слоты для модулей</h4>
                 <div class="form-group">
@@ -8200,6 +8926,10 @@ window.openCreateWeaponTemplateModal = function(weaponIndex, template = null) {
                 </div>
                 <div class="form-group">
                     <label><input type="checkbox" id="template-fixed-magazine"> Несъёмный магазин</label>
+                </div>
+                <div class="form-group" id="template-fixed-magazine-size-group" style="display:none;">
+                    <label>Ёмкость встроенного магазина</label>
+                    <input type="number" id="template-magazineSize" class="form-control number-input" value="0" min="1">
                 </div>
                 <input type="hidden" id="weapon-template-id">
                 <div class="form-actions">
@@ -8226,6 +8956,7 @@ window.openCreateWeaponTemplateModal = function(weaponIndex, template = null) {
         document.getElementById('template-weight').value = template.weight || 0;
         document.getElementById('template-volume').value = template.volume || 0;
         document.getElementById('template-magazineSize').value = template.attributes?.magazine_size || 0;
+        document.getElementById('template-fixed-magazine').checked = Boolean(template.attributes?.fixedMagazine);
         // Слоты
         const slots = template.attributes?.slots || [];
         document.getElementById('template-slot-scope').checked = slots.some(s => s.type === 'scope');
@@ -8233,8 +8964,17 @@ window.openCreateWeaponTemplateModal = function(weaponIndex, template = null) {
         document.getElementById('template-slot-handguard').checked = slots.some(s => s.type === 'handguard');
     } else {
         document.getElementById('weapon-template-id').value = '';
+        document.getElementById('template-fixed-magazine').checked = false;
+        document.getElementById('template-magazineSize').value = 0;
     }
 
+    const fixedMagazineCheckbox = document.getElementById('template-fixed-magazine');
+    const fixedMagazineSizeGroup = document.getElementById('template-fixed-magazine-size-group');
+    const updateFixedMagazineFields = () => {
+        fixedMagazineSizeGroup.style.display = fixedMagazineCheckbox.checked ? '' : 'none';
+    };
+    fixedMagazineCheckbox.onchange = updateFixedMagazineFields;
+    updateFixedMagazineFields();
     modal.style.display = 'flex';
 };
 
@@ -8249,6 +8989,7 @@ window.saveWeaponTemplate = async function() {
     if (document.getElementById('template-slot-barrel').checked) slots.push({ type: 'barrel', label: 'Ствол', maxItems: 1 });
     if (document.getElementById('template-slot-handguard').checked) slots.push({ type: 'handguard', label: 'Цевье', maxItems: 1 });
 
+    const hasFixedMagazine = document.getElementById('template-fixed-magazine').checked;
     const attributes = {
         accuracy: parseInt(document.getElementById('template-accuracy').value) || 0,
         noise: parseInt(document.getElementById('template-noise').value) || 0,
@@ -8259,10 +9000,12 @@ window.saveWeaponTemplate = async function() {
         durability: parseInt(document.getElementById('template-durability').value) || 100,
         fire_rate: parseInt(document.getElementById('template-fireRate').value) || 0,
         caliber: caliber,
-        magazine_size: parseInt(document.getElementById('template-magazineSize').value) || 0,
         slots: slots,
-        fixedMagazine: document.getElementById('template-fixed-magazine').checked
+        fixedMagazine: hasFixedMagazine
     };
+    if (hasFixedMagazine) {
+        attributes.magazine_size = parseInt(document.getElementById('template-magazineSize').value) || 0;
+    }
 
     const weight = parseFloat(document.getElementById('template-weight').value) || 0;
     const volume = parseFloat(document.getElementById('template-volume').value) || 0;
@@ -9601,7 +10344,8 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
     const newItem = createItemFromTemplateSelection(template, quantity, ammoVariant);
     targetItems.push(newItem);
 
-    await renderInventoryTab(currentCharacterData);
+    await rerenderContainer(targetPath, null, { keepExpanded: true });
+    recalculateInventoryTotals();
     scheduleAutoSave();
     return true;
 }
@@ -9853,7 +10597,9 @@ window.confirmAmmoSelection = async function() {
         return;
     }
 
-    const ammoVariant = chosenVariant || normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect);
+    const ammoVariant = variantSelect
+        ? (variantSelect.value || null)
+        : normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect);
     const added = modal._templateSelectionHandler
         ? await modal._templateSelectionHandler(
             createItemFromTemplateSelection(template, quantity, ammoVariant),
@@ -10474,6 +11220,13 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
 
     // Магазин
     if (item.category === 'magazine') {
+        if (isAmmoFeederTool(item)) {
+            const toolInfo = document.createElement('div');
+            toolInfo.style.marginTop = '5px';
+            toolInfo.style.opacity = '0.8';
+            toolInfo.textContent = 'Инструмент зарядки магазинов';
+            itemDiv.appendChild(toolInfo);
+        } else {
         const cap = item.attributes?.capacity || 30;
         const total = item.ammo ? item.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
         let ammoText = `Патроны: ${total}/${cap}`;
@@ -10493,6 +11246,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             <button type="button" class="btn btn-sm btn-danger" onclick="unloadMagazineToInventory('${itemPath.join(',')}')">Разрядить</button>
         `;
         itemDiv.appendChild(ammoControls);
+        }
     }
 
     // Содержимое контейнера
@@ -11239,14 +11993,14 @@ function updatePlateProtectionDisplay() {
  * @param {Array} containerPath - путь к контейнеру в currentCharacterData
  * @param {HTMLElement} [parentElement] - если известен, иначе найдёт по data-path
  */
-async function rerenderContainer(containerPath, parentElement = null) {
+async function rerenderContainer(containerPath, parentElement = null, options = {}) {
     const pouchesIndex = containerPath.indexOf('pouches');
     if (pouchesIndex !== -1 &&
         pouchesIndex + 1 < containerPath.length &&
         typeof containerPath[pouchesIndex + 1] === 'number' &&
         containerPath[containerPath.length - 1] !== 'contents') {
         const contentsPath = containerPath.concat('contents');
-        await rerenderContainer(contentsPath, parentElement);
+        await rerenderContainer(contentsPath, parentElement, options);
         return;
     }
 
@@ -11302,7 +12056,10 @@ async function rerenderContainer(containerPath, parentElement = null) {
     if (!containerDiv) return;
     if (!isPockets && !isBackpack && !containerDiv.classList.contains('container-contents')) return;
 
-    const wasCollapsed = (!isPockets && !isBackpack) ? (containerDiv.style.display === 'none') : false;
+    const keepExpanded = Boolean(options.keepExpanded);
+    const wasCollapsed = (!isPockets && !isBackpack && !keepExpanded)
+        ? (containerDiv.style.display === 'none')
+        : false;
     const allTemplates = await getAllItemTemplates();
     const parentItem = (!isPockets && !isBackpack) ? containerDiv.closest('.container-item') : null;
 
@@ -11331,7 +12088,11 @@ async function rerenderContainer(containerPath, parentElement = null) {
         }
     }
 
-    if (wasCollapsed) containerDiv.style.display = 'none';
+    if (!isPockets && !isBackpack && keepExpanded) {
+        containerDiv.style.display = '';
+    } else if (wasCollapsed) {
+        containerDiv.style.display = 'none';
+    }
     if (parentItem && parentItem._toggleIcon) {
         parentItem._toggleIcon.textContent = wasCollapsed ? '▶' : '▼';
     }
@@ -11355,6 +12116,11 @@ window.removeWeapon = function(index) {
     updateDataFromFields();
     if (!currentCharacterData.weapons) return;
     currentCharacterData.weapons.splice(index, 1);
+    if (Number(currentCharacterData.activeWeaponIndex) === Number(index)) {
+        delete currentCharacterData.activeWeaponIndex;
+    } else if (Number(currentCharacterData.activeWeaponIndex) > Number(index)) {
+        currentCharacterData.activeWeaponIndex -= 1;
+    }
     renderEquipmentTab(currentCharacterData);
     scheduleAutoSave();
 };

@@ -1,4 +1,7 @@
 from app.services.equipment_importer import (
+    _canonical_caliber,
+    _finalize_weapon_magazine_attributes,
+    _magazine_volume,
     _parse_burst_profile,
     _parse_ranged_weapons,
 )
@@ -70,3 +73,42 @@ def test_ranged_weapon_keeps_fractional_and_textual_characteristics():
     assert weapon["attributes"]["magazine_size"] == 2
     assert weapon["attributes"]["magazine_size_raw"] == "2(1 в одном)"
     assert weapon["attributes"]["fire_modes"]["single_shot_options"] == [1, 2]
+
+
+def test_detachable_weapon_does_not_keep_own_magazine_capacity():
+    template = {
+        "attributes": {
+            "magazine": "legacy",
+            "magazine_size": 30,
+            "magazine_size_raw": "30",
+        },
+    }
+
+    _finalize_weapon_magazine_attributes(template, fixed_magazine=False)
+
+    assert template["attributes"] == {"fixedMagazine": False}
+
+
+def test_fixed_weapon_keeps_only_internal_magazine_capacity():
+    template = {
+        "attributes": {
+            "magazine": "legacy",
+            "magazine_size": 6,
+            "magazine_size_raw": "6",
+        },
+    }
+
+    _finalize_weapon_magazine_attributes(template, fixed_magazine=True)
+
+    assert template["attributes"] == {
+        "fixedMagazine": True,
+        "magazine_size": 6,
+    }
+
+
+def test_cyrillic_acp_is_canonicalized():
+    assert _canonical_caliber(".45 аср") == ".45 ACP"
+
+
+def test_excel_date_serial_is_not_used_as_magazine_volume():
+    assert _magazine_volume("45748", "Клипса СП-4") == 0.25

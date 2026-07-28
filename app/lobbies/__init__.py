@@ -745,8 +745,8 @@ def spawn_character_in_location(lobby_id, location_id):
         loc_char.action_points_current = profile['action_points']
         loc_char.free_actions_max = profile['free_actions']
         loc_char.free_actions_current = profile['free_actions']
-        loc_char.movement_points_max = profile['movement_points']
-        loc_char.movement_points_current = profile['movement_points']
+        loc_char.movement_points_max = 0
+        loc_char.movement_points_current = 0
         db.session.commit()
         action = 'spawned'
 
@@ -910,6 +910,9 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         target_y=data.get('target_y'),
         posture=data.get('posture'),
         payment=data.get('payment'),
+        magazine_template_id=data.get('magazine_template_id'),
+        inventory_retrieval_action_points=data.get('inventory_retrieval_action_points'),
+        inventory_use_action_discount=data.get('inventory_use_action_discount'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")

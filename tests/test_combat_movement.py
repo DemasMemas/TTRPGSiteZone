@@ -226,3 +226,132 @@ def test_posture_allows_compatible_movement_modes(posture, movement_mode):
     profile = CombatService._validate_posture_movement(posture, movement_mode)
 
     assert profile
+
+
+@pytest.mark.parametrize(
+    ("ergonomics", "draw", "reload_modifier", "aimed_cost", "accuracy"),
+    [
+        (0, 4, 2, 6, -2),
+        (10, 4, 2, 6, -2),
+        (11, 3, 2, 6, -1),
+        (20, 3, 2, 6, -1),
+        (21, 3, 1, 5, -1),
+        (30, 3, 1, 5, -1),
+        (31, 3, 1, 5, 0),
+        (40, 3, 1, 5, 0),
+        (41, 2, 1, 4, 0),
+        (50, 2, 1, 4, 0),
+        (51, 2, 0, 4, 0),
+        (70, 2, 0, 4, 0),
+        (71, 1, 0, 3, 0),
+        (80, 1, 0, 3, 0),
+        (81, 1, 0, 3, 1),
+        (90, 1, 0, 3, 1),
+        (91, 1, -1, 3, 1),
+        (99, 1, -1, 3, 1),
+        (100, 0, -2, 2, 2),
+        (140, 0, -2, 2, 2),
+    ],
+)
+def test_ergonomics_thresholds(ergonomics, draw, reload_modifier, aimed_cost, accuracy):
+    profile = CombatService._ergonomics_effects(ergonomics)
+
+    assert profile["draw_action_points"] == draw
+    assert profile["reload_action_points_modifier"] == reload_modifier
+    assert profile["aimed_shot_action_points"] == aimed_cost
+    assert profile["accuracy_modifier"] == accuracy
+
+
+def test_weapon_ergonomics_combines_all_available_sources():
+    location_character = LocationCharacter(posture="sitting")
+    location_character.character = LobbyCharacter(data={
+        "skills": {
+            "physical": {"shooting": {"base": 15, "bonus": 4}},
+            "other": {"tactics": {"base": 10, "bonus": 3}},
+        },
+        "equipment": {
+            "helmet": {"ergonomicsPenalty": 5},
+        },
+    })
+    weapon = {
+        "ergonomics": 20,
+        "installedModules": [
+            {"modifiers": {"ergonomics": "+5"}},
+        ],
+        "installedMagazine": {
+            "ergonomics": -5,
+        },
+    }
+
+    profile = CombatService._weapon_ergonomics_profile(location_character, weapon, 2)
+
+    assert profile["value"] == 50
+    assert profile["weapon_index"] == 2
+    assert profile["shooting_value"] == 15
+    assert profile["tactics_value"] == 10
+    assert profile["posture_bonus"] == 10
+    assert profile["module_modifier"] == 5
+    assert profile["magazine_modifier"] == -5
+    assert profile["helmet_penalty"] == 5
+    assert profile["draw_action_points"] == 2
+    assert profile["reload_action_points_modifier"] == 1
+    assert profile["aimed_shot_action_points"] == 4
+
+
+def test_active_weapon_is_read_from_persistent_character_data():
+    location_character = LocationCharacter(drawn_weapon_index=None)
+    location_character.character = LobbyCharacter(
+        data={
+            "weapons": [{"name": "first"}, {"name": "second"}],
+            "activeWeaponIndex": 1,
+        }
+    )
+
+    assert CombatService._persistent_weapon_index(location_character) == 1
+
+
+def test_setting_active_weapon_updates_location_and_character_data():
+    location_character = LocationCharacter(drawn_weapon_index=None)
+    location_character.character = LobbyCharacter(
+        data={"weapons": [{"name": "first"}, {"name": "second"}]}
+    )
+
+    CombatService._set_active_weapon(location_character, 1)
+
+    assert location_character.drawn_weapon_index == 1
+    assert location_character.character.data["activeWeaponIndex"] == 1
+
+
+def test_invalid_persistent_weapon_index_is_ignored():
+    location_character = LocationCharacter(drawn_weapon_index=None)
+    location_character.character = LobbyCharacter(
+        data={"weapons": [{"name": "only"}], "activeWeaponIndex": 4}
+    )
+
+    assert CombatService._persistent_weapon_index(location_character) is None
+
+
+def test_aim_bonus_applies_only_to_same_target_and_weapon():
+    location_character = LocationCharacter(
+        aimed_target_character_id=12,
+        aimed_weapon_index=1,
+        aim_accuracy_bonus=4,
+    )
+
+    assert CombatService._aim_bonus_for_target(location_character, 12, 1) == 4
+    assert CombatService._aim_bonus_for_target(location_character, 13, 1) == 0
+    assert CombatService._aim_bonus_for_target(location_character, 12, 0) == 0
+
+
+def test_clear_aim_resets_target_weapon_and_bonus():
+    location_character = LocationCharacter(
+        aimed_target_character_id=12,
+        aimed_weapon_index=1,
+        aim_accuracy_bonus=4,
+    )
+
+    CombatService._clear_aim(location_character)
+
+    assert location_character.aimed_target_character_id is None
+    assert location_character.aimed_weapon_index is None
+    assert location_character.aim_accuracy_bonus == 0

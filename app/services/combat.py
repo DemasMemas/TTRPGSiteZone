@@ -89,6 +89,9 @@ MOVEMENT_MODES = {
 ACTION_CATALOG = [
     {'key': 'attack', 'label': 'Атака', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
     {'key': 'aim', 'label': 'Прицеливание', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'draw_weapon', 'label': 'Достать оружие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'stow_weapon', 'label': 'Освободить руки', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'reload_weapon', 'label': 'Сменить магазин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'change_posture', 'label': 'Смена положения', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'defend', 'label': 'Защита', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
     {'key': 'use_item', 'label': 'Использовать предмет', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
@@ -105,6 +108,181 @@ class CombatService:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _persistent_weapon_index(loc_char):
+        character = getattr(loc_char, 'character', None)
+        data = character.data if character and isinstance(character.data, dict) else {}
+        weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+        index = CombatService._coerce_int(data.get('activeWeaponIndex'), -1)
+        return index if 0 <= index < len(weapons) else None
+
+    @staticmethod
+    def _set_active_weapon(loc_char, weapon_index):
+        character = getattr(loc_char, 'character', None)
+        if not character or not isinstance(character.data, dict):
+            loc_char.drawn_weapon_index = weapon_index
+            return
+        data = dict(character.data)
+        if weapon_index is None:
+            data.pop('activeWeaponIndex', None)
+        else:
+            data['activeWeaponIndex'] = weapon_index
+        character.data = data
+        flag_modified(character, 'data')
+        loc_char.drawn_weapon_index = weapon_index
+
+    @staticmethod
+    def _clear_aim(loc_char):
+        loc_char.aimed_target_character_id = None
+        loc_char.aimed_weapon_index = None
+        loc_char.aim_accuracy_bonus = 0
+
+    @staticmethod
+    def _aim_bonus_for_target(loc_char, target_character_id, weapon_index):
+        if (
+            target_character_id is not None
+            and loc_char.aimed_target_character_id == target_character_id
+            and loc_char.aimed_weapon_index == weapon_index
+        ):
+            return max(0, CombatService._coerce_int(loc_char.aim_accuracy_bonus, 0))
+        return 0
+
+    @staticmethod
+    def _skill_value(character_data, skill_path):
+        current = character_data if isinstance(character_data, dict) else {}
+        for part in skill_path.split('.'):
+            if not isinstance(current, dict):
+                return 0
+            current = current.get(part)
+        if not isinstance(current, dict):
+            return 0
+        return max(0, CombatService._coerce_int(current.get('base'), 0))
+
+    @staticmethod
+    def _apply_numeric_modifier(value, modifier):
+        text = str(modifier if modifier is not None else '').strip()
+        if not text:
+            return value
+        if text.startswith('='):
+            return CombatService._coerce_int(text[1:], 0)
+        return value + CombatService._coerce_int(text, 0)
+
+    @staticmethod
+    def _ergonomics_effects(value):
+        ergonomics = max(0, CombatService._coerce_int(value, 0))
+        if ergonomics <= 10:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 4, 2, 2, -2
+        elif ergonomics <= 20:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 3, 2, 2, -1
+        elif ergonomics <= 30:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 3, 1, 1, -1
+        elif ergonomics <= 40:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 3, 1, 1, 0
+        elif ergonomics <= 50:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 2, 1, 0, 0
+        elif ergonomics <= 70:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 2, 0, 0, 0
+        elif ergonomics <= 80:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 1, 0, -1, 0
+        elif ergonomics <= 90:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 1, 0, -1, 1
+        elif ergonomics <= 99:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 1, -1, -1, 1
+        else:
+            draw_cost, reload_modifier, aimed_modifier, accuracy_modifier = 0, -2, -2, 2
+        return {
+            'value': ergonomics,
+            'draw_action_points': draw_cost,
+            'reload_action_points_modifier': reload_modifier,
+            'aimed_shot_action_points_modifier': aimed_modifier,
+            'aimed_shot_action_points': max(0, 4 + aimed_modifier),
+            'accuracy_modifier': accuracy_modifier,
+        }
+
+    @staticmethod
+    def _weapon_ergonomics_profile(loc_char, weapon, weapon_index=None):
+        character = getattr(loc_char, 'character', None)
+        data = character.data if character and isinstance(character.data, dict) else {}
+        weapon = weapon if isinstance(weapon, dict) else {}
+        template = None
+        template_id = CombatService._coerce_int(weapon.get('templateId'), 0)
+        if template_id:
+            template = db.session.get(ItemTemplate, template_id)
+        template_attributes = template.attributes if template and isinstance(template.attributes, dict) else {}
+
+        raw_base = weapon.get('ergonomics')
+        if raw_base is None:
+            raw_base = (weapon.get('attributes') or {}).get('ergonomics')
+        if raw_base is None:
+            raw_base = template_attributes.get('ergonomics')
+        base_ergonomics = CombatService._coerce_int(raw_base, 0)
+        weapon_ergonomics = base_ergonomics
+        module_modifier = 0
+        for module in weapon.get('installedModules') or []:
+            if not isinstance(module, dict):
+                continue
+            modifiers = module.get('modifiers')
+            if not isinstance(modifiers, dict):
+                modifiers = (module.get('attributes') or {}).get('modifiers') or {}
+            before = weapon_ergonomics
+            weapon_ergonomics = CombatService._apply_numeric_modifier(
+                weapon_ergonomics,
+                modifiers.get('ergonomics'),
+            )
+            module_modifier += weapon_ergonomics - before
+
+        magazine = weapon.get('installedMagazine')
+        magazine = magazine if isinstance(magazine, dict) else {}
+        magazine_modifier = magazine.get('ergonomics')
+        if magazine_modifier is None:
+            magazine_modifier = (magazine.get('attributes') or {}).get('ergonomics')
+        if magazine_modifier is None:
+            magazine_template_id = CombatService._coerce_int(magazine.get('templateId'), 0)
+            if magazine_template_id:
+                magazine_template = db.session.get(ItemTemplate, magazine_template_id)
+                magazine_attributes = (
+                    magazine_template.attributes
+                    if magazine_template and isinstance(magazine_template.attributes, dict)
+                    else {}
+                )
+                magazine_modifier = magazine_attributes.get('ergonomics')
+        magazine_modifier = CombatService._coerce_int(magazine_modifier, 0)
+
+        equipment = data.get('equipment') if isinstance(data.get('equipment'), dict) else {}
+        helmet = equipment.get('helmet') if isinstance(equipment.get('helmet'), dict) else {}
+        helmet_penalty = helmet.get('ergonomicsPenalty')
+        if helmet_penalty is None:
+            helmet_penalty = helmet.get('ergonomics_penalty')
+        if helmet_penalty is None:
+            helmet_penalty = (helmet.get('attributes') or {}).get('ergonomics_penalty')
+        helmet_penalty = max(0, CombatService._coerce_int(helmet_penalty, 0))
+
+        posture = CombatService._posture_key(loc_char)
+        posture_bonus = POSTURES[posture]['ergonomics_bonus']
+        shooting_value = CombatService._skill_value(data, 'skills.physical.shooting')
+        tactics_value = CombatService._skill_value(data, 'skills.other.tactics')
+        effective_value = max(
+            0,
+            weapon_ergonomics
+            + shooting_value
+            + tactics_value
+            + posture_bonus
+            + magazine_modifier
+            - helmet_penalty,
+        )
+        effects = CombatService._ergonomics_effects(effective_value)
+        return {
+            'weapon_index': weapon_index,
+            'base_weapon_ergonomics': base_ergonomics,
+            'module_modifier': module_modifier,
+            'shooting_value': shooting_value,
+            'tactics_value': tactics_value,
+            'posture_bonus': posture_bonus,
+            'magazine_modifier': magazine_modifier,
+            'helmet_penalty': helmet_penalty,
+            **effects,
+        }
 
     @staticmethod
     def _posture_key(loc_char):
@@ -908,6 +1086,11 @@ class CombatService:
                 target_posture,
             )
         data = character.data if character and isinstance(character.data, dict) else {}
+        weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+        weapon_ergonomics = [
+            CombatService._weapon_ergonomics_profile(loc_char, weapon, index)
+            for index, weapon in enumerate(weapons)
+        ]
         health = data.get('health') if isinstance(data, dict) else {}
         if not isinstance(health, dict):
             health = {}
@@ -950,8 +1133,11 @@ class CombatService:
                 'can_correction': posture_profile['can_correction'],
                 'can_use_low_cover': posture_profile['can_use_low_cover'],
             },
+            'weapon_ergonomics': weapon_ergonomics,
+            'drawn_weapon_index': loc_char.drawn_weapon_index,
             'aimed_target_character_id': loc_char.aimed_target_character_id,
             'aimed_weapon_index': loc_char.aimed_weapon_index,
+            'aim_accuracy_bonus': max(0, CombatService._coerce_int(loc_char.aim_accuracy_bonus, 0)),
             'hp_zones': loc_char.hp_zones,
             'effects': loc_char.effects,
             'pain_level': CombatService._coerce_int(health.get('painLevel', 0), 0),
@@ -1068,6 +1254,8 @@ class CombatService:
             loc_char.initiative_roll = random.randint(1, 20)
             loc_char.initiative_total = loc_char.initiative_roll + loc_char.initiative_bonus
             loc_char.strenuous_movement_blocked_until_round = 0
+            loc_char.drawn_weapon_index = CombatService._persistent_weapon_index(loc_char)
+            CombatService._clear_aim(loc_char)
             CombatService._prepare_character_for_turn(loc_char)
             CombatService._sync_location_effects_from_character(loc_char)
 
@@ -1180,6 +1368,7 @@ class CombatService:
         character.action_points_current -= action_points
         character.free_actions_current -= free_actions
         character.movement_points_current -= movement_points
+        CombatService._clear_aim(character)
         character.last_action = db.func.now()
         db.session.commit()
         return CombatService._serialize_character(
@@ -1227,6 +1416,9 @@ class CombatService:
         target_y=None,
         posture=None,
         payment=None,
+        magazine_template_id=None,
+        inventory_retrieval_action_points=None,
+        inventory_use_action_discount=None,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -1251,6 +1443,8 @@ class CombatService:
         attack_details = None
         aim_details = None
         posture_details = None
+        draw_details = None
+        reload_details = None
         if action_key == 'change_posture':
             target_posture = str(posture or '').lower()
             options = CombatService._posture_change_options(character, target_posture)
@@ -1277,11 +1471,92 @@ class CombatService:
                 **selected,
             }
 
+        if action_key == 'draw_weapon':
+            weapons = (character.character.data or {}).get('weapons') or []
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            if weapon_index < 0 or weapon_index >= len(weapons):
+                raise ValidationError("Weapon not found")
+            ergonomics_profile = CombatService._weapon_ergonomics_profile(
+                character,
+                weapons[weapon_index],
+                weapon_index,
+            )
+            draw_cost = ergonomics_profile['draw_action_points']
+            if character.action_points_current < draw_cost:
+                raise ValidationError("Not enough action points")
+            character.action_points_current -= draw_cost
+            CombatService._set_active_weapon(character, weapon_index)
+            CombatService._clear_aim(character)
+            draw_details = {
+                'weapon_index': weapon_index,
+                'action_points': draw_cost,
+                'ergonomics': ergonomics_profile,
+            }
+
+        if action_key == 'reload_weapon':
+            weapons = (character.character.data or {}).get('weapons') or []
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            if weapon_index < 0 or weapon_index >= len(weapons):
+                raise ValidationError("Weapon not found")
+            magazine_template = db.session.get(
+                ItemTemplate,
+                CombatService._coerce_int(magazine_template_id, 0),
+            )
+            if not magazine_template or magazine_template.category != 'magazine':
+                raise ValidationError("Magazine not found")
+            magazine_attributes = (
+                magazine_template.attributes
+                if isinstance(magazine_template.attributes, dict)
+                else {}
+            )
+            candidate_weapon = dict(weapons[weapon_index] or {})
+            candidate_weapon['installedMagazine'] = {
+                'templateId': magazine_template.id,
+                'ergonomics': magazine_attributes.get('ergonomics', 0),
+            }
+            ergonomics_profile = CombatService._weapon_ergonomics_profile(
+                character,
+                candidate_weapon,
+                weapon_index,
+            )
+            base_reload_cost = max(
+                0,
+                CombatService._coerce_int(magazine_attributes.get('reload_time_od'), 0),
+            )
+            reload_cost = max(
+                0,
+                base_reload_cost + ergonomics_profile['reload_action_points_modifier'],
+            )
+            retrieval_cost = max(
+                0,
+                min(20, CombatService._coerce_int(inventory_retrieval_action_points, 0)),
+            )
+            use_discount = max(
+                0,
+                min(20, CombatService._coerce_int(inventory_use_action_discount, 0)),
+            )
+            reload_cost = max(0, reload_cost - use_discount) + retrieval_cost
+            if character.action_points_current < reload_cost:
+                raise ValidationError("Not enough action points")
+            character.action_points_current -= reload_cost
+            CombatService._clear_aim(character)
+            reload_details = {
+                'weapon_index': weapon_index,
+                'magazine_template_id': magazine_template.id,
+                'base_action_points': base_reload_cost,
+                'ergonomics_modifier': ergonomics_profile['reload_action_points_modifier'],
+                'inventory_retrieval_action_points': retrieval_cost,
+                'inventory_use_action_discount': use_discount,
+                'action_points': reload_cost,
+            }
+
         if action_key == 'aim':
             weapons = (character.character.data or {}).get('weapons') or []
             weapon_index = CombatService._coerce_int(weapon_index, -1)
             if weapon_index < 0 or weapon_index >= len(weapons):
                 raise ValidationError("Weapon not found")
+            if character.drawn_weapon_index != weapon_index:
+                raise ValidationError("Draw this weapon first")
             target = LocationCharacter.query.filter_by(
                 location_id=location_id,
                 character_id=target_character_id,
@@ -1291,6 +1566,12 @@ class CombatService:
             aim_details = {
                 'weapon_index': weapon_index,
                 'target_character_id': target_character_id,
+                'accuracy_bonus': (
+                    CombatService._coerce_int(character.aim_accuracy_bonus, 0) + 1
+                    if character.aimed_target_character_id == target_character_id
+                    and character.aimed_weapon_index == weapon_index
+                    else 1
+                ),
             }
 
         if action_key == 'attack' and fire_mode:
@@ -1300,12 +1581,21 @@ class CombatService:
             weapon_index = CombatService._coerce_int(weapon_index, -1)
             if weapon_index < 0 or weapon_index >= len(weapons):
                 raise ValidationError("Weapon not found")
+            if character.drawn_weapon_index != weapon_index:
+                raise ValidationError("Draw this weapon first")
             weapon = weapons[weapon_index] or {}
+            if weapon.get('requiresManualCycle'):
+                raise ValidationError("Cycle the weapon action before firing")
             profile = weapon.get('fireModes') or (weapon.get('attributes') or {}).get('fire_modes')
             if not profile and weapon.get('templateId'):
                 template = db.session.get(ItemTemplate, weapon.get('templateId'))
                 profile = (template.attributes or {}).get('fire_modes') if template else None
             profile = profile or {}
+            ergonomics_profile = CombatService._weapon_ergonomics_profile(
+                character,
+                weapon,
+                weapon_index,
+            )
             shots = max(1, CombatService._coerce_int(shot_count, 1))
             volley_count = CombatService._coerce_int(volley_count, 1)
             single_options = profile.get('single_shot_options') or [1]
@@ -1318,7 +1608,7 @@ class CombatService:
             expected_action_points = {
                 'unaimed': 2,
                 'rapid': 1,
-                'aimed': 4,
+                'aimed': ergonomics_profile['aimed_shot_action_points'],
                 'burst': 3,
                 'area': 5,
             }.get(fire_mode)
@@ -1396,6 +1686,29 @@ class CombatService:
                 available_ammo = max(0, CombatService._coerce_int(weapon.get('ammo'), 0))
             if available_ammo < shots:
                 raise ValidationError("Not enough ammo")
+            range_target = None
+            if target_character_id:
+                range_target = LocationCharacter.query.filter_by(
+                    location_id=location_id,
+                    character_id=target_character_id,
+                ).first()
+            target_distance = (
+                max(
+                    abs(character.pos_x - range_target.pos_x),
+                    abs(character.pos_y - range_target.pos_y),
+                )
+                if range_target
+                else None
+            )
+            weapon_range = CombatService._coerce_int(
+                weapon.get('range', (weapon.get('attributes') or {}).get('range')),
+                0,
+            )
+            accuracy_in_range = bool(
+                target_distance is not None
+                and weapon_range > 0
+                and target_distance <= weapon_range
+            )
             attack_details = {
                 'weapon_index': weapon_index,
                 'fire_mode': fire_mode,
@@ -1411,6 +1724,19 @@ class CombatService:
                 'posture_shooting_bonus': POSTURES[CombatService._posture_key(character)]['shooting_bonus'],
                 'posture_ergonomics_bonus': POSTURES[CombatService._posture_key(character)]['ergonomics_bonus'],
                 'shooter_movement_mode': character.movement_mode_this_turn,
+                'ergonomics': ergonomics_profile,
+                'target_distance': target_distance,
+                'weapon_range': weapon_range,
+                'ergonomics_accuracy_applied': (
+                    ergonomics_profile['accuracy_modifier']
+                    if accuracy_in_range
+                    else 0
+                ),
+                'aim_accuracy_bonus': CombatService._aim_bonus_for_target(
+                    character,
+                    target_character_id,
+                    weapon_index,
+                ),
             }
 
         if action_key == 'convert_free_action_to_movement':
@@ -1423,9 +1749,16 @@ class CombatService:
                 raise ValidationError("Not enough action points")
             character.movement_points_max += gain
             character.movement_points_current += gain
+            CombatService._clear_aim(character)
         elif action_key == 'change_posture':
-            character.aimed_target_character_id = None
-            character.aimed_weapon_index = None
+            CombatService._clear_aim(character)
+        elif action_key == 'draw_weapon':
+            pass
+        elif action_key == 'stow_weapon':
+            CombatService._set_active_weapon(character, None)
+            CombatService._clear_aim(character)
+        elif action_key == 'reload_weapon':
+            pass
         else:
             action_point_cost = (
                 attack_details['action_points']
@@ -1440,14 +1773,16 @@ class CombatService:
             if action_key == 'aim' and aim_details:
                 character.aimed_target_character_id = aim_details['target_character_id']
                 character.aimed_weapon_index = aim_details['weapon_index']
+                character.aim_accuracy_bonus = aim_details['accuracy_bonus']
             elif action_key == 'attack' and attack_details:
                 selected_target = attack_details.get('target_character_id')
-                if selected_target != character.aimed_target_character_id:
-                    character.aimed_target_character_id = None
-                    character.aimed_weapon_index = None
+                if (
+                    selected_target != character.aimed_target_character_id
+                    or weapon_index != character.aimed_weapon_index
+                ):
+                    CombatService._clear_aim(character)
             else:
-                character.aimed_target_character_id = None
-                character.aimed_weapon_index = None
+                CombatService._clear_aim(character)
 
         character.last_action = db.func.now()
         db.session.commit()
@@ -1458,6 +1793,8 @@ class CombatService:
             'attack': attack_details,
             'aim': aim_details,
             'posture_change': posture_details,
+            'draw_weapon': draw_details,
+            'reload_weapon': reload_details,
         }
 
     @staticmethod
@@ -1520,8 +1857,7 @@ class CombatService:
                     raise ValidationError("Not enough movement points")
 
             character.pos_x, character.pos_y = landing
-            character.aimed_target_character_id = None
-            character.aimed_weapon_index = None
+            CombatService._clear_aim(character)
             character.last_action = db.func.now()
             CombatService._apply_periodic_health_effects(character, phase='movement_end')
             CombatService._sync_location_effects_from_character(character)
@@ -1631,8 +1967,7 @@ class CombatService:
 
         character.pos_x = new_x
         character.pos_y = new_y
-        character.aimed_target_character_id = None
-        character.aimed_weapon_index = None
+        CombatService._clear_aim(character)
         character.last_action = db.func.now()
         CombatService._apply_periodic_health_effects(character, phase='movement_end')
         CombatService._sync_location_effects_from_character(character)
@@ -1667,6 +2002,8 @@ class CombatService:
             loc_char.movement_distance_this_turn = 0
             loc_char.correction_distance_this_turn = 0
             loc_char.strenuous_movement_blocked_until_round = 0
+            CombatService._set_active_weapon(loc_char, loc_char.drawn_weapon_index)
+            CombatService._clear_aim(loc_char)
             character = getattr(loc_char, 'character', None)
             if character and isinstance(character.data, dict):
                 data = character.data

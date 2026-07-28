@@ -243,9 +243,17 @@ def _parse_name_list(text: str) -> List[str]:
 def _canonical_caliber(text: str) -> str:
     normalized = _normalize_text(text)
     normalized = normalized.replace("х", "x").replace("*", "x")
+    normalized = re.sub(r"аср", "ACP", normalized, flags=re.IGNORECASE)
     normalized = normalized.replace(" ,", ",").replace("..", ".")
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
+
+
+def _magazine_volume(value: Any, name: Any = "") -> float:
+    if "клипс" in _normalize_text(name).lower():
+        return 0.25
+    volume = _as_float(value, 0.0)
+    return volume if 0 <= volume <= 100 else 1.0
 
 
 def _ammo_damage_from_row(row: Dict[str, str]) -> Optional[float]:
@@ -367,6 +375,17 @@ def _parse_ranged_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
             }
         )
     return templates
+
+
+def _finalize_weapon_magazine_attributes(template: Dict[str, Any], fixed_magazine: bool) -> None:
+    attributes = template.get("attributes")
+    if not isinstance(attributes, dict):
+        return
+    attributes["fixedMagazine"] = fixed_magazine
+    attributes.pop("magazine", None)
+    attributes.pop("magazine_size_raw", None)
+    if not fixed_magazine:
+        attributes.pop("magazine_size", None)
 
 
 def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
@@ -550,7 +569,7 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
             compatible_names = _parse_name_list(row.get("H"))
             reload_time = _parse_od(row.get("C"))
             compatible_weapon_names = compatible_names
-            is_loader = any(fragment in name_a.lower() for fragment in ("клипса", "короб"))
+            is_loader = any(fragment in name_a.lower() for fragment in ("подавач", "лента"))
             templates.append(
                 {
                     "name": _canonical_caliber(name_a),
@@ -560,7 +579,7 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
                     "description": row.get("H") or "",
                     "price": _as_int(row.get("D"), 0),
                     "weight": 0.0,
-                    "volume": _as_float(row.get("E"), 0.0),
+                    "volume": _magazine_volume(row.get("E"), name_a),
                     "attributes": {
                         "import_source": "equipment_workbook",
                         "caliber": caliber,
@@ -645,12 +664,38 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
                 "Штурмовые винтовки и карабины",
                 "Пулемёты",
             }
-            pistol_with_fixed_cylinder = name.startswith("Револьвер") or name == "Нож стреляющий"
-            template["attributes"]["fixedMagazine"] = not (
+            caliber_key = re.sub(r"[^0-9a-zа-я]+", "", str(template["attributes"].get("caliber") or "").lower())
+            pistol_with_fixed_cylinder = (
+                name.startswith("Револьвер")
+                or name == "Нож стреляющий"
+                or caliber_key == "18x45"
+            )
+            fixed_magazine = not (
                 explicitly_detachable or generally_detachable or (
                     subcategory == "Пистолеты" and not pistol_with_fixed_cylinder
                 )
             )
+            _finalize_weapon_magazine_attributes(template, fixed_magazine)
+            normalized_name = _equipment_alias(name)
+            bolt_names = {_equipment_alias(value) for value in (
+                "Суслик", "Малинова", "Мачеха 51", "Свет-99", "Пылесос",
+            )}
+            pump_names = {_equipment_alias(value) for value in (
+                "Гора Б88", "Гора 580Б2", "Ремень 787", "Спаситель 70",
+            )}
+            lowered_name = name.lower()
+            matches_bolt = (
+                any(value in normalized_name for value in bolt_names)
+                or bool(re.search(r"(?:^|\s)ау(?:\s|$)", lowered_name))
+            )
+            matches_pump = (
+                any(value in normalized_name for value in pump_names)
+                or bool(re.search(r"(?:^|\s)д-?2(?:\s|$)", lowered_name))
+            )
+            if matches_bolt:
+                template["attributes"]["manual_cycle"] = "bolt"
+            elif matches_pump:
+                template["attributes"]["manual_cycle"] = "pump"
     return templates
 
 

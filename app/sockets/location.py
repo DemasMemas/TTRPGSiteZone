@@ -63,7 +63,8 @@ def handle_join_location(data):
             emit('error', {'message': 'Character not found or not owned'}, room=request.sid)
             return
 
-        if not loc_char:
+        is_new_location_character = loc_char is None
+        if is_new_location_character:
             spawn = None
             for sp in location.spawn_points or []:
                 taken = LocationCharacter.query.filter_by(
@@ -86,17 +87,19 @@ def handle_join_location(data):
                 controlled_by=character.owner_id,
             )
             db.session.add(loc_char)
+            db.session.flush()
         elif loc_char.controlled_by is None:
             loc_char.controlled_by = character.owner_id
 
-        profile = CombatService._combat_profile(loc_char)
-        loc_char.initiative_bonus = profile['initiative_bonus']
-        loc_char.action_points_max = profile['action_points']
-        loc_char.action_points_current = profile['action_points']
-        loc_char.free_actions_max = profile['free_actions']
-        loc_char.free_actions_current = profile['free_actions']
-        loc_char.movement_points_max = profile['movement_points']
-        loc_char.movement_points_current = profile['movement_points']
+        if is_new_location_character:
+            profile = CombatService._combat_profile(loc_char)
+            loc_char.initiative_bonus = profile['initiative_bonus']
+            loc_char.action_points_max = profile['action_points']
+            loc_char.action_points_current = profile['action_points']
+            loc_char.free_actions_max = profile['free_actions']
+            loc_char.free_actions_current = profile['free_actions']
+            loc_char.movement_points_max = 0
+            loc_char.movement_points_current = 0
         if loc_char.character and isinstance(loc_char.character.data, dict):
             health = loc_char.character.data.get('health')
             if isinstance(health, dict):

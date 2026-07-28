@@ -1101,21 +1101,21 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         {
             label: 'Атака',
             title: 'Открыть экипировку для выбора оружия и типа атаки',
-            angle: -18,
+            angle: -38,
             action: () => import('./characterSheet.js').then(module => module.openCharacterSheet(characterId, 'equipment')),
         },
         {
             label: 'Положение',
             icon: '↕',
             title: 'Встать, сесть или лечь',
-            angle: -162,
+            angle: 222,
             requiresCombat: true,
             action: () => showPostureMenu(characterId),
         },
         {
             label: 'Инвентарь',
             title: 'Открыть вкладку инвентаря',
-            angle: 126,
+            angle: 118,
             action: () => import('./characterSheet.js').then(module => module.openCharacterSheet(characterId, 'inventory')),
             allowAlways: true,
         },
@@ -1123,13 +1123,13 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             label: 'Мед',
             icon: '✚',
             title: 'Быстрый выбор расходников',
-            angle: 72,
+            angle: 66,
             action: () => showMedicalConsumableMenu(characterId),
         },
         {
             label: 'ОП',
             title: 'Преобразовать СД в ОП',
-            angle: 198,
+            angle: 170,
             action: () => {
                 const combatCharacter = findCombatCharacterByCharacterId(characterId);
                 if (!combatCharacter || !combatCharacter.location_character_id) {
@@ -1149,7 +1149,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     menuItems.splice(2, 0, {
         label: 'Взаим.',
         title: 'Действия со структурой',
-        angle: 36,
+        angle: 14,
         action: () => beginStructureInteractionMode(characterId),
     });
 
@@ -2123,7 +2123,7 @@ function renderCombatHud() {
             <div>ОД: ${combatState.current_character?.action_points_current ?? 0}/${combatState.current_character?.action_points_max ?? 0}</div>
             <div>СД: ${combatState.current_character?.free_actions_current ?? 0}/${combatState.current_character?.free_actions_max ?? 0}</div>
             <div>ОП: ${combatState.current_character?.movement_points_current ?? 0}/${combatState.current_character?.movement_points_max ?? 0}</div>
-            ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong></div>` : ''}
+            ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong> · Точность +${combatState.current_character?.aim_accuracy_bonus || 0}</div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
             <div>Кровопотеря: ${combatState.current_character?.blood ?? 'normal'} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
