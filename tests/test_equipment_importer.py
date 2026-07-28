@@ -16,6 +16,12 @@ def test_dash_disables_all_automatic_fire_modes():
     assert profile["supports_area_fire"] is False
 
 
+def test_grenade_launcher_calibers_preserve_letters():
+    assert _canonical_caliber("Вог-25") == "ВОГ-25"
+    assert _canonical_caliber("Граната ОГ-12") == "ОГ-12"
+    assert _canonical_caliber("N-101-2") == "N-101-2"
+
+
 def test_duplex_is_a_single_fire_option_not_a_burst():
     profile = _parse_burst_profile("Дуплет(Одиночный - 2 выстрела)")
 

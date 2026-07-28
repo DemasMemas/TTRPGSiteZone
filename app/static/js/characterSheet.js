@@ -23,11 +23,12 @@ import { Server } from './api.js';
 import { showNotification } from './utils.js';
 import { lobbyParticipants } from './ui.js';
 import { getSocket } from './socketHandlers.js';
-import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
+import { advanceTimedEffects, applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
 
 // ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
 let currentCharacterId = null;
 let currentCharacterData = null;
+let currentCharacterCanEdit = false;
 let autoSaveTimer = null;
 const AUTO_SAVE_DELAY = 500;
 
@@ -207,6 +208,7 @@ function getAmmoVariantLabels(value) {
 function getItemCaliber(item) {
     const value = item?.attributes?.caliber
         ?? item?.caliber
+        ?? (item?.category === 'grenade' ? item?.name : null)
         ?? item?.subcategory
         ?? item?.attributes?.ammo_group
         ?? item?.attributes?.magazine_caliber
@@ -218,11 +220,12 @@ function normalizeCaliberText(value) {
     return String(value || '')
         .trim()
         .toLowerCase()
+        .replace(/^граната\s*/u, '')
         .replace(/аср/g, 'acp')
         .replace(/[×*]/g, 'x')
         .replace(/\s+/g, '')
         .replace(/\./g, '')
-        .replace(/[^a-z0-9x+-]/g, '');
+        .replace(/[^a-zа-яё0-9x+-]/gu, '');
 }
 
 const AMMO_VARIANT_MODIFIERS = {
@@ -525,6 +528,7 @@ function updateDataFromFields() {
 }
 
 function scheduleAutoSave() {
+    if (!currentCharacterCanEdit) return;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
         if (currentCharacterId) {
@@ -546,6 +550,7 @@ function scheduleAutoSave() {
 }
 
 function forceSyncCharacter() {
+    if (!currentCharacterCanEdit) return;
     const socket = getSocket();
     if (socket && currentCharacterId) {
         socket.emit('update_character_data', {
@@ -4241,7 +4246,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
     const collectAmmo = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'ammo' && getItemCaliber(item) === caliber && item.quantity > 0) {
+            if (['ammo', 'grenade'].includes(item.category) && getItemCaliber(item) === caliber && item.quantity > 0) {
                 ammoItems.push({ item, path: path.concat(idx) });
             }
             if (item.contents) collectAmmo(item.contents, path.concat(idx, 'contents'));
@@ -4641,7 +4646,7 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
         const collectAmmo = (items, path) => {
             if (!Array.isArray(items)) return;
             items.forEach((item, idx) => {
-                if (item.category === 'ammo' && getItemCaliber(item) === caliber && item.quantity > 0) {
+                if (['ammo', 'grenade'].includes(item.category) && getItemCaliber(item) === caliber && item.quantity > 0) {
                     ammoItems.push({ item, path: path.concat(idx) });
                 }
                 if (item.contents) collectAmmo(item.contents, path.concat(idx, 'contents'));
@@ -4737,7 +4742,7 @@ window.reloadMagazineFromInventory = async function(pathStr) {
                 item !== mag
                 &&
                 (
-                    item.category === 'ammo'
+                    ['ammo', 'grenade'].includes(item.category)
                     || isAmmoLoadingDevice(item)
                 )
                 && (
@@ -4988,7 +4993,13 @@ function resolveCharacterDay(health, effects, didSleep) {
 window.advanceCharacterDayWithoutSleep = function() {
     updateDataFromFields();
     const health = ensureHealthMaximums(currentCharacterData);
-    health.effects = resolveCharacterDay(health, normalizeEffectList(health.effects || []), false);
+    const elapsedEffects = advanceTimedEffects(
+        health,
+        normalizeEffectList(health.effects || []),
+        24 * 3600,
+        true
+    );
+    health.effects = resolveCharacterDay(health, elapsedEffects, false);
     syncHealthDerivedStatuses(health);
     refreshHealthPanel();
     scheduleAutoSave();
@@ -5001,6 +5012,12 @@ window.performCharacterRest = function(hours = 8) {
     const health = ensureHealthMaximums(currentCharacterData);
     health.needs = normalizeDailyNeeds(health.needs);
     let effects = normalizeEffectList(health.effects || []);
+    effects = advanceTimedEffects(
+        health,
+        effects,
+        Math.max(0, Number(hours) || 0) * 3600,
+        true
+    );
     const restBonus = effects.find(effect => effect.type === 'next_rest_healing');
     const restModifier = (health.combatMeta?.consumableModifiers || []).find(modifier => modifier?.stat === 'rest_heal_multiplier');
     const multiplier = Math.max(1, Number(restBonus?.value || restModifier?.value || 1));
@@ -5055,8 +5072,10 @@ function addAmmoToMagazine(mag, ammoItem, count) {
         mag.ammo.push({
             templateId: ammoItem.templateId,
             name: ammoItem.name,
+            category: ammoItem.category,
             quantity: count,
             ammo_variant: ammoVariant || null,
+            attributes: { ...(ammoItem.attributes || {}) },
             damage: ammoItem.damage ?? ammoItem.attributes?.damage ?? null,
             penetration: ammoItem.penetration ?? ammoItem.attributes?.penetration ?? null,
             range: ammoItem.attributes?.range ?? null,
@@ -6741,7 +6760,11 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
     const collectGrenades = (items, path) => {
         if (!Array.isArray(items)) return;
         items.forEach((item, idx) => {
-            if (item.category === 'grenade' && item.attributes?.caliber === caliber && item.quantity > 0) {
+            if (
+                item.category === 'grenade'
+                && getItemCaliber(item) === normalizeCaliberText(caliber)
+                && item.quantity > 0
+            ) {
                 grenadeItems.push({ item, path: path.concat(idx) });
             }
             if (item.contents) collectGrenades(item.contents, path.concat(idx, 'contents'));
@@ -7280,6 +7303,17 @@ function spendWaterRequirement(data, fraction, allowAlcohol = false, consume = t
     return { ok: false, source: null };
 }
 
+function findSmokingFireSource(data) {
+    const sources = collectInventoryEntries(data, item =>
+        Number(item?.quantity || 0) > 0
+        && /зажигал|спич/i.test(String(item?.name || ''))
+    );
+    const lighter = sources.find(entry => /зажигал/i.test(String(entry.item?.name || '')));
+    if (lighter) return { entry: lighter, consume: false };
+    const matches = sources.find(entry => /спич/i.test(String(entry.item?.name || '')));
+    return matches ? { entry: matches, consume: true } : null;
+}
+
 function chooseConsumableApplication(title, choices) {
     if (!Array.isArray(choices) || choices.length === 0) return Promise.resolve(null);
     if (choices.length === 1) return Promise.resolve(choices[0]);
@@ -7544,6 +7578,13 @@ async function useConsumable(item, itemPath, options = {}) {
 
     let waterRequirement = null;
     let usingWithoutWater = false;
+    const fireRequirement = direct.requires_fire
+        ? findSmokingFireSource(currentCharacterData)
+        : null;
+    if (direct.requires_fire && !fireRequirement) {
+        showNotification('Для курения нужна зажигалка или спичка');
+        return false;
+    }
     if (direct.requires_water_fraction) {
         const waterCheck = spendWaterRequirement(currentCharacterData, direct.requires_water_fraction, Boolean(direct.water_or_alcohol), false);
         if (!waterCheck.ok) {
@@ -7628,6 +7669,10 @@ async function useConsumable(item, itemPath, options = {}) {
         }
     } else if (usingWithoutWater) {
         showNotification('Предмет использован без воды: получен штраф к истощению', 'system');
+    }
+    if (fireRequirement?.consume && !spendInventoryItemUses(fireRequirement.entry, 1)) {
+        showNotification('Не удалось потратить спичку. Предмет не использован.');
+        return false;
     }
 
     effects.forEach(eff => {
@@ -9417,10 +9462,10 @@ async function renderInventoryTab(data) {
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="pockets-container"></div>
-        <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        ${window.isGM ? `<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
             <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker()">➕ Добавить предмет</button>
         </div>
-        <button type="button" class="btn btn-sm btn-secondary" onclick="addPocketItemManual()">📝 Свой предмет</button>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="addPocketItemManual()">📝 Свой предмет</button>` : ''}
 
         <!-- Пояс -->
         ${eq.belt?.templateId ? `
@@ -9509,10 +9554,10 @@ async function renderInventoryTab(data) {
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
         <div id="backpack-container"></div>
-        <div style="margin-top:10px;">
+        ${window.isGM ? `<div style="margin-top:10px;">
             <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker('backpack')">➕ Добавить предмет</button>
         </div>
-        <button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>` : ''}
     `;
 
     container.innerHTML = html;
@@ -9919,7 +9964,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
     const pouchTemplate = pouchTemplates.find(t => t.id == pouch.type);
     const hasArmorPlateSlot = pouchTemplate?.attributes?.slots?.some(s => s.type === 'armor_plate');
 
-    if (!hasArmorPlateSlot) {
+    if (window.isGM && !hasArmorPlateSlot) {
         const addBtn = document.createElement('button');
         addBtn.type = 'button';
         addBtn.className = 'btn btn-sm btn-secondary';
@@ -10058,7 +10103,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     const pouchTemplate = pouchTemplates.find(t => t.id == pouch.type);
     const hasArmorPlateSlot = pouchTemplate?.attributes?.slots?.some(s => s.type === 'armor_plate');
 
-    if (!hasArmorPlateSlot) {
+    if (window.isGM && !hasArmorPlateSlot) {
         const addBtn = document.createElement('button');
         addBtn.type = 'button';
         addBtn.className = 'btn btn-sm btn-secondary';
@@ -10328,6 +10373,10 @@ function getInventoryTargetItems(targetPath) {
 }
 
 async function addTemplateItemToInventory(templateId, target, quantity = 1, ammoVariant = null) {
+    if (!window.isGM) {
+        showNotification('Только ГМ может добавлять предметы');
+        return false;
+    }
     if (!templateId) return false;
 
     const allTemplates = await getAllItemTemplates();
@@ -10351,6 +10400,10 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
 }
 
 window.openInventoryTemplatePicker = async function(target = 'pockets', options = {}) {
+    if (!window.isGM) {
+        showNotification('Только ГМ может добавлять предметы');
+        return;
+    }
     let modal = document.getElementById('inventory-template-picker-modal');
     if (!modal) {
         modal = document.createElement('div');
@@ -11269,12 +11322,14 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
                 });
             }
 
-            const addBtn = document.createElement('button');
-            addBtn.type = 'button';
-            addBtn.className = 'btn btn-sm btn-secondary';
-            addBtn.textContent = '➕ Добавить внутрь';
-            addBtn.onclick = () => openInventoryTemplatePicker(itemPath.concat('contents'));
-            contentsDiv.appendChild(addBtn);
+            if (window.isGM) {
+                const addBtn = document.createElement('button');
+                addBtn.type = 'button';
+                addBtn.className = 'btn btn-sm btn-secondary';
+                addBtn.textContent = '➕ Добавить внутрь';
+                addBtn.onclick = () => openInventoryTemplatePicker(itemPath.concat('contents'));
+                contentsDiv.appendChild(addBtn);
+            }
 
             setupDropTarget(contentsDiv, itemPath.concat('contents'), item);
             itemDiv.appendChild(contentsDiv);
@@ -11479,6 +11534,10 @@ window.addPocketItemFromTemplate = templateId =>
     addTemplateItemToInventory(templateId, 'pockets');
 
 window.addPocketItemManual = function() {
+    if (!window.isGM) {
+        showNotification('Только ГМ может добавлять предметы');
+        return;
+    }
     const newItem = {
         id: generateItemId(),
         templateId: null,
@@ -11541,20 +11600,26 @@ function renderSettingsTab(data) {
 
     const ownerUsername = currentCharacterData.ownerUsername || 'Неизвестно';
     const visibleTo = currentCharacterData.visible_to || [];
+    const editableTo = currentCharacterData.editable_to || [];
     const currentUserId = parseInt(localStorage.getItem('user_id'));
     const isOwner = currentCharacterData.ownerId === currentUserId;
+    const isGM = window.isGM === true;
 
     let html = `
         <h4>Владелец: ${escapeHtml(ownerUsername)}</h4>
-        <hr>
-        <h4>Видимость</h4>
-        <div id="visibility-settings-container"></div>
     `;
 
-    if (isOwner) {
+    if (isGM) {
         html += `
-            <button type="button" class="btn btn-sm" onclick="applyVisibilityFromSheet()">Применить видимость</button>
             <hr>
+            <h4>Видимость</h4>
+            <div id="visibility-settings-container"></div>
+            <button type="button" class="btn btn-sm" onclick="applyVisibilityFromSheet()">Применить видимость</button>
+        `;
+    }
+    if (isOwner || isGM) {
+        html += `
+            ${isGM ? '<hr>' : ''}
             <button type="button" class="btn btn-sm btn-danger" onclick="deleteCharacterFromSheet()">Удалить персонажа</button>
         `;
     }
@@ -11568,18 +11633,31 @@ function renderSettingsTab(data) {
             const div = document.createElement('div');
             div.className = 'visibility-participant';
             div.innerHTML = `
-                <input type="checkbox" value="${p.user_id}" ${visibleTo.includes(p.user_id) ? 'checked' : ''} ${!isOwner ? 'disabled' : ''}>
+                <label><input class="character-visible-checkbox" type="checkbox" value="${p.user_id}" ${visibleTo.includes(p.user_id) ? 'checked' : ''}> Видимость</label>
+                <label><input class="character-editable-checkbox" type="checkbox" value="${p.user_id}" ${editableTo.includes(p.user_id) ? 'checked' : ''}> Редактирование</label>
                 <label>${p.username}</label>
             `;
+            const visible = div.querySelector('.character-visible-checkbox');
+            const editable = div.querySelector('.character-editable-checkbox');
+            editable.addEventListener('change', () => {
+                if (editable.checked) visible.checked = true;
+            });
+            visible.addEventListener('change', () => {
+                if (!visible.checked) editable.checked = false;
+            });
             visContainer.appendChild(div);
         });
     }
 }
 
 window.applyVisibilityFromSheet = function() {
-    const checkboxes = document.querySelectorAll('#visibility-settings-container input:checked');
-    const visibleTo = Array.from(checkboxes).map(cb => parseInt(cb.value, 10));
-    Server.setCharacterVisibility(currentCharacterId, visibleTo)
+    const visibleTo = Array.from(document.querySelectorAll(
+        '#visibility-settings-container .character-visible-checkbox:checked'
+    )).map(cb => parseInt(cb.value, 10));
+    const editableTo = Array.from(document.querySelectorAll(
+        '#visibility-settings-container .character-editable-checkbox:checked'
+    )).map(cb => parseInt(cb.value, 10));
+    Server.setCharacterVisibility(currentCharacterId, visibleTo, editableTo)
         .then(() => showNotification('Видимость обновлена', 'success'))
         .catch(err => showNotification(err.message));
 };
@@ -11602,6 +11680,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
     localStorage.setItem('currentCharacterId', String(characterId));
     try {
         const character = await Server.getCharacter(characterId);
+        currentCharacterCanEdit = character.can_edit === true;
         currentCharacterData = character.data || {};
         normalizeCharacterEffects(currentCharacterData);
 
@@ -11631,8 +11710,20 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
         currentCharacterData.ownerId = character.owner_id;
         currentCharacterData.ownerUsername = character.owner_username;
         currentCharacterData.visible_to = character.visible_to || [];
+        currentCharacterData.editable_to = character.editable_to || [];
         await getAllItemTemplates();
         await renderCharacterSheet(character.name, currentCharacterData);
+        if (!currentCharacterCanEdit) {
+            const sheet = document.getElementById('character-sheet-modal');
+            sheet?.querySelectorAll('input, select, textarea').forEach(control => {
+                control.disabled = true;
+            });
+            sheet?.querySelectorAll('button').forEach(button => {
+                if (!button.classList.contains('tab-btn') && !button.classList.contains('close')) {
+                    button.disabled = true;
+                }
+            });
+        }
         switchSheetTab(tabId);
         document.getElementById('character-sheet-modal').style.display = 'flex';
 
@@ -12078,7 +12169,7 @@ async function rerenderContainer(containerPath, parentElement = null, options = 
                 isArmorPlateSlot = true;
             }
         }
-        if (!isArmorPlateSlot) {
+        if (window.isGM && !isArmorPlateSlot) {
             const addBtn = document.createElement('button');
             addBtn.type = 'button';
             addBtn.className = 'btn btn-sm btn-secondary';
@@ -12169,6 +12260,10 @@ window.addBackpackItemFromTemplate = templateId =>
     addTemplateItemToInventory(templateId, 'backpack');
 
 window.addBackpackItemManual = function() {
+    if (!window.isGM) {
+        showNotification('Только ГМ может добавлять предметы');
+        return;
+    }
     const newItem = {
         id: generateItemId(),
         templateId: null,

@@ -12,6 +12,7 @@ class CharacterSchema(Schema):
     owner_username = fields.Method("get_owner_username")
     data = fields.Dict()
     visible_to = fields.List(fields.Int())
+    editable_to = fields.List(fields.Int())
     created_at = fields.DateTime()
     updated_at = fields.DateTime()
 

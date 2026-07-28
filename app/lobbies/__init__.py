@@ -244,7 +244,19 @@ def get_character(character_id):
     user_id = int(get_jwt_identity())
     character = CharacterService.get_character(character_id, user_id)
     schema = CharacterSchema()
-    return jsonify(schema.dump(character)), 200
+    payload = schema.dump(character)
+    lobby = db.session.get(Lobby, character.lobby_id)
+    is_controller = LocationCharacter.query.filter_by(
+        character_id=character.id,
+        controlled_by=user_id,
+    ).first() is not None
+    payload['can_edit'] = bool(
+        character.owner_id == user_id
+        or (lobby and lobby.gm_id == user_id)
+        or user_id in (character.editable_to or [])
+        or is_controller
+    )
+    return jsonify(payload), 200
 
 @lobbies_bp.route('/characters/<int:character_id>', methods=['PUT'])
 @jwt_required()
@@ -270,10 +282,16 @@ def set_character_visibility(character_id):
     data = request.get_json()
     if 'visible_to' not in data or not isinstance(data['visible_to'], list):
         return jsonify({'error': 'visible_to must be a list'}), 400
-    character = CharacterService.set_visibility(character_id, user_id, data['visible_to'])
+    editable_to = data.get('editable_to', [])
+    if not isinstance(editable_to, list):
+        return jsonify({'error': 'editable_to must be a list'}), 400
+    character = CharacterService.set_visibility(
+        character_id, user_id, data['visible_to'], editable_to
+    )
     socketio.emit('character_updated', {
         'id': character.id,
-        'visible_to': character.visible_to
+        'visible_to': character.visible_to,
+        'editable_to': character.editable_to,
     }, room=f"lobby_{character.lobby_id}")
     return jsonify({'message': 'Visibility updated'}), 200
 

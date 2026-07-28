@@ -4,7 +4,9 @@ from flask import request
 from flask_socketio import emit, join_room, leave_room
 from sqlalchemy.orm.attributes import flag_modified
 from app.extensions import socketio, db
-from app.models import LobbyCharacter, LobbyParticipant, LocationCharacter
+from app.models import Lobby, LobbyCharacter, LobbyParticipant, LocationCharacter
+from app.services.character import CharacterService
+from app.services.exceptions import PermissionDenied
 from app.services.effects import normalize_effect_list, sync_health_derived_statuses
 from app.services.health import apply_health_maximums, health_zones_to_location
 from .utils import get_user_from_token
@@ -78,6 +80,30 @@ def handle_update_character_data(data):
     if not participant:
         emit('error', {'message': 'You are not in this lobby'}, room=request.sid)
         return
+
+    lobby = db.session.get(Lobby, character.lobby_id)
+    is_gm = bool(lobby and lobby.gm_id == user.id)
+    is_controller = LocationCharacter.query.filter_by(
+        character_id=character.id,
+        controlled_by=user.id,
+    ).first() is not None
+    if (
+        character.owner_id != user.id
+        and not is_gm
+        and user.id not in (character.editable_to or [])
+        and not is_controller
+    ):
+        emit('error', {'message': 'You cannot update this character'}, room=request.sid)
+        return
+    if 'visible_to' in updates and not is_gm:
+        emit('error', {'message': 'Only GM can change visibility'}, room=request.sid)
+        return
+    if 'data' in updates and not is_gm:
+        try:
+            CharacterService.ensure_no_items_added(character.data, updates['data'])
+        except PermissionDenied as error:
+            emit('error', {'message': str(error)}, room=request.sid)
+            return
 
     # Применяем обновления
     if 'data' in updates:

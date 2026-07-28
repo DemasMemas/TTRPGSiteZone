@@ -11,6 +11,7 @@ class LobbyCharacter(db.Model):
     name = db.Column(db.String(100), nullable=False)
     data = db.Column(db.JSON, nullable=False, default=empty_dict)
     visible_to = db.Column(db.JSON, nullable=False, default=empty_list)
+    editable_to = db.Column(db.JSON, nullable=False, default=empty_list)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now(timezone.utc))
 

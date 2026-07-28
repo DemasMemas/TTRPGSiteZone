@@ -6,7 +6,7 @@ from app.extensions import db
 from app.models import Location, LocationCharacter, LocationCombatState, LobbyParticipant, LobbyCharacter, LocationObject
 from app.models.templates import ItemTemplate
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
-from app.services.effects import apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
+from app.services.effects import advance_timed_effects, apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
 from sqlalchemy.orm.attributes import flag_modified
 
 
@@ -864,6 +864,25 @@ class CombatService:
         return loc_char
 
     @staticmethod
+    def _advance_character_time(loc_char, elapsed_seconds):
+        if not loc_char or not getattr(loc_char, 'character', None):
+            return loc_char
+        character_data = loc_char.character.data if isinstance(loc_char.character.data, dict) else {}
+        health = character_data.get('health')
+        if not isinstance(health, dict):
+            return loc_char
+        health['effects'] = advance_timed_effects(
+            health,
+            health.get('effects') or [],
+            elapsed_seconds,
+        )
+        character_data['health'] = health
+        loc_char.character.data = character_data
+        flag_modified(loc_char.character, 'data')
+        CombatService._sync_location_effects_from_character(loc_char)
+        return loc_char
+
+    @staticmethod
     def _sync_location_effects_from_character(loc_char):
         if not loc_char or not getattr(loc_char, 'character', None):
             return loc_char
@@ -1504,6 +1523,8 @@ class CombatService:
                 LocationCharacter.query.filter_by(location_id=location_id).all()
             )
             CombatService._apply_end_of_round_pain_recovery(round_characters)
+            for round_character in round_characters:
+                CombatService._advance_character_time(round_character, 6)
             state.round_number += 1
         state.turn_index = next_index
         state.current_location_character_id = next_character_id

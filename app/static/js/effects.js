@@ -567,6 +567,61 @@ export function tickEffect(effect, phase = 'turn_end') {
     return normalized;
 }
 
+export function advanceTimedEffects(health = {}, effectsInput = [], elapsedSeconds = 0, includeTurnEffects = false) {
+    const unitSeconds = { second: 1, minute: 60, movement: 600, hour: 3600 };
+    const survivors = [];
+    const activated = [];
+    const adjust = (entry) => {
+        if (!entry?.field) return;
+        const min = entry.min ?? 0;
+        const max = entry.max ?? null;
+        let value = Number(health[entry.field] || 0) + Number(entry.delta || 0);
+        if (min !== null) value = Math.max(Number(min), value);
+        if (max !== null) value = Math.min(Number(max), value);
+        health[entry.field] = value;
+    };
+
+    normalizeEffectList(effectsInput).forEach(effect => {
+        let unit = String(effect.time_unit || '').toLowerCase();
+        if (!unit) {
+            unit = {
+                time_elapsed: 'minute',
+                movement_end: 'movement',
+                hour_start: 'hour',
+            }[effect.tick] || '';
+        }
+        if (includeTurnEffects && !unit && effect.tick === 'turn_end') {
+            unit = 'second';
+            effect.seconds_per_unit ??= 6;
+        }
+        if (!unitSeconds[unit] || effect.remaining == null) {
+            survivors.push(effect);
+            return;
+        }
+        const secondsPerUnit = Math.max(0.001, Number(effect.seconds_per_unit || unitSeconds[unit]));
+        const remainingSeconds = Number(
+            effect.remaining_seconds ?? (Number(effect.remaining) * secondsPerUnit)
+        ) - Math.max(0, Number(elapsedSeconds) || 0);
+        if (remainingSeconds > 0) {
+            effect.remaining_seconds = remainingSeconds;
+            effect.remaining = Math.max(1, Math.ceil(remainingSeconds / secondsPerUnit));
+            survivors.push(effect);
+            return;
+        }
+        (effect.onExpire || effect.on_expire || []).forEach(adjust);
+        if (['delayed_adjustment', 'delayed_treatment', 'deferred_adjustment'].includes(effect.type)) {
+            (effect.adjustments || []).forEach(adjust);
+        }
+        activated.push(...(effect.activate_effects || effect.activateEffects || []).filter(
+            entry => entry && typeof entry === 'object'
+        ));
+    });
+    health.effects = survivors;
+    activated.forEach(effect => applyEffectToHealth(health, effect));
+    syncHealthDerivedStatuses(health);
+    return normalizeEffectList(health.effects || []);
+}
+
 function getEffectImpact(effect) {
     const normalized = normalizeEffect(effect);
     const rule = EFFECT_IMPACT_RULES[normalized.type] || EFFECT_IMPACT_RULES.generic;

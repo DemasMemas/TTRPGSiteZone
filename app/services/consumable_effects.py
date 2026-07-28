@@ -607,7 +607,7 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
     tobacco_stress = 1 if "самокрутка" in lower else 2
     if any(name in lower for name in ("самокрутка", "сигареты ", "сигары")):
         effect("delayed_adjustment", tobacco_stress, name="Снижение стресса через 5 минут",
-               remaining=1, tick="movement_end", time_unit="movement",
+               remaining=5, tick="time_elapsed", time_unit="minute", remaining_seconds=300,
                adjustments=[{"field": "stress", "delta": -tobacco_stress, "min": 0, "max": 10}])
         direct["requires_fire"] = True
         if "сигареты " in lower:
@@ -758,11 +758,12 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
     if "стимулятор варвар" in lower:
         direct["pain_delta"] = -3
         effect("limb_trauma_suppression", 1, name="Подавление перелома и выбитой конечности",
-               remaining=1, tick="movement_end")
+               remaining=10, tick="time_elapsed", time_unit="minute", remaining_seconds=600)
     if "стимулятор викинг" in lower:
         direct["pain_delta"] = -5
         effect("limb_trauma_suppression", 1, name="Защита и подавление травм конечности",
-               remaining=1, tick="movement_end", minimum_limb_health=1)
+               remaining=10, tick="time_elapsed", time_unit="minute", remaining_seconds=600,
+               minimum_limb_health=1)
     if "научный стимпак" in lower:
         direct["radiation_delta"] = -5
     if "военный стимпак" in lower:

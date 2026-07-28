@@ -28,6 +28,20 @@ def test_beer_is_marked_as_alcohol_for_food_requirements():
     assert profile["direct"]["is_alcohol"] is True
 
 
+def test_tobacco_requires_fire_and_uses_five_minute_delay():
+    profile = parse_consumable_effects(
+        "Сигареты Тест. Снижение стресса через 5 минут"
+    )
+
+    assert profile["direct"]["requires_fire"] is True
+    delayed = next(
+        effect for effect in profile["effects"]
+        if effect["type"] == "delayed_adjustment"
+    )
+    assert delayed["time_unit"] == "minute"
+    assert delayed["remaining_seconds"] == 300
+
+
 def test_dry_ration_counts_as_food_and_water():
     profile = parse_consumable_effects(
         "\u0421\u0443\u0445\u043e\u0439 \u043f\u0430\u0435\u043a. "

@@ -242,10 +242,17 @@ def _parse_name_list(text: str) -> List[str]:
 
 def _canonical_caliber(text: str) -> str:
     normalized = _normalize_text(text)
+    normalized = re.sub(r"^граната\s+", "", normalized, flags=re.IGNORECASE)
     normalized = normalized.replace("х", "x").replace("*", "x")
     normalized = re.sub(r"аср", "ACP", normalized, flags=re.IGNORECASE)
     normalized = normalized.replace(" ,", ",").replace("..", ".")
     normalized = re.sub(r"\s+", " ", normalized)
+    aliases = {
+        "вог-25": "ВОГ-25",
+        "ог-12": "ОГ-12",
+        "n-101-2": "N-101-2",
+    }
+    normalized = aliases.get(normalized.lower(), normalized)
     return normalized
 
 

@@ -1,4 +1,5 @@
 from app.services.effects import (
+    advance_timed_effects,
     apply_effect_to_health,
     apply_periodic_effects_to_health,
     canonical_type,
@@ -161,3 +162,41 @@ def test_numeric_status_effects_are_clamped():
     assert health["painLevel"] == 10
     assert health["stress"] == 0
     assert health["intoxication"] == 100
+
+
+def test_five_minute_delayed_effect_advances_in_six_second_rounds():
+    health = {"stress": 5}
+    effects = [{
+        "type": "delayed_adjustment",
+        "name": "Stress after five minutes",
+        "remaining": 5,
+        "remaining_seconds": 300,
+        "time_unit": "minute",
+        "tick": "time_elapsed",
+        "adjustments": [{"field": "stress", "delta": -2, "min": 0, "max": 10}],
+    }]
+
+    effects = advance_timed_effects(health, effects, 294)
+    assert effects[0]["remaining_seconds"] == 6
+    assert health["stress"] == 5
+
+    effects = advance_timed_effects(health, effects, 6)
+    assert effects == []
+    assert health["stress"] == 3
+
+
+def test_rest_expires_minute_and_turn_effects():
+    health = {"painLevel": 3}
+    effects = [
+        {
+            "type": "limb_trauma_suppression",
+            "remaining": 10,
+            "time_unit": "minute",
+            "tick": "time_elapsed",
+        },
+        {"type": "analgesia", "remaining": 3, "tick": "turn_end"},
+    ]
+
+    assert advance_timed_effects(
+        health, effects, 3600, include_turn_effects=True
+    ) == []

@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { scene, directionalLight, ambientLight, waterMat, setSkyMode } from './lobby3d.js';
-import { Howl } from 'howler';
 
 let rainParticles = null;
 let rainSound = null;
@@ -16,8 +15,12 @@ const DEFAULT_SUN_INTENSITY = 0.5;
 const DEFAULT_EMISSION_INTENSITY = 0.5;
 
 export function initWeather() {
-    rainSound = new Howl({ src: ['/static/audio/rain.mp3'], loop: true, volume: 0 });
-    emissionSound = new Howl({ src: ['/static/audio/emission.mp3'], loop: true, volume: 0 });
+    if (typeof window.Howl !== 'function') {
+        console.warn('Howler could not be loaded; weather audio is disabled.');
+        return;
+    }
+    rainSound = new window.Howl({ src: ['/static/audio/rain.mp3'], loop: true, volume: 0 });
+    emissionSound = new window.Howl({ src: ['/static/audio/emission.mp3'], loop: true, volume: 0 });
 }
 
 export function applyWeather(settings) {
@@ -60,11 +63,13 @@ export function applyWeather(settings) {
             updateRainIntensity(rain.intensity);
         }
         rainParticles.visible = true;
-        rainSound.volume(rain.intensity * RAIN_VOLUME_FACTOR);
-        rainSound.play();
+        if (rainSound) {
+            rainSound.volume(rain.intensity * RAIN_VOLUME_FACTOR);
+            rainSound.play();
+        }
     } else {
         if (rainParticles) rainParticles.visible = false;
-        rainSound.pause();
+        rainSound?.pause();
     }
 
     // Солнце + небо
@@ -98,12 +103,14 @@ export function applyWeather(settings) {
             scene.fog.color.lerpColors(new THREE.Color(0xcccccc), new THREE.Color(0xaa3333), intensity);
         }
 
-        emissionSound.volume(intensity * EMISSION_VOLUME_FACTOR);
-        emissionSound.play();
+        if (emissionSound) {
+            emissionSound.volume(intensity * EMISSION_VOLUME_FACTOR);
+            emissionSound.play();
+        }
     } else {
         directionalLight.color.setHex(0xffffff);
         ambientLight.color.setHex(0xffffff);
-        emissionSound.pause();
+        emissionSound?.pause();
     }
 }
 

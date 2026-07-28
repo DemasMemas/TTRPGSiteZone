@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 EFFECT_TYPE_META = {
@@ -727,6 +728,77 @@ def tick_effects(effects: Iterable[Any], phase: str = "turn_end") -> List[Dict[s
             continue
         updated.append(normalized)
     return updated
+
+
+def advance_timed_effects(
+    health: Dict[str, Any],
+    effects: Iterable[Any],
+    elapsed_seconds: float,
+    *,
+    include_turn_effects: bool = False,
+) -> List[Dict[str, Any]]:
+    """Advance real-time effects without simulating thousands of combat ticks."""
+    unit_seconds = {"second": 1, "minute": 60, "movement": 600, "hour": 3600}
+    survivors = []
+    activated = []
+    elapsed = max(0.0, _to_float(elapsed_seconds, 0))
+
+    for raw_effect in effects or []:
+        effect = normalize_effect(raw_effect)
+        unit = str(effect.get("time_unit") or "").lower()
+        tick = str(effect.get("tick") or "")
+        if not unit:
+            unit = {
+                "time_elapsed": "minute",
+                "movement_end": "movement",
+                "hour_start": "hour",
+            }.get(tick, "")
+        if include_turn_effects and not unit and tick == "turn_end":
+            unit = "second"
+            effect.setdefault("seconds_per_unit", 6)
+        if unit not in unit_seconds or effect.get("remaining") is None:
+            survivors.append(effect)
+            continue
+
+        seconds_per_unit = max(
+            0.001,
+            _to_float(effect.get("seconds_per_unit"), unit_seconds[unit]),
+        )
+        remaining_seconds = _to_float(
+            effect.get("remaining_seconds"),
+            _to_float(effect.get("remaining"), 0) * seconds_per_unit,
+        ) - elapsed
+        if remaining_seconds > 0:
+            effect["remaining_seconds"] = remaining_seconds
+            effect["remaining"] = max(1, math.ceil(remaining_seconds / seconds_per_unit))
+            survivors.append(effect)
+            continue
+
+        for adjustment in effect.get("onExpire") or effect.get("on_expire") or []:
+            if isinstance(adjustment, dict) and adjustment.get("field"):
+                _adjust_field(
+                    health, str(adjustment["field"]),
+                    _to_float(adjustment.get("delta", 0), 0),
+                    adjustment.get("min", 0), adjustment.get("max"),
+                )
+        if effect.get("type") in {"delayed_adjustment", "delayed_treatment", "deferred_adjustment"}:
+            for adjustment in effect.get("adjustments") or []:
+                if isinstance(adjustment, dict) and adjustment.get("field"):
+                    _adjust_field(
+                        health, str(adjustment["field"]),
+                        _to_float(adjustment.get("delta", 0), 0),
+                        adjustment.get("min", 0), adjustment.get("max"),
+                    )
+        activated.extend(
+            item for item in (effect.get("activate_effects") or effect.get("activateEffects") or [])
+            if isinstance(item, dict)
+        )
+
+    health["effects"] = survivors
+    for effect in activated:
+        apply_effect_to_health(health, effect)
+    sync_health_derived_statuses(health)
+    return normalize_effect_list(health.get("effects") or [])
 
 
 def effect_summary(effect: Any) -> str:

@@ -129,11 +129,11 @@ export const Server = {
         return apiFetch(`/lobbies/characters/${characterId}`, { method: 'DELETE' });
     },
 
-    async setCharacterVisibility(characterId, visibleTo) {
+    async setCharacterVisibility(characterId, visibleTo, editableTo = []) {
         return apiFetch(`/lobbies/characters/${characterId}/visibility`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ visible_to: visibleTo }),
+            body: JSON.stringify({ visible_to: visibleTo, editable_to: editableTo }),
         });
     },
 
