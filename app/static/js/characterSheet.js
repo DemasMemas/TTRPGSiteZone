@@ -11687,21 +11687,32 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
         migratePouchesToNewFormat();
 
         function ensureSkillXp(data) {
-            if (!data.skills) data.skills = {};
+            const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+            if (!isRecord(data.skills)) data.skills = {};
             const skills = data.skills;
             const categories = ['physical', 'social', 'other'];
             for (const cat of categories) {
-                if (!skills[cat]) skills[cat] = {};
-                for (const skill of Object.values(skills[cat])) {
+                if (!isRecord(skills[cat])) skills[cat] = {};
+                for (const [key, rawSkill] of Object.entries(skills[cat])) {
+                    const skill = isRecord(rawSkill)
+                        ? rawSkill
+                        : { base: Number.isFinite(Number(rawSkill)) && rawSkill !== '' ? Number(rawSkill) : 5, bonus: 0 };
+                    skills[cat][key] = skill;
                     if (skill.xp === undefined) skill.xp = 0;
                 }
             }
             if (skills.skillPoints === undefined) skills.skillPoints = 30;
 
             const weaponKeys = ['pistols', 'shotguns', 'smgs', 'assaultRifles', 'sniperRifles', 'grenadeLaunchers', 'machineGuns'];
-            if (!skills.specialized) skills.specialized = {};
+            if (!isRecord(skills.specialized)) skills.specialized = {};
             for (const key of weaponKeys) {
-                if (!skills.specialized[key]) skills.specialized[key] = { level: 'unfamiliar', xp: 0 };
+                const specialization = skills.specialized[key];
+                if (!isRecord(specialization)) {
+                    const legacyLevel = typeof specialization === 'string' && specialization
+                        ? specialization
+                        : 'unfamiliar';
+                    skills.specialized[key] = { level: legacyLevel, xp: 0 };
+                }
                 if (skills.specialized[key].xp === undefined) skills.specialized[key].xp = 0;
             }
         }
