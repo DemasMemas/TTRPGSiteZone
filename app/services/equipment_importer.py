@@ -481,10 +481,20 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         name = _normalize_text(row.get("B"))
         if not name:
             continue
+        is_gas_mask = name.lower().startswith(("противогаз", "респиратор"))
+        requires_filter = _normalize_text(row.get("A")) == "Противогазо-шлем"
+        integrated_visor = name.lower().startswith("шлем")
+        material = _normalize_text(row.get("I"))
+        charisma_bonus = _normalize_text(row.get("M"))
+        if name.lower().endswith("ушанка"):
+            charisma_bonus = "1.5"
+        slots = []
+        if is_gas_mask or requires_filter:
+            slots.append({"type": "filter", "label": "Фильтр", "maxItems": 1})
         templates.append(
             {
                 "name": name,
-                "category": "gas_mask" if name.lower().startswith(("противогаз", "респиратор")) else "helmet",
+                "category": "gas_mask" if is_gas_mask else "helmet",
                 "subcategory": _normalize_text(row.get("I")),
                 "item_class": _normalize_text(row.get("N")),
                 "description": _normalize_text(row.get("A")),
@@ -496,11 +506,14 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
                     "max_durability": _as_int(row.get("C"), 1),
                     "protection": _protection(row, ("D", "E", "F", "G", "H")),
                     "armor_type": _normalize_text(row.get("I")),
+                    "material": material,
                     "accuracy_penalty": _normalize_text(row.get("K")),
                     "ergonomics_penalty": _normalize_text(row.get("L")),
-                    "charisma_bonus": _normalize_text(row.get("M")),
+                    "charisma_bonus": charisma_bonus,
                     "movement_penalty": _as_int(row.get("P")),
-                    "requires_filter": _normalize_text(row.get("A")) == "Противогазо-шлем",
+                    "requires_filter": requires_filter,
+                    "integrated_visor": integrated_visor,
+                    "slots": slots,
                     "protection_zones": ["crown", "back", "ears", "face"],
                     "raw_row": row,
                 },

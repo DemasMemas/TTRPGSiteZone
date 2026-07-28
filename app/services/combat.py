@@ -410,6 +410,13 @@ class CombatService:
                 modifiers.get('ergonomics'),
             )
             module_modifier += weapon_ergonomics - before
+            if (
+                module.get('slotType') == 'handguard'
+                and (module.get('bipod') or (module.get('attributes') or {}).get('bipod') or module.get('name') == 'Сошки')
+                and module.get('deployed')
+            ):
+                weapon_ergonomics += 75
+                module_modifier += 75
 
         magazine = weapon.get('installedMagazine')
         magazine = magazine if isinstance(magazine, dict) else {}
@@ -436,6 +443,13 @@ class CombatService:
         if helmet_penalty is None:
             helmet_penalty = (helmet.get('attributes') or {}).get('ergonomics_penalty')
         helmet_penalty = max(0, CombatService._coerce_int(helmet_penalty, 0))
+        gas_mask = equipment.get('gasMask') if isinstance(equipment.get('gasMask'), dict) else {}
+        gas_mask_penalty = gas_mask.get('ergonomicsPenalty')
+        if gas_mask_penalty is None:
+            gas_mask_penalty = gas_mask.get('ergonomics_penalty')
+        if gas_mask_penalty is None:
+            gas_mask_penalty = (gas_mask.get('attributes') or {}).get('ergonomics_penalty')
+        gas_mask_penalty = max(0, CombatService._coerce_int(gas_mask_penalty, 0))
 
         posture = CombatService._posture_key(loc_char)
         posture_bonus = POSTURES[posture]['ergonomics_bonus']
@@ -448,7 +462,8 @@ class CombatService:
             + tactics_value
             + posture_bonus
             + magazine_modifier
-            - helmet_penalty,
+            - helmet_penalty
+            - gas_mask_penalty,
         )
         effects = CombatService._ergonomics_effects(effective_value)
         return {
@@ -460,6 +475,7 @@ class CombatService:
             'posture_bonus': posture_bonus,
             'magazine_modifier': magazine_modifier,
             'helmet_penalty': helmet_penalty,
+            'gas_mask_penalty': gas_mask_penalty,
             **effects,
         }
 
@@ -1708,12 +1724,27 @@ class CombatService:
             setattr(character, field, getattr(character, field) - cost)
             character.weapon_braced = True
             character.braced_weapon_index = character.drawn_weapon_index
+            drawn_weapon = (character.data.get('weapons') or [])[character.drawn_weapon_index]
+            bipod = next(
+                (
+                    module for module in (drawn_weapon.get('installedModules') or [])
+                    if isinstance(module, dict)
+                    and module.get('slotType') == 'handguard'
+                    and (
+                        module.get('bipod')
+                        or (module.get('attributes') or {}).get('bipod')
+                        or module.get('name') == 'Сошки'
+                    )
+                ),
+                None,
+            )
+            brace_ergonomics_bonus = 75 if bipod else 10
             brace_details = {
                 'weapon_index': character.drawn_weapon_index,
                 'payment': payment_key,
                 'cost': cost,
                 'accuracy_bonus': 1,
-                'ergonomics_bonus': 10,
+                'ergonomics_bonus': brace_ergonomics_bonus,
             }
         if action_key == 'change_posture':
             target_posture = str(posture or '').lower()
@@ -2023,9 +2054,29 @@ class CombatService:
                     else 0
                 ),
                 'brace_ergonomics_bonus': (
-                    10
-                    if character.weapon_braced and character.braced_weapon_index == weapon_index
-                    else 0
+                    75
+                    if any(
+                        isinstance(module, dict)
+                        and module.get('slotType') == 'handguard'
+                        and (
+                            module.get('bipod')
+                            or (module.get('attributes') or {}).get('bipod')
+                            or module.get('name') == 'Сошки'
+                        )
+                        for module in (weapon.get('installedModules') or [])
+                    )
+                    and (
+                        character.posture == 'prone'
+                        or (
+                            character.weapon_braced
+                            and character.braced_weapon_index == weapon_index
+                        )
+                    )
+                    else (
+                        10
+                        if character.weapon_braced and character.braced_weapon_index == weapon_index
+                        else 0
+                    )
                 ),
             }
             if range_target:

@@ -507,6 +507,9 @@ function updateDataFromFields() {
         } else {
             value = input.value;
         }
+        if (input.dataset?.protectionPercent === 'true' && value !== null) {
+            value = value / 100;
+        }
         // Преобразование для templateId и подобных полей
         if (name.endsWith('templateId') || name.endsWith('Id')) {
             value = value === '' ? null : Number(value);
@@ -530,6 +533,16 @@ function renderCreatedByPlayerBadge(item) {
     return item?.createdByPlayer
         ? '<span class="created-by-player-badge" title="Предмет добавлен игроком" style="display:inline-block; margin-left:8px; padding:2px 6px; border-radius:4px; font-size:11px; color:#d8c58a; border:1px solid rgba(216,197,138,.45);">Создано игроком</span>'
         : '';
+}
+
+function protectionPercentValue(value) {
+    const numeric = Number(value) || 0;
+    return Math.abs(numeric) <= 1 ? numeric * 100 : numeric;
+}
+
+function formatProtectionPercent(value) {
+    const percent = protectionPercentValue(value);
+    return `${Number.isInteger(percent) ? percent : percent.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}%`;
 }
 
 function scheduleAutoSave() {
@@ -769,6 +782,47 @@ function createItemFromTemplate(template, quantity = 1, options = {}) {
     return item;
 }
 
+function helmetHasVisor(helmet, template = null) {
+    const templateSlots = template?.attributes?.slots || [];
+    const name = String(template?.name || helmet?.name || '').trim().toLowerCase();
+    return Boolean(template?.attributes?.integrated_visor)
+        || (template?.attributes?.protection_zones || []).includes('face')
+        || name.startsWith('шлем ')
+        || templateSlots.some(slot => slot?.type === 'visor')
+        || (helmet?.installedModules || []).some(module => module?.slotType === 'visor');
+}
+
+function isGasMaskHelmet(template) {
+    const name = String(template?.name || '').trim().toLowerCase();
+    return Boolean(template?.attributes?.requires_filter)
+        || name.includes('противогазо-шлем');
+}
+
+function notifyHelmetGasMaskConflict() {
+    showNotification('Нельзя одновременно надеть противогаз и шлем с забралом или противогазо-шлем');
+}
+
+async function canEquipHelmetWithCurrentGasMask(template, helmet) {
+    if (!currentCharacterData.equipment?.gasMask?.templateId) return true;
+    if (isGasMaskHelmet(template) || helmetHasVisor(helmet, template)) {
+        notifyHelmetGasMaskConflict();
+        return false;
+    }
+    return true;
+}
+
+async function canEquipGasMaskWithCurrentHelmet() {
+    const helmet = currentCharacterData.equipment?.helmet;
+    if (!helmet?.templateId) return true;
+    const templates = await loadTemplatesForLobby('helmet');
+    const template = templates.find(item => Number(item.id) === Number(helmet.templateId));
+    if (isGasMaskHelmet(template) || helmetHasVisor(helmet, template)) {
+        notifyHelmetGasMaskConflict();
+        return false;
+    }
+    return true;
+}
+
 function createItemFromTemplateSelection(template, quantity = 1, ammoVariant = null, options = {}) {
     const newItem = createItemFromTemplate(template, quantity, options);
     if (template.category === 'ammo') {
@@ -918,9 +972,21 @@ function getEffectiveWeaponStats(weapon) {
         base.noise = applyModifier(base.noise, m.noise);
         base.range = applyModifier(base.range, m.range);
         base.ergonomics = applyModifier(base.ergonomics, m.ergonomics);
+        const combatState = window.locationCombatState;
+        const weaponIndex = (currentCharacterData.weapons || []).indexOf(weapon);
+        const isBraced = Boolean(
+            combatState?.current_character?.character_id === currentCharacterId
+            && combatState.current_character.weapon_braced
+            && combatState.current_character.braced_weapon_index === weaponIndex
+        );
+        const isProne = combatState?.current_character?.posture === 'prone';
+        if (mod.slotType === 'handguard' && (mod.attributes?.bipod || mod.bipod || mod.name === 'Сошки') && (isBraced || isProne)) {
+            base.ergonomics += 75;
+        }
     });
     return base;
 }
+
 
 //Рекурсивно вычисляет общий объём предмета с учётом содержимого
 function getTotalVolume(item) {
@@ -2491,11 +2557,11 @@ async function renderEquipmentTab(data) {
         return `
             <div class="protection-grid">
                 <div>Физ</div><div>Хим</div><div>Терм</div><div>Элек</div><div>Рад</div>
-                <input type="number" class="number-input form-control" name="${prefix}.protection.physical" value="${prot.physical || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.chemical" value="${prot.chemical || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.thermal" value="${prot.thermal || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.electric" value="${prot.electric || 0}">
-                <input type="number" class="number-input form-control" name="${prefix}.protection.radiation" value="${prot.radiation || 0}">
+                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.physical" value="${protectionPercentValue(prot.physical)}">
+                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.chemical" value="${protectionPercentValue(prot.chemical)}">
+                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.thermal" value="${protectionPercentValue(prot.thermal)}">
+                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.electric" value="${protectionPercentValue(prot.electric)}">
+                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.radiation" value="${protectionPercentValue(prot.radiation)}">
             </div>
         `;
     }
@@ -2554,8 +2620,8 @@ async function renderEquipmentTab(data) {
                                 ${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Штраф Точности</label><input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
                     </div>
                 </div>
@@ -2634,8 +2700,8 @@ async function renderEquipmentTab(data) {
                                 ${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number"><label>Точность</label><input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Эргономика</label><input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Штраф Точности</label><input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
                     </div>
                 </div>
@@ -2935,7 +3001,7 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
                 const prot = installed.protection?.physical ?? 0;
                 const dur = installed.durability ?? 0;
                 const maxDur = installed.maxDurability ?? 0;
-                info = `${info} (точность ${acc}, эргон. ${erg}, харизма ${cha}, прочность ${dur}/${maxDur}, физ. защита ${prot})`;
+                info = `${info} (точность ${acc}, эргон. ${erg}, харизма ${cha}, прочность ${dur}/${maxDur}, физ. защита ${formatProtectionPercent(prot)})`;
             } else if (slot.type === 'battery') {
                 const power = installed.attributes?.power;
                 info = `${info} (заряд ${power !== undefined ? power : '?'}%)`;
@@ -2948,7 +3014,7 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
                 const stageText = stageNames[stage-1] || stage;
                 const currentStageDur = installed.currentStageDurability ?? installed.stageDurability ?? 0;
                 const maxStageDur = installed.stageDurability ?? 0;
-                info = `${info} (Физ. защита ${prot}%. Стадия ${stageText}. Прочность стадии ${currentStageDur}/${maxStageDur})`;
+                info = `${info} (Физ. защита ${formatProtectionPercent(prot)}. Стадия ${stageText}. Прочность стадии ${currentStageDur}/${maxStageDur})`;
             }
 
             const uninstallBtn = `<button type="button" class="btn btn-sm btn-danger" onclick="window.uninstallModuleFromSlot('${JSON.stringify(itemPath).replace(/"/g, '&quot;')}', '${slot.type}')">Снять</button>`;
@@ -5155,6 +5221,10 @@ window.fillHelmetFromPreset = async function(select) {
     if (!template) return;
 
     const helmet = currentCharacterData.equipment?.helmet || {};
+    if (!await canEquipHelmetWithCurrentGasMask(template, helmet)) {
+        select.value = helmet.templateId || '';
+        return;
+    }
     const mapping = {
         'accuracyPenalty': 'accuracy_penalty',
         'ergonomicsPenalty': 'ergonomics_penalty',
@@ -5166,6 +5236,7 @@ window.fillHelmetFromPreset = async function(select) {
     helmet.name = template.name;
     helmet.weight = template.weight;
     helmet.volume = template.volume;
+    helmet.material = template.attributes?.material || template.attributes?.armor_type || helmet.material || 'Текстиль';
     helmet.createdByPlayer = !window.isGM;
 
     initArmorStagedDurability(helmet, template);
@@ -5184,6 +5255,11 @@ window.fillGasMaskFromPreset = async function(select) {
     const template = templates.find(t => t.id === selectedId);
     if (!template) return;
 
+    if (!await canEquipGasMaskWithCurrentHelmet()) {
+        select.value = currentCharacterData.equipment?.gasMask?.templateId || '';
+        return;
+    }
+
     const gasMask = currentCharacterData.equipment?.gasMask || {};
     const mapping = {
         'accuracyPenalty': 'accuracy_penalty',
@@ -5196,6 +5272,7 @@ window.fillGasMaskFromPreset = async function(select) {
     gasMask.name = template.name;
     gasMask.weight = template.weight;
     gasMask.volume = template.volume;
+    gasMask.material = template.attributes?.material || template.attributes?.armor_type || gasMask.material || 'Текстиль';
     gasMask.createdByPlayer = !window.isGM;
     gasMask.isWorn = gasMask.isWorn || false;
 
@@ -5226,6 +5303,7 @@ window.fillArmorFromPreset = async function(select) {
     armor.name = template.name;
     armor.weight = template.weight;
     armor.volume = template.volume;
+    armor.material = template.attributes?.material || armor.material || 'Текстиль';
     armor.createdByPlayer = !window.isGM;
 
     const containerSlots = template.attributes?.container_slots || 0;
@@ -5330,6 +5408,7 @@ window.equipHelmetFromInventory = async function(itemPath) {
         showNotification('Шаблон шлема не найден');
         return;
     }
+    if (!await canEquipHelmetWithCurrentGasMask(template, item)) return;
     const helmetToEquip = {
         templateId: template.id,
         createdByPlayer: Boolean(item.createdByPlayer),
@@ -5395,6 +5474,7 @@ window.equipGasMaskFromInventory = async function(itemPath) {
         showNotification('Шаблон противогаза не найден');
         return;
     }
+    if (!await canEquipGasMaskWithCurrentHelmet()) return;
     const gasMaskToEquip = {
         templateId: template.id,
         createdByPlayer: Boolean(item.createdByPlayer),
@@ -8570,9 +8650,6 @@ window.openCreateHelmetTemplateModal = function(template = null) {
                 <div class="form-group">
                     <label><input type="checkbox" id="helmet-has-filter-slot"> Слот для фильтра (противогазо-шлем)</label>
                 </div>
-                <div class="form-group">
-                    <label><input type="checkbox" id="helmet-has-visor-slot"> Слот для забрала</label>
-                </div>
                 <div class="form-actions"><button class="btn btn-primary" onclick="saveHelmetTemplate()">Сохранить</button><button class="btn btn-secondary" onclick="document.getElementById('create-helmet-template-modal').style.display='none'">Отмена</button></div>
             </div>`;
         document.body.appendChild(modal);
@@ -8588,11 +8665,11 @@ window.openCreateHelmetTemplateModal = function(template = null) {
         document.getElementById('helmet-weight').value = template.weight || 0;
         document.getElementById('helmet-volume').value = template.volume || 0;
         const prot = template.attributes?.protection || {};
-        document.getElementById('helmet-physical').value = prot.physical || 0;
-        document.getElementById('helmet-chemical').value = prot.chemical || 0;
-        document.getElementById('helmet-thermal').value = prot.thermal || 0;
-        document.getElementById('helmet-electric').value = prot.electric || 0;
-        document.getElementById('helmet-radiation').value = prot.radiation || 0;
+        document.getElementById('helmet-physical').value = protectionPercentValue(prot.physical);
+        document.getElementById('helmet-chemical').value = protectionPercentValue(prot.chemical);
+        document.getElementById('helmet-thermal').value = protectionPercentValue(prot.thermal);
+        document.getElementById('helmet-electric').value = protectionPercentValue(prot.electric);
+        document.getElementById('helmet-radiation').value = protectionPercentValue(prot.radiation);
         const zones = template.attributes?.protection_zones || [];
         document.getElementById('helmet-zone-crown').checked = zones.includes('crown');
         document.getElementById('helmet-zone-back').checked = zones.includes('back');
@@ -8601,7 +8678,6 @@ window.openCreateHelmetTemplateModal = function(template = null) {
         const slots = template.attributes?.slots || [];
         document.getElementById('helmet-has-nvg-slot').checked = slots.some(s => s.type === 'nvg');
         document.getElementById('helmet-has-filter-slot').checked = slots.some(s => s.type === 'filter');
-        document.getElementById('helmet-has-visor-slot').checked = slots.some(s => s.type === 'visor');
     } else {
         document.getElementById('helmet-template-id').value = '';
     }
@@ -8616,7 +8692,6 @@ window.saveHelmetTemplate = async function() {
     const slots = [];
     if (document.getElementById('helmet-has-nvg-slot').checked) slots.push({ type: 'nvg', label: 'ПНВ', maxItems: 1 });
     if (document.getElementById('helmet-has-filter-slot').checked) slots.push({ type: 'filter', label: 'Фильтр', maxItems: 1 });
-    if (document.getElementById('helmet-has-visor-slot').checked) slots.push({ type: 'visor', label: 'Забрало', maxItems: 1 });
 
     const protectionZones = [];
     if (document.getElementById('helmet-zone-crown').checked) protectionZones.push('crown');
@@ -8631,11 +8706,11 @@ window.saveHelmetTemplate = async function() {
         ergonomics_penalty: parseInt(document.getElementById('helmet-ergonomicsPenalty').value) || 0,
         charisma_bonus: parseInt(document.getElementById('helmet-charismaBonus').value) || 0,
         protection: {
-            physical: parseInt(document.getElementById('helmet-physical').value) || 0,
-            chemical: parseInt(document.getElementById('helmet-chemical').value) || 0,
-            thermal: parseInt(document.getElementById('helmet-thermal').value) || 0,
-            electric: parseInt(document.getElementById('helmet-electric').value) || 0,
-            radiation: parseInt(document.getElementById('helmet-radiation').value) || 0
+            physical: (parseFloat(document.getElementById('helmet-physical').value) || 0) / 100,
+            chemical: (parseFloat(document.getElementById('helmet-chemical').value) || 0) / 100,
+            thermal: (parseFloat(document.getElementById('helmet-thermal').value) || 0) / 100,
+            electric: (parseFloat(document.getElementById('helmet-electric').value) || 0) / 100,
+            radiation: (parseFloat(document.getElementById('helmet-radiation').value) || 0) / 100
         },
         protection_zones: protectionZones,
         slots: slots
@@ -8735,11 +8810,11 @@ window.openCreateGasMaskTemplateModal = function(template = null) {
         document.getElementById('gasMask-weight').value = template.weight || 0;
         document.getElementById('gasMask-volume').value = template.volume || 0;
         const prot = template.attributes?.protection || {};
-        document.getElementById('gasMask-physical').value = prot.physical || 0;
-        document.getElementById('gasMask-chemical').value = prot.chemical || 0;
-        document.getElementById('gasMask-thermal').value = prot.thermal || 0;
-        document.getElementById('gasMask-electric').value = prot.electric || 0;
-        document.getElementById('gasMask-radiation').value = prot.radiation || 0;
+        document.getElementById('gasMask-physical').value = protectionPercentValue(prot.physical);
+        document.getElementById('gasMask-chemical').value = protectionPercentValue(prot.chemical);
+        document.getElementById('gasMask-thermal').value = protectionPercentValue(prot.thermal);
+        document.getElementById('gasMask-electric').value = protectionPercentValue(prot.electric);
+        document.getElementById('gasMask-radiation').value = protectionPercentValue(prot.radiation);
     } else {
         document.getElementById('gasMask-template-id').value = '';
     }
@@ -8759,11 +8834,11 @@ window.saveGasMaskTemplate = async function() {
         ergonomics_penalty: parseInt(document.getElementById('gasMask-ergonomicsPenalty').value) || 0,
         charisma_bonus: parseInt(document.getElementById('gasMask-charismaBonus').value) || 0,
         protection: {
-            physical: parseInt(document.getElementById('gasMask-physical').value) || 0,
-            chemical: parseInt(document.getElementById('gasMask-chemical').value) || 0,
-            thermal: parseInt(document.getElementById('gasMask-thermal').value) || 0,
-            electric: parseInt(document.getElementById('gasMask-electric').value) || 0,
-            radiation: parseInt(document.getElementById('gasMask-radiation').value) || 0
+            physical: (parseFloat(document.getElementById('gasMask-physical').value) || 0) / 100,
+            chemical: (parseFloat(document.getElementById('gasMask-chemical').value) || 0) / 100,
+            thermal: (parseFloat(document.getElementById('gasMask-thermal').value) || 0) / 100,
+            electric: (parseFloat(document.getElementById('gasMask-electric').value) || 0) / 100,
+            radiation: (parseFloat(document.getElementById('gasMask-radiation').value) || 0) / 100
         },
         slots: [{ type: 'filter', label: 'Фильтр', maxItems: 1 }]   // ← слот всегда есть
     };
@@ -8851,11 +8926,11 @@ window.openCreateArmorTemplateModal = function(template = null) {
         document.getElementById('armor-weight').value = template.weight || 0;
         document.getElementById('armor-volume').value = template.volume || 0;
         const prot = template.attributes?.protection || {};
-        document.getElementById('armor-physical').value = prot.physical || 0;
-        document.getElementById('armor-chemical').value = prot.chemical || 0;
-        document.getElementById('armor-thermal').value = prot.thermal || 0;
-        document.getElementById('armor-electric').value = prot.electric || 0;
-        document.getElementById('armor-radiation').value = prot.radiation || 0;
+        document.getElementById('armor-physical').value = protectionPercentValue(prot.physical);
+        document.getElementById('armor-chemical').value = protectionPercentValue(prot.chemical);
+        document.getElementById('armor-thermal').value = protectionPercentValue(prot.thermal);
+        document.getElementById('armor-electric').value = protectionPercentValue(prot.electric);
+        document.getElementById('armor-radiation').value = protectionPercentValue(prot.radiation);
         const zones = template.attributes?.protection_zones || [];
         document.getElementById('armor-zone-torso').checked = zones.includes('torso');
         document.getElementById('armor-zone-arms').checked = zones.includes('arms');
@@ -8882,11 +8957,11 @@ window.saveArmorTemplate = async function() {
         movement_penalty: parseInt(document.getElementById('armor-movementPenalty').value) || 0,
         container_slots: parseInt(document.getElementById('armor-containerSlots').value) || 0,
         protection: {
-            physical: parseInt(document.getElementById('armor-physical').value) || 0,
-            chemical: parseInt(document.getElementById('armor-chemical').value) || 0,
-            thermal: parseInt(document.getElementById('armor-thermal').value) || 0,
-            electric: parseInt(document.getElementById('armor-electric').value) || 0,
-            radiation: parseInt(document.getElementById('armor-radiation').value) || 0
+            physical: (parseFloat(document.getElementById('armor-physical').value) || 0) / 100,
+            chemical: (parseFloat(document.getElementById('armor-chemical').value) || 0) / 100,
+            thermal: (parseFloat(document.getElementById('armor-thermal').value) || 0) / 100,
+            electric: (parseFloat(document.getElementById('armor-electric').value) || 0) / 100,
+            radiation: (parseFloat(document.getElementById('armor-radiation').value) || 0) / 100
         },
         protection_zones: protectionZones
     };
@@ -11390,7 +11465,7 @@ function showItemDetailsModal(item) {
     if (item.protection) {
         const prot = item.protection;
         html += '<p><strong>Защита:</strong> ';
-        html += `Физ: ${prot.physical || 0}, Хим: ${prot.chemical || 0}, Терм: ${prot.thermal || 0}, Элек: ${prot.electric || 0}, Рад: ${prot.radiation || 0}`;
+        html += `Физ: ${formatProtectionPercent(prot.physical)}, Хим: ${formatProtectionPercent(prot.chemical)}, Терм: ${formatProtectionPercent(prot.thermal)}, Элек: ${formatProtectionPercent(prot.electric)}, Рад: ${formatProtectionPercent(prot.radiation)}`;
         html += '</p>';
     }
 

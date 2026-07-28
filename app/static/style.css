@@ -746,7 +746,8 @@ input[type="number"] {
   margin-bottom: 15px !important;
 }
 .equipment-main-block {
-  flex: 0 0 auto !important;
+  flex: 1 1 520px !important;
+  min-width: 0 !important;
   background: rgba(255,255,255,0.03) !important;
   border-radius: 8px !important;
   padding: 10px !important;
@@ -784,6 +785,18 @@ input[type="number"] {
   flex-wrap: wrap !important;
   gap: 8px !important;
   align-items: flex-start !important;
+}
+.equipment-main-block .fields-container {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+}
+.equipment-main-block .field-group {
+  min-width: 0 !important;
+}
+.equipment-main-block .field-group label {
+  white-space: normal !important;
+  line-height: 1.15 !important;
+  min-height: 1.7em;
 }
 .field-group {
   display: flex !important;
