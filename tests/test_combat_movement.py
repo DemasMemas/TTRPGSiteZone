@@ -65,6 +65,25 @@ def test_new_turn_resets_distance_but_keeps_run_and_sprint_exhaustion():
     assert character.strenuous_movement_blocked_until_round == 5
 
 
+def test_initiative_bonus_uses_tactics_bonus_and_explicit_modifier():
+    character = LocationCharacter(initiative_bonus=99)
+    character.character = LobbyCharacter(data={
+        "skills": {
+            "other": {
+                "tactics": {
+                    "base": 16,
+                    "bonus": 2,
+                }
+            }
+        },
+        "initiative_bonus": 3,
+    })
+
+    profile = CombatService._combat_profile(character)
+
+    assert profile["initiative_bonus"] == 8
+
+
 def test_movement_penalty_combines_weight_armor_and_temporary_modifier():
     character_data = {
         "inventory": {

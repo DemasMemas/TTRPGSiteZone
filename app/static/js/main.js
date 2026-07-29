@@ -28,7 +28,7 @@ import {
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
-    setLocationStructureRotation
+        setLocationStructureRotation
 } from './locationScene.js';
 import { getUserColorHex, updateMyColor } from './colors.js';
 import * as THREE from 'three';
@@ -79,29 +79,6 @@ window.isLocationActive = false; // флаг активной локации
 window.socket = socket;
 window.currentLocationId = null;
 window.currentLocationCharacterId = window.currentLocationCharacterId || null;
-
-async function resolveLocationCharacterId() {
-    const myUserId = parseInt(localStorage.getItem('user_id') || '0', 10);
-    if (!myUserId) return null;
-
-    const ownedCharacters = await Server.getLobbyCharacters(currentLobbyId)
-        .then((characters) => (characters || []).filter((char) => char.owner_id === myUserId))
-        .catch(() => []);
-
-    const savedLocationCharacterId = parseInt(localStorage.getItem('selectedLocationCharacterId') || '0', 10);
-    if (savedLocationCharacterId > 0) {
-        const savedCharacter = ownedCharacters.find((char) => char.id === savedLocationCharacterId);
-        if (savedCharacter) return savedCharacter.id;
-    }
-
-    const viewedCharacterId = parseInt(window.currentCharacterId || '0', 10);
-    if (viewedCharacterId > 0) {
-        const viewedCharacter = ownedCharacters.find((char) => char.id === viewedCharacterId);
-        if (viewedCharacter) return viewedCharacter.id;
-    }
-
-    return ownedCharacters[0]?.id || null;
-}
 
 // ========== Перенаправление UI-вызовов в зависимости от активного режима ==========
 
@@ -197,12 +174,12 @@ window.enterLocation = async function(locationId) {
         setLocationBrushTerrain(window.currentTileType);
 
         if (socket) {
-            const characterId = await resolveLocationCharacterId();
-            window.currentLocationCharacterId = characterId || null;
-            if (characterId) {
-                localStorage.setItem('selectedLocationCharacterId', String(characterId));
-            }
-            socket.emit('join_location', { token: token, location_id: locationId, character_id: characterId || null });
+            window.currentLocationCharacterId = null;
+            socket.emit('join_location', {
+                token,
+                location_id: locationId,
+                character_id: null,
+            });
         }
 
         if (window.isGM) {
@@ -803,6 +780,12 @@ if (socket) {
     socket.on('character_moved', (data) => {
         updateCharacterPosition(data.character_id, data.x, data.y);
     });
+    socket.on('movement_rejected', (data) => {
+        if (Number.isFinite(Number(data.x)) && Number.isFinite(Number(data.y))) {
+            updateCharacterPosition(data.character_id, Number(data.x), Number(data.y));
+        }
+        showNotification(`Ошибка: ${data.message || 'Перемещение недоступно'}`, 'error');
+    });
     socket.on('location_tiles_updated', (data) => {
         if (data.location_id === getCurrentLocationId()) {
             import('./locationScene.js').then(module => {
@@ -840,6 +823,18 @@ if (socket) {
                 data.character.effects,
                 Number(data.character.controlled_by)
             );
+        });
+    });
+    socket.on('location_character_removed', (data) => {
+        if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
+        import('./locationScene.js').then(module => {
+            module.removeCharacterFromLocation(data.character_id);
+        });
+    });
+    socket.on('location_character_posture_updated', (data) => {
+        if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
+        import('./locationScene.js').then(module => {
+            module.applyCharacterPostureVisual(data.character_id, data.posture);
         });
     });
 

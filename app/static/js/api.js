@@ -290,9 +290,13 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat`);
     },
 
-    async startLocationCombat(lobbyId, locationId) {
+    async startLocationCombat(lobbyId, locationId, locationCharacterIds = null) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start`, {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                location_character_ids: locationCharacterIds,
+            }),
         });
     },
 

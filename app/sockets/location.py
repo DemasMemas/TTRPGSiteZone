@@ -16,6 +16,18 @@ from app.sockets.utils import get_user_from_token
 logger = logging.getLogger(__name__)
 
 
+def _find_existing_location_character(location_id, character_id):
+    if not character_id:
+        return None
+    return LocationCharacter.query.filter_by(
+        location_id=location_id,
+        character_id=character_id,
+    ).order_by(
+        LocationCharacter.last_action.desc().nullslast(),
+        LocationCharacter.id.desc(),
+    ).first()
+
+
 @socketio.on('join_location')
 def handle_join_location(data):
     token = data.get('token')
@@ -46,74 +58,40 @@ def handle_join_location(data):
     if character_id:
         character = LobbyCharacter.query.get(character_id)
         if not character:
-            emit('error', {'message': 'Character not found or not owned'}, room=request.sid)
-            return
-
-        loc_char = LocationCharacter.query.filter_by(
-            location_id=location_id,
-            character_id=character_id,
-        ).order_by(
-            LocationCharacter.last_action.desc().nullslast(),
-            LocationCharacter.id.desc(),
-        ).first()
-
-        is_gm = location.lobby.gm_id == user.id
-        is_controller = bool(loc_char and loc_char.controlled_by == user.id)
-        if character.owner_id != user.id and not is_controller and not is_gm:
-            emit('error', {'message': 'Character not found or not owned'}, room=request.sid)
-            return
-
-        is_new_location_character = loc_char is None
-        if is_new_location_character:
-            spawn = None
-            for sp in location.spawn_points or []:
-                taken = LocationCharacter.query.filter_by(
-                    location_id=location_id,
-                    pos_x=sp.get('x'),
-                    pos_y=sp.get('y'),
-                ).first()
-                if not taken:
-                    spawn = sp
-                    break
-            if not spawn:
-                spawn = {'x': 0, 'y': 0}
-
-            loc_char = LocationCharacter(
-                location_id=location_id,
-                character_id=character_id,
-                pos_x=spawn['x'],
-                pos_y=spawn['y'],
-                status='idle',
-                controlled_by=character.owner_id,
+            character_id = None
+        else:
+            loc_char = _find_existing_location_character(
+                location_id,
+                character_id,
             )
-            db.session.add(loc_char)
-            db.session.flush()
-        elif loc_char.controlled_by is None:
-            loc_char.controlled_by = character.owner_id
 
-        if is_new_location_character:
-            profile = CombatService._combat_profile(loc_char)
-            loc_char.initiative_bonus = profile['initiative_bonus']
-            loc_char.action_points_max = profile['action_points']
-            loc_char.action_points_current = profile['action_points']
-            loc_char.free_actions_max = profile['free_actions']
-            loc_char.free_actions_current = profile['free_actions']
-            loc_char.movement_points_max = 0
-            loc_char.movement_points_current = 0
-        if loc_char.character and isinstance(loc_char.character.data, dict):
-            health = loc_char.character.data.get('health')
-            if isinstance(health, dict):
-                loc_char.effects = normalize_effect_list(health.get('effects') or [])
-                sync_health_derived_statuses(health)
-                flag_modified(loc_char, 'effects')
-        db.session.commit()
+            is_gm = location.lobby.gm_id == user.id
+            is_controller = bool(loc_char and loc_char.controlled_by == user.id)
+            if loc_char and (
+                character.owner_id == user.id
+                or is_controller
+                or is_gm
+            ):
+                if loc_char.character and isinstance(loc_char.character.data, dict):
+                    health = loc_char.character.data.get('health')
+                    if isinstance(health, dict):
+                        loc_char.effects = normalize_effect_list(
+                            health.get('effects') or []
+                        )
+                        sync_health_derived_statuses(health)
+                        flag_modified(loc_char, 'effects')
+                        db.session.commit()
+            else:
+                # Joining a sublocation never creates or claims a model.
+                loc_char = None
+                character_id = None
 
     join_room(f"location_{location_id}")
     emit(
         'joined_location',
         {
             'location_id': location_id,
-            'character_id': character_id,
+            'character_id': character_id if loc_char else None,
             'x': loc_char.pos_x if loc_char else 0,
             'y': loc_char.pos_y if loc_char else 0,
         },
@@ -193,7 +171,21 @@ def handle_move_in_location(data):
             movement_mode,
         )
     except ServiceError as exc:
-        emit('error', {'message': str(exc)}, room=request.sid)
+        db.session.rollback()
+        current_character = LocationCharacter.query.filter_by(
+            location_id=location_id,
+            character_id=character_id,
+        ).first()
+        emit(
+            'movement_rejected',
+            {
+                'character_id': character_id,
+                'x': current_character.pos_x if current_character else None,
+                'y': current_character.pos_y if current_character else None,
+                'message': str(exc),
+            },
+            room=request.sid,
+        )
         return
 
     emit(

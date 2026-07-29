@@ -144,6 +144,8 @@ def _normalize_equipment_name(value: Any) -> str:
 def _equipment_alias(value: Any) -> str:
     text = _normalize_equipment_name(value)
     text = re.sub(r"[^0-9a-zа-я]+", " ", text, flags=re.IGNORECASE)
+    # Workbook aliases such as "ППСП5" refer to weapons named "ПП СП5".
+    text = re.sub(r"^пп(?=[a-zа-я]*\d)", "пп ", text, flags=re.IGNORECASE)
     text = re.sub(
         r"^(пистолет|револьвер|дробовик|автомат|пп|пулемет|ручной пулемет|"
         r"магазин|снайперский|самозарядный карабин)\s+",
@@ -439,6 +441,28 @@ def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     return templates
 
 
+def _armor_protection_zones(name: str) -> List[str]:
+    normalized = _normalize_text(name).lower()
+    torso_only = {
+        "армейский бронежилет",
+        "кожаная куртка",
+        "бандитская куртка",
+        "броня путника",
+    }
+    includes_head = {
+        "костюм химзащиты",
+        "комбинезон купол",
+        "комбинезон купол м",
+        "комбинезон гроб",
+        "экзоскелет",
+    }
+    if normalized in torso_only:
+        return ["torso"]
+    if normalized in includes_head:
+        return ["torso", "arms", "legs", "head"]
+    return ["torso", "arms", "legs"]
+
+
 def _parse_armor(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     templates: List[Dict[str, Any]] = []
     for row in rows[2:20]:
@@ -455,7 +479,7 @@ def _parse_armor(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
             "container_slots": _as_int(row.get("K")),
             "inventory_weight_penalty": weight_penalty,
             "modification_category": _normalize_text(row.get("P")),
-            "protection_zones": ["torso", "arms", "legs"],
+            "protection_zones": _armor_protection_zones(name),
             "raw_row": row,
         }
         templates.append(

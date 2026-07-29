@@ -220,6 +220,191 @@ def test_gm_can_delete_character_owned_by_player(
     assert LocationCharacter.query.filter_by(character_id=character["id"]).count() == 0
 
 
+def test_only_gm_can_remove_character_model_from_location(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("despawn-gm")
+    player = create_user("despawn-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, player, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Despawn test",
+        world_tile_x=0,
+        world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    db.session.add(LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+    ))
+    db.session.commit()
+    endpoint = (
+        f"/lobbies/{lobby['id']}/locations/{location.id}"
+        f"/characters/{character['id']}"
+    )
+
+    forbidden = client.delete(endpoint, headers=auth_headers(player))
+    removed = client.delete(endpoint, headers=auth_headers(gm))
+
+    assert forbidden.status_code == 403
+    assert removed.status_code == 200
+    assert db.session.get(LobbyCharacter, character["id"]) is not None
+    assert LocationCharacter.query.filter_by(
+        location_id=location.id,
+        character_id=character["id"],
+    ).count() == 0
+
+
+def test_location_join_lookup_does_not_spawn_selected_character(
+    client,
+    create_user,
+    auth_headers,
+):
+    from app.sockets.location import _find_existing_location_character
+
+    gm = create_user("location-join-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Empty location",
+        world_tile_x=0,
+        world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.commit()
+
+    result = _find_existing_location_character(location.id, character["id"])
+
+    assert result is None
+    assert LocationCharacter.query.filter_by(
+        location_id=location.id,
+        character_id=character["id"],
+    ).count() == 0
+
+
+def test_controller_can_change_posture_outside_combat_for_free(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("posture-gm")
+    player = create_user("posture-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, player, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Posture test",
+        world_tile_x=0,
+        world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    location_character = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        controlled_by=player["id"],
+        posture="standing",
+    )
+    db.session.add(location_character)
+    db.session.commit()
+
+    response = client.patch(
+        (
+            f"/lobbies/{lobby['id']}/locations/{location.id}"
+            f"/characters/{character['id']}/posture"
+        ),
+        headers=auth_headers(player),
+        json={"posture": "prone"},
+    )
+
+    assert response.status_code == 200
+    db.session.refresh(location_character)
+    assert location_character.posture == "prone"
+    assert location_character.action_points_current == 5
+    assert location_character.movement_points_current == 0
+
+
+def test_combat_start_rolls_tactics_initiative_only_for_selected_characters(
+    client,
+    create_user,
+    auth_headers,
+    monkeypatch,
+):
+    gm = create_user("initiative-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    first = create_character(
+        client,
+        lobby,
+        gm,
+        auth_headers,
+        data={
+            "skills": {
+                "other": {
+                    "tactics": {
+                        "base": 16,
+                        "bonus": 2,
+                    }
+                }
+            }
+        },
+    )
+    second = create_character(
+        client,
+        lobby,
+        gm,
+        auth_headers,
+    )
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Initiative test",
+        world_tile_x=0,
+        world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    selected = LocationCharacter(
+        location_id=location.id,
+        character_id=first["id"],
+    )
+    excluded = LocationCharacter(
+        location_id=location.id,
+        character_id=second["id"],
+    )
+    db.session.add_all([selected, excluded])
+    db.session.commit()
+    monkeypatch.setattr("app.services.combat.random.randint", lambda start, end: 10)
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start",
+        headers=auth_headers(gm),
+        json={"location_character_ids": [selected.id]},
+    )
+
+    assert response.status_code == 200
+    state = response.get_json()
+    assert state["turn_order"] == [selected.id]
+    selected_state = next(
+        item for item in state["characters"]
+        if item["location_character_id"] == selected.id
+    )
+    excluded_state = next(
+        item for item in state["characters"]
+        if item["location_character_id"] == excluded.id
+    )
+    assert selected_state["initiative_roll"] == 10
+    assert selected_state["initiative_bonus"] == 5
+    assert selected_state["initiative_total"] == 15
+    assert excluded_state["initiative_roll"] is None
+    assert excluded_state["initiative_total"] is None
+
+
 def test_only_gm_can_change_character_visibility(
     client,
     create_user,
@@ -352,7 +537,7 @@ def test_only_gm_or_controller_can_end_combat_turn(
     assert allowed_for_gm.status_code == 200
 
 
-def test_player_may_move_existing_item_but_cannot_add_another(
+def test_player_may_move_and_add_marked_player_item(
     client,
     create_user,
     auth_headers,
@@ -406,6 +591,13 @@ def test_player_may_move_existing_item_but_cannot_add_another(
             },
         },
     )
+    db.session.expire_all()
+    saved_character = db.session.get(LobbyCharacter, character["id"])
+    player_item = next(
+        item
+        for item in saved_character.data["inventory"]["backpack"]
+        if item["id"] == "item-added"
+    )
     gm_add = client.put(
         endpoint,
         headers=auth_headers(gm),
@@ -429,5 +621,6 @@ def test_player_may_move_existing_item_but_cannot_add_another(
     )
 
     assert moved.status_code == 200
-    assert player_add.status_code == 403
+    assert player_add.status_code == 200
+    assert player_item["createdByPlayer"] is True
     assert gm_add.status_code == 200

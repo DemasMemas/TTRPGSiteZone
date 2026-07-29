@@ -105,8 +105,8 @@ def test_closed_and_suppressed_bleeding_do_not_raise_difficulty():
 
     bleeding = get_bleeding_state(health)
 
-    assert bleeding["totalSeverity"] == 2
-    assert bleeding["difficulty"] == 7
+    assert bleeding["totalSeverity"] == 3
+    assert bleeding["difficulty"] == 8
     assert len(bleeding["effects"]) == 1
 
 

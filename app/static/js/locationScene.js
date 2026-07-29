@@ -74,6 +74,7 @@ let armedMoveCharacterId = null;
 let armedMovementType = null;
 let movementTypeMenu = null;
 let postureMenu = null;
+let combatParticipantMenu = null;
 let movementPreviewGhost = null;
 let movementPreviewLine = null;
 let movementPreviewHint = null;
@@ -1118,7 +1119,6 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             icon: '↕',
             title: 'Встать, сесть или лечь',
             angle: 222,
-            requiresCombat: true,
             action: () => showPostureMenu(characterId),
         },
         {
@@ -1161,6 +1161,21 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         angle: 14,
         action: () => beginStructureInteractionMode(characterId),
     });
+    if (window.isGM) {
+        menuItems.push({
+            label: 'Убрать',
+            icon: '×',
+            title: 'Убрать модель персонажа с подлокации',
+            angle: -64,
+            ringRadius: 165,
+            allowAlways: true,
+            danger: true,
+            action: () => removeCharacterFromCurrentLocation(characterId),
+        });
+    }
+
+    combatActionMenu.style.width = window.isGM ? '410px' : '280px';
+    combatActionMenu.style.height = window.isGM ? '410px' : '280px';
 
     combatActionMenu.innerHTML = `
         <div class="combat-menu-core" style="
@@ -1187,6 +1202,8 @@ function showCombatActionMenu(clientX, clientY, characterId) {
 
     const radius = 98;
     menuItems.forEach((item) => {
+        const angle = item.angle;
+        const itemRadius = item.ringRadius || radius;
         const button = document.createElement('button');
         button.type = 'button';
         button.innerHTML = item.icon ? `<span style="font-size:22px; line-height:1;">${item.icon}</span>` : item.label;
@@ -1197,7 +1214,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             top:50%;
             width:74px;
             min-height:74px;
-            transform: translate(-50%, -50%) translate(${Math.cos((item.angle * Math.PI) / 180) * radius}px, ${Math.sin((item.angle * Math.PI) / 180) * radius}px);
+            transform: translate(-50%, -50%) translate(${Math.cos((angle * Math.PI) / 180) * itemRadius}px, ${Math.sin((angle * Math.PI) / 180) * itemRadius}px);
             border-radius:50%;
             border:1px solid rgba(255,255,255,0.18);
             background: rgba(32, 36, 48, 0.96);
@@ -1214,6 +1231,10 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             && (!item.requiresCombat || combatState?.status === 'active');
         button.disabled = !allowed;
         button.style.opacity = allowed ? '1' : '0.45';
+        if (item.danger) {
+            button.style.background = 'rgba(105, 31, 28, 0.97)';
+            button.style.borderColor = 'rgba(225, 108, 94, 0.72)';
+        }
         if (item.icon) {
             button.style.fontSize = '22px';
             button.style.fontWeight = '800';
@@ -1237,6 +1258,33 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     if (top < rect.height / 2 + 10) top = rect.height / 2 + 10;
     combatActionMenu.style.left = `${left}px`;
     combatActionMenu.style.top = `${top}px`;
+}
+
+async function removeCharacterFromCurrentLocation(characterId) {
+    if (!window.isGM || !window.currentLobbyId || !getCurrentLocationId()) return;
+    const entry = getCharacterModelEntry(characterId);
+    const name = entry?.name || `#${characterId}`;
+    if (!window.confirm(`Убрать ${name} с этой подлокации? Лист персонажа сохранится.`)) {
+        return;
+    }
+    try {
+        const response = await fetch(
+            `/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/characters/${characterId}`,
+            {
+                method: 'DELETE',
+                headers: {
+                    Authorization: `Bearer ${localStorage.getItem('access_token')}`,
+                },
+            },
+        );
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(payload.error || 'Не удалось убрать персонажа');
+        }
+        showNotification(`${name} убран с подлокации`, 'success');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось убрать персонажа', 'error');
+    }
 }
 
 function getCombatMenuState() {
@@ -1289,13 +1337,22 @@ function movementModeSummary(key, mode, posture) {
 }
 
 function showPostureMenu(characterId) {
-    const character = findCombatCharacterByCharacterId(characterId);
-    if (!character || combatState?.status !== 'active') {
-        showNotification('Смена положения доступна во время боя', 'system');
+    const isCombatActive = combatState?.status === 'active';
+    const character = isCombatActive
+        ? findCombatCharacterByCharacterId(characterId)
+        : getCharacterModelEntry(characterId);
+    if (!character) {
+        showNotification('Персонаж не найден на подлокации', 'system');
         return;
     }
-    if (!canActWithCombatCharacter(character)) {
-        showNotification('Сейчас не ход этого персонажа', 'system');
+    const canChangePosture = isCombatActive
+        ? canActWithCombatCharacter(character)
+        : canControlCharacter(characterId);
+    if (!canChangePosture) {
+        showNotification(
+            isCombatActive ? 'Сейчас не ход этого персонажа' : 'Вы не управляете этим персонажем',
+            'system',
+        );
         return;
     }
 
@@ -1317,8 +1374,9 @@ function showPostureMenu(characterId) {
                 <div>
                     <div style="font-size:19px; font-weight:800;">Смена положения</div>
                     <div style="margin-top:3px; opacity:0.7; font-size:12px;">
-                        Сейчас: ${COMBAT_POSTURES[currentPosture]?.label || 'Стоя'} ·
-                        ОД ${character.action_points_current ?? 0} · ОП ${character.movement_points_current ?? 0}
+                        ${isCombatActive
+                            ? `Сейчас: ${COMBAT_POSTURES[currentPosture]?.label || 'Стоя'} · ОД ${character.action_points_current ?? 0} · ОП ${character.movement_points_current ?? 0}`
+                            : `Сейчас: ${COMBAT_POSTURES[currentPosture]?.label || 'Стоя'} · вне боя бесплатно`}
                     </div>
                 </div>
                 <button type="button" class="posture-close" style="
@@ -1334,7 +1392,9 @@ function showPostureMenu(characterId) {
     const options = menu.querySelector('.posture-options');
     Object.entries(COMBAT_POSTURES).forEach(([targetPosture, profile]) => {
         if (targetPosture === currentPosture) return;
-        const paymentOptions = character.posture_change_options?.[targetPosture] || [];
+        const paymentOptions = isCombatActive
+            ? (character.posture_change_options?.[targetPosture] || [])
+            : [{ resource: 'free', cost: 0 }];
         const card = document.createElement('div');
         card.style.cssText = `
             display:grid;
@@ -1359,13 +1419,18 @@ function showPostureMenu(characterId) {
         `;
         const paymentButtons = card.querySelector('.posture-payment-buttons');
         paymentOptions.forEach((option) => {
-            const available = option.resource === 'action'
-                ? Number(character.action_points_current) >= option.cost
-                : Number(character.movement_points_current) >= option.cost;
+            const available = option.resource === 'free'
+                || (
+                    option.resource === 'action'
+                        ? Number(character.action_points_current) >= option.cost
+                        : Number(character.movement_points_current) >= option.cost
+                );
             const button = document.createElement('button');
             button.type = 'button';
             button.disabled = !available;
-            button.textContent = posturePaymentLabel(option);
+            button.textContent = option.resource === 'free'
+                ? 'Сменить'
+                : posturePaymentLabel(option);
             button.title = available ? `Перейти в положение «${profile.label}»` : 'Недостаточно ресурсов';
             button.style.cssText = `
                 min-width:58px;
@@ -1382,12 +1447,30 @@ function showPostureMenu(characterId) {
                     item.disabled = true;
                 });
                 try {
-                    await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
-                        location_character_id: character.location_character_id,
-                        action_key: 'change_posture',
-                        posture: targetPosture,
-                        payment: option.resource,
-                    });
+                    if (isCombatActive) {
+                        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                            location_character_id: character.location_character_id,
+                            action_key: 'change_posture',
+                            posture: targetPosture,
+                            payment: option.resource,
+                        });
+                    } else {
+                        const response = await fetch(
+                            `/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/characters/${characterId}/posture`,
+                            {
+                                method: 'PATCH',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    Authorization: `Bearer ${localStorage.getItem('access_token')}`,
+                                },
+                                body: JSON.stringify({ posture: targetPosture }),
+                            },
+                        );
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload.error || 'Не удалось изменить положение');
+                        }
+                    }
                     closePostureMenu();
                     showNotification(`Положение изменено: ${profile.label}`, 'success');
                 } catch (error) {
@@ -1722,8 +1805,19 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         item_path: action.itemPath,
     };
     if (action.fireMode === 'aimed') {
+        const zoneLabels = {
+            head: 'голова (+5 СЛ)',
+            chest: 'грудь',
+            abdomen: 'живот',
+            left_arm: 'левая рука',
+            right_arm: 'правая рука',
+            left_leg: 'левая нога',
+            right_leg: 'правая нога',
+        };
         const zone = window.prompt(
-            'Зона попадания: head, chest, abdomen, left_arm, right_arm, left_leg, right_leg',
+            Object.entries(zoneLabels)
+                .map(([key, label]) => `${key} — ${label}`)
+                .join('\n'),
             'chest'
         );
         if (zone === null) return false;
@@ -1742,8 +1836,15 @@ async function resolveCombatTargetSelection(targetCharacterId) {
             if (attack?.results?.length) {
                 const hits = attack.results.filter(item => item.hit);
                 const damage = attack.damage_total || 0;
+                const rolls = attack.results.map((item, index) => {
+                    const dice = Array.isArray(item.rolls) && item.rolls.length > 1
+                        ? `[${item.rolls.join(', ')}] → ${item.roll}`
+                        : String(item.roll);
+                    const outcome = item.hit ? 'попадание' : 'промах';
+                    return `${index + 1}: d20 ${dice}, СЛ ${item.difficulty} — ${outcome}`;
+                }).join('; ');
                 showNotification(
-                    `Бросок: ${hits.length}/${attack.results.length}, урон: ${damage}`,
+                    `${rolls}. Итоговый урон: ${damage}`,
                     hits.length ? 'success' : 'system'
                 );
             }
@@ -1996,7 +2097,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     invalidateMovementMapCache();
 }
 
-function applyCharacterPostureVisual(characterId, posture = 'standing') {
+export function applyCharacterPostureVisual(characterId, posture = 'standing') {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
     const normalized = COMBAT_POSTURES[posture] ? posture : 'standing';
@@ -2029,6 +2130,24 @@ export function updateCharacterPosition(characterId, posX, posY) {
     entry.label.position.set(posX + 0.5, tileHeight + labelOffset, posY + 0.5);
     entry.posX = posX;
     entry.posY = posY;
+    invalidateMovementMapCache();
+}
+
+export function removeCharacterFromLocation(characterId) {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry) return;
+    if (entry.model) {
+        disposeObject(entry.model);
+        scene.remove(entry.model);
+    }
+    if (entry.label) {
+        scene.remove(entry.label);
+    }
+    characterModels.delete(characterId);
+    if (combatActionMenuCharacterId === characterId && combatActionMenu) {
+        combatActionMenu.style.display = 'none';
+        combatActionMenuCharacterId = null;
+    }
     invalidateMovementMapCache();
 }
 
@@ -2152,6 +2271,143 @@ function ensureCombatHud() {
     document.body.appendChild(combatHud);
 }
 
+function closeCombatParticipantMenu() {
+    if (combatParticipantMenu) {
+        combatParticipantMenu.remove();
+        combatParticipantMenu = null;
+    }
+}
+
+async function showCombatParticipantSelection() {
+    if (!window.isGM || combatState?.status === 'active') return;
+    let characters = [];
+    try {
+        const freshState = await Server.getLocationCombatState(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+        );
+        combatState = freshState;
+        window.locationCombatState = freshState;
+        characters = Array.isArray(freshState?.characters)
+            ? freshState.characters
+            : [];
+    } catch (error) {
+        showNotification(error.message || 'Не удалось получить участников боя', 'error');
+        return;
+    }
+    if (!characters.length) {
+        showNotification('На подлокации нет персонажей', 'system');
+        return;
+    }
+
+    closeCombatParticipantMenu();
+    combatParticipantMenu = document.createElement('div');
+    combatParticipantMenu.className = 'modal combat-participant-menu';
+    combatParticipantMenu.style.cssText = `
+        position:fixed;
+        inset:0;
+        z-index:1260;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:16px;
+        background:rgba(4,7,10,0.62);
+    `;
+    combatParticipantMenu.innerHTML = `
+        <div class="modal-content" style="
+            width:min(560px, calc(100vw - 32px));
+            max-height:calc(100vh - 32px);
+            display:flex;
+            flex-direction:column;
+            gap:12px;
+            padding:18px;
+            overflow:hidden;
+        ">
+            <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
+                <div>
+                    <h3 style="margin:0;">Участники боя</h3>
+                    <div style="margin-top:4px; font-size:12px; opacity:.72;">
+                        Отмеченные персонажи бросят 1к20 + Бонус Тактики.
+                    </div>
+                </div>
+                <button type="button" class="combat-participant-close btn btn-sm btn-secondary">×</button>
+            </div>
+            <div class="combat-participant-list" style="
+                display:grid;
+                gap:8px;
+                overflow-y:auto;
+                min-height:0;
+                padding-right:4px;
+            "></div>
+            <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button type="button" class="btn btn-secondary combat-participant-cancel">Отмена</button>
+                <button type="button" class="btn btn-primary combat-participant-start">Начать бой</button>
+            </div>
+        </div>
+    `;
+    const list = combatParticipantMenu.querySelector('.combat-participant-list');
+    characters.forEach((character) => {
+        const bonus = Number(character.initiative_bonus) || 0;
+        const row = document.createElement('label');
+        row.style.cssText = `
+            display:grid;
+            grid-template-columns:auto minmax(0,1fr) auto;
+            align-items:center;
+            gap:10px;
+            padding:10px 12px;
+            border:1px solid rgba(255,255,255,.12);
+            border-radius:10px;
+            background:rgba(255,255,255,.045);
+            cursor:pointer;
+        `;
+        row.innerHTML = `
+            <input type="checkbox" value="${character.location_character_id}" checked>
+            <strong style="overflow:hidden; text-overflow:ellipsis;">${escapeHtml(character.name || `#${character.character_id}`)}</strong>
+            <span style="font-size:12px; opacity:.75;">Инициатива ${bonus >= 0 ? '+' : ''}${bonus}</span>
+        `;
+        list.appendChild(row);
+    });
+
+    const close = closeCombatParticipantMenu;
+    combatParticipantMenu.querySelector('.combat-participant-close').onclick = close;
+    combatParticipantMenu.querySelector('.combat-participant-cancel').onclick = close;
+    combatParticipantMenu.addEventListener('pointerdown', (event) => {
+        if (event.target === combatParticipantMenu) close();
+    });
+    combatParticipantMenu.querySelector('.combat-participant-start').onclick = async (event) => {
+        const selectedIds = Array.from(
+            combatParticipantMenu.querySelectorAll('input[type="checkbox"]:checked'),
+        ).map(input => Number(input.value)).filter(Number.isFinite);
+        if (!selectedIds.length) {
+            showNotification('Выберите хотя бы одного участника боя', 'system');
+            return;
+        }
+        event.currentTarget.disabled = true;
+        try {
+            const state = await Server.startLocationCombat(
+                window.currentLobbyId,
+                getCurrentLocationId(),
+                selectedIds,
+            );
+            const results = (state.characters || [])
+                .filter(character => selectedIds.includes(Number(character.location_character_id)))
+                .sort((left, right) => (right.initiative_total || 0) - (left.initiative_total || 0))
+                .map(character => (
+                    `${character.name}: d20 ${character.initiative_roll} `
+                    + `${Number(character.initiative_bonus) >= 0 ? '+' : ''}${character.initiative_bonus} `
+                    + `= ${character.initiative_total}`
+                ))
+                .join('; ');
+            close();
+            showNotification(`Инициатива: ${results}`, 'system');
+        } catch (error) {
+            event.currentTarget.disabled = false;
+            showNotification(error.message || 'Не удалось начать бой');
+        }
+    };
+    document.body.appendChild(combatParticipantMenu);
+}
+
 function renderCombatHud() {
     if (!combatState) {
         if (combatHud && combatHud.parentNode) {
@@ -2164,7 +2420,13 @@ function renderCombatHud() {
     ensureCombatHud();
     const charactersByLocationId = new Map((combatState.characters || []).map((char) => [char.location_character_id, char]));
     const orderLabels = [...new Set(combatState.turn_order || [])]
-        .map((id) => charactersByLocationId.get(id)?.name || `#${id}`)
+        .map((id) => {
+            const character = charactersByLocationId.get(id);
+            if (!character) return `#${id}`;
+            if (combatState.status !== 'active') return character.name;
+            const bonus = Number(character.initiative_bonus) || 0;
+            return `${character.name} (${character.initiative_roll}${bonus >= 0 ? '+' : ''}${bonus}=${character.initiative_total})`;
+        })
         .filter(Boolean);
     const visibleOrderLabels = orderLabels.length
         ? orderLabels
@@ -2258,16 +2520,7 @@ function renderCombatHud() {
     }
     const startBtn = combatHud.querySelector('.combat-start-btn');
     if (startBtn) {
-        startBtn.onclick = async () => {
-            startBtn.disabled = true;
-            try {
-                await Server.startLocationCombat(window.currentLobbyId, getCurrentLocationId());
-            } catch (error) {
-                showNotification(error.message || 'Не удалось начать бой');
-            } finally {
-                startBtn.disabled = false;
-            }
-        };
+        startBtn.onclick = showCombatParticipantSelection;
     }
     const endTurnBtn = combatHud.querySelector('.combat-end-turn-btn');
     if (endTurnBtn) {
@@ -4857,6 +5110,10 @@ function setupCharacterDragging() {
         if (postureMenu && postureMenu.style.display !== 'none') {
             e.preventDefault();
             closePostureMenu();
+        }
+        if (combatParticipantMenu) {
+            e.preventDefault();
+            closeCombatParticipantMenu();
         }
         if (pendingCombatAction) {
             e.preventDefault();

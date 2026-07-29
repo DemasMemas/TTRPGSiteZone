@@ -187,7 +187,7 @@ def test_internal_bleeding_keeps_anatomical_source():
     bleeding = get_bleeding_state(health)
 
     assert bleeding["breakdown"]["internal"]["severe"] == 1
-    assert bleeding["breakdown"]["internal"]["total"] == 3
+    assert bleeding["breakdown"]["internal"]["total"] == 5
     assert bleeding["effects"][0]["kind"] == "internal"
     assert bleeding["effects"][0]["area"] == "chest"
 

@@ -16,7 +16,14 @@ from app.schemas.lobby import LobbyCreateSchema, LobbyDetailSchema, LobbyMySchem
 from app.schemas.participant import BannedUserSchema
 from app.schemas.character import CharacterSchema, CharacterCreateSchema
 from app.schemas.map import GameStateSchema, MapChunkSchema, TileUpdateSchema
-from app.models import LobbyParticipant, GameState, LobbyCharacter, User, Lobby
+from app.models import (
+    GameState,
+    Lobby,
+    LobbyCharacter,
+    LobbyParticipant,
+    LocationCombatState,
+    User,
+)
 from app.utils.decorators import requires_participant, requires_gm
 from app.models.location import Location
 from app.models.location_character import LocationCharacter
@@ -787,6 +794,151 @@ def spawn_character_in_location(lobby_id, location_id):
     return jsonify({'message': f'Character {action} successfully', 'location_character_id': loc_char.id}), 200
 
 
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>',
+    methods=['DELETE'],
+)
+@jwt_required()
+@requires_gm
+def remove_character_from_location(
+    lobby_id,
+    location_id,
+    character_id,
+    lobby,
+):
+    location = Location.query.filter_by(id=location_id, lobby_id=lobby_id).first()
+    if not location:
+        return jsonify({'error': 'Location not found'}), 404
+
+    location_characters = LocationCharacter.query.filter_by(
+        location_id=location_id,
+        character_id=character_id,
+    ).all()
+    if not location_characters:
+        return jsonify({'error': 'Character is not in this location'}), 404
+
+    removed_ids = {item.id for item in location_characters}
+    combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
+    if combat_state:
+        old_order = list(dict.fromkeys(combat_state.turn_order or []))
+        removed_current = combat_state.current_location_character_id in removed_ids
+        current_index = (
+            old_order.index(combat_state.current_location_character_id)
+            if removed_current and combat_state.current_location_character_id in old_order
+            else 0
+        )
+        new_order = [item_id for item_id in old_order if item_id not in removed_ids]
+        combat_state.turn_order = new_order
+
+        if not new_order:
+            combat_state.current_location_character_id = None
+            combat_state.turn_index = 0
+            if combat_state.status == 'active':
+                combat_state.status = 'idle'
+        elif removed_current:
+            next_index = min(current_index, len(new_order) - 1)
+            combat_state.current_location_character_id = new_order[next_index]
+            combat_state.turn_index = next_index
+            if combat_state.status == 'active':
+                next_character = db.session.get(
+                    LocationCharacter,
+                    combat_state.current_location_character_id,
+                )
+                if next_character:
+                    CombatService._prepare_character_for_turn(next_character)
+        elif combat_state.current_location_character_id in new_order:
+            combat_state.turn_index = new_order.index(
+                combat_state.current_location_character_id
+            )
+
+    for location_character in location_characters:
+        db.session.delete(location_character)
+    db.session.commit()
+
+    socketio.emit(
+        'location_character_removed',
+        {
+            'location_id': location_id,
+            'character_id': character_id,
+        },
+        room=f"location_{location_id}",
+    )
+    if combat_state:
+        socketio.emit(
+            'combat_state_updated',
+            CombatService._serialize_state(location, combat_state),
+            room=f"location_{location_id}",
+        )
+
+    return jsonify({'message': 'Character removed from location'}), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/posture',
+    methods=['PATCH'],
+)
+@jwt_required()
+@requires_participant
+def change_character_posture_outside_combat(
+    lobby_id,
+    location_id,
+    character_id,
+    lobby,
+    participant,
+):
+    location = Location.query.filter_by(id=location_id, lobby_id=lobby_id).first()
+    if not location:
+        return jsonify({'error': 'Location not found'}), 404
+
+    combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
+    if combat_state and combat_state.status == 'active':
+        return jsonify({'error': 'Use the combat action to change posture'}), 409
+
+    location_character = LocationCharacter.query.filter_by(
+        location_id=location_id,
+        character_id=character_id,
+    ).first()
+    if not location_character:
+        return jsonify({'error': 'Character is not in this location'}), 404
+
+    user_id = participant.user_id
+    can_control = (
+        lobby.gm_id == user_id
+        or location_character.controlled_by == user_id
+        or (
+            location_character.character
+            and location_character.character.owner_id == user_id
+        )
+    )
+    if not can_control:
+        return jsonify({'error': 'You do not control this character'}), 403
+
+    target_posture = str((request.get_json() or {}).get('posture') or '').lower()
+    if target_posture not in {'standing', 'sitting', 'prone'}:
+        return jsonify({'error': 'Unknown posture'}), 400
+    if target_posture == location_character.posture:
+        return jsonify({'error': 'Character is already in this posture'}), 400
+
+    location_character.posture = target_posture
+    location_character.weapon_braced = False
+    location_character.braced_weapon_index = None
+    if target_posture == 'standing':
+        location_character.cover_object_id = None
+    db.session.commit()
+
+    payload = {
+        'location_id': location_id,
+        'character_id': character_id,
+        'posture': target_posture,
+    }
+    socketio.emit(
+        'location_character_posture_updated',
+        payload,
+        room=f"location_{location_id}",
+    )
+    return jsonify(payload), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat', methods=['GET'])
 @jwt_required()
 @requires_participant
@@ -799,7 +951,12 @@ def get_location_combat_state(lobby_id, location_id, lobby, participant):
 @jwt_required()
 @requires_gm
 def start_location_combat(lobby_id, location_id, lobby):
-    state = CombatService.start_combat(location_id, lobby.gm_id)
+    data = request.get_json(silent=True) or {}
+    state = CombatService.start_combat(
+        location_id,
+        lobby.gm_id,
+        location_character_ids=data.get('location_character_ids'),
+    )
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     return jsonify(state), 200
 
@@ -936,4 +1093,24 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
+    affected_character_ids = {
+        character_id
+        for character_id in (
+            [data.get('target_character_id')]
+            + list(data.get('target_character_ids') or [])
+        )
+        if character_id
+    }
+    for character_id in affected_character_ids:
+        target = db.session.get(LobbyCharacter, character_id)
+        if target:
+            socketio.emit(
+                'character_data_updated',
+                {
+                    'character_id': target.id,
+                    'updates': {'data': target.data},
+                    'source': 'combat',
+                },
+                room=f"character_{target.id}",
+            )
     return jsonify(result), 200

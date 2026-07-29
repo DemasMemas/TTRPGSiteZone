@@ -256,13 +256,13 @@ BLEEDING_STAGE_PENALTIES = {
 BLEEDING_EFFECT_RULES = {
     "bleeding": {"severity": 1, "kind": "external", "stage": "light", "areas": ["wound"]},
     "bleeding_external_light": {"severity": 1, "kind": "external", "stage": "light", "areas": ["wound"]},
-    "bleeding_external_medium": {"severity": 2, "kind": "external", "stage": "medium", "areas": ["wound"]},
-    "bleeding_external_severe": {"severity": 3, "kind": "external", "stage": "severe", "areas": ["wound"]},
-    "bleeding_external_extreme": {"severity": 4, "kind": "external", "stage": "critical", "areas": ["wound"]},
+    "bleeding_external_medium": {"severity": 3, "kind": "external", "stage": "medium", "areas": ["wound"]},
+    "bleeding_external_severe": {"severity": 5, "kind": "external", "stage": "severe", "areas": ["wound"]},
+    "bleeding_external_extreme": {"severity": 8, "kind": "external", "stage": "extreme", "areas": ["wound"]},
     "bleeding_internal_light": {"severity": 1, "kind": "internal", "stage": "light", "areas": ["wound"]},
-    "bleeding_internal_medium": {"severity": 2, "kind": "internal", "stage": "medium", "areas": ["wound"]},
-    "bleeding_internal_severe": {"severity": 3, "kind": "internal", "stage": "severe", "areas": ["wound"]},
-    "bleeding_internal_extreme": {"severity": 4, "kind": "internal", "stage": "critical", "areas": ["wound"]},
+    "bleeding_internal_medium": {"severity": 3, "kind": "internal", "stage": "medium", "areas": ["wound"]},
+    "bleeding_internal_severe": {"severity": 5, "kind": "internal", "stage": "severe", "areas": ["wound"]},
+    "bleeding_internal_extreme": {"severity": 8, "kind": "internal", "stage": "extreme", "areas": ["wound"]},
 }
 
 

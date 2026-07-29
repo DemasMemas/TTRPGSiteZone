@@ -3528,13 +3528,15 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     const singleOptions = Array.isArray(profile.single_shot_options) && profile.single_shot_options.length
         ? profile.single_shot_options
         : [1];
+    const isPistol = String(template?.subcategory || '').trim().toLowerCase() === 'пистолеты';
+    const unaimedActionPoints = isPistol ? 1 : 2;
 
     buttons.push(`<button type="button" class="btn btn-sm btn-secondary" ${disabledAttr} onclick="aimWeaponFromEquipment(${index})">Прицеливание · 1 ОД</button>`);
     singleOptions.forEach((shots) => {
         const modeName = shots === 1
             ? ''
             : (shots === 2 ? 'Дуплет: ' : (shots === 4 ? 'Двойной дуплет: ' : `${shots} выстрела: `));
-        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'unaimed', ${shots}, 2)">${modeName}Неприцельный · 2 ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'unaimed', ${shots}, ${unaimedActionPoints})">${modeName}Неприцельный · ${unaimedActionPoints} ОД</button>`);
         buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'rapid', ${shots}, 1)">${modeName}Беглый · 1 ОД</button>`);
         buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'aimed', ${shots}, ${aimedActionPoints})">${modeName}Прицельный · ${aimedActionPoints} ОД</button>`);
     });
@@ -3841,6 +3843,7 @@ window.equipModuleToWeapon = async function(weaponIndex, slotType) {
     const weaponTemplates = await loadTemplatesForLobby('weapon');
     const weaponTemplate = weaponTemplates.find(t => t.id == weapon.templateId);
     const weaponCaliber = getItemCaliber(weaponTemplate);
+    await getAllItemTemplates();
 
     const inventoryModules = [];
     const collectModules = (items, path) => {
@@ -4057,8 +4060,11 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
                 const itemCaliber = getItemCaliber(item);
                 if (weaponCaliber && itemCaliber && itemCaliber !== weaponCaliber) return;
                 // Проверка совместимости по списку оружий (если список не пуст)
-                const compatible = item.attributes?.compatible_weapons;
-                if (compatible && compatible.length > 0 && !compatible.includes(weapon.templateId)) return;
+                const compatible = getMagazineCompatibleWeaponIds(item);
+                if (
+                    compatible.length > 0
+                    && !compatible.includes(Number(weapon.templateId))
+                ) return;
                 inventoryMagazines.push({ item, path: path.concat(idx) });
             }
             if (item.contents) collectMagazines(item.contents, path.concat(idx, 'contents'));
@@ -4122,8 +4128,8 @@ async function confirmEquipMagazineDirect(weaponIndex, selected) {
     if (!weapon) return;
 
     // Проверка совместимости по списку оружий
-    const compatible = selected.item.attributes?.compatible_weapons;
-    if (compatible && compatible.length > 0) {
+    const compatible = getMagazineCompatibleWeaponIds(selected.item);
+    if (compatible.length > 0) {
         const weaponTemplateId = Number(weapon.templateId);
         if (!compatible.includes(weaponTemplateId)) {
             showNotification('Этот магазин не подходит к данному оружию');
@@ -6870,6 +6876,19 @@ window.useWeaponFromEquipment = function(
             }
             weapon.ammo = mag.ammo.reduce((sum, a) => sum + a.quantity, 0);
             updateMagazineWeight(mag);
+        } else if (Array.isArray(weapon.fixedAmmo)) {
+            let remaining = shots;
+            while (remaining > 0 && weapon.fixedAmmo.length > 0) {
+                const last = weapon.fixedAmmo[weapon.fixedAmmo.length - 1];
+                const consumed = Math.min(remaining, Number(last.quantity) || 0);
+                last.quantity -= consumed;
+                remaining -= consumed;
+                if (last.quantity <= 0) weapon.fixedAmmo.pop();
+            }
+            weapon.ammo = weapon.fixedAmmo.reduce(
+                (sum, stack) => sum + (Number(stack.quantity) || 0),
+                0
+            );
         } else if (typeof weapon.ammo === 'number') {
             weapon.ammo -= shots;
         } else {
@@ -7174,6 +7193,16 @@ function getInventoryItemCategory(item) {
     return String(item?.category || getInventoryItemTemplate(item)?.category || '').trim().toLowerCase();
 }
 
+function getMagazineCompatibleWeaponIds(item) {
+    const template = getInventoryItemTemplate(item);
+    const compatible = template?.attributes?.compatible_weapons
+        ?? item?.attributes?.compatible_weapons
+        ?? [];
+    return Array.isArray(compatible)
+        ? compatible.map(value => Number(value)).filter(Number.isFinite)
+        : [];
+}
+
 function getInventoryItemAccessActionPoints(item) {
     const template = getInventoryItemTemplate(item);
     const attributes = { ...(template?.attributes || {}), ...(item?.attributes || {}) };
@@ -7221,6 +7250,12 @@ function isItemCompatibleWithPouch(item, pouch) {
     return allowed.map(value => String(value).toLowerCase()).includes(category);
 }
 
+function getDisabledArmRetrievalPenalty() {
+    const zones = currentCharacterData?.health?.zones || {};
+    const arms = [zones.leftArm, zones.rightArm];
+    return arms.some(zone => zone && Number(zone.current) <= 0) ? 1 : 0;
+}
+
 async function calculateInventoryAccess(item, itemPath) {
     if (!Array.isArray(allTemplatesCache) || allTemplatesCache.length === 0) {
         await getAllItemTemplates();
@@ -7256,11 +7291,16 @@ async function calculateInventoryAccess(item, itemPath) {
         baseActionPoints += getInventoryItemAccessActionPoints(container);
     });
 
-    const retrievalActionPoints = Math.max(0, baseActionPoints - quickAccessDiscount);
+    const limbPenalty = getDisabledArmRetrievalPenalty();
+    const retrievalActionPoints = Math.max(
+        0,
+        baseActionPoints - quickAccessDiscount + limbPenalty
+    );
     return {
         source,
         baseActionPoints,
         quickAccessDiscount,
+        limbPenalty,
         retrievalActionPoints,
         useActionDiscount: Math.max(0, quickAccessDiscount - baseActionPoints),
     };

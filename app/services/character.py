@@ -52,12 +52,49 @@ class CharacterService:
         return totals
 
     @staticmethod
-    def ensure_no_items_added(current_data, updated_data):
-        """Players may move or consume items, but only the GM may create them."""
-        before = CharacterService._item_totals(current_data)
-        after = CharacterService._item_totals(updated_data)
-        if any(quantity > before.get(key, 0) for key, quantity in after.items()):
-            raise PermissionDenied("Only GM can add items")
+    def mark_added_items_as_player_created(current_data, updated_data):
+        """Mark quantities introduced by a player without flagging moved items."""
+        remaining = CharacterService._item_totals(current_data)
+
+        def visit(value):
+            if isinstance(value, list):
+                for item in value:
+                    visit(item)
+                return
+            if not isinstance(value, dict):
+                return
+
+            template_id = value.get('templateId')
+            looks_like_item = (
+                template_id is not None
+                or (
+                    value.get('id')
+                    and any(key in value for key in ('category', 'weight', 'volume', 'quantity'))
+                )
+            )
+            if looks_like_item:
+                key = (
+                    f"template:{template_id}"
+                    if template_id is not None
+                    else (
+                        f"custom:{value.get('category', '')}:"
+                        f"{str(value.get('name', '')).strip().casefold()}"
+                    )
+                )
+                try:
+                    quantity = max(0, float(value.get('quantity', 1) or 0))
+                except (TypeError, ValueError):
+                    quantity = 1
+                existing_quantity = max(0, remaining.get(key, 0))
+                if quantity > existing_quantity:
+                    value['createdByPlayer'] = True
+                remaining[key] = max(0, existing_quantity - quantity)
+
+            for nested in value.values():
+                visit(nested)
+
+        visit(updated_data if isinstance(updated_data, dict) else {})
+        return updated_data
 
     @staticmethod
     def create_character(lobby_id, owner_id, name, data=None):
@@ -150,7 +187,10 @@ class CharacterService:
         if 'data' in updates:
             character_data = dict(updates['data'] or {})
             if not is_gm:
-                CharacterService.ensure_no_items_added(character.data, character_data)
+                CharacterService.mark_added_items_as_player_created(
+                    character.data,
+                    character_data,
+                )
             health = apply_health_maximums(character_data)
             character.data = character_data
             for loc_char in LocationCharacter.query.filter_by(character_id=character.id).all():
