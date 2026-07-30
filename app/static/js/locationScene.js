@@ -816,6 +816,20 @@ function findCombatCharacterByCharacterId(characterId) {
     return combatState.characters.find((item) => item.character_id === characterId) || null;
 }
 
+function getGrappleMovementContext(characterId) {
+    const holder = findCombatCharacterByCharacterId(characterId);
+    if (!holder?.grapple_target_id) return null;
+    const captive = findCombatCharacterByLocationId(holder.grapple_target_id);
+    const holderEntry = getCharacterModelEntry(holder.character_id);
+    const captiveEntry = captive ? getCharacterModelEntry(captive.character_id) : null;
+    if (!captive || !holderEntry || !captiveEntry) return null;
+    return {
+        captiveCharacterId: captive.character_id,
+        offsetX: captiveEntry.posX - holderEntry.posX,
+        offsetY: captiveEntry.posY - holderEntry.posY,
+    };
+}
+
 function canControlCharacter(characterId) {
     const entry = characterModels.get(characterId);
     if (!entry) return false;
@@ -2042,8 +2056,12 @@ export function beginPendingCombatAction(action) {
         : (action.actionKey === 'aim' ? 'Прицеливание' : 'Атака');
     const targetHint = action.targetType === 'structure'
         ? 'выберите укрытие'
-        : (action.targetType === 'multi_character'
-            ? 'выберите до 3 целей в области 5×5, затем нажмите Enter'
+        : (['multi_character', 'multi_melee'].includes(action.targetType)
+            ? (
+                action.targetType === 'multi_melee'
+                    ? 'выберите до 3 соседних целей, затем нажмите Enter'
+                    : 'выберите до 3 целей в области 5×5, затем нажмите Enter'
+            )
             : 'выберите цель на сцене');
     showNotification(`${label}: ${targetHint}`, 'system');
     renderCombatHud();
@@ -2074,6 +2092,10 @@ export function startCharacterMoveMode(characterId) {
         showNotification('Сейчас не ход этого персонажа', 'system');
         return false;
     }
+    if (findCombatCharacterByCharacterId(characterId)?.grappled_by_id) {
+        showNotification('Схваченный персонаж не может двигаться самостоятельно', 'system');
+        return false;
+    }
     hideStructureInteraction();
     if (combatState?.status === 'active') {
         showMovementTypeMenu(characterId);
@@ -2100,7 +2122,7 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         showNotification('Нельзя выбрать самого себя в качестве цели', 'system');
         return false;
     }
-    if (action.targetType === 'multi_character') {
+    if (['multi_character', 'multi_melee'].includes(action.targetType)) {
         const selectedIds = action.selectedTargetIds || [];
         const existingIndex = selectedIds.indexOf(targetCharacterId);
         if (existingIndex >= 0) {
@@ -2110,23 +2132,36 @@ async function resolveCombatTargetSelection(targetCharacterId) {
             return true;
         }
         if (selectedIds.length >= 3) {
-            showNotification('Для огня по области можно выбрать не больше 3 целей', 'system');
+            showNotification('Можно выбрать не больше 3 целей', 'system');
             return false;
         }
-        if (!action.areaAnchor) {
+        if (action.targetType === 'multi_character' && !action.areaAnchor) {
             showNotification('Сначала выберите центр области 5×5', 'system');
             return false;
         }
         if (
-            Math.abs((target.x ?? target.pos_x ?? 0) - action.areaAnchor.x) > 2 ||
-            Math.abs((target.y ?? target.pos_y ?? 0) - action.areaAnchor.y) > 2
+            action.targetType === 'multi_character'
+            && (
+                Math.abs((target.x ?? target.pos_x ?? 0) - action.areaAnchor.x) > 2
+                || Math.abs((target.y ?? target.pos_y ?? 0) - action.areaAnchor.y) > 2
+            )
         ) {
             showNotification('Цель находится за пределами выбранной области 5×5', 'system');
             return false;
         }
+        if (
+            action.targetType === 'multi_melee'
+            && Math.max(
+                Math.abs((target.x ?? 0) - (actor.x ?? 0)),
+                Math.abs((target.y ?? 0) - (actor.y ?? 0)),
+            ) !== 1
+        ) {
+            showNotification('Круговой атакой можно выбрать только соседнюю цель', 'system');
+            return false;
+        }
         selectedIds.push(targetCharacterId);
         showNotification(
-            `Цель добавлена. Выбрано: ${selectedIds.length}/3. Enter — открыть огонь`,
+            `Цель добавлена. Выбрано: ${selectedIds.length}/3. Enter — выполнить действие`,
             'system'
         );
         renderCombatHud();
@@ -2237,29 +2272,43 @@ function selectAreaFireAnchor(clientX, clientY) {
 
 async function finalizeAreaFire() {
     const action = pendingCombatAction;
-    if (!action || action.targetType !== 'multi_character') return false;
+    if (
+        !action
+        || !['multi_character', 'multi_melee'].includes(action.targetType)
+    ) return false;
     const targetIds = action.selectedTargetIds || [];
     if (targetIds.length === 0) {
         showNotification('Выберите хотя бы одну цель', 'system');
         return false;
     }
     try {
-        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+        const payload = {
             location_character_id: action.actorLocationCharacterId,
             action_key: action.actionKey,
             weapon_index: action.weaponIndex,
+            attack_type: action.attackType,
             fire_mode: action.fireMode,
             shot_count: action.shotCount,
             volley_count: action.volleyCount,
             action_points: action.actionPoints,
             target_character_ids: targetIds,
-            area_center_x: action.areaAnchor.x,
-            area_center_y: action.areaAnchor.y,
-        });
+        };
+        if (action.targetType === 'multi_character') {
+            payload.area_center_x = action.areaAnchor.x;
+            payload.area_center_y = action.areaAnchor.y;
+        }
+        await Server.performLocationCombatAction(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            payload,
+        );
         if (typeof action.onResolve === 'function') {
             await action.onResolve({ targetCharacterIds: targetIds });
         }
-        showNotification(`Огонь по области: выбрано целей ${targetIds.length}`, 'success');
+        showNotification(
+            `${action.targetType === 'multi_melee' ? 'Круговая атака' : 'Огонь по области'}: целей ${targetIds.length}`,
+            'success',
+        );
         clearPendingCombatAction();
         return true;
     } catch (error) {
@@ -2404,7 +2453,23 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
 
     const div = document.createElement('div');
     const colorHex = getUserColorHex(colorUserId);
-    div.textContent = name;
+    const nameLine = document.createElement('div');
+    nameLine.textContent = name;
+    const grappleBadge = document.createElement('div');
+    grappleBadge.style.cssText = `
+        display:none;
+        margin-top:3px;
+        padding:2px 6px;
+        border-radius:7px;
+        background:rgba(45,18,14,.94);
+        border:1px solid rgba(235,126,91,.9);
+        color:#ffd6c7;
+        font-size:10px;
+        font-weight:800;
+        line-height:1.2;
+        white-space:nowrap;
+    `;
+    div.append(nameLine, grappleBadge);
     div.style.color = 'white';
     div.style.fontSize = '14px';
     div.style.fontWeight = 'bold';
@@ -2429,12 +2494,14 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         posX,
         posY,
         posture: 'standing',
-        controlledBy: resolvedControlledBy ?? fallbackOwnerId
+        controlledBy: resolvedControlledBy ?? fallbackOwnerId,
+        grappleBadge,
     });
     const combatCharacter = findCombatCharacterByCharacterId(characterId);
     if (combatCharacter?.posture) {
         applyCharacterPostureVisual(characterId, combatCharacter.posture);
     }
+    applyCharacterGrappleVisual(characterId, combatCharacter);
     invalidateMovementMapCache();
 }
 
@@ -2471,6 +2538,25 @@ function applyCharacterFacingVisual(characterId, facingX = 0, facingY = 1) {
     entry.model.rotation.y = Math.atan2(x, y);
     entry.facingX = x;
     entry.facingY = y;
+}
+
+function applyCharacterGrappleVisual(characterId, combatCharacter = null) {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry?.grappleBadge) return;
+    const character = combatCharacter || findCombatCharacterByCharacterId(characterId);
+    let text = '';
+    if (character?.grapple_target_id) {
+        const captive = findCombatCharacterByLocationId(character.grapple_target_id);
+        text = `Держит: ${captive?.name || 'цель'}`;
+    } else if (character?.grappled_by_id) {
+        const holder = findCombatCharacterByLocationId(character.grappled_by_id);
+        text = `Схвачен: ${holder?.name || 'противник'}`;
+    }
+    entry.grappleBadge.textContent = text;
+    entry.grappleBadge.style.display = text ? 'block' : 'none';
+    entry.model.userData.grappleState = character?.grapple_target_id
+        ? 'holder'
+        : (character?.grappled_by_id ? 'captive' : null);
 }
 
 export function updateCharacterPosition(characterId, posX, posY) {
@@ -2850,7 +2936,9 @@ function renderCombatHud() {
                         ? (pendingCombatAction.areaAnchor
                             ? `цели в области ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для огня`
                             : 'центр области 5×5')
-                        : (pendingCombatAction.fireMode || pendingCombatAction.actionKey || 'действие'))
+                        : (pendingCombatAction.targetType === 'multi_melee'
+                            ? `соседние цели ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для атаки`
+                            : (pendingCombatAction.fireMode || pendingCombatAction.actionKey || 'действие')))
             }</div>` : ''}
             <div style="margin-top:10px;">
                 ${combatState.status !== 'active' && window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn" style="margin-top:8px;">Начать бой</button>' : ''}
@@ -2933,6 +3021,7 @@ export function setCombatState(state) {
             character.facing_x,
             character.facing_y,
         );
+        applyCharacterGrappleVisual(character.character_id, character);
     });
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
     renderCombatHud();
@@ -3271,7 +3360,15 @@ function tileHasObjectFootprint(object, x, y, fallbackX = null, fallbackY = null
 }
 
 function getMovementMap(movingCharacterId = null) {
-    const cacheKey = `${movementMapVersion}:${currentLocationId || ''}:${movingCharacterId ?? ''}`;
+    const grapple = getGrappleMovementContext(movingCharacterId);
+    const ignoredCharacterIds = new Set([
+        String(movingCharacterId ?? ''),
+        String(grapple?.captiveCharacterId ?? ''),
+    ]);
+    const cacheKey = (
+        `${movementMapVersion}:${currentLocationId || ''}:${movingCharacterId ?? ''}`
+        + `:${grapple?.captiveCharacterId ?? ''}`
+    );
     const cached = movementMapCache.get(cacheKey);
     if (cached) return cached;
 
@@ -3317,9 +3414,8 @@ function getMovementMap(movingCharacterId = null) {
     }
 
     if (characterModels && typeof characterModels.forEach === 'function') {
-        const ignoreId = String(movingCharacterId ?? '');
         characterModels.forEach((entry, characterId) => {
-            if (String(characterId) === ignoreId) return;
+            if (ignoredCharacterIds.has(String(characterId))) return;
             if (!entry) return;
             blockedTiles.add(`${entry.posX}:${entry.posY}`);
             climbCostTiles.delete(`${entry.posX}:${entry.posY}`);
@@ -3761,6 +3857,19 @@ function findMovementPath(startX, startY, endX, endY, movingCharacterId = null) 
     if (!width || !height) return null;
 
     const inBounds = (x, y) => x >= 0 && y >= 0 && x < width && y < height;
+    const grapple = getGrappleMovementContext(movingCharacterId);
+    const companionCanOccupy = (x, y) => {
+        if (!grapple) return true;
+        const companionX = x + grapple.offsetX;
+        const companionY = y + grapple.offsetY;
+        if (!inBounds(companionX, companionY)) return false;
+        const profile = getTileMovementProfile(
+            companionX,
+            companionY,
+            movingCharacterId,
+        );
+        return !profile.blocked && profile.climbCost === 0;
+    };
     const keyFor = (x, y) => `${x}:${y}`;
     const directions = [
         [1, 0], [-1, 0], [0, 1], [0, -1],
@@ -3774,7 +3883,7 @@ function findMovementPath(startX, startY, endX, endY, movingCharacterId = null) 
 
     const heuristic = (x, y) => Math.max(Math.abs(endX - x), Math.abs(endY - y));
     const targetProfile = getTileMovementProfile(endX, endY, movingCharacterId);
-    if (targetProfile.climbCost > 0) return null;
+    if (targetProfile.climbCost > 0 || !companionCanOccupy(endX, endY)) return null;
 
     while (open.length) {
         open.sort((a, b) => a.priority - b.priority || a.cost - b.cost);
@@ -3806,11 +3915,18 @@ function findMovementPath(startX, startY, endX, endY, movingCharacterId = null) 
                 if ((sideA.blocked && sideA.climbCost === 0) || (sideB.blocked && sideB.climbCost === 0)) {
                     continue;
                 }
+                if (
+                    !companionCanOccupy(current.x + dx, current.y)
+                    || !companionCanOccupy(current.x, current.y + dy)
+                ) {
+                    continue;
+                }
             }
 
             const tileProfile = getTileMovementProfile(nx, ny, movingCharacterId);
             if (nx === endX && ny === endY && tileProfile.climbCost > 0) continue;
             if (tileProfile.blocked && tileProfile.climbCost === 0) continue;
+            if (!companionCanOccupy(nx, ny)) continue;
 
             const stepCost = 1 + Math.max(0, tileProfile.climbCost || 0);
             const newCost = current.cost + stepCost;
@@ -5516,6 +5632,13 @@ function setupCharacterDragging() {
         if (!charId) return;
         const entry = characterModels.get(charId);
         if (!entry) return;
+        if (
+            combatState?.status === 'active'
+            && findCombatCharacterByCharacterId(charId)?.grappled_by_id
+        ) {
+            showNotification('Схваченный персонаж не может двигаться самостоятельно', 'system');
+            return;
+        }
         if (pendingCombatAction) {
             e.preventDefault();
             e.stopPropagation();
@@ -5701,7 +5824,10 @@ function setupCharacterDragging() {
             locationCameraKeys.add(e.code);
             e.preventDefault();
         }
-        if (e.key === 'Enter' && pendingCombatAction?.targetType === 'multi_character') {
+        if (
+            e.key === 'Enter'
+            && ['multi_character', 'multi_melee'].includes(pendingCombatAction?.targetType)
+        ) {
             e.preventDefault();
             finalizeAreaFire();
             return;

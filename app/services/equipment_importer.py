@@ -413,6 +413,17 @@ def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         if not allowed_attacks and name != "Нож стреляющий":
             continue
         description = _normalize_text(row.get("T"))
+        normalized_description = description.lower().replace("ё", "е")
+        if "очень тяжел" in normalized_description:
+            weight_class = "Очень тяжелое"
+        elif "тяжел" in normalized_description:
+            weight_class = "Тяжелое"
+        elif "легк" in normalized_description:
+            weight_class = "Легкое"
+        elif name == "Спиральный нож":
+            weight_class = "Легкое"
+        else:
+            weight_class = None
         penetration_match = re.search(r"(-?\d+(?:[.,]\d+)?)\s*%", description)
         templates.append(
             {
@@ -431,6 +442,7 @@ def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
                     "armor_piercing": _as_float(penetration_match.group(1)) if penetration_match else 0.0,
                     "bleeding": _normalize_text(row.get("X")),
                     "size": _normalize_text(row.get("Z")),
+                    "weight_class": weight_class,
                     "allowed_attacks": allowed_attacks,
                     "max_durability": 100,
                     "raw_row": row,

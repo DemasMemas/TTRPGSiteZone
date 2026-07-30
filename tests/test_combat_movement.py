@@ -45,6 +45,56 @@ def test_unknown_movement_mode_is_rejected():
         CombatService._movement_route_cost(movement_path(1), "teleport")
 
 
+def test_grapple_group_path_keeps_companion_offset(monkeypatch):
+    location = SimpleNamespace(grid_width=6, grid_height=6)
+    monkeypatch.setattr(
+        CombatService,
+        "_build_movement_map",
+        staticmethod(lambda location, moving_character_id=None, ignored_character_ids=None: (set(), {})),
+    )
+
+    result = CombatService._find_movement_path(
+        location,
+        1,
+        1,
+        3,
+        1,
+        moving_character_id=10,
+        ignored_character_ids=[10, 11],
+        companion_offset=(0, 1),
+    )
+
+    assert result["path"][0] == (1, 1)
+    assert result["path"][-1] == (3, 1)
+
+
+def test_grapple_group_path_rejects_blocked_companion_destination(monkeypatch):
+    location = SimpleNamespace(grid_width=6, grid_height=6)
+    monkeypatch.setattr(
+        CombatService,
+        "_build_movement_map",
+        staticmethod(
+            lambda location, moving_character_id=None, ignored_character_ids=None: (
+                {(3, 2)},
+                {},
+            )
+        ),
+    )
+
+    result = CombatService._find_movement_path(
+        location,
+        1,
+        1,
+        3,
+        1,
+        moving_character_id=10,
+        ignored_character_ids=[10, 11],
+        companion_offset=(0, 1),
+    )
+
+    assert result is None
+
+
 def test_new_turn_resets_distance_but_keeps_run_and_sprint_exhaustion():
     character = LocationCharacter(
         initiative_bonus=0,

@@ -1232,19 +1232,38 @@ class CombatService:
                     penetration += 10
                 elif 'круг' in attack_name:
                     penetration = max(0, penetration - 10)
+        melee_damage_type = attributes.get(
+            'melee_damage_type',
+            attributes.get('attack_type', weapon.get('attackType')),
+        )
+        attack_name = str(attack_type or '').strip().lower().replace('ё', 'е')
+        if attack_name:
+            if 'круг' in attack_name:
+                allowed_attacks = [
+                    str(item or '').strip().lower().replace('ё', 'е')
+                    for item in (attributes.get('allowed_attacks') or [])
+                ]
+                melee_damage_type = (
+                    'slashing'
+                    if any('руб' in item for item in allowed_attacks)
+                    else 'crushing'
+                )
+            else:
+                melee_damage_type = attack_type
         return {
             'damage': max(0, damage),
             'armor_piercing': penetration,
+            'weight': max(0, CombatService._coerce_float(
+                weapon.get('weight', attributes.get('weight', 0)),
+                0,
+            )),
             'bleeding': bleeding,
             'accuracy': attributes.get('accuracy', weapon.get('accuracy', 0)),
             'effective_range': CombatService._coerce_int(
                 attributes.get('effective_range', attributes.get('range', weapon.get('range', 0))), 0
             ),
             'damage_type': attributes.get('damage_type', 'physical'),
-            'melee_damage_type': attributes.get(
-                'melee_damage_type',
-                attributes.get('attack_type', weapon.get('attackType')),
-            ),
+            'melee_damage_type': melee_damage_type,
             'weight_class': attributes.get(
                 'weight_class',
                 weapon.get('weightClass', weapon.get('weight_class', 'heavy')),
@@ -1291,6 +1310,7 @@ class CombatService:
                 'damage_type': 'physical',
                 'melee_damage_type': 'crushing',
                 'weight_class': 'light',
+                'weight': 0,
                 'skip_strength_scaling': True,
             }
         if attack_key == 'firearm_butt':
@@ -1300,13 +1320,14 @@ class CombatService:
                 weapon.get('weight', attributes.get('weight', 0)), 0
             )
             return {
-                'damage': 25 if weight < 1 else 40,
+                'damage': 25 if weight <= 1 else 40,
                 'armor_piercing': 0,
                 'bleeding': '',
                 'accuracy': 0,
                 'damage_type': 'physical',
                 'melee_damage_type': 'crushing',
-                'weight_class': 'light' if weight < 1 else 'heavy',
+                'weight_class': 'light' if weight <= 1 else 'heavy',
+                'weight': max(0, weight),
             }
         if attack_key == 'grapple_desperate':
             strength_bonus = CombatService._skill_modifier(
@@ -1320,6 +1341,7 @@ class CombatService:
                 'damage_type': 'physical',
                 'melee_damage_type': 'crushing',
                 'weight_class': 'heavy',
+                'weight': 0,
                 'skip_strength_scaling': True,
             }
         return None
@@ -1327,14 +1349,35 @@ class CombatService:
     @staticmethod
     def _melee_action_cost(profile, attack_type=None):
         profile = profile if isinstance(profile, dict) else {}
-        if str(attack_type or '').strip().lower() == 'unarmed':
+        attack_key = str(attack_type or '').strip().lower().replace('ё', 'е')
+        if attack_key == 'unarmed':
             return 2
         weight_class = str(profile.get('weight_class') or '').strip().lower()
         if 'очень' in weight_class or 'heavy_plus' in weight_class:
-            return 4
-        if 'лег' in weight_class or weight_class == 'light':
-            return 2
-        return 3
+            base_cost = 4
+        elif 'лег' in weight_class or weight_class == 'light':
+            base_cost = 2
+        else:
+            base_cost = 3
+        modifier = 0
+        if 'кол' in attack_key:
+            modifier = 1
+        elif 'реж' in attack_key:
+            modifier = -1
+        elif 'всп' in attack_key:
+            modifier = 2
+        elif 'круг' in attack_key:
+            modifier = 1
+        return max(1, base_cost + modifier)
+
+    @staticmethod
+    def _crushing_damage_multiplier(profile):
+        profile = profile if isinstance(profile, dict) else {}
+        damage_type = str(profile.get('melee_damage_type') or '').strip().lower()
+        if 'дроб' not in damage_type and damage_type != 'crushing':
+            return None
+        weight = max(0, CombatService._coerce_float(profile.get('weight'), 0))
+        return min(1.0, (20 + 5 * weight) / 100)
 
     @staticmethod
     def _is_adjacent(first, second):
@@ -1393,6 +1436,63 @@ class CombatService:
             or weapon.get('twoHanded')
             or weapon.get('two_handed')
         )
+
+    @staticmethod
+    def _has_usable_free_hand(loc_char):
+        if not CombatService._has_free_hand(loc_char):
+            return False
+        data = (
+            loc_char.character.data
+            if loc_char and loc_char.character and isinstance(loc_char.character.data, dict)
+            else {}
+        )
+        health = data.get('health') if isinstance(data.get('health'), dict) else {}
+        zones = health.get('zones') if isinstance(health.get('zones'), dict) else {}
+        arm_values = []
+        for aliases in (('leftArm', 'left_arm'), ('rightArm', 'right_arm')):
+            zone = next(
+                (zones.get(key) for key in aliases if isinstance(zones.get(key), dict)),
+                None,
+            )
+            if zone is None:
+                arm_values.append(1)
+            else:
+                arm_values.append(CombatService._coerce_float(zone.get('current'), 0))
+        functional_arms = sum(1 for value in arm_values if value > 0)
+        occupied_hands = 0 if loc_char.drawn_weapon_index is None else 1
+        return functional_arms > occupied_hands
+
+    @staticmethod
+    def _clear_grapple(holder, captive=None):
+        if not holder:
+            return
+        if captive is None and holder.grapple_target_id:
+            captive = db.session.get(LocationCharacter, holder.grapple_target_id)
+        holder.grapple_target_id = None
+        holder.grapple_strengthened = False
+        holder.grapple_choke_rounds = 0
+        holder.grapple_live_shield = False
+        if captive and captive.grappled_by_id == holder.id:
+            captive.grappled_by_id = None
+
+    @staticmethod
+    def _release_invalid_grapples(location_id):
+        holders = LocationCharacter.query.filter(
+            LocationCharacter.location_id == location_id,
+            LocationCharacter.grapple_target_id.isnot(None),
+        ).all()
+        for holder in holders:
+            captive = db.session.get(LocationCharacter, holder.grapple_target_id)
+            holder_condition = CombatService._location_character_condition(holder)
+            invalid = bool(
+                not captive
+                or captive.location_id != location_id
+                or captive.grappled_by_id != holder.id
+                or holder_condition['state'] in {'critical', 'dead'}
+                or not CombatService._has_usable_free_hand(holder)
+            )
+            if invalid:
+                CombatService._clear_grapple(holder, captive)
 
     @staticmethod
     def _sync_grapple_facing(holder, captive=None):
@@ -2137,18 +2237,24 @@ class CombatService:
                 12 - skill - CombatService._parse_percent(profile.get('accuracy', 0), 0),
             )
             rolls = [forced_roll if forced_roll is not None else random.randint(1, 20)]
-            if forced_roll is None and (
+            has_disadvantage = bool(
                 attack_details.get('melee_disadvantage')
                 or CombatService._has_roll_disadvantage(
                     attacker_data, 'skills.physical.melee'
                 )
-            ):
+            )
+            has_advantage = bool(
+                attack_details.get('melee_advantage')
+                or getattr(target, 'grappled_by_id', None)
+            )
+            if forced_roll is None and has_advantage != has_disadvantage:
                 rolls.append(random.randint(1, 20))
-            if forced_roll is None and attack_details.get('melee_advantage'):
-                rolls.append(random.randint(1, 20))
+            if has_advantage and not has_disadvantage:
                 roll = max(rolls)
-            else:
+            elif has_disadvantage and not has_advantage:
                 roll = min(rolls)
+            else:
+                roll = rolls[0]
             hit = roll == 20 or (roll != 1 and roll >= difficulty)
             result = {
                 'roll': roll,
@@ -2305,6 +2411,15 @@ class CombatService:
         penetration_deficit = max(0.0, effective_armor)
         damage_reduction_steps = math.ceil(penetration_deficit / 5) if penetration_deficit else 0
         damage_multiplier = max(0.0, 1 - damage_reduction_steps * 0.25)
+        crushing_non_penetration = False
+        crushing_multiplier = (
+            CombatService._crushing_damage_multiplier(profile)
+            if melee and penetration_deficit > 0
+            else None
+        )
+        if crushing_multiplier is not None:
+            damage_multiplier = crushing_multiplier
+            crushing_non_penetration = True
         behind_armor_multiplier = 0.0
         full_non_penetration = bool(
             not melee
@@ -2367,6 +2482,10 @@ class CombatService:
             'penetration_deficit': penetration_deficit,
             'damage_multiplier': damage_multiplier,
             'behind_armor_multiplier': behind_armor_multiplier,
+            'crushing_non_penetration': crushing_non_penetration,
+            'crushing_damage_multiplier': (
+                crushing_multiplier if crushing_non_penetration else None
+            ),
             'full_non_penetration': full_non_penetration,
             'buckshot_mutant_non_penetration': buckshot_mutant_non_penetration,
             'damage': final_damage,
@@ -2899,9 +3018,19 @@ class CombatService:
         return {'blocked': True, 'climb_cost': 0}
 
     @staticmethod
-    def _build_movement_map(location, moving_character_id=None):
+    def _build_movement_map(
+        location,
+        moving_character_id=None,
+        ignored_character_ids=None,
+    ):
         blocked_tiles = set()
         climb_cost_tiles = {}
+        ignored_ids = {
+            CombatService._coerce_int(item, -1)
+            for item in (ignored_character_ids or [])
+        }
+        if moving_character_id is not None:
+            ignored_ids.add(CombatService._coerce_int(moving_character_id, -1))
 
         tiles = location.tiles_data if isinstance(location.tiles_data, list) else []
         for y, row in enumerate(tiles):
@@ -2936,7 +3065,7 @@ class CombatService:
         for character in CombatService._unique_location_characters(
             LocationCharacter.query.filter_by(location_id=location.id).all()
         ):
-            if moving_character_id is not None and character.character_id == moving_character_id:
+            if CombatService._coerce_int(character.character_id, -1) in ignored_ids:
                 continue
             blocked_tiles.add((character.pos_x, character.pos_y))
             climb_cost_tiles.pop((character.pos_x, character.pos_y), None)
@@ -2998,11 +3127,24 @@ class CombatService:
         return None
 
     @staticmethod
-    def _find_movement_path(location, start_x, start_y, end_x, end_y, moving_character_id=None):
+    def _find_movement_path(
+        location,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        moving_character_id=None,
+        ignored_character_ids=None,
+        companion_offset=None,
+    ):
         if start_x == end_x and start_y == end_y:
             return {'cost': 0, 'path': [(start_x, start_y)], 'climb_cost': 0}
 
-        blocked_tiles, climb_cost_tiles = CombatService._build_movement_map(location, moving_character_id)
+        blocked_tiles, climb_cost_tiles = CombatService._build_movement_map(
+            location,
+            moving_character_id,
+            ignored_character_ids,
+        )
         width = location.grid_width
         height = location.grid_height
 
@@ -3014,10 +3156,24 @@ class CombatService:
                 return None
             return 1 + max(0, climb_cost_tiles.get((x, y), 0))
 
+        def companion_can_occupy(x, y):
+            if not companion_offset:
+                return True
+            companion_x = x + companion_offset[0]
+            companion_y = y + companion_offset[1]
+            return bool(
+                in_bounds(companion_x, companion_y)
+                and (companion_x, companion_y) not in blocked_tiles
+                and climb_cost_tiles.get((companion_x, companion_y), 0) <= 0
+            )
+
         def heuristic(x, y):
             return max(abs(end_x - x), abs(end_y - y))
 
-        if climb_cost_tiles.get((end_x, end_y), 0) > 0:
+        if (
+            climb_cost_tiles.get((end_x, end_y), 0) > 0
+            or not companion_can_occupy(end_x, end_y)
+        ):
             return None
 
         directions = [
@@ -3055,9 +3211,14 @@ class CombatService:
                     side_b = step_cost(x, y + dy)
                     if side_a is None or side_b is None:
                         continue
+                    if companion_offset and (
+                        not companion_can_occupy(x + dx, y)
+                        or not companion_can_occupy(x, y + dy)
+                    ):
+                        continue
 
                 move_cost = step_cost(nx, ny)
-                if move_cost is None:
+                if move_cost is None or not companion_can_occupy(nx, ny):
                     continue
                 if nx == end_x and ny == end_y and climb_cost_tiles.get((nx, ny), 0) > 0:
                     continue
@@ -3551,6 +3712,7 @@ class CombatService:
     def end_turn(location_id, user_id, location_character_id=None):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
+        CombatService._release_invalid_grapples(location_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
         if not state:
             raise ValidationError("Combat is not active")
@@ -3597,6 +3759,31 @@ class CombatService:
             current_character,
             ending_round,
         )
+        current_data = (
+            current_character.character.data
+            if current_character.character
+            and isinstance(current_character.character.data, dict)
+            else {}
+        )
+        current_health = current_data.get('health')
+        current_meta = (
+            current_health.get('combatMeta')
+            if isinstance(current_health, dict)
+            and isinstance(current_health.get('combatMeta'), dict)
+            else {}
+        )
+        if current_meta.pop('circularAttackRound', None) == ending_round:
+            apply_effect_to_health(current_health, {
+                'type': 'circular_attack_recovery',
+                'name': 'Восстановление после круговой атаки',
+                'remaining': 1,
+                'tick': 'turn_end',
+                'rollPenalty': 2,
+                'source': 'circular_attack',
+            })
+            current_character.character.data = current_data
+            flag_modified(current_character.character, 'data')
+        CombatService._release_invalid_grapples(location_id)
         CombatService._sync_location_effects_from_character(current_character)
 
         if next_index == 0:
@@ -3621,6 +3808,7 @@ class CombatService:
     def spend_resources(location_id, user_id, location_character_id, action_points=0, free_actions=0, movement_points=0):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
+        CombatService._release_invalid_grapples(location_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
         if not state:
             raise ValidationError("Combat is not active")
@@ -3678,6 +3866,7 @@ class CombatService:
         movement_points = max(-50, min(50, CombatService._coerce_int(movement_points, 0)))
         character.action_points_current = max(0, character.action_points_current + action_points)
         character.movement_points_current = max(0, character.movement_points_current + movement_points)
+        CombatService._release_invalid_grapples(location_id)
         character.last_action = db.func.now()
         db.session.commit()
         return CombatService._serialize_character(character, current_turn_id=state.current_location_character_id)
@@ -3711,6 +3900,7 @@ class CombatService:
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
+        CombatService._release_invalid_grapples(location_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
         if not state or state.status != 'active':
             raise ValidationError("Combat is not active")
@@ -3968,7 +4158,7 @@ class CombatService:
                 melee_action_details['attacker_fell'] = True
 
         if action_key == 'grapple':
-            if not CombatService._has_free_hand(character):
+            if not CombatService._has_usable_free_hand(character):
                 raise ValidationError("At least one free hand is required for a grapple")
             if character.grapple_target_id or character.grappled_by_id:
                 raise ValidationError("Character is already in a grapple")
@@ -4043,11 +4233,7 @@ class CombatService:
             if action_key == 'grapple_release':
                 if holder.id != character.id:
                     raise ValidationError("Only the holder can release the grapple")
-                holder.grapple_target_id = None
-                holder.grapple_strengthened = False
-                holder.grapple_choke_rounds = 0
-                holder.grapple_live_shield = False
-                captive.grappled_by_id = None
+                CombatService._clear_grapple(holder, captive)
                 melee_action_details = {'released': True}
             elif action_key == 'grapple_escape':
                 if captive.id != character.id:
@@ -4066,11 +4252,7 @@ class CombatService:
                 )
                 success = captive_roll['total'] > holder_roll['total']
                 if success:
-                    holder.grapple_target_id = None
-                    holder.grapple_strengthened = False
-                    holder.grapple_choke_rounds = 0
-                    holder.grapple_live_shield = False
-                    captive.grappled_by_id = None
+                    CombatService._clear_grapple(holder, captive)
                 melee_action_details = {
                     'captive': captive_roll,
                     'holder': holder_roll,
@@ -4390,16 +4572,51 @@ class CombatService:
             }
 
         if action_key == 'attack' and not fire_mode:
-            if not target_character_id:
-                raise ValidationError("Target character is required")
-            target = LocationCharacter.query.filter_by(
-                location_id=location_id,
-                character_id=target_character_id,
-            ).first()
-            if not target or target.id == character.id:
-                raise ValidationError("Target character not found")
             weapons = (character.character.data or {}).get('weapons') or []
-            attack_type_key = str(attack_type or '').strip().lower()
+            attack_type_key = str(attack_type or '').strip().lower().replace('ё', 'е')
+            circular_attack = 'круг' in attack_type_key
+            melee_targets = []
+            if circular_attack:
+                selected_ids = list(dict.fromkeys(target_character_ids or []))
+                if not selected_ids and target_character_id:
+                    selected_ids = [target_character_id]
+                if not 1 <= len(selected_ids) <= 3:
+                    raise ValidationError("A circular attack requires 1 to 3 targets")
+                target_lookup = {
+                    item.character_id: item
+                    for item in LocationCharacter.query.filter(
+                        LocationCharacter.location_id == location_id,
+                        LocationCharacter.character_id.in_(selected_ids),
+                    ).all()
+                }
+                melee_targets = [
+                    target_lookup[target_id]
+                    for target_id in selected_ids
+                    if target_id in target_lookup
+                ]
+                if (
+                    len(melee_targets) != len(selected_ids)
+                    or any(target.id == character.id for target in melee_targets)
+                ):
+                    raise ValidationError("Circular attack target not found")
+                if any(
+                    not CombatService._is_adjacent(character, target)
+                    for target in melee_targets
+                ):
+                    raise ValidationError("All circular attack targets must be adjacent")
+                target = melee_targets[0]
+                target_character_id = target.character_id
+                target_character_ids = selected_ids
+            else:
+                if not target_character_id:
+                    raise ValidationError("Target character is required")
+                target = LocationCharacter.query.filter_by(
+                    location_id=location_id,
+                    character_id=target_character_id,
+                ).first()
+                if not target or target.id == character.id:
+                    raise ValidationError("Target character not found")
+                melee_targets = [target]
             weapon_index = CombatService._coerce_int(weapon_index, -1)
             weapon = {}
             if attack_type_key == 'unarmed':
@@ -4418,7 +4635,7 @@ class CombatService:
                     if template and template.category != 'weapon':
                         raise ValidationError("Only a firearm can use a butt attack")
             distance = max(abs(character.pos_x - target.pos_x), abs(character.pos_y - target.pos_y))
-            if distance != 1:
+            if not circular_attack and distance != 1:
                 raise ValidationError("Melee target must be in an adjacent tile")
             character.facing_x = 0 if target.pos_x == character.pos_x else (1 if target.pos_x > character.pos_x else -1)
             character.facing_y = 0 if target.pos_y == character.pos_y else (1 if target.pos_y > character.pos_y else -1)
@@ -4435,6 +4652,8 @@ class CombatService:
             )
             accuracy = CombatService._coerce_int(profile.get('accuracy'), 0)
             aimed_melee = str(payment or '').strip().lower() == 'aimed'
+            if circular_attack and aimed_melee:
+                raise ValidationError("A circular attack cannot be aimed")
             swing_prepared = character.melee_swing_round == current_round
             if aimed_melee and not swing_prepared:
                 raise ValidationError("Prepare a swing before an aimed melee attack")
@@ -4450,6 +4669,7 @@ class CombatService:
                 (8 - melee_bonus * 2 if behind else 12 - melee_bonus)
                 + block_penalty
                 + aimed_penalty
+                + (3 if circular_attack else 0)
                 - accuracy
             )
             melee_cost = CombatService._melee_action_cost(profile, attack_type_key)
@@ -4459,8 +4679,10 @@ class CombatService:
                 'action_points': melee_cost,
                 'round_number': state.round_number,
                 'target_character_id': target_character_id,
+                'target_character_ids': target_character_ids if circular_attack else None,
                 'target_distance': distance,
                 'melee': True,
+                'circular_attack': circular_attack,
                 'hit_difficulty': hit_difficulty,
                 'aimed_melee': aimed_melee,
                 'from_behind': behind,
@@ -4468,6 +4690,8 @@ class CombatService:
                 'aimed_penalty': aimed_penalty,
                 'swing_bonus': swing_prepared,
                 'melee_advantage': bool(target.grappled_by_id),
+                'melee_bonus': melee_bonus,
+                'weapon_accuracy': accuracy,
             }
 
         if action_key == 'attack' and fire_mode:
@@ -4796,16 +5020,57 @@ class CombatService:
 
         if attack_details:
             if attack_details.get('melee'):
-                target = LocationCharacter.query.filter_by(
-                    location_id=location_id,
-                    character_id=attack_details['target_character_id'],
-                ).first()
-                resolved_hits.append(CombatService._resolve_attack(
-                    target, character, attack_details,
-                    melee=True,
-                    attack_type=attack_type,
-                    aimed_zone=target_zone,
-                ))
+                if attack_details.get('circular_attack'):
+                    circular_targets = [
+                        LocationCharacter.query.filter_by(
+                            location_id=location_id,
+                            character_id=target_id,
+                        ).first()
+                        for target_id in (attack_details.get('target_character_ids') or [])
+                    ]
+                    for target in (item for item in circular_targets if item):
+                        target_details = dict(attack_details)
+                        target_details['target_character_id'] = target.character_id
+                        target_details['from_behind'] = CombatService._is_behind(
+                            character,
+                            target,
+                        )
+                        target_details['block_penalty'] = max(
+                            0,
+                            CombatService._coerce_int(
+                                target.melee_block_effectiveness,
+                                0,
+                            ),
+                        )
+                        target_details['melee_advantage'] = bool(target.grappled_by_id)
+                        target_details['hit_difficulty'] = (
+                            (
+                                8 - target_details['melee_bonus'] * 2
+                                if target_details['from_behind']
+                                else 12 - target_details['melee_bonus']
+                            )
+                            + target_details['block_penalty']
+                            + 3
+                            - target_details['weapon_accuracy']
+                        )
+                        resolved_hits.append(CombatService._resolve_attack(
+                            target,
+                            character,
+                            target_details,
+                            melee=True,
+                            attack_type=attack_type,
+                        ))
+                else:
+                    target = LocationCharacter.query.filter_by(
+                        location_id=location_id,
+                        character_id=attack_details['target_character_id'],
+                    ).first()
+                    resolved_hits.append(CombatService._resolve_attack(
+                        target, character, attack_details,
+                        melee=True,
+                        attack_type=attack_type,
+                        aimed_zone=target_zone,
+                    ))
                 if (
                     action_key == 'grapple_desperate_attack'
                     and resolved_hits[-1].get('hit')
@@ -4867,12 +5132,18 @@ class CombatService:
                 item.get('combined_damage', item.get('damage', 0))
                 for item in resolved_hits
             )
-            if not attack_details.get('melee'):
+            if attack_details.get('circular_attack'):
+                health = data.setdefault('health', {})
+                health.setdefault('combatMeta', {})['circularAttackRound'] = current_round
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            elif not attack_details.get('melee'):
                 health = data.setdefault('health', {})
                 health.setdefault('combatMeta', {})['firedRound'] = current_round
                 character.character.data = data
                 flag_modified(character.character, 'data')
 
+        CombatService._release_invalid_grapples(location_id)
         character.last_action = db.func.now()
         db.session.commit()
         if action_key == 'recover_from_shock':
@@ -4925,6 +5196,7 @@ class CombatService:
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
+        CombatService._release_invalid_grapples(location_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
         character = LocationCharacter.query.filter_by(
             character_id=character_id,
@@ -4939,11 +5211,29 @@ class CombatService:
         if not is_gm and character.controlled_by not in (None, user_id):
             raise PermissionDenied("Permission denied")
         CombatService.ensure_character_can_act(character)
+        if character.grappled_by_id:
+            raise ValidationError("A grappled character cannot move independently")
+
+        grapple_captive = (
+            LocationCharacter.query.filter_by(
+                id=character.grapple_target_id,
+                location_id=location_id,
+            ).first()
+            if character.grapple_target_id
+            else None
+        )
+        if character.grapple_target_id and not grapple_captive:
+            character.grapple_target_id = None
+            character.grapple_strengthened = False
+            character.grapple_choke_rounds = 0
+            character.grapple_live_shield = False
 
         if state and state.status == 'active' and not is_gm and state.current_location_character_id != character.id:
             raise PermissionDenied("It is not this character's turn")
 
         if special_action == 'climb':
+            if grapple_captive:
+                raise ValidationError("A character cannot climb while holding a grapple")
             if CombatService._posture_key(character) != 'standing':
                 raise ValidationError("Stand up before climbing")
             climb_object = None
@@ -4989,6 +5279,19 @@ class CombatService:
         if not (0 <= new_x < location.grid_width and 0 <= new_y < location.grid_height):
             raise ValidationError("Out of bounds")
 
+        companion_offset = (
+            (
+                grapple_captive.pos_x - character.pos_x,
+                grapple_captive.pos_y - character.pos_y,
+            )
+            if grapple_captive
+            else None
+        )
+        ignored_character_ids = (
+            [character.character_id, grapple_captive.character_id]
+            if grapple_captive
+            else None
+        )
         path = CombatService._find_movement_path(
             location,
             character.pos_x,
@@ -4996,6 +5299,8 @@ class CombatService:
             new_x,
             new_y,
             character.character_id,
+            ignored_character_ids=ignored_character_ids,
+            companion_offset=companion_offset,
         )
         if not path:
             raise ValidationError("Path is blocked")
@@ -5094,6 +5399,13 @@ class CombatService:
         previous_x, previous_y = character.pos_x, character.pos_y
         character.pos_x = new_x
         character.pos_y = new_y
+        if grapple_captive and companion_offset:
+            grapple_captive.pos_x = new_x + companion_offset[0]
+            grapple_captive.pos_y = new_y + companion_offset[1]
+            grapple_captive.cover_object_id = None
+            grapple_captive.weapon_braced = False
+            grapple_captive.braced_weapon_index = None
+            CombatService._clear_aim(grapple_captive)
         path_tiles = path.get('path') or []
         if len(path_tiles) >= 2:
             before_x, before_y = path_tiles[-2]

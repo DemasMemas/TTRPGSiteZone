@@ -3726,8 +3726,8 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     const persistentWeaponIndex = currentCharacterData?.activeWeaponIndex;
     const isCombatActive = combatState?.status === 'active';
     const weaponWeight = Number(weapon?.weight ?? template?.weight) || 0;
-    const buttLabel = weaponWeight < 1 ? 'Удар рукояткой' : 'Удар прикладом';
-    const buttCost = weaponWeight < 1 ? 2 : 3;
+    const buttLabel = weaponWeight <= 1 ? 'Удар рукояткой' : 'Удар прикладом';
+    const buttCost = weaponWeight <= 1 ? 2 : 3;
     const swingPrepared = combatState?.current_character?.melee_swing_round === combatState?.round_number;
     const buttButton = `
         <button type="button" class="btn btn-sm btn-primary" ${disabledAttr} onclick="useMeleeAttack(${index}, 'firearm_butt')">${buttLabel} · ${buttCost} ОД</button>
@@ -3785,7 +3785,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
         const burstShots = Number(profile.burst_size) || 0;
         const action = (mode, actionPoints = 3, volleyCount = 1) => machineGun
             ? `chooseMachineGunBurst(${index}, '${mode}', ${actionPoints}, ${volleyCount})`
-            : `useWeaponFromEquipment(${index}, '${mode}', ${burstShots * volleyCount}, ${actionPoints})`;
+            : `useWeaponFromEquipment(${index}, '${mode}', ${burstShots * volleyCount}, ${actionPoints}, ${volleyCount})`;
         const burstLabel = machineGun ? 'Пулемётная очередь' : `Очередь x${burstShots}`;
         buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('burst')}">${burstLabel} · 3 ОД</button>`);
         if (profile.supports_suppression) {
@@ -4042,17 +4042,20 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         if (isMelee) {
             const allowedAttacks = template?.attributes?.allowed_attacks || [];
             const weightClass = String(template?.attributes?.weight_class || weapon.weightClass || 'Тяжелое').toLowerCase();
-            const meleeCost = weightClass.includes('очень') ? 4 : (weightClass.includes('лег') ? 2 : 3);
             const drawnWeaponIndex = combatState?.current_character?.drawn_weapon_index;
             const activeWeaponIndex = isCombatActive ? drawnWeaponIndex : currentCharacterData?.activeWeaponIndex;
             const handsButton = isSelectedWeaponIndex(activeWeaponIndex, index)
                 ? '<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>'
                 : `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="drawWeaponFromEquipment(${index})">${isCombatActive ? 'Достать оружие' : 'Взять в руки'}</button>`;
             const swingPrepared = combatState?.current_character?.melee_swing_round === combatState?.round_number;
-            attackButtonsHtml = handsButton + allowedAttacks.map(attackType =>
-                `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="useMeleeAttack(${index}, '${attackType}')">${attackType} · ${meleeCost} ОД</button>
-                 <button type="button" class="btn btn-sm btn-warning" ${combatActionDisabled || !swingPrepared ? 'disabled' : ''} title="${swingPrepared ? 'Выбрать часть тела' : 'Сначала выполните Замах'}" onclick="useMeleeAttack(${index}, '${attackType}', true)">Прицельный · ${meleeCost} ОД</button>`
-            ).join('');
+            attackButtonsHtml = handsButton + allowedAttacks.map((attackType) => {
+                const meleeCost = getMeleeActionPointCost(weightClass, attackType);
+                const circular = String(attackType).toLowerCase().includes('круг');
+                const aimedButton = circular
+                    ? ''
+                    : `<button type="button" class="btn btn-sm btn-warning" ${combatActionDisabled || !swingPrepared ? 'disabled' : ''} title="${swingPrepared ? 'Выбрать часть тела' : 'Сначала выполните Замах'}" onclick="useMeleeAttack(${index}, '${attackType}', true)">Прицельный: ${attackType.toLowerCase()} · ${meleeCost} ОД</button>`;
+                return `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="useMeleeAttack(${index}, '${attackType}')">${attackType} · ${meleeCost} ОД</button>${aimedButton}`;
+            }).join('');
         } else {
             attackButtonsHtml = renderRangedAttackButtons(weapon, template, index, combatActionDisabled);
         }
@@ -7321,6 +7324,20 @@ function getMeleeAttackModifiers(attackType, baseDamage, baseAP) {
     }
 }
 
+function getMeleeActionPointCost(weightClass, attackType) {
+    const normalizedClass = String(weightClass || '').toLowerCase().replaceAll('ё', 'е');
+    const normalizedAttack = String(attackType || '').toLowerCase().replaceAll('ё', 'е');
+    const baseCost = normalizedClass.includes('очень')
+        ? 4
+        : (normalizedClass.includes('лег') ? 2 : 3);
+    let modifier = 0;
+    if (normalizedAttack.includes('кол')) modifier = 1;
+    else if (normalizedAttack.includes('реж')) modifier = -1;
+    else if (normalizedAttack.includes('всп')) modifier = 2;
+    else if (normalizedAttack.includes('круг')) modifier = 1;
+    return Math.max(1, baseCost + modifier);
+}
+
 window.useWeaponFromEquipment = function(
     weaponIndex,
     fireMode = 'unaimed',
@@ -7450,7 +7467,7 @@ window.useMeleeAttack = function(weaponIndex, attackType, aimed = false) {
     );
     const baseDamage = isUnarmed
         ? Math.max(10, 10 * strengthBonus)
-        : (isFirearmButt ? ((Number(weapon.weight ?? template?.weight) || 0) < 1 ? 25 : 40) : (attrs.damage || 0));
+        : (isFirearmButt ? ((Number(weapon.weight ?? template?.weight) || 0) <= 1 ? 25 : 40) : (attrs.damage || 0));
     const baseAP = (isUnarmed || isFirearmButt) ? 0 : (attrs.armor_piercing || 0);
     const modifiers = (isUnarmed || isFirearmButt)
         ? { damage: baseDamage, ap: baseAP }
@@ -7458,7 +7475,7 @@ window.useMeleeAttack = function(weaponIndex, attackType, aimed = false) {
     const attackLabel = isUnarmed
         ? 'Удар кулаком'
         : (isFirearmButt
-            ? ((Number(weapon.weight ?? template?.weight) || 0) < 1 ? 'Удар рукояткой' : 'Удар прикладом')
+            ? ((Number(weapon.weight ?? template?.weight) || 0) <= 1 ? 'Удар рукояткой' : 'Удар прикладом')
             : attackType);
     const weaponLabel = isUnarmed ? 'Кулаки' : weapon.name;
     const combatState = window.locationCombatState;
@@ -7485,6 +7502,9 @@ window.useMeleeAttack = function(weaponIndex, attackType, aimed = false) {
             attackType,
             payment: aimed ? 'aimed' : null,
             meleeAimed: aimed,
+            targetType: String(attackType).toLowerCase().includes('круг')
+                ? 'multi_melee'
+                : 'character',
             source: 'sheet',
         });
     });

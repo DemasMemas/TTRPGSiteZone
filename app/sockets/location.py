@@ -199,6 +199,24 @@ def handle_move_in_location(data):
         },
         room=f"location_{location_id}",
     )
+    if moved_character.grapple_target_id:
+        captive = db.session.get(
+            LocationCharacter,
+            moved_character.grapple_target_id,
+        )
+        if captive:
+            emit(
+                'character_moved',
+                {
+                    'character_id': captive.character_id,
+                    'x': captive.pos_x,
+                    'y': captive.pos_y,
+                    'movement_cost': 0,
+                    'movement_mode': movement_mode,
+                    'moved_with_grapple': True,
+                },
+                room=f"location_{location_id}",
+            )
 
     if combat_state:
         socketio.emit('combat_state_updated', combat_state, room=f"location_{location_id}")

@@ -43,24 +43,108 @@ def test_unarmed_damage_uses_strength_bonus_with_minimum_ten():
     assert CombatService._virtual_melee_profile("unarmed", character_data=strong)["damage"] == 40
 
 
-def test_firearm_butt_uses_grip_damage_for_weapons_under_one_kilogram():
+def test_firearm_butt_uses_grip_damage_for_weapons_up_to_one_kilogram():
     grip = CombatService._virtual_melee_profile("firearm_butt", {"weight": 0.5})
+    boundary = CombatService._virtual_melee_profile("firearm_butt", {"weight": 1})
     butt = CombatService._virtual_melee_profile("firearm_butt", {"weight": 3.5})
 
     assert grip["damage"] == 25
+    assert boundary["damage"] == 25
+    assert CombatService._melee_action_cost(boundary, "firearm_butt") == 2
     assert butt["damage"] == 40
     assert grip["armor_piercing"] == 0
     assert grip["melee_damage_type"] == "crushing"
     assert butt["melee_damage_type"] == "crushing"
 
 
+def test_crushing_damage_multiplier_uses_twenty_percent_plus_five_per_kilogram():
+    assert CombatService._crushing_damage_multiplier({
+        "melee_damage_type": "crushing",
+        "weight": 0,
+    }) == 0.20
+    assert CombatService._crushing_damage_multiplier({
+        "melee_damage_type": "Дробящий",
+        "weight": 1,
+    }) == 0.25
+    assert CombatService._crushing_damage_multiplier({
+        "melee_damage_type": "crushing",
+        "weight": 3,
+    }) == 0.35
+
+
+def test_unarmed_crushing_attack_deals_twenty_percent_on_non_penetration(
+    monkeypatch,
+):
+    monkeypatch.setattr(CombatService, "_target_armor", lambda data, zone: (100, []))
+    monkeypatch.setattr(
+        CombatService,
+        "_apply_attack_damage",
+        lambda *args, **kwargs: {
+            "current": 698,
+            "zones": {"chest": {"current": 148}},
+        },
+    )
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": []}))
+    target = SimpleNamespace(character=SimpleNamespace(data={}), hp_zones={})
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": -1,
+            "attack_type": "unarmed",
+            "hit_difficulty": 1,
+            "round_number": 1,
+            "melee": True,
+        },
+        melee=True,
+        attack_type="unarmed",
+        aimed_zone="chest",
+        forced_roll=20,
+    )
+
+    assert result["crushing_non_penetration"] is True
+    assert result["crushing_damage_multiplier"] == 0.20
+    assert result["base_damage"] == 10
+    assert result["damage"] == 2
+
+
 def test_melee_action_cost_uses_attack_and_weight_class_rules():
     assert CombatService._melee_action_cost(
         {"weight_class": "light"}, "unarmed"
     ) == 2
-    assert CombatService._melee_action_cost({"weight_class": "Легкое"}) == 2
-    assert CombatService._melee_action_cost({"weight_class": "Тяжелое"}) == 3
-    assert CombatService._melee_action_cost({"weight_class": "Очень тяжелое"}) == 4
+    assert CombatService._melee_action_cost({"weight_class": "light"}, "\u0440\u0443\u0431\u044f\u0449\u0438\u0439") == 2
+    assert CombatService._melee_action_cost({"weight_class": "heavy"}, "\u0440\u0443\u0431\u044f\u0449\u0438\u0439") == 3
+    assert CombatService._melee_action_cost({"weight_class": "heavy_plus"}, "\u0440\u0443\u0431\u044f\u0449\u0438\u0439") == 4
+    assert CombatService._melee_action_cost({"weight_class": "heavy"}, "\u0440\u0435\u0436\u0443\u0449\u0438\u0439") == 2
+    assert CombatService._melee_action_cost({"weight_class": "heavy"}, "\u043a\u043e\u043b\u044e\u0449\u0438\u0439") == 4
+    assert CombatService._melee_action_cost({"weight_class": "heavy"}, "\u0432\u0441\u043f\u0430\u0440\u044b\u0432\u0430\u044e\u0449\u0438\u0439") == 5
+    assert CombatService._melee_action_cost({"weight_class": "heavy"}, "\u043a\u0440\u0443\u0433\u043e\u0432\u043e\u0439") == 4
+
+
+def test_circular_attack_uses_slashing_or_crushing_damage_profile(app):
+    with app.app_context():
+        slashing = CombatService._weapon_damage_profile(
+            {
+                "attributes": {
+                    "damage": 40,
+                    "allowed_attacks": ["\u0420\u0443\u0431\u044f\u0449\u0438\u0439", "\u041a\u0440\u0443\u0433\u043e\u0432\u043e\u0439"],
+                }
+            },
+            "\u041a\u0440\u0443\u0433\u043e\u0432\u043e\u0439",
+        )
+        crushing = CombatService._weapon_damage_profile(
+            {
+                "attributes": {
+                    "damage": 40,
+                    "allowed_attacks": ["\u0414\u0440\u043e\u0431\u044f\u0449\u0438\u0439", "\u041a\u0440\u0443\u0433\u043e\u0432\u043e\u0439"],
+                }
+            },
+            "\u041a\u0440\u0443\u0433\u043e\u0432\u043e\u0439",
+        )
+
+    assert slashing["melee_damage_type"] == "slashing"
+    assert crushing["melee_damage_type"] == "crushing"
 
 
 def test_melee_adjacency_includes_diagonal_but_not_two_tiles():

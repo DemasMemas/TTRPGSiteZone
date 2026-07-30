@@ -6,6 +6,7 @@ from app.services.equipment_importer import (
     _parse_exoskeleton_battery,
     _parse_burst_profile,
     _parse_helmets,
+    _parse_melee_weapons,
     _parse_ranged_weapons,
 )
 
@@ -50,6 +51,20 @@ def test_machine_gun_uses_variable_burst_length():
     assert profile["machine_gun_burst"] is True
     assert profile["burst_size"] is None
     assert profile["supports_burst"] is True
+
+
+def test_melee_weapon_imports_weight_class_from_rules_description():
+    rows = [{
+        "S": "\u0422\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u0442\u043e\u043f\u043e\u0440",
+        "T": "\u0422\u044f\u0436\u0435\u043b\u043e\u0435. 15% \u0431\u0440\u043e\u043d\u0435\u0431\u043e\u0439\u043d\u043e\u0441\u0442\u0438",
+        "U": "40",
+        "AC": "\u0420\u0443\u0431\u044f\u0449\u0438\u0439",
+        "AD": "\u041a\u0440\u0443\u0433\u043e\u0432\u043e\u0439",
+    }]
+
+    weapon = _parse_melee_weapons(rows)[0]
+
+    assert weapon["attributes"]["weight_class"] == "\u0422\u044f\u0436\u0435\u043b\u043e\u0435"
 
 
 def test_ranged_weapon_keeps_fractional_and_textual_characteristics():
