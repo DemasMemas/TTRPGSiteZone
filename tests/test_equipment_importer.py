@@ -1,9 +1,11 @@
 from app.services.equipment_importer import (
     _canonical_caliber,
     _finalize_weapon_magazine_attributes,
+    _integrated_helmet_name,
     _magazine_volume,
     _parse_exoskeleton_battery,
     _parse_burst_profile,
+    _parse_helmets,
     _parse_ranged_weapons,
 )
 
@@ -154,3 +156,29 @@ def test_exoskeleton_battery_is_imported_as_one_day_module():
         },
         "compatible_ids": [],
     }]
+
+
+def test_integrated_helmet_uses_armor_specific_name():
+    assert _integrated_helmet_name("Комбинезон Купол") == "Шлем Купол"
+    assert _integrated_helmet_name("Экзоскелет") == "Шлем Экзоскелета"
+
+
+def test_helmet_import_removes_misc_prefix_and_skips_embedded_templates():
+    rows = [{} for _ in range(61)]
+    rows[22] = {
+        "A": "Головной убор",
+        "B": "Прочее Ушанка",
+        "C": "1",
+        "I": "Текстиль",
+    }
+    rows[56] = {
+        "A": "Шлем Купол",
+        "C": "10%",
+        "D": "3",
+        "E": "3",
+    }
+
+    helmets = _parse_helmets(rows)
+
+    assert [template["name"] for template in helmets] == ["Ушанка"]
+    assert all(template["subcategory"] != "Встроенный" for template in helmets)

@@ -484,6 +484,19 @@ def _integrated_helmet_profile(name: str) -> Optional[Dict[str, Any]]:
     return dict(profile) if profile else None
 
 
+def _integrated_helmet_name(name: str) -> Optional[str]:
+    normalized = _normalize_text(name).lower().replace("ё", "е")
+    names = {
+        "костюм химзащиты": "Шлем Костюма Химзащиты",
+        "комбинезон купол": "Шлем Купол",
+        "комбинезон купол м": "Шлем Купол-М",
+        "комбинезон купол-м": "Шлем Купол-М",
+        "комбинезон гроб": "Шлем ГРОБ",
+        "экзоскелет": "Шлем Экзоскелета",
+    }
+    return names.get(normalized)
+
+
 def _parse_armor(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     templates: List[Dict[str, Any]] = []
     for row in rows[2:20]:
@@ -506,6 +519,7 @@ def _parse_armor(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         if "head" in attributes["protection_zones"]:
             attributes["integrated_helmet"] = True
             attributes["integrated_helmet_profile"] = _integrated_helmet_profile(name)
+            attributes["integrated_helmet_name"] = _integrated_helmet_name(name)
         if _normalize_text(name).lower().replace("ё", "е") == "экзоскелет":
             attributes.update({
                 "is_exoskeleton": True,
@@ -538,6 +552,7 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         name = _normalize_text(row.get("B"))
         if not name:
             continue
+        name = re.sub(r"^Прочее\s+", "", name, flags=re.IGNORECASE)
         is_gas_mask = name.lower().startswith(("противогаз", "респиратор"))
         requires_filter = _normalize_text(row.get("A")) == "Противогазо-шлем"
         integrated_visor = name.lower().startswith("шлем")
@@ -578,41 +593,6 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
             }
         )
 
-    for row in rows[56:61]:
-        name = _normalize_text(row.get("A"))
-        if not name:
-            continue
-        physical_raw = _normalize_text(row.get("C"))
-        templates.append(
-            {
-                "name": name,
-                "category": "helmet",
-                "subcategory": "Встроенный",
-                "item_class": None,
-                "description": "Встроенный в броню шлем",
-                "price": 0,
-                "weight": 0.0,
-                "volume": 0.0,
-                "attributes": {
-                    "import_source": "equipment_workbook",
-                    "embedded": True,
-                    "max_durability": 1,
-                    "protection": {
-                        "physical": _as_float(physical_raw),
-                        "chemical": 0.0,
-                        "thermal": 0.0,
-                        "electric": 0.0,
-                        "radiation": 0.0,
-                    },
-                    "physical_protection_rule": physical_raw if not re.fullmatch(r"-?\d+(?:[.,]\d+)?", physical_raw) else "",
-                    "charisma_penalty": _as_int(row.get("D")),
-                    "accuracy_penalty": _as_int(row.get("E")),
-                    "protection_zones": ["crown", "back", "ears", "face"],
-                    "raw_row": row,
-                },
-                "compatible_ids": [],
-            }
-        )
     return templates
 
 

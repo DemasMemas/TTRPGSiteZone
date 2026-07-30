@@ -399,8 +399,8 @@ def test_combat_start_rolls_tactics_initiative_only_for_selected_characters(
         if item["location_character_id"] == excluded.id
     )
     assert selected_state["initiative_roll"] == 10
-    assert selected_state["initiative_bonus"] == 5
-    assert selected_state["initiative_total"] == 15
+    assert selected_state["initiative_bonus"] == 4
+    assert selected_state["initiative_total"] == 14
     assert excluded_state["initiative_roll"] is None
     assert excluded_state["initiative_total"] is None
 

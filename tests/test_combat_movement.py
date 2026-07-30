@@ -81,7 +81,7 @@ def test_initiative_bonus_uses_tactics_bonus_and_explicit_modifier():
 
     profile = CombatService._combat_profile(character)
 
-    assert profile["initiative_bonus"] == 8
+    assert profile["initiative_bonus"] == 7
 
 
 def test_movement_penalty_combines_weight_armor_and_temporary_modifier():
@@ -183,6 +183,28 @@ def test_powered_exoskeleton_adds_strength_level_and_roll_bonuses():
     assert weight_details["weight_per_penalty"] == pytest.approx(7)
 
 
+@pytest.mark.parametrize(
+    "skill_path",
+    [
+        "skills.physical.strength",
+        "skills.social.charisma",
+        "skills.other.tactics",
+    ],
+)
+def test_skill_bonus_is_added_to_value_before_roll_modifier(skill_path):
+    category, skill = skill_path.split(".")[1:]
+    data = {
+        "skills": {
+            category: {
+                skill: {"base": 5, "bonus": 8},
+            },
+        },
+    }
+
+    assert CombatService._skill_value(data, skill_path) == 13
+    assert CombatService._skill_modifier(data, skill_path) == 1
+
+
 def test_exoskeleton_without_charged_battery_keeps_weight_penalty():
     character_data = {
         "inventory": {
@@ -204,6 +226,27 @@ def test_exoskeleton_without_charged_battery_keeps_weight_penalty():
     assert details["powered_exoskeleton"] is False
     assert details["weight"] == 1
     assert CombatService._movement_penalty(location_character) == 6
+
+
+def test_helmet_movement_penalty_is_added_but_integrated_helmet_is_not():
+    data = {
+        "equipment": {
+            "armor": {"movementPenalty": 2},
+            "helmet": {"movementPenalty": 1},
+        },
+    }
+
+    details = CombatService._movement_penalty_breakdown(data)
+
+    assert details["armor"] == 2
+    assert details["helmet"] == 1
+    assert details["total"] == 3
+
+    data["equipment"]["helmet"]["integratedWithArmor"] = True
+    integrated = CombatService._movement_penalty_breakdown(data)
+
+    assert integrated["helmet"] == 0
+    assert integrated["total"] == 2
 
 
 def test_carrying_capacity_uses_strength_bonus_without_health_roll_penalties():
@@ -230,7 +273,7 @@ def test_carrying_capacity_uses_strength_bonus_without_health_roll_penalties():
     assert details["penalty"] == 1
 
 
-def test_skill_roll_bonus_does_not_change_carrying_capacity():
+def test_skill_bonus_is_part_of_effective_strength_for_carrying_capacity():
     data = {
         "skills": {
             "physical": {
@@ -241,8 +284,8 @@ def test_skill_roll_bonus_does_not_change_carrying_capacity():
 
     details = CombatService._inventory_weight_details(data)
 
-    assert details["effective_strength"] == 10
-    assert details["weight_per_penalty"] == pytest.approx(5)
+    assert details["effective_strength"] == 16
+    assert details["weight_per_penalty"] == pytest.approx(6.5)
 
 
 @pytest.mark.parametrize(
@@ -640,16 +683,16 @@ def test_weapon_ergonomics_combines_all_available_sources():
 
     profile = CombatService._weapon_ergonomics_profile(location_character, weapon, 2)
 
-    assert profile["value"] == 50
+    assert profile["value"] == 57
     assert profile["weapon_index"] == 2
-    assert profile["shooting_value"] == 15
-    assert profile["tactics_value"] == 10
+    assert profile["shooting_value"] == 19
+    assert profile["tactics_value"] == 13
     assert profile["posture_bonus"] == 10
     assert profile["module_modifier"] == 5
     assert profile["magazine_modifier"] == -5
     assert profile["helmet_penalty"] == 5
     assert profile["draw_action_points"] == 2
-    assert profile["reload_action_points_modifier"] == 1
+    assert profile["reload_action_points_modifier"] == 0
     assert profile["aimed_shot_action_points"] == 4
 
 

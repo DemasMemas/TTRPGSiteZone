@@ -531,7 +531,10 @@ function updateDataFromFields() {
             value = input.value;
         }
         if (input.dataset?.protectionPercent === 'true' && value !== null) {
-            value = value / 100;
+            value = Math.round(value) / 100;
+        }
+        if (input.dataset?.transientBonus && value !== null) {
+            value -= Number(input.dataset.transientBonus) || 0;
         }
         // Преобразование для templateId и подобных полей
         if (name.endsWith('templateId') || name.endsWith('Id')) {
@@ -560,12 +563,12 @@ function renderCreatedByPlayerBadge(item) {
 
 function protectionPercentValue(value) {
     const numeric = Number(value) || 0;
-    return Math.abs(numeric) <= 1 ? numeric * 100 : numeric;
+    const percent = Math.abs(numeric) <= 1 ? numeric * 100 : numeric;
+    return Math.round(percent);
 }
 
 function formatProtectionPercent(value) {
-    const percent = protectionPercentValue(value);
-    return `${Number.isInteger(percent) ? percent : percent.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}%`;
+    return `${protectionPercentValue(value)}%`;
 }
 
 function scheduleAutoSave() {
@@ -861,6 +864,22 @@ function getIntegratedHelmetProfile(armor, template = null) {
     return profiles[name] || null;
 }
 
+function getIntegratedHelmetName(armor, template = null) {
+    const configuredName = template?.attributes?.integrated_helmet_name
+        || armor?.attributes?.integrated_helmet_name;
+    if (configuredName) return configuredName;
+    const name = String(template?.name || armor?.name || '').trim().toLowerCase().replace(/ё/g, 'е');
+    const names = {
+        'костюм химзащиты': 'Шлем Костюма Химзащиты',
+        'комбинезон купол': 'Шлем Купол',
+        'комбинезон купол м': 'Шлем Купол-М',
+        'комбинезон купол-м': 'Шлем Купол-М',
+        'комбинезон гроб': 'Шлем ГРОБ',
+        'экзоскелет': 'Шлем Экзоскелета',
+    };
+    return names[name] || `${armor.name} · встроенный шлем`;
+}
+
 function syncIntegratedArmorHelmet(armor, template = null) {
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     const currentHelmet = currentCharacterData.equipment.helmet;
@@ -877,7 +896,7 @@ function syncIntegratedArmorHelmet(armor, template = null) {
         templateId: `integrated:${armor.templateId || 'armor'}`,
         integratedWithArmor: true,
         sourceArmorTemplateId: armor.templateId,
-        name: `${armor.name} · встроенный шлем`,
+        name: getIntegratedHelmetName(armor, template),
         material: armor.material,
         protection: {
             physical: profile.physical,
@@ -1042,7 +1061,7 @@ function getTotalWeight(item) {
     return total;
 }
 
-function getSkillRollModifier(data, skillPath) {
+function getSkillEffectiveValue(data, skillPath) {
     const parts = skillPath.split('.');
     let skill = data?.skills;
     for (const part of parts) {
@@ -1050,17 +1069,26 @@ function getSkillRollModifier(data, skillPath) {
         skill = skill[part];
     }
     const base = Number(skill?.base);
-    const permanentBonus = Number(skill?.bonus) || 0;
-    const baseModifier = Number.isFinite(base) ? Math.floor((base - 10) / 2) : 0;
+    const bonus = Number(skill?.bonus) || 0;
+    const statName = skillPath.split('.').pop();
     const modifiers = data?.health?.combatMeta?.consumableModifiers;
-    const temporaryBonus = Array.isArray(modifiers)
+    const temporaryValue = Array.isArray(modifiers)
         ? modifiers.reduce((sum, modifier) => {
-            if (!modifier || modifier.stat !== skillPath.split('.').pop()) return sum;
+            if (!modifier || ![statName, `${statName}_delta`].includes(modifier.stat)) return sum;
             if (modifier.remaining !== undefined && Number(modifier.remaining) <= 0) return sum;
             return sum + (Number(modifier.value) || 0);
         }, 0)
         : 0;
-    return baseModifier + permanentBonus + temporaryBonus + getHealthRollModifier(data, skillPath);
+    const equipmentValue = skillPath === 'physical.strength'
+        ? getExoskeletonPowerProfile(data).strengthLevelBonus
+        : 0;
+    return (Number.isFinite(base) ? base : 0) + bonus + temporaryValue + equipmentValue;
+}
+
+function getSkillRollModifier(data, skillPath) {
+    const effectiveValue = getSkillEffectiveValue(data, skillPath);
+    return Math.floor((effectiveValue - 10) / 2)
+        + getHealthRollModifier(data, skillPath);
 }
 
 function getHealthRollModifier(data, skillPath, options = {}) {
@@ -1114,21 +1142,10 @@ function hasHealthRollDisadvantage(data, skillPath) {
 }
 
 function getWeightPerMovementPenalty(data) {
-    const strength = data?.skills?.physical?.strength || {};
-    const base = Number(strength.base);
-    const modifiers = data?.health?.combatMeta?.consumableModifiers;
-    const temporaryStrength = Array.isArray(modifiers)
-        ? modifiers.reduce((sum, modifier) => {
-            if (!modifier || !['strength', 'strength_delta', 'generic', 'generic_multiplier'].includes(modifier.stat)) {
-                return sum;
-            }
-            if (modifier.remaining !== undefined && Number(modifier.remaining) <= 0) return sum;
-            return sum + (Number(modifier.value) || 0);
-        }, 0)
-        : 0;
-    const effectiveStrength = (Number.isFinite(base) ? base : 10)
-        + temporaryStrength
-        + getExoskeletonPowerProfile(data).strengthLevelBonus;
+    const strength = data?.skills?.physical?.strength;
+    const effectiveStrength = strength
+        ? getSkillEffectiveValue(data, 'physical.strength')
+        : 10;
     const capacityModifier = Math.floor((effectiveStrength - 10) / 2);
     return Math.max(0.5, 5 * (1 + capacityModifier * 0.1));
 }
@@ -1154,7 +1171,6 @@ function getExoskeletonPowerProfile(data) {
         isExoskeleton,
         powered,
         strengthLevelBonus: powered ? 8 : 0,
-        strengthRollBonus: powered ? 4 : 0,
     };
 }
 
@@ -1183,6 +1199,10 @@ function getMovementPenaltyBreakdown(data, suppliedWeight = null) {
     const backpackReduction = Math.max(0, Number(eq.backpack?.attributes?.weight_reduction) || 0);
     let weightPenalty = Math.max(0, rawWeightPenalty - backpackReduction);
     let armorPenalty = Number(armor.movementPenalty ?? armor.movement_penalty) || 0;
+    const helmet = eq.helmet || {};
+    const helmetPenalty = helmet.integratedWithArmor
+        ? 0
+        : (Number(helmet.movementPenalty ?? helmet.movement_penalty) || 0);
     const exoskeleton = getExoskeletonPowerProfile(data);
     const isExoskeleton = exoskeleton.isExoskeleton;
     const powered = exoskeleton.powered;
@@ -1207,13 +1227,14 @@ function getMovementPenaltyBreakdown(data, suppliedWeight = null) {
         0,
     );
     return {
-        total: Math.max(0, armorPenalty + weightPenalty + temporary + injuries),
+        total: Math.max(0, armorPenalty + helmetPenalty + weightPenalty + temporary + injuries),
         totalWeight,
         weightPerPenalty,
         rawWeightPenalty,
         backpackReduction,
         weightPenalty,
         armorPenalty,
+        helmetPenalty,
         temporary,
         injuries,
         poweredExoskeleton: powered,
@@ -2526,23 +2547,22 @@ async function renderSkillsTab(data) {
 
     function renderSkillRow(label, base, bonus, xp, path) {
         const required = getRequiredXp(base);
-        const equipmentNote = (
+        const transientBonus = (
             path === 'physical.strength'
             && getExoskeletonPowerProfile(data).powered
         )
-            ? '<span style="font-size:0.7rem; color:#b8c994;">Экзоскелет: +8 к Силе, +4 к броску</span>'
-            : '';
+            ? 8
+            : 0;
         return `
             <div style="display: flex; align-items: center; gap: 3px; margin-bottom: 5px; flex-wrap: wrap;">
                 <span style="width: 125px; word-break: break-word; line-height: 1.3;" onclick="window.rollSkill('${path}', '${label}')" title="${label}">${label}</span>
                 <input type="number" class="form-control number-input" name="skills.${path}.base" value="${base}" style="width: 55px;">
                 <span>+</span>
-                <input type="number" class="form-control number-input" name="skills.${path}.bonus" value="${bonus}" style="width: 55px;">
+                <input type="number" class="form-control number-input" name="skills.${path}.bonus" value="${Number(bonus || 0) + transientBonus}" data-transient-bonus="${transientBonus}" style="width: 55px;">
                 <span style="font-size: 0.7rem;">Опыт: ${xp}/${required}</span>
                 <button type="button" class="btn btn-sm btn-secondary" onclick="addSkillXpFromPoints('${path}')" style="padding: 2px 4px; font-size: 0.7rem;" title="Взять 1 свободное очко навыка">➕</button>
                 <button type="button" class="btn btn-sm btn-secondary" onclick="addSkillXpFromUse('${path}')" style="padding: 2px 4px; font-size: 0.7rem;" title="Добавить опыт за использование">💡</button>
                 <span style="cursor: pointer; font-size: 1.1em;" onclick="window.rollSkill('${path}', '${label}')">🎲</span>
-                ${equipmentNote}
             </div>
         `;
     }
@@ -2812,6 +2832,14 @@ async function renderEquipmentTab(data) {
     } catch (e) {
         console.error('Failed to load templates', e);
     }
+    const equippedHelmetTemplate = helmetTemplates.find(
+        template => template.id == helmet.templateId
+    );
+    if (helmet.templateId && helmet.movementPenalty === undefined) {
+        helmet.movementPenalty = Number(
+            equippedHelmetTemplate?.attributes?.movement_penalty
+        ) || 0;
+    }
 
     const helmetModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'helmet');
     const gasMaskModTemplates = modificationTemplates.filter(t => t.attributes?.type === 'gas_mask');
@@ -2840,11 +2868,11 @@ async function renderEquipmentTab(data) {
         return `
             <div class="protection-grid">
                 <div>Физ</div><div>Хим</div><div>Терм</div><div>Элек</div><div>Рад</div>
-                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.physical" value="${protectionPercentValue(prot.physical)}">
-                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.chemical" value="${protectionPercentValue(prot.chemical)}">
-                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.thermal" value="${protectionPercentValue(prot.thermal)}">
-                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.electric" value="${protectionPercentValue(prot.electric)}">
-                <input type="number" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.radiation" value="${protectionPercentValue(prot.radiation)}">
+                <input type="number" step="1" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.physical" value="${protectionPercentValue(prot.physical)}">
+                <input type="number" step="1" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.chemical" value="${protectionPercentValue(prot.chemical)}">
+                <input type="number" step="1" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.thermal" value="${protectionPercentValue(prot.thermal)}">
+                <input type="number" step="1" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.electric" value="${protectionPercentValue(prot.electric)}">
+                <input type="number" step="1" class="number-input form-control" data-protection-percent="true" name="${prefix}.protection.radiation" value="${protectionPercentValue(prot.radiation)}">
             </div>
         `;
     }
@@ -2861,7 +2889,7 @@ async function renderEquipmentTab(data) {
         <!-- Шлем -->
         <div class="equipment-group">
             <div class="equipment-row" style="display: flex; gap: 10px;">
-                <div class="equipment-main-block" style="flex: 2;">
+                <div class="equipment-main-block helmet-main-block">
                     <div class="block-header">
                         <h4>Шлем ${renderCreatedByPlayerBadge(helmet)}</h4>
                         <div style="display: flex; gap: 10px;">
@@ -2878,11 +2906,11 @@ async function renderEquipmentTab(data) {
                                 ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number">
+                        <div class="field-group field-number field-durability">
                             <label>Прочность</label>
                             <input type="number" class="number-input form-control" name="equipment.helmet.durability" value="${helmet.durability || 0}">
                         </div>
-                        <div class="field-group field-select">
+                        <div class="field-group field-select field-stage">
                             <label>Стадия</label>
                             <select name="equipment.helmet.stage" class="form-control" onchange="updateArmorStageFromSelect(this, 'helmet')">
                                 ${['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'].map((name, idx) =>
@@ -2890,23 +2918,24 @@ async function renderEquipmentTab(data) {
                                 ).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number" style="min-width: 100px;">
+                        <div class="field-group field-number field-stage-durability">
                             <label>Прочность стадии</label>
                             <input type="number" class="number-input form-control" name="equipment.helmet.currentStageDurability" value="${helmet.currentStageDurability ?? helmet.stageDurability ?? 0}" step="1" min="0">
                         </div>
-                        <div class="field-group field-number" style="min-width: 130px;">
+                        <div class="field-group field-number field-stage-durability-max">
                             <label>Макс. прочность стадии</label>
                             <input type="number" class="number-input form-control" value="${calculateStageDurability(helmet.durability || 0, helmet.material || 'Текстиль')}" readonly disabled>
                         </div>
-                        <div class="field-group field-select">
+                        <div class="field-group field-select field-material">
                             <label>Материал</label>
                             <select name="equipment.helmet.material" class="form-control">
                                 ${materialOptions.map(opt => `<option value="${opt}" ${helmet.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                             </select>
                         </div>
                         <div class="field-group field-number"><label>Штраф Точности</label><input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Модификатор Харизмы</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
+                        <div class="field-group field-number field-ergonomics-penalty"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Бонус Харизмы</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
+                        <div class="field-group field-number field-movement-penalty"><label>Штраф перемещения</label><input type="number" class="number-input form-control" name="equipment.helmet.movementPenalty" value="${helmet.movementPenalty || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block" style="flex: 1;">
@@ -2959,19 +2988,13 @@ async function renderEquipmentTab(data) {
                                 ${gasMaskTemplates.map(t => `<option value="${t.id}" ${gasMask.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number">
+                        <div class="field-group field-number field-durability">
                             <label>Прочность</label>
                             <input type="number" class="number-input form-control" name="equipment.gasMask.durability" value="${gasMask.durability || 0}">
                         </div>
-                        <div class="field-group field-select">
-                            <label>Материал</label>
-                            <select name="equipment.gasMask.material" class="form-control">
-                                ${materialOptions.map(opt => `<option value="${opt}" ${gasMask.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
-                            </select>
-                        </div>
                         <div class="field-group field-number"><label>Штраф Точности</label><input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Модификатор Харизмы</label><input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
+                        <div class="field-group field-number field-ergonomics-penalty"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Бонус Харизмы</label><input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block">
@@ -3012,11 +3035,11 @@ async function renderEquipmentTab(data) {
                                 ${armorTemplates.map(t => `<option value="${t.id}" ${armor.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number">
+                        <div class="field-group field-number field-durability">
                             <label>Прочность</label>
                             <input type="number" class="number-input form-control" name="equipment.armor.durability" value="${armor.durability || 0}">
                         </div>
-                        <div class="field-group field-select">
+                        <div class="field-group field-select field-stage">
                             <label>Стадия</label>
                             <select name="equipment.armor.stage" class="form-control" onchange="updateArmorStageFromSelect(this, 'armor')">
                                 ${['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'].map((name, idx) =>
@@ -3024,21 +3047,21 @@ async function renderEquipmentTab(data) {
                                 ).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number" style="min-width: 100px;">
+                        <div class="field-group field-number field-stage-durability">
                             <label>Прочность стадии</label>
                             <input type="number" class="number-input form-control" name="equipment.armor.currentStageDurability" value="${armor.currentStageDurability ?? armor.stageDurability ?? 0}" step="1" min="0">
                         </div>
-                        <div class="field-group field-number" style="min-width: 130px;">
+                        <div class="field-group field-number field-stage-durability-max">
                             <label>Макс. прочность стадии</label>
                             <input type="number" class="number-input form-control" value="${calculateStageDurability(armor.durability || 0, armor.material || 'Текстиль')}" readonly disabled>
                         </div>
-                        <div class="field-group field-select">
+                        <div class="field-group field-select field-material">
                             <label>Материал</label>
                             <select name="equipment.armor.material" class="form-control">
                                 ${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number"><label>Штраф перемещения брони</label><input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
+                        <div class="field-group field-number field-movement-penalty"><label>Штраф перемещения</label><input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block" style="flex: 1;">
@@ -3056,13 +3079,15 @@ async function renderEquipmentTab(data) {
                         })()}
                     </div>
                 </div>
+            </div>
+            <!-- Слоты брони всегда занимают отдельную строку. -->
                 ${renderSlotsUniversal(armor, ['equipment', 'armor']) ? `
-                    <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
+                    <div class="equipment-slots-row">
                         ${renderSlotsUniversal(armor, ['equipment', 'armor'])}
                     </div>
                 ` : ''}
-                <!-- Контейнеры на броне (отдельная строка, ниже) -->
-                <div style="margin-top: 15px; display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start;">
+                ${(armor.containers || []).length ? `
+                <div class="armor-containers-row">
                     ${(armor.containers || []).map((slot, idx) => `
                         <div style="border: 1px solid #666; border-radius: 4px; padding: 5px; width: 180px; background: rgba(0,0,0,0.2);">
                             <div style="display: flex; align-items: center; gap: 5px;">
@@ -3082,7 +3107,7 @@ async function renderEquipmentTab(data) {
                         </div>
                     `).join('')}
                 </div>
-            </div>
+                ` : ''}
             <div class="modifications-block">
                 <div style="display:flex; align-items:center;">
                     <h5 style="margin:0;">Модификации брони</h5>
@@ -3281,7 +3306,7 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
                 info = `${info} (заряд ${power !== undefined ? power : '?'}%)`;
             } else if (slot.type === 'exoskeleton_battery') {
                 const days = Math.max(0, Number(installed.attributes?.remaining_days) || 0);
-                info = `${info} (${days > 0 ? `заряд на ${days} сут.` : 'разряжен'})`;
+                info = days > 0 ? `${days} сут.` : 'Разряжен';
             } else if (slot.type === 'armor_plate') {
                 const prot = installed.attributes?.protection?.physical ?? installed.protection?.physical ?? 0;
                 const dur = installed.durability ?? 0;
@@ -3737,7 +3762,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     const isPistol = String(template?.subcategory || '').trim().toLowerCase() === 'пистолеты';
     const unaimedActionPoints = isPistol ? 1 : 2;
 
-    buttons.push(`<button type="button" class="btn btn-sm btn-secondary" ${disabledAttr} onclick="aimWeaponFromEquipment(${index})">Прицеливание · 1 ОД</button>`);
+    buttons.push(`<button type="button" class="btn btn-sm btn-aim-action" ${disabledAttr} onclick="aimWeaponFromEquipment(${index})">Прицеливание · 1 ОД</button>`);
     singleOptions.forEach((shots) => {
         const modeName = shots === 1
             ? ''
@@ -3929,12 +3954,22 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
 
             if (hasFixedMagazine) {
                 const maxAmmo = weaponTemplate.attributes?.magazine_size || 0;
+                const fixedAmmo = Array.isArray(weapon.fixedAmmo)
+                    ? weapon.fixedAmmo.filter(stack => Number(stack?.quantity) > 0)
+                    : [];
+                const stackedAmmo = fixedAmmo.reduce((sum, stack) => sum + Number(stack.quantity || 0), 0);
+                const totalAmmo = fixedAmmo.length ? stackedAmmo : Math.max(0, Number(weapon.ammo || 0));
+                const nextAmmo = fixedAmmo.length ? fixedAmmo[fixedAmmo.length - 1] : null;
+                const ammoBreakdown = fixedAmmo.length
+                    ? `<br><small>Состав: ${fixedAmmo.map(stack => `${formatAmmoStackLabel(stack)} (${stack.quantity})`).join(', ')}
+                        <br>▶ Следующий: ${formatAmmoStackLabel(nextAmmo)}</small>`
+                    : (totalAmmo > 0 ? '<br><small>Состав старых данных не указан</small>' : '');
                 magazineHtml = `<div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
-                    <strong>Патроны (несъёмный магазин):</strong>
+                    <strong>Магазин:</strong>
                     <div style="margin-left: 15px; display: flex; align-items: center; gap: 10px; margin-top: 5px;">
-                        <input type="number" class="form-control number-input" style="width:80px;"
-                               name="weapons.${index}.ammo" value="${weapon.ammo || 0}"> / ${maxAmmo}
+                        <span>Несъёмный (${totalAmmo}/${maxAmmo})${ammoBreakdown}</span>
                         <button type="button" class="btn btn-sm btn-primary" onclick="reloadFixedMagazine(${index})">Зарядить</button>
+                        <button type="button" class="btn btn-sm btn-danger" onclick="unloadFixedMagazine(${index})" ${totalAmmo <= 0 ? 'disabled' : ''}>Разрядить</button>
                     </div>
                 </div>`;
             } else {
@@ -5261,6 +5296,83 @@ window.confirmReloadMagazine = async function(pathStr) {
     showNotification(`Заряжено ${plan.quantity} патронов (${ammoItem.name})`, 'success');
 };
 
+async function returnAmmoStacksToInventory(ammoStacks, targetArray) {
+    const allTemplates = await getAllItemTemplates();
+    for (const ammoEntry of ammoStacks) {
+        const quantity = Math.max(0, Number(ammoEntry?.quantity || 0));
+        if (quantity <= 0) continue;
+        const template = allTemplates.find(t => t.id == ammoEntry.templateId);
+        const category = template?.category || ammoEntry.category || 'ammo';
+        const existing = targetArray.find(item =>
+            item.category === category
+            && getAmmoStackKey(item) === getAmmoStackKey(ammoEntry)
+        );
+        if (existing) {
+            existing.quantity += quantity;
+            updateAmmoWeight(existing);
+        } else {
+            const newAmmo = template
+                ? createItemFromTemplate(template)
+                : {
+                    ...ammoEntry,
+                    attributes: { ...(ammoEntry.attributes || {}) },
+                    category,
+                };
+            newAmmo.quantity = quantity;
+            if (template) {
+                applyAmmoVariantToItem(newAmmo, template, ammoEntry.ammo_variant || null);
+            }
+            updateAmmoWeight(newAmmo);
+            targetArray.push(newAmmo);
+        }
+    }
+}
+
+window.unloadFixedMagazine = async function(weaponIndex) {
+    const weapon = currentCharacterData.weapons?.[weaponIndex];
+    if (!weapon) return;
+    const weaponTemplates = await loadTemplatesForLobby('weapon');
+    const weaponTemplate = weaponTemplates.find(template => template.id == weapon.templateId);
+    if (!weaponTemplate?.attributes?.fixedMagazine) {
+        showNotification('Это оружие использует сменный магазин');
+        return;
+    }
+
+    const ammoStacks = Array.isArray(weapon.fixedAmmo)
+        ? weapon.fixedAmmo.filter(stack => Number(stack?.quantity) > 0)
+        : [];
+    const legacyAmmoCount = Math.max(0, Number(weapon.ammo || 0));
+    if (!ammoStacks.length) {
+        showNotification(
+            legacyAmmoCount > 0
+                ? 'Нельзя разрядить старую запись: тип патронов не указан'
+                : 'Магазин пуст'
+        );
+        return;
+    }
+
+    if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+    if (!Array.isArray(currentCharacterData.inventory.backpack)) {
+        currentCharacterData.inventory.backpack = [];
+    }
+    await returnAmmoStacksToInventory(ammoStacks, currentCharacterData.inventory.backpack);
+    weapon.fixedAmmo = [];
+    weapon.ammo = 0;
+    const loadingState = currentCharacterData.combatMagazineLoading;
+    if (
+        loadingState?.targetType === 'fixed'
+        && Number(loadingState.weaponIndex) === Number(weaponIndex)
+    ) {
+        delete currentCharacterData.combatMagazineLoading;
+    }
+
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    scheduleAutoSave();
+    forceSyncCharacter();
+    showNotification('Несъёмный магазин разряжен', 'success');
+};
+
 window.unloadMagazineToInventory = async function(pathStr) {
     const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
     const mag = getItemByPath(path);
@@ -5275,29 +5387,14 @@ window.unloadMagazineToInventory = async function(pathStr) {
     else if (parent?.backpack) targetArray = parent.backpack;
     else targetArray = currentCharacterData.inventory.backpack;
 
-    const allTemplates = await getAllItemTemplates();
-
-    for (const ammoEntry of mag.ammo) {
-        const template = allTemplates.find(t => t.id === ammoEntry.templateId);
-        if (!template) continue;
-        const existing = targetArray.find(item => item.category === 'ammo' && getAmmoStackKey(item) === getAmmoStackKey(ammoEntry));
-        if (existing) {
-            existing.quantity += ammoEntry.quantity;
-            updateAmmoWeight(existing);
-        } else {
-            const newAmmo = createItemFromTemplate(template);
-            newAmmo.quantity = ammoEntry.quantity;
-            applyAmmoVariantToItem(newAmmo, template, ammoEntry.ammo_variant || null);
-            updateAmmoWeight(newAmmo);
-            targetArray.push(newAmmo);
-        }
-    }
+    await returnAmmoStacksToInventory(mag.ammo, targetArray);
 
     mag.ammo = [];
     updateMagazineWeight(mag);
 
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
+    forceSyncCharacter();
     showNotification('Магазин разряжен', 'success');
 };
 
@@ -5605,23 +5702,84 @@ window.selectWeaponModel = async function(index) {
     scheduleAutoSave();
 };
 
+function resetEquipmentPreset(type) {
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    const previous = currentCharacterData.equipment[type];
+    const installedModules = Array.isArray(previous?.installedModules)
+        ? previous.installedModules
+        : [];
+    if (installedModules.length) {
+        if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
+        if (!Array.isArray(currentCharacterData.inventory.backpack)) {
+            currentCharacterData.inventory.backpack = [];
+        }
+        currentCharacterData.inventory.backpack.push(...installedModules);
+    }
+
+    const blank = {
+        templateId: null,
+        name: '',
+        weight: 0,
+        volume: 0,
+        durability: 0,
+        maxDurability: 0,
+        stage: 1,
+        stageDurability: 0,
+        currentStageDurability: 0,
+        material: '',
+        accuracyPenalty: 0,
+        ergonomicsPenalty: 0,
+        charismaBonus: 0,
+        movementPenalty: 0,
+        containerSlots: 0,
+        protection: {
+            physical: 0,
+            chemical: 0,
+            thermal: 0,
+            electric: 0,
+            radiation: 0,
+        },
+        protectionZones: [],
+        modifications: [],
+        installedModules: [],
+        containers: [],
+        powered: false,
+    };
+    currentCharacterData.equipment[type] = blank;
+    if (
+        type === 'armor'
+        && currentCharacterData.equipment?.helmet?.integratedWithArmor
+    ) {
+        delete currentCharacterData.equipment.helmet;
+    }
+    return blank;
+}
+
 window.fillHelmetFromPreset = async function(select) {
     const selectedId = parseInt(select.value, 10);
-    if (isNaN(selectedId)) return;
+    if (isNaN(selectedId)) {
+        resetEquipmentPreset('helmet');
+        await renderEquipmentTab(currentCharacterData);
+        await renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        return;
+    }
 
     const templates = await loadTemplatesForLobby('helmet');
     const template = templates.find(t => t.id === selectedId);
     if (!template) return;
 
-    const helmet = currentCharacterData.equipment?.helmet || {};
-    if (!await canEquipHelmetWithCurrentGasMask(template, helmet)) {
-        select.value = helmet.templateId || '';
+    const currentHelmet = currentCharacterData.equipment?.helmet || {};
+    if (!await canEquipHelmetWithCurrentGasMask(template, currentHelmet)) {
+        select.value = currentHelmet.templateId || '';
         return;
     }
+    const helmet = resetEquipmentPreset('helmet');
     const mapping = {
         'accuracyPenalty': 'accuracy_penalty',
         'ergonomicsPenalty': 'ergonomics_penalty',
         'charismaBonus': 'charisma_bonus',
+        'movementPenalty': 'movement_penalty',
         'protection': 'protection'
     };
     applyTemplateToObject(helmet, template, mapping);
@@ -5637,12 +5795,19 @@ window.fillHelmetFromPreset = async function(select) {
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.helmet = helmet;
     await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
 window.fillGasMaskFromPreset = async function(select) {
     const selectedId = parseInt(select.value, 10);
-    if (isNaN(selectedId)) return;
+    if (isNaN(selectedId)) {
+        resetEquipmentPreset('gasMask');
+        await renderEquipmentTab(currentCharacterData);
+        await renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        return;
+    }
 
     const templates = await loadTemplatesForLobby('gas_mask');
     const template = templates.find(t => t.id === selectedId);
@@ -5653,7 +5818,7 @@ window.fillGasMaskFromPreset = async function(select) {
         return;
     }
 
-    const gasMask = currentCharacterData.equipment?.gasMask || {};
+    const gasMask = resetEquipmentPreset('gasMask');
     const mapping = {
         'accuracyPenalty': 'accuracy_penalty',
         'ergonomicsPenalty': 'ergonomics_penalty',
@@ -5679,12 +5844,20 @@ window.fillGasMaskFromPreset = async function(select) {
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.gasMask = gasMask;
     await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
 };
 
 window.fillArmorFromPreset = async function(select) {
     const selectedId = parseInt(select.value, 10);
-    if (isNaN(selectedId)) return;
+    if (isNaN(selectedId)) {
+        resetEquipmentPreset('armor');
+        await renderEquipmentTab(currentCharacterData);
+        await renderInventoryTab(currentCharacterData);
+        await renderSkillsTab(currentCharacterData);
+        scheduleAutoSave();
+        return;
+    }
 
     const templates = await loadTemplatesForLobby('armor');
     const template = templates.find(t => t.id === selectedId);
@@ -5702,7 +5875,7 @@ window.fillArmorFromPreset = async function(select) {
         return;
     }
 
-    const armor = currentCharacterData.equipment?.armor || {};
+    const armor = resetEquipmentPreset('armor');
     const mapping = {
         'movementPenalty': 'movement_penalty',
         'containerSlots': 'container_slots',
@@ -5730,6 +5903,8 @@ window.fillArmorFromPreset = async function(select) {
     currentCharacterData.equipment.armor = armor;
     syncIntegratedArmorHelmet(armor, template);
     await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    await renderSkillsTab(currentCharacterData);
     scheduleAutoSave();
 };
 
@@ -5820,6 +5995,9 @@ window.equipArmorFromInventory = async function(itemPath) {
             oldItem.currentStageDurability = oldArmor.currentStageDurability;
             oldItem.protection = { ...oldArmor.protection };
             oldItem.modifications = oldArmor.modifications || [];
+            oldItem.installedModules = oldArmor.installedModules
+                ? [...oldArmor.installedModules]
+                : [];
             restoreItemToPath(oldItem, itemPath);
         }
     }
@@ -5857,6 +6035,7 @@ window.equipHelmetFromInventory = async function(itemPath) {
         accuracyPenalty: item.accuracyPenalty || template.attributes?.accuracy_penalty || 0,
         ergonomicsPenalty: item.ergonomicsPenalty || template.attributes?.ergonomics_penalty || 0,
         charismaBonus: item.charismaBonus || template.attributes?.charisma_bonus || 0,
+        movementPenalty: item.movementPenalty ?? template.attributes?.movement_penalty ?? 0,
         modifications: item.modifications || [],
         installedModules: item.installedModules ? [...item.installedModules] : []
     };
@@ -5885,6 +6064,7 @@ window.equipHelmetFromInventory = async function(itemPath) {
             oldItem.condition = oldHelmet.condition;
             oldItem.currentStageDurability = oldHelmet.currentStageDurability;
             oldItem.protection = { ...oldHelmet.protection };
+            oldItem.movementPenalty = oldHelmet.movementPenalty || 0;
             oldItem.modifications = oldHelmet.modifications || [];
             oldItem.installedModules = oldHelmet.installedModules || [];
             restoreItemToPath(oldItem, itemPath);
@@ -6863,6 +7043,9 @@ window.unequipArmor = async function() {
     restoredItem.currentStageDurability = armor.currentStageDurability;
     restoredItem.protection = { ...armor.protection };
     restoredItem.modifications = armor.modifications || [];
+    restoredItem.installedModules = armor.installedModules
+        ? [...armor.installedModules]
+        : [];
     restoredItem.containers = armor.containers || [];
     restoredItem.protectionZones = armor.protectionZones || [];
     restoredItem.integratedHelmet = Boolean(armor.integratedHelmet);
@@ -6876,8 +7059,9 @@ window.unequipArmor = async function() {
     if (currentCharacterData.equipment?.helmet?.integratedWithArmor) {
         delete currentCharacterData.equipment.helmet;
     }
-    renderEquipmentTab(currentCharacterData);
-    renderInventoryTab(currentCharacterData);
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    await renderSkillsTab(currentCharacterData);
     scheduleAutoSave();
     forceSyncCharacter();
     showNotification('Броня снята', 'success');
@@ -6907,6 +7091,7 @@ window.unequipHelmet = async function() {
     restoredItem.condition = helmet.condition;
     restoredItem.currentStageDurability = helmet.currentStageDurability;
     restoredItem.protection = { ...helmet.protection };
+    restoredItem.movementPenalty = helmet.movementPenalty || 0;
     restoredItem.modifications = helmet.modifications || [];
     restoredItem.installedModules = helmet.installedModules || [];
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
@@ -9138,9 +9323,10 @@ window.openCreateHelmetTemplateModal = function(template = null) {
                 <div class="form-group"><label>Название</label><input type="text" id="helmet-name" class="form-control"></div>
                 <div class="form-group"><label>Материал</label><select id="helmet-material" class="form-control">${MATERIAL_OPTIONS.map(opt => `<option value="${opt}">${opt}</option>`).join('')}</select></div>
                 <div class="form-group"><label>Прочность</label><input type="number" id="helmet-maxDurability" class="form-control number-input" value="1"></div>
-                <div class="form-group"><label>Точность (штраф)</label><input type="number" id="helmet-accuracyPenalty" class="form-control number-input" value="0"></div>
-                <div class="form-group"><label>Эргономика (штраф)</label><input type="number" id="helmet-ergonomicsPenalty" class="form-control number-input" value="0"></div>
-                <div class="form-group"><label>Харизма (бонус)</label><input type="number" id="helmet-charismaBonus" class="form-control number-input" value="0"></div>
+                <div class="form-group"><label>Штраф Точности</label><input type="number" id="helmet-accuracyPenalty" class="form-control number-input" value="0"></div>
+                <div class="form-group"><label>Штраф Эргономики</label><input type="number" id="helmet-ergonomicsPenalty" class="form-control number-input" value="0"></div>
+                <div class="form-group"><label>Бонус Харизмы</label><input type="number" id="helmet-charismaBonus" class="form-control number-input" value="0"></div>
+                <div class="form-group"><label>Штраф перемещения</label><input type="number" id="helmet-movementPenalty" class="form-control number-input" value="0"></div>
                 <div class="form-group"><label>Вес</label><input type="number" id="helmet-weight" class="form-control number-input" value="0" step="0.1"></div>
                 <div class="form-group"><label>Объём</label><input type="number" id="helmet-volume" class="form-control number-input" value="0" step="0.1"></div>
                 <div class="form-group"><label>Защита</label>
@@ -9180,6 +9366,7 @@ window.openCreateHelmetTemplateModal = function(template = null) {
         document.getElementById('helmet-accuracyPenalty').value = template.attributes?.accuracy_penalty || 0;
         document.getElementById('helmet-ergonomicsPenalty').value = template.attributes?.ergonomics_penalty || 0;
         document.getElementById('helmet-charismaBonus').value = template.attributes?.charisma_bonus || 0;
+        document.getElementById('helmet-movementPenalty').value = template.attributes?.movement_penalty || 0;
         document.getElementById('helmet-weight').value = template.weight || 0;
         document.getElementById('helmet-volume').value = template.volume || 0;
         const prot = template.attributes?.protection || {};
@@ -9223,6 +9410,7 @@ window.saveHelmetTemplate = async function() {
         accuracy_penalty: parseInt(document.getElementById('helmet-accuracyPenalty').value) || 0,
         ergonomics_penalty: parseInt(document.getElementById('helmet-ergonomicsPenalty').value) || 0,
         charisma_bonus: parseInt(document.getElementById('helmet-charismaBonus').value) || 0,
+        movement_penalty: parseInt(document.getElementById('helmet-movementPenalty').value) || 0,
         protection: {
             physical: (parseFloat(document.getElementById('helmet-physical').value) || 0) / 100,
             chemical: (parseFloat(document.getElementById('helmet-chemical').value) || 0) / 100,
@@ -9269,25 +9457,19 @@ window.openCreateGasMaskTemplateModal = function(template = null) {
                     <input type="text" id="gasMask-name" class="form-control">
                 </div>
                 <div class="form-group">
-                    <label>Материал</label>
-                    <select id="gasMask-material" class="form-control">
-                        ${MATERIAL_OPTIONS.map(opt => `<option value="${opt}">${opt}</option>`).join('')}
-                    </select>
-                </div>
-                <div class="form-group">
                     <label>Прочность</label>
                     <input type="number" id="gasMask-maxDurability" class="form-control number-input" value="1">
                 </div>
                 <div class="form-group">
-                    <label>Точность (штраф)</label>
+                    <label>Штраф Точности</label>
                     <input type="number" id="gasMask-accuracyPenalty" class="form-control number-input" value="0">
                 </div>
                 <div class="form-group">
-                    <label>Эргономика (штраф)</label>
+                    <label>Штраф Эргономики</label>
                     <input type="number" id="gasMask-ergonomicsPenalty" class="form-control number-input" value="0">
                 </div>
                 <div class="form-group">
-                    <label>Харизма (бонус)</label>
+                    <label>Бонус Харизмы</label>
                     <input type="number" id="gasMask-charismaBonus" class="form-control number-input" value="0">
                 </div>
                 <div class="form-group">
@@ -9320,7 +9502,6 @@ window.openCreateGasMaskTemplateModal = function(template = null) {
     if (template) {
         document.getElementById('gasMask-template-id').value = template.id;
         document.getElementById('gasMask-name').value = template.name || '';
-        document.getElementById('gasMask-material').value = template.attributes?.material || 'Текстиль';
         document.getElementById('gasMask-maxDurability').value = template.attributes?.max_durability || 1;
         document.getElementById('gasMask-accuracyPenalty').value = template.attributes?.accuracy_penalty || 0;
         document.getElementById('gasMask-ergonomicsPenalty').value = template.attributes?.ergonomics_penalty || 0;
@@ -9346,7 +9527,6 @@ window.saveGasMaskTemplate = async function() {
     if (!name) { showNotification('Введите название'); return; }
 
     const attributes = {
-        material: document.getElementById('gasMask-material').value,
         max_durability: parseInt(document.getElementById('gasMask-maxDurability').value) || 1,
         accuracy_penalty: parseInt(document.getElementById('gasMask-accuracyPenalty').value) || 0,
         ergonomics_penalty: parseInt(document.getElementById('gasMask-ergonomicsPenalty').value) || 0,
@@ -10057,10 +10237,11 @@ async function renderInventoryTab(data) {
                     <span>Снижение от рюкзака</span><span id="weight-penalty-backpack">−${movementPenalty.backpackReduction}</span>
                     <span>Итог от веса</span><span id="weight-penalty-source">${movementPenalty.weightPenalty}</span>
                     <span>Броня</span><span id="armor-penalty-source">${movementPenalty.armorPenalty}</span>
+                    <span>Шлем</span><span id="helmet-penalty-source">${movementPenalty.helmetPenalty}</span>
                     <span>Травмы ног</span><span id="injury-penalty-source">${movementPenalty.injuries}</span>
                     <span>Временные модификаторы</span><span id="temporary-penalty-source">${movementPenalty.temporary}</span>
                     <span id="exoskeleton-weight-rule" style="grid-column:span 2; opacity:.7; font-size:12px; display:${movementPenalty.poweredExoskeleton ? 'block' : 'none'};">
-                        Запитанный экзоскелет: броня устанавливает штраф 5, перегруз не учитывается, Сила +8, броски Силы +4. Бег и спринт недоступны.
+                        Запитанный экзоскелет: броня устанавливает штраф 5, перегруз не учитывается. Бег и спринт недоступны.
                     </span>
                 </div>
             </details>
@@ -11490,6 +11671,7 @@ function recalculateInventoryTotals() {
         'weight-penalty-backpack': `−${movementPenalty.backpackReduction}`,
         'weight-penalty-source': movementPenalty.weightPenalty,
         'armor-penalty-source': movementPenalty.armorPenalty,
+        'helmet-penalty-source': movementPenalty.helmetPenalty,
         'injury-penalty-source': movementPenalty.injuries,
         'temporary-penalty-source': movementPenalty.temporary,
     };
@@ -12464,18 +12646,14 @@ window.rollSkill = function(skillPath, skillLabel) {
     }
     if (!skillObj) return;
 
-    let base = skillObj.base;
-    let bonus = skillObj.bonus || 0;
-
-    // Модификатор от базового значения навыка (по D&D правилам: (base-10)/2)
-    const selfMod = typeof base === 'number' ? Math.floor((base - 10) / 2) : 0;
+    const effectiveValue = getSkillEffectiveValue(currentCharacterData, skillPath);
+    const selfMod = Math.floor((effectiveValue - 10) / 2);
 
     // Харизма для социальных навыков (кроме самой харизмы)
     let charismaMod = 0;
     if (skillPath.startsWith('social.') && skillPath !== 'social.charisma') {
-        const charisma = currentCharacterData.skills?.social?.charisma;
-        const charismaBase = charisma?.base;
-        charismaMod = typeof charismaBase === 'number' ? Math.floor((charismaBase - 10) / 2) : 0;
+        const charismaValue = getSkillEffectiveValue(currentCharacterData, 'social.charisma');
+        charismaMod = Math.floor((charismaValue - 10) / 2);
     }
 
     // Бонус от экипировки
@@ -12506,9 +12684,8 @@ window.rollSkill = function(skillPath, skillLabel) {
 
     // Можно добавить другие бонусы по необходимости (например, от артефактов, контейнеров и т.д.)
 
-    // Итоговый бонус: собственный бонус навыка + модификатор от базы + харизма + экипировка
     const statusModifier = getHealthRollModifier(currentCharacterData, skillPath);
-    const totalBonus = bonus + selfMod + charismaMod + equipmentBonus + statusModifier;
+    const totalBonus = selfMod + charismaMod + equipmentBonus + statusModifier;
 
     const firstDice = Math.floor(Math.random() * 20) + 1;
     const disadvantaged = hasHealthRollDisadvantage(currentCharacterData, skillPath);
@@ -12516,9 +12693,8 @@ window.rollSkill = function(skillPath, skillLabel) {
     const dice = disadvantaged ? Math.min(firstDice, secondDice) : firstDice;
     const total = dice + totalBonus;
 
-    let modStr = `модификатор навыка = ${selfMod}`;
+    let modStr = `навык ${effectiveValue}, модификатор = ${selfMod}`;
     if (charismaMod !== 0) modStr += ` + харизма = ${charismaMod}`;
-    if (bonus !== 0) modStr += ` + бонус навыка = ${bonus}`;
     if (equipmentBonus !== 0) modStr += ` + экипировка = ${equipmentBonus}`;
     if (statusModifier !== 0) modStr += ` + состояния = ${statusModifier}`;
 
@@ -12621,7 +12797,7 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
             const power = entry.item.attributes?.power;
             desc += ` (заряд ${power !== undefined ? power : '?'}%)`;
         } else if (slotType === 'exoskeleton_battery') {
-            desc += ` (заряд на ${Number(entry.item.attributes?.remaining_days) || 0} сут.)`;
+            desc = `Аккумулятор · ${Number(entry.item.attributes?.remaining_days) || 0} сут.`;
         }
         opt.textContent = desc;
         select.appendChild(opt);
@@ -12633,6 +12809,7 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
         const selected = candidateModules[idx];
         modal.remove();
 
+        updateDataFromFields();
         const success = universalInstallModule(targetItem, targetPath, selected.item, selected.path, slotType);
         if (success) {
             // Обновить слоты – удалить старый блок, вставить новый
@@ -12647,6 +12824,9 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
             const sourceContainerPath = selected.path.slice(0, -1);
             await rerenderContainer(sourceContainerPath);
             await renderEquipmentTab(currentCharacterData);
+            if (slotType === 'exoskeleton_battery') {
+                await renderSkillsTab(currentCharacterData);
+            }
             recalculateInventoryTotals();
             updatePlateProtectionDisplay();
             scheduleAutoSave();
@@ -12698,6 +12878,7 @@ function universalUninstallModule(targetItem, targetPath, slotType) {
 }
 
 window.universalUninstallModuleByPath = async function(targetPath, slotType) {
+    updateDataFromFields();
     const targetItem = getItemByPath(targetPath);
     if (!targetItem) {
         showNotification('Предмет не найден');
@@ -12717,6 +12898,9 @@ window.universalUninstallModuleByPath = async function(targetPath, slotType) {
         // Перерисовать рюкзак (куда вернули модуль)
         await rerenderContainer(['inventory', 'backpack']);
         await renderEquipmentTab(currentCharacterData);
+        if (slotType === 'exoskeleton_battery') {
+            await renderSkillsTab(currentCharacterData);
+        }
         recalculateInventoryTotals();
         updatePlateProtectionDisplay();
         scheduleAutoSave();
@@ -12857,9 +13041,6 @@ async function rerenderContainer(containerPath, parentElement = null, options = 
         containerDiv.style.display = '';
     } else if (wasCollapsed) {
         containerDiv.style.display = 'none';
-    }
-    if (skillPath === 'physical.strength') {
-        equipmentBonus += getExoskeletonPowerProfile(currentCharacterData).strengthRollBonus;
     }
     if (parentItem && parentItem._toggleIcon) {
         parentItem._toggleIcon.textContent = wasCollapsed ? '▶' : '▼';

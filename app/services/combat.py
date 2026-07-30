@@ -355,7 +355,19 @@ class CombatService:
             current = current.get(part)
         if not isinstance(current, dict):
             return 0
-        return max(0, CombatService._coerce_int(current.get('base'), 0))
+        stat_name = skill_path.split('.')[-1]
+        equipment_bonus = (
+            CombatService._exoskeleton_power_profile(character_data)['strength_level_bonus']
+            if skill_path == 'skills.physical.strength'
+            else 0
+        )
+        return max(
+            0,
+            CombatService._coerce_int(current.get('base'), 0)
+            + CombatService._coerce_int(current.get('bonus'), 0)
+            + CombatService._consumable_stat_value_bonus(character_data, stat_name)
+            + equipment_bonus,
+        )
 
     @staticmethod
     def _apply_numeric_modifier(value, modifier):
@@ -552,8 +564,6 @@ class CombatService:
         effective_required = 0 if ignored_by_bipod else max(0, required - posture_reduction)
         strength = (
             CombatService._skill_value(data, 'skills.physical.strength')
-            + CombatService._consumable_stat_bonus(data, 'strength')
-            + CombatService._exoskeleton_power_profile(data)['strength_level_bonus']
         )
         deficit = max(0, effective_required - strength)
         return {
@@ -725,6 +735,8 @@ class CombatService:
         data = data if isinstance(data, dict) else {}
         equipment = data.get('equipment', {}) if isinstance(data, dict) else {}
         armor = equipment.get('armor', {}) if isinstance(equipment, dict) else {}
+        helmet = equipment.get('helmet', {}) if isinstance(equipment, dict) else {}
+        helmet = helmet if isinstance(helmet, dict) else {}
 
         armor_penalty = (
             armor.get('movementPenalty')
@@ -732,6 +744,20 @@ class CombatService:
         )
         if armor_penalty is None and isinstance(armor, dict):
             armor_penalty = armor.get('movement_penalty')
+        helmet_attributes = (
+            CombatService._template_attributes(helmet)
+            if isinstance(helmet, dict) else {}
+        )
+        helmet_penalty = 0 if helmet.get('integratedWithArmor') else (
+            helmet.get(
+                'movementPenalty',
+                helmet.get(
+                    'movement_penalty',
+                    helmet_attributes.get('movement_penalty', 0),
+                ),
+            )
+            if isinstance(helmet, dict) else 0
+        )
 
         weight_details = CombatService._inventory_weight_details(data)
         weight_penalty = weight_details['penalty']
@@ -745,6 +771,7 @@ class CombatService:
         total = max(
             0,
             CombatService._coerce_int(armor_penalty, 0)
+            + CombatService._coerce_int(helmet_penalty, 0)
             + weight_penalty
             + temporary_penalty
             + limb_penalty,
@@ -752,6 +779,7 @@ class CombatService:
         return {
             'total': total,
             'armor': CombatService._coerce_int(armor_penalty, 0),
+            'helmet': CombatService._coerce_int(helmet_penalty, 0),
             'weight': weight_penalty,
             'weight_raw': weight_details['raw_penalty'],
             'backpack_reduction': weight_details['backpack_reduction'],
@@ -802,7 +830,6 @@ class CombatService:
             'is_exoskeleton': is_exoskeleton,
             'powered': powered,
             'strength_level_bonus': 8 if powered else 0,
-            'strength_roll_bonus': 4 if powered else 0,
             'blocks_strenuous_movement': is_exoskeleton,
         }
 
@@ -883,11 +910,10 @@ class CombatService:
 
         total_weight = sum(CombatService._item_total_weight(item) for item in carried_items)
         strength = ((character_data.get('skills') or {}).get('physical') or {}).get('strength')
-        strength = strength if isinstance(strength, dict) else {}
         effective_strength = (
-            CombatService._coerce_int(strength.get('base'), 10)
-            + CombatService._consumable_stat_bonus(character_data, 'strength')
-            + CombatService._exoskeleton_power_profile(character_data)['strength_level_bonus']
+            CombatService._skill_value(character_data, 'skills.physical.strength')
+            if isinstance(strength, dict)
+            else 10
         )
         strength_capacity_modifier = math.floor((effective_strength - 10) / 2)
         weight_per_penalty = max(
@@ -1898,28 +1924,41 @@ class CombatService:
         current = character_data if isinstance(character_data, dict) else {}
         for part in skill_path.split('.'):
             if not isinstance(current, dict):
-                return 0
+                current = None
+                break
             current = current.get(part)
         if not isinstance(current, dict):
-            base_mod = 0
-            bonus = 0
-        else:
-            base = current.get('base')
-            bonus = current.get('bonus', 0)
-            base_mod = math.floor((CombatService._coerce_int(base, 10) - 10) / 2)
-        temp_bonus = CombatService._consumable_stat_bonus(character_data, skill_path.split('.')[-1])
-        equipment_bonus = (
-            CombatService._exoskeleton_power_profile(character_data)['strength_roll_bonus']
-            if skill_path == 'skills.physical.strength'
-            else 0
-        )
+            return CombatService._health_roll_modifier(
+                character_data,
+                skill_path,
+                include_pain,
+            )
+        skill_value = CombatService._skill_value(character_data, skill_path)
+        base_mod = math.floor((skill_value - 10) / 2)
         return (
             base_mod
-            + CombatService._coerce_int(bonus, 0)
-            + temp_bonus
-            + equipment_bonus
             + CombatService._health_roll_modifier(character_data, skill_path, include_pain)
         )
+
+    @staticmethod
+    def _consumable_stat_value_bonus(character_data, stat_name):
+        if not isinstance(character_data, dict):
+            return 0
+        health = character_data.get('health') if isinstance(character_data.get('health'), dict) else {}
+        combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+        modifiers = combat_meta.get('consumableModifiers')
+        if not isinstance(modifiers, list):
+            return 0
+        total = 0
+        for item in modifiers:
+            if not isinstance(item, dict):
+                continue
+            remaining = item.get('remaining')
+            if remaining is not None and CombatService._coerce_int(remaining, 0) <= 0:
+                continue
+            if str(item.get('stat') or '').strip() in {stat_name, f'{stat_name}_delta'}:
+                total += CombatService._coerce_int(item.get('value', 0), 0)
+        return total
 
     @staticmethod
     def _consumable_stat_bonus(character_data, stat_name):
