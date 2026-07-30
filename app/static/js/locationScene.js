@@ -2,10 +2,25 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'https://unpkg.com/three@0.128.0/examples/jsm/renderers/CSS2DRenderer.js';
+import {
+    createCompatibleWebGLRenderer,
+    createUnavailableRenderer,
+    showWebGLUnavailable,
+} from './webglSupport.js';
 import { showNotification } from './utils.js';
 import { getUserColor, getUserColorHex } from './colors.js';
 import { Server } from './api.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;',
+    })[character]);
+}
 
 // ========== Глобальные переменные ==========
 let scene, camera, renderer, labelRenderer, controls;
@@ -75,6 +90,8 @@ let armedMovementType = null;
 let movementTypeMenu = null;
 let postureMenu = null;
 let combatParticipantMenu = null;
+let aimedZoneMenu = null;
+let aimedZoneMenuResolve = null;
 let movementPreviewGhost = null;
 let movementPreviewLine = null;
 let movementPreviewHint = null;
@@ -90,6 +107,7 @@ let attackPreviewLine = null;
 let movementMapCache = new Map();
 let movementMapVersion = 0;
 let locationObjectPickCache = { key: null, result: null };
+const locationCameraKeys = new Set();
 
 const COMBAT_MOVEMENT_TYPES = {
     walk: {
@@ -217,6 +235,38 @@ const terrainColors = {
 };
 
 // ========== Вспомогательные функции ==========
+function isKeyboardInputTarget(target) {
+    return Boolean(target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+}
+
+function updateLocationCameraMovement(deltaSeconds) {
+    if (!locationActive || !camera || !controls || locationCameraKeys.size === 0) return;
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    forward.y = 0;
+    if (forward.lengthSq() < 0.0001) return;
+    forward.normalize();
+    const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+    const movement = new THREE.Vector3();
+    if (locationCameraKeys.has('KeyW')) movement.add(forward);
+    if (locationCameraKeys.has('KeyS')) movement.sub(forward);
+    if (locationCameraKeys.has('KeyD')) movement.add(right);
+    if (locationCameraKeys.has('KeyA')) movement.sub(right);
+    if (movement.lengthSq() === 0) return;
+
+    const distanceToTarget = camera.position.distanceTo(controls.target);
+    movement.normalize().multiplyScalar(Math.max(6, distanceToTarget * 0.6) * deltaSeconds);
+    const oldTarget = controls.target.clone();
+    const maxX = Math.max(0, (currentLocationData?.grid_width || 1) - 0.5);
+    const maxZ = Math.max(0, (currentLocationData?.grid_height || 1) - 0.5);
+    const nextTarget = oldTarget.clone().add(movement);
+    nextTarget.x = THREE.MathUtils.clamp(nextTarget.x, 0.5, maxX);
+    nextTarget.z = THREE.MathUtils.clamp(nextTarget.z, 0.5, maxZ);
+    const appliedMovement = nextTarget.sub(oldTarget);
+    controls.target.add(appliedMovement);
+    camera.position.add(appliedMovement);
+}
+
 function getTileHeight(tileX, tileZ) {
     if (!currentLocationData) return 1.0;
     if (tileZ < 0 || tileZ >= currentLocationData.tiles_data.length) return 1.0;
@@ -1298,6 +1348,103 @@ function closeMovementTypeMenu() {
     if (movementTypeMenu) movementTypeMenu.style.display = 'none';
 }
 
+function closeAimedZoneMenu(result = null) {
+    if (aimedZoneMenu) aimedZoneMenu.style.display = 'none';
+    if (aimedZoneMenuResolve) {
+        const resolve = aimedZoneMenuResolve;
+        aimedZoneMenuResolve = null;
+        resolve(result);
+    }
+}
+
+function selectAimedTargetZone(targetName) {
+    closeAimedZoneMenu();
+    if (!aimedZoneMenu) {
+        aimedZoneMenu = document.createElement('div');
+        aimedZoneMenu.id = 'combat-aimed-zone-menu';
+        aimedZoneMenu.style.cssText = `
+            position:fixed;
+            inset:0;
+            z-index:1240;
+            display:none;
+            align-items:center;
+            justify-content:center;
+            padding:16px;
+            background:rgba(4, 7, 10, 0.62);
+            backdrop-filter:blur(3px);
+        `;
+        aimedZoneMenu.addEventListener('pointerdown', (event) => {
+            if (event.target === aimedZoneMenu) closeAimedZoneMenu();
+        });
+        document.body.appendChild(aimedZoneMenu);
+    }
+    const zones = [
+        { key: 'head', label: 'Голова', icon: '●', note: '+5 к сложности' },
+        { key: 'chest', label: 'Грудь', icon: '▰', note: 'Торс' },
+        { key: 'abdomen', label: 'Живот', icon: '◆', note: 'Торс' },
+        { key: 'left_arm', label: 'Левая рука', icon: '◀', note: 'Конечность' },
+        { key: 'right_arm', label: 'Правая рука', icon: '▶', note: 'Конечность' },
+        { key: 'left_leg', label: 'Левая нога', icon: '↙', note: 'Конечность' },
+        { key: 'right_leg', label: 'Правая нога', icon: '↘', note: 'Конечность' },
+    ];
+    aimedZoneMenu.innerHTML = `
+        <div style="
+            width:min(660px, calc(100vw - 32px));
+            max-height:calc(100vh - 32px);
+            overflow-y:auto;
+            padding:18px;
+            border-radius:16px;
+            border:1px solid rgba(255,255,255,0.16);
+            background:rgba(14,18,26,0.98);
+            color:#fff;
+            box-shadow:0 24px 60px rgba(0,0,0,0.48);
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:14px;">
+                <div>
+                    <div style="font-size:19px; font-weight:800;">Куда прицелиться</div>
+                    <div style="margin-top:3px; opacity:0.7; font-size:12px;">Цель: ${escapeHtml(targetName || 'персонаж')}</div>
+                </div>
+                <button type="button" class="aimed-zone-close" style="
+                    width:34px; height:34px; border:0; border-radius:50%;
+                    background:rgba(255,255,255,0.08); color:#fff; cursor:pointer; font-size:20px;
+                ">×</button>
+            </div>
+            <div class="aimed-zone-options" style="
+                display:grid;
+                grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
+                gap:10px;
+            "></div>
+        </div>
+    `;
+    const options = aimedZoneMenu.querySelector('.aimed-zone-options');
+    zones.forEach((zone) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.style.cssText = `
+            min-height:108px;
+            padding:13px 10px;
+            border-radius:13px;
+            border:1px solid rgba(184,164,110,0.36);
+            background:rgba(184,164,110,0.09);
+            color:#fff;
+            cursor:pointer;
+            text-align:center;
+        `;
+        button.innerHTML = `
+            <span style="display:block; font-size:31px; line-height:1;">${zone.icon}</span>
+            <strong style="display:block; margin-top:10px; font-size:14px;">${zone.label}</strong>
+            <span style="display:block; margin-top:4px; font-size:11px; opacity:0.68;">${zone.note}</span>
+        `;
+        button.onclick = () => closeAimedZoneMenu(zone.key);
+        options.appendChild(button);
+    });
+    aimedZoneMenu.querySelector('.aimed-zone-close').onclick = () => closeAimedZoneMenu();
+    aimedZoneMenu.style.display = 'flex';
+    return new Promise((resolve) => {
+        aimedZoneMenuResolve = resolve;
+    });
+}
+
 function closePostureMenu() {
     if (postureMenu) postureMenu.style.display = 'none';
 }
@@ -1805,23 +1952,9 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         item_path: action.itemPath,
     };
     if (action.fireMode === 'aimed') {
-        const zoneLabels = {
-            head: 'голова (+5 СЛ)',
-            chest: 'грудь',
-            abdomen: 'живот',
-            left_arm: 'левая рука',
-            right_arm: 'правая рука',
-            left_leg: 'левая нога',
-            right_leg: 'правая нога',
-        };
-        const zone = window.prompt(
-            Object.entries(zoneLabels)
-                .map(([key, label]) => `${key} — ${label}`)
-                .join('\n'),
-            'chest'
-        );
-        if (zone === null) return false;
-        payload.target_zone = zone.trim().toLowerCase();
+        const zone = await selectAimedTargetZone(target.name);
+        if (!zone) return false;
+        payload.target_zone = zone;
     }
 
     try {
@@ -2362,9 +2495,12 @@ async function showCombatParticipantSelection() {
         `;
         row.innerHTML = `
             <input type="checkbox" value="${character.location_character_id}" checked>
-            <strong style="overflow:hidden; text-overflow:ellipsis;">${escapeHtml(character.name || `#${character.character_id}`)}</strong>
+            <strong class="combat-participant-name" style="overflow:hidden; text-overflow:ellipsis;"></strong>
             <span style="font-size:12px; opacity:.75;">Инициатива ${bonus >= 0 ? '+' : ''}${bonus}</span>
         `;
+        row.querySelector('.combat-participant-name').textContent = (
+            character.name || `#${character.character_id}`
+        );
         list.appendChild(row);
     });
 
@@ -2580,12 +2716,17 @@ export function initLocationScene(containerId) {
     while (container.firstChild) container.removeChild(container.firstChild);
 
     // WebGL рендерер
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = createCompatibleWebGLRenderer(THREE, { antialias: true })
+        || createUnavailableRenderer();
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.shadowMap.enabled = true;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.shadowMap.enabled = !renderer.isUnavailableRenderer;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
+    if (renderer.isUnavailableRenderer) {
+        window.webGLUnavailable = true;
+        showWebGLUnavailable(container);
+    }
 
     // CSS2D рендерер
     labelRenderer = new CSS2DRenderer();
@@ -2628,8 +2769,12 @@ export function initLocationScene(containerId) {
     createHighlight();
 
     // Анимация
-    function animate() {
+    let previousFrameTime = performance.now();
+    function animate(frameTime = performance.now()) {
         animationFrameId = requestAnimationFrame(animate);
+        const deltaSeconds = Math.min(0.1, Math.max(0, (frameTime - previousFrameTime) / 1000));
+        previousFrameTime = frameTime;
+        updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
         animateAnomalyEffects(anomalyEffectMeshes, performance.now());
         if (renderer && scene && camera) renderer.render(scene, camera);
@@ -5097,6 +5242,10 @@ function setupCharacterDragging() {
     handlers.canvas.contextmenu = onContextMenu;
 
     const onKeyDown = (e) => {
+        if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && !isKeyboardInputTarget(e.target)) {
+            locationCameraKeys.add(e.code);
+            e.preventDefault();
+        }
         if (e.key === 'Enter' && pendingCombatAction?.targetType === 'multi_character') {
             e.preventDefault();
             finalizeAreaFire();
@@ -5114,6 +5263,10 @@ function setupCharacterDragging() {
         if (combatParticipantMenu) {
             e.preventDefault();
             closeCombatParticipantMenu();
+        }
+        if (aimedZoneMenu && aimedZoneMenu.style.display !== 'none') {
+            e.preventDefault();
+            closeAimedZoneMenu();
         }
         if (pendingCombatAction) {
             e.preventDefault();
@@ -5138,6 +5291,14 @@ function setupCharacterDragging() {
 };
     document.addEventListener('keydown', onKeyDown);
     handlers.document.keydown = onKeyDown;
+    const onKeyUp = (e) => {
+        if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code)) locationCameraKeys.delete(e.code);
+    };
+    const onWindowBlur = () => locationCameraKeys.clear();
+    document.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
+    handlers.document.keyup = onKeyUp;
+    handlers.window.cameraBlur = onWindowBlur;
 }
 
 // ========== Настройка обработчиков редактирования и Drag&Drop спавна ==========
@@ -5648,6 +5809,7 @@ export function setEditButtonVisible(visible) {
 
 export function destroyLocationScene() {
     locationActive = false;
+    closeAimedZoneMenu();
 
     // Удаляем обработчики
     if (eventCleanup) {
@@ -5680,6 +5842,15 @@ export function destroyLocationScene() {
         document.removeEventListener('keydown', handlers.document.keydown);
         delete handlers.document.keydown;
     }
+    if (handlers.document.keyup) {
+        document.removeEventListener('keyup', handlers.document.keyup);
+        delete handlers.document.keyup;
+    }
+    if (handlers.window.cameraBlur) {
+        window.removeEventListener('blur', handlers.window.cameraBlur);
+        delete handlers.window.cameraBlur;
+    }
+    locationCameraKeys.clear();
     if (handlers.window.combatHudPointerMove) {
         window.removeEventListener('pointermove', handlers.window.combatHudPointerMove);
         delete handlers.window.combatHudPointerMove;

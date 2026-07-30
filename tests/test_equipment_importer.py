@@ -2,6 +2,7 @@ from app.services.equipment_importer import (
     _canonical_caliber,
     _finalize_weapon_magazine_attributes,
     _magazine_volume,
+    _parse_exoskeleton_battery,
     _parse_burst_profile,
     _parse_ranged_weapons,
 )
@@ -118,3 +119,38 @@ def test_cyrillic_acp_is_canonicalized():
 
 def test_excel_date_serial_is_not_used_as_magazine_volume():
     assert _magazine_volume("45748", "Клипса СП-4") == 0.25
+
+
+def test_exoskeleton_battery_is_imported_as_one_day_module():
+    templates = _parse_exoskeleton_battery([{
+        "A": "Аккумуляторы Экзоскелета",
+        "B": "2.5",
+        "C": "3500",
+        "D": "5",
+        "E": "Поддерживают работоспособность экзоскелета.",
+    }])
+
+    assert templates == [{
+        "name": "Аккумуляторы Экзоскелета",
+        "category": "exoskeleton_module",
+        "subcategory": "battery",
+        "item_class": None,
+        "description": "Поддерживают работоспособность экзоскелета.",
+        "price": 3500,
+        "weight": 2.5,
+        "volume": 5.0,
+        "attributes": {
+            "import_source": "equipment_workbook",
+            "slot_type": "exoskeleton_battery",
+            "charge_days": 1,
+            "remaining_days": 1,
+            "raw_row": {
+                "A": "Аккумуляторы Экзоскелета",
+                "B": "2.5",
+                "C": "3500",
+                "D": "5",
+                "E": "Поддерживают работоспособность экзоскелета.",
+            },
+        },
+        "compatible_ids": [],
+    }]

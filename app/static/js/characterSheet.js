@@ -134,6 +134,7 @@ function getCategoryDisplay(cat) {
         'magazine': 'Магазины',
         'ammo': 'Патроны',
         'gas_mask_module': 'Фильтры противогазов',
+        'exoskeleton_module': 'Прочее',
         'helmet_module': 'Модули шлемов',
         'visor': 'Забрала',
         'belt': 'Пояс',
@@ -708,6 +709,15 @@ function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, 
         };
         moduleItem.durability = charges;
         moduleItem.maxDurability = charges;
+    } else if (slotType === 'exoskeleton_battery') {
+        moduleItem.category = 'exoskeleton_module';
+        moduleItem.subcategory = 'battery';
+        moduleItem.attributes = {
+            ...(moduleItem.attributes || {}),
+            slot_type: 'exoskeleton_battery',
+            charge_days: Number(moduleItem.attributes?.charge_days) || 1,
+            remaining_days: Number(moduleItem.attributes?.remaining_days) || 1,
+        };
     }
 
     // Обработка стопки
@@ -735,6 +745,7 @@ function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, 
     moduleItem.sourcePath = modulePath;
     moduleItem.slotType = slotType;
     targetItem.installedModules.push(moduleItem);
+    if (slotType === 'exoskeleton_battery') targetItem.powered = true;
     return true;
 }
 
@@ -813,6 +824,81 @@ function helmetHasVisor(helmet, template = null) {
         || (helmet?.installedModules || []).some(module => module?.slotType === 'visor');
 }
 
+const INTEGRATED_HELMET_ARMORS = new Set([
+    'костюм химзащиты',
+    'комбинезон купол',
+    'комбинезон купол м',
+    'комбинезон купол-м',
+    'комбинезон гроб',
+    'экзоскелет',
+]);
+
+function armorHasIntegratedHelmet(armor, template = null) {
+    const name = String(template?.name || armor?.name || '').trim().toLowerCase().replace(/ё/g, 'е');
+    return Boolean(template?.attributes?.integrated_helmet)
+        || (template?.attributes?.protection_zones || []).includes('head')
+        || INTEGRATED_HELMET_ARMORS.has(name);
+}
+
+function getIntegratedHelmetProfile(armor, template = null) {
+    const name = String(template?.name || armor?.name || '').trim().toLowerCase().replace(/ё/g, 'е');
+    const profiles = {
+        'костюм химзащиты': { physical: 0, charismaPenalty: 2, accuracyPenalty: 2 },
+        'комбинезон купол': { physical: 0.1, charismaPenalty: 3, accuracyPenalty: 3 },
+        'комбинезон купол м': { physical: 0.35, charismaPenalty: 2, accuracyPenalty: 3 },
+        'комбинезон купол-м': { physical: 0.35, charismaPenalty: 2, accuracyPenalty: 3 },
+        'комбинезон гроб': { physical: 0.4, charismaPenalty: 4, accuracyPenalty: 4 },
+    };
+    if (name === 'экзоскелет') {
+        const armorPhysical = protectionPercentValue(armor?.protection?.physical) / 100;
+        return {
+            physical: Math.max(0, armorPhysical - 0.1),
+            charismaPenalty: 0,
+            accuracyPenalty: 2,
+        };
+    }
+    return profiles[name] || null;
+}
+
+function syncIntegratedArmorHelmet(armor, template = null) {
+    if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
+    const currentHelmet = currentCharacterData.equipment.helmet;
+    if (!armorHasIntegratedHelmet(armor, template)) {
+        if (currentHelmet?.integratedWithArmor) delete currentCharacterData.equipment.helmet;
+        return;
+    }
+    const profile = getIntegratedHelmetProfile(armor, template) || {
+        physical: 0,
+        charismaPenalty: 0,
+        accuracyPenalty: 0,
+    };
+    currentCharacterData.equipment.helmet = {
+        templateId: `integrated:${armor.templateId || 'armor'}`,
+        integratedWithArmor: true,
+        sourceArmorTemplateId: armor.templateId,
+        name: `${armor.name} · встроенный шлем`,
+        material: armor.material,
+        protection: {
+            physical: profile.physical,
+            chemical: 0,
+            thermal: 0,
+            electric: 0,
+            radiation: 0,
+        },
+        durability: armor.durability,
+        maxDurability: armor.maxDurability,
+        stage: armor.stage,
+        condition: armor.condition,
+        stageDurability: armor.stageDurability,
+        currentStageDurability: armor.currentStageDurability,
+        accuracyPenalty: profile.accuracyPenalty,
+        ergonomicsPenalty: 0,
+        charismaBonus: -profile.charismaPenalty,
+        modifications: [],
+        installedModules: [],
+    };
+}
+
 function isGasMaskHelmet(template) {
     const name = String(template?.name || '').trim().toLowerCase();
     return Boolean(template?.attributes?.requires_filter)
@@ -824,6 +910,10 @@ function notifyHelmetGasMaskConflict() {
 }
 
 async function canEquipHelmetWithCurrentGasMask(template, helmet) {
+    if (currentCharacterData.equipment?.helmet?.integratedWithArmor) {
+        showNotification('Сначала снимите броню со встроенным шлемом');
+        return false;
+    }
     if (!currentCharacterData.equipment?.gasMask?.templateId) return true;
     if (isGasMaskHelmet(template) || helmetHasVisor(helmet, template)) {
         notifyHelmetGasMaskConflict();
@@ -835,6 +925,10 @@ async function canEquipHelmetWithCurrentGasMask(template, helmet) {
 async function canEquipGasMaskWithCurrentHelmet() {
     const helmet = currentCharacterData.equipment?.helmet;
     if (!helmet?.templateId) return true;
+    if (helmet.integratedWithArmor) {
+        notifyHelmetGasMaskConflict();
+        return false;
+    }
     const templates = await loadTemplatesForLobby('helmet');
     const template = templates.find(item => Number(item.id) === Number(helmet.templateId));
     if (isGasMaskHelmet(template) || helmetHasVisor(helmet, template)) {
@@ -923,9 +1017,12 @@ function migratePouchesToNewFormat() {
 
 // Рекурсивно вычисляет общий вес предмета с учётом содержимого
 function getTotalWeight(item) {
+    if (!item || typeof item !== 'object') return 0;
     let baseWeight = item.weight || 0;
     if (item.category === 'magazine') {
-        const currentAmmo = item.currentAmmo || 0;
+        const currentAmmo = Number(item.currentAmmo) || (Array.isArray(item.ammo)
+            ? item.ammo.reduce((sum, stack) => sum + (Number(stack?.quantity) || 0), 0)
+            : 0);
         baseWeight = (currentAmmo > 0) ? (item.loadedWeight || 0) : (item.emptyWeight || 0);
     } else if (item.category === 'ammo') {
         const qty = item.quantity || 0;
@@ -1016,8 +1113,91 @@ function hasHealthRollDisadvantage(data, skillPath) {
 }
 
 function getWeightPerMovementPenalty(data) {
-    const strengthBonus = getSkillRollModifier(data, 'physical.strength');
+    const strength = data?.skills?.physical?.strength || {};
+    const base = Number(strength.base);
+    const baseBonus = Number.isFinite(base) ? Math.floor((base - 10) / 2) : 0;
+    const permanentBonus = Number(strength.bonus) || 0;
+    const modifiers = data?.health?.combatMeta?.consumableModifiers;
+    const temporaryBonus = Array.isArray(modifiers)
+        ? modifiers.reduce((sum, modifier) => {
+            if (!modifier || !['strength', 'strength_delta', 'generic', 'generic_multiplier'].includes(modifier.stat)) {
+                return sum;
+            }
+            if (modifier.remaining !== undefined && Number(modifier.remaining) <= 0) return sum;
+            return sum + (Number(modifier.value) || 0);
+        }, 0)
+        : 0;
+    const strengthBonus = baseBonus + permanentBonus + temporaryBonus;
     return Math.max(0.5, 5 * (1 + strengthBonus * 0.1));
+}
+
+function calculateCarriedWeight(data) {
+    const inv = data?.inventory || {};
+    const eq = data?.equipment || {};
+    const items = [];
+    if (Array.isArray(inv.backpack)) items.push(...inv.backpack);
+    if (Array.isArray(inv.pockets)) items.push(...inv.pockets);
+    for (const group of ['belt', 'vest']) {
+        const pouches = Array.isArray(eq[group]?.pouches) ? eq[group].pouches : [];
+        pouches.forEach((pouch) => {
+            if (Array.isArray(pouch?.contents)) items.push(...pouch.contents);
+        });
+    }
+    if (Array.isArray(data?.weapons)) items.push(...data.weapons);
+    return items.reduce((sum, item) => sum + getTotalWeight(item), 0);
+}
+
+function getMovementPenaltyBreakdown(data, suppliedWeight = null) {
+    const eq = data?.equipment || {};
+    const armor = eq.armor || {};
+    const totalWeight = suppliedWeight ?? calculateCarriedWeight(data);
+    const weightPerPenalty = getWeightPerMovementPenalty(data);
+    const rawWeightPenalty = Math.floor(totalWeight / weightPerPenalty);
+    const backpackReduction = Math.max(0, Number(eq.backpack?.attributes?.weight_reduction) || 0);
+    let weightPenalty = Math.max(0, rawWeightPenalty - backpackReduction);
+    let armorPenalty = Number(armor.movementPenalty ?? armor.movement_penalty) || 0;
+    const armorName = String(armor.name || '').trim().toLowerCase();
+    const isExoskeleton = armorName === 'экзоскелет' || armor.isExoskeleton || armor.attributes?.is_exoskeleton;
+    const battery = (armor.installedModules || []).find(
+        module => module?.slotType === 'exoskeleton_battery'
+    );
+    const powered = Boolean(
+        isExoskeleton
+        && battery
+        && Number(battery.attributes?.remaining_days) > 0
+    );
+    if (isExoskeleton) armor.powered = powered;
+    if (powered) {
+        armorPenalty = 5;
+        weightPenalty = 0;
+    }
+    const activeModifiers = data?.health?.combatMeta?.consumableModifiers;
+    const temporary = Array.isArray(activeModifiers)
+        ? activeModifiers.reduce((sum, modifier) => {
+            if (!modifier || !['movement_points', 'movement_points_delta', 'generic', 'generic_multiplier'].includes(modifier.stat)) {
+                return sum;
+            }
+            if (modifier.remaining !== undefined && Number(modifier.remaining) <= 0) return sum;
+            return sum + (Number(modifier.value) || 0);
+        }, 0)
+        : 0;
+    const zones = data?.health?.zones || {};
+    const injuries = ['leftLeg', 'rightLeg'].reduce(
+        (sum, key) => sum + (zones[key] && Number(zones[key].current) <= 0 ? 3 : 0),
+        0,
+    );
+    return {
+        total: Math.max(0, armorPenalty + weightPenalty + temporary + injuries),
+        totalWeight,
+        weightPerPenalty,
+        rawWeightPenalty,
+        backpackReduction,
+        weightPenalty,
+        armorPenalty,
+        temporary,
+        injuries,
+        poweredExoskeleton: powered,
+    };
 }
 
 function applyModifier(base, mod) {
@@ -2577,6 +2757,11 @@ async function renderEquipmentTab(data) {
     if (!container) return;
 
     const eq = data.equipment || {};
+    if (armorHasIntegratedHelmet(eq.armor)) {
+        syncIntegratedArmorHelmet(eq.armor);
+    } else if (!armorHasIntegratedHelmet(eq.armor) && eq.helmet?.integratedWithArmor) {
+        delete eq.helmet;
+    }
     const helmet = eq.helmet || {};
     const gasMask = eq.gasMask || {};
     const armor = eq.armor || {};
@@ -2654,7 +2839,7 @@ async function renderEquipmentTab(data) {
                         <h4>Шлем ${renderCreatedByPlayerBadge(helmet)}</h4>
                         <div style="display: flex; gap: 10px;">
                             ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="openCreateHelmetTemplateModal()">➕ Создать кастом</button>` : ''}
-                            ${helmet.templateId ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipHelmet()">Снять</button>` : ''}
+                            ${helmet.templateId && !helmet.integratedWithArmor ? `<button type="button" class="btn btn-sm btn-danger" onclick="unequipHelmet()">Снять</button>` : ''}
                         </div>
                     </div>
                     <div class="fields-container">
@@ -2662,6 +2847,7 @@ async function renderEquipmentTab(data) {
                             <label>Название</label>
                             <select name="equipment.helmet.templateId" class="form-control" onchange="fillHelmetFromPreset(this)">
                                 <option value="">-- Выберите --</option>
+                                ${helmet.integratedWithArmor ? `<option value="${helmet.templateId}" selected>${helmet.name}</option>` : ''}
                                 ${helmetTemplates.map(t => `<option value="${t.id}" ${helmet.templateId == t.id ? 'selected' : ''}>${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                             </select>
                         </div>
@@ -2693,7 +2879,7 @@ async function renderEquipmentTab(data) {
                         </div>
                         <div class="field-group field-number"><label>Штраф Точности</label><input type="number" class="number-input form-control" name="equipment.helmet.accuracyPenalty" value="${helmet.accuracyPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.helmet.ergonomicsPenalty" value="${helmet.ergonomicsPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
+                        <div class="field-group field-number"><label>Модификатор Харизмы</label><input type="number" class="number-input form-control" name="equipment.helmet.charismaBonus" value="${helmet.charismaBonus || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block" style="flex: 1;">
@@ -2705,6 +2891,7 @@ async function renderEquipmentTab(data) {
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px; text-align: center;">
                         ${(() => {
                             const template = helmetTemplates.find(t => t.id == helmet.templateId);
+                            if (helmet.integratedWithArmor) return '<div style="grid-column:span 2;">Голова</div>';
                             if (!template?.attributes?.protection_zones?.length) return '<span style="color:#aaa; grid-column: span 2;">Не указаны</span>';
                             const zoneNames = { crown: 'Темя', back: 'Затылок', ears: 'Уши', face: 'Забрало' };
                             return template.attributes.protection_zones.map(z => `<div>${zoneNames[z] || z}</div>`).join('');
@@ -2773,7 +2960,7 @@ async function renderEquipmentTab(data) {
                         </div>
                         <div class="field-group field-number"><label>Штраф Точности</label><input type="number" class="number-input form-control" name="equipment.gasMask.accuracyPenalty" value="${gasMask.accuracyPenalty || 0}"></div>
                         <div class="field-group field-number"><label>Штраф Эргономики</label><input type="number" class="number-input form-control" name="equipment.gasMask.ergonomicsPenalty" value="${gasMask.ergonomicsPenalty || 0}"></div>
-                        <div class="field-group field-number"><label>Харизма</label><input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
+                        <div class="field-group field-number"><label>Модификатор Харизмы</label><input type="number" class="number-input form-control" name="equipment.gasMask.charismaBonus" value="${gasMask.charismaBonus || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block">
@@ -2840,7 +3027,7 @@ async function renderEquipmentTab(data) {
                                 ${materialOptions.map(opt => `<option value="${opt}" ${armor.material === opt ? 'selected' : ''}>${opt}</option>`).join('')}
                             </select>
                         </div>
-                        <div class="field-group field-number"><label>Перемещение</label><input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
+                        <div class="field-group field-number"><label>Штраф перемещения брони</label><input type="number" class="number-input form-control" name="equipment.armor.movementPenalty" value="${armor.movementPenalty || 0}"></div>
                     </div>
                 </div>
                 <div class="equipment-protection-block" style="flex: 1;">
@@ -2858,6 +3045,11 @@ async function renderEquipmentTab(data) {
                         })()}
                     </div>
                 </div>
+                ${renderSlotsUniversal(armor, ['equipment', 'armor']) ? `
+                    <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
+                        ${renderSlotsUniversal(armor, ['equipment', 'armor'])}
+                    </div>
+                ` : ''}
                 <!-- Контейнеры на броне (отдельная строка, ниже) -->
                 <div style="margin-top: 15px; display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start;">
                     ${(armor.containers || []).map((slot, idx) => `
@@ -3076,6 +3268,9 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
             } else if (slot.type === 'battery') {
                 const power = installed.attributes?.power;
                 info = `${info} (заряд ${power !== undefined ? power : '?'}%)`;
+            } else if (slot.type === 'exoskeleton_battery') {
+                const days = Math.max(0, Number(installed.attributes?.remaining_days) || 0);
+                info = `${info} (${days > 0 ? `заряд на ${days} сут.` : 'разряжен'})`;
             } else if (slot.type === 'armor_plate') {
                 const prot = installed.attributes?.protection?.physical ?? installed.protection?.physical ?? 0;
                 const dur = installed.durability ?? 0;
@@ -5151,6 +5346,24 @@ function resolveCharacterDay(health, effects, didSleep) {
     return updated;
 }
 
+function advanceExoskeletonBatteryDay(data) {
+    const armor = data?.equipment?.armor;
+    if (!armor || String(armor.name || '').trim().toLowerCase() !== 'экзоскелет') return;
+    const battery = (armor.installedModules || []).find(
+        module => module?.slotType === 'exoskeleton_battery'
+    );
+    if (!battery) {
+        armor.powered = false;
+        return;
+    }
+    battery.attributes = battery.attributes || {};
+    battery.attributes.remaining_days = Math.max(
+        0,
+        (Number(battery.attributes.remaining_days) || 0) - 1,
+    );
+    armor.powered = battery.attributes.remaining_days > 0;
+}
+
 window.advanceCharacterDayWithoutSleep = function() {
     updateDataFromFields();
     const health = ensureHealthMaximums(currentCharacterData);
@@ -5161,6 +5374,7 @@ window.advanceCharacterDayWithoutSleep = function() {
         true
     );
     health.effects = resolveCharacterDay(health, elapsedEffects, false);
+    advanceExoskeletonBatteryDay(currentCharacterData);
     syncHealthDerivedStatuses(health);
     refreshHealthPanel();
     scheduleAutoSave();
@@ -5196,6 +5410,7 @@ window.performCharacterRest = function(hours = 8) {
     if (Number(hours) >= 8) {
         health.intoxication = Math.max(0, Number(health.intoxication || 0) - 75);
         effects = resolveCharacterDay(health, effects, true);
+        advanceExoskeletonBatteryDay(currentCharacterData);
     }
     health.effects = effects;
     syncHealthDerivedStatuses(health);
@@ -5453,6 +5668,18 @@ window.fillArmorFromPreset = async function(select) {
     const templates = await loadTemplatesForLobby('armor');
     const template = templates.find(t => t.id === selectedId);
     if (!template) return;
+    const equippedHelmet = currentCharacterData.equipment?.helmet;
+    if (
+        armorHasIntegratedHelmet(null, template)
+        && (
+            currentCharacterData.equipment?.gasMask?.templateId
+            || (equippedHelmet?.templateId && !equippedHelmet.integratedWithArmor)
+        )
+    ) {
+        showNotification('Сначала снимите обычный шлем и противогаз');
+        select.value = currentCharacterData.equipment?.armor?.templateId || '';
+        return;
+    }
 
     const armor = currentCharacterData.equipment?.armor || {};
     const mapping = {
@@ -5467,6 +5694,11 @@ window.fillArmorFromPreset = async function(select) {
     armor.volume = template.volume;
     armor.material = template.attributes?.material || armor.material || 'Текстиль';
     armor.createdByPlayer = !window.isGM;
+    armor.protectionZones = [...(template.attributes?.protection_zones || [])];
+    armor.integratedHelmet = armorHasIntegratedHelmet(armor, template);
+    armor.isExoskeleton = Boolean(template.attributes?.is_exoskeleton) || template.name === 'Экзоскелет';
+    armor.requiresExoskeletonBattery = Boolean(template.attributes?.requires_exoskeleton_battery || armor.isExoskeleton);
+    armor.powered = armor.isExoskeleton ? false : (template.attributes?.powered ?? armor.powered ?? false);
 
     const containerSlots = template.attributes?.container_slots || 0;
     armor.containers = Array(containerSlots).fill().map(() => ({ item: null }));
@@ -5475,6 +5707,7 @@ window.fillArmorFromPreset = async function(select) {
 
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.armor = armor;
+    syncIntegratedArmorHelmet(armor, template);
     await renderEquipmentTab(currentCharacterData);
     scheduleAutoSave();
 };
@@ -5503,6 +5736,17 @@ window.equipArmorFromInventory = async function(itemPath) {
         showNotification('Шаблон брони не найден');
         return;
     }
+    const equippedHelmet = currentCharacterData.equipment?.helmet;
+    if (
+        armorHasIntegratedHelmet(item, template)
+        && (
+            currentCharacterData.equipment?.gasMask?.templateId
+            || (equippedHelmet?.templateId && !equippedHelmet.integratedWithArmor)
+        )
+    ) {
+        showNotification('Сначала снимите обычный шлем и противогаз');
+        return;
+    }
     const armorToEquip = {
         templateId: template.id,
         createdByPlayer: Boolean(item.createdByPlayer),
@@ -5511,10 +5755,19 @@ window.equipArmorFromInventory = async function(itemPath) {
         volume: template.volume,
         material: item.material || template.attributes?.material || 'Текстиль',
         protection: item.protection || { ...template.attributes?.protection },
-        movementPenalty: item.movementPenalty || template.attributes?.movement_penalty || 0,
+        movementPenalty: item.movementPenalty ?? template.attributes?.movement_penalty ?? 0,
         containerSlots: item.containerSlots || template.attributes?.container_slots || 0,
         modifications: item.modifications || [],
-        installedModules: item.installedModules ? [...item.installedModules] : []
+        installedModules: item.installedModules ? [...item.installedModules] : [],
+        protectionZones: [...(item.protectionZones || template.attributes?.protection_zones || [])],
+        integratedHelmet: armorHasIntegratedHelmet(item, template),
+        isExoskeleton: Boolean(item.isExoskeleton || template.attributes?.is_exoskeleton || template.name === 'Экзоскелет'),
+        requiresExoskeletonBattery: Boolean(
+            item.requiresExoskeletonBattery
+            || template.attributes?.requires_exoskeleton_battery
+            || template.name === 'Экзоскелет'
+        ),
+        powered: false,
     };
 
     const containerSlots = template.attributes?.container_slots || 0;
@@ -5551,6 +5804,7 @@ window.equipArmorFromInventory = async function(itemPath) {
     }
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.armor = armorToEquip;
+    syncIntegratedArmorHelmet(armorToEquip, template);
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
@@ -6594,10 +6848,18 @@ window.unequipArmor = async function() {
     restoredItem.protection = { ...armor.protection };
     restoredItem.modifications = armor.modifications || [];
     restoredItem.containers = armor.containers || [];
+    restoredItem.protectionZones = armor.protectionZones || [];
+    restoredItem.integratedHelmet = Boolean(armor.integratedHelmet);
+    restoredItem.isExoskeleton = Boolean(armor.isExoskeleton);
+    restoredItem.requiresExoskeletonBattery = Boolean(armor.requiresExoskeletonBattery);
+    restoredItem.powered = armor.powered;
     if (!currentCharacterData.inventory) currentCharacterData.inventory = {};
     if (!currentCharacterData.inventory.backpack) currentCharacterData.inventory.backpack = [];
     currentCharacterData.inventory.backpack.push(restoredItem);
     delete currentCharacterData.equipment.armor;
+    if (currentCharacterData.equipment?.helmet?.integratedWithArmor) {
+        delete currentCharacterData.equipment.helmet;
+    }
     renderEquipmentTab(currentCharacterData);
     renderInventoryTab(currentCharacterData);
     scheduleAutoSave();
@@ -6609,6 +6871,10 @@ window.unequipHelmet = async function() {
     const helmet = currentCharacterData.equipment?.helmet;
     if (!helmet || !helmet.templateId) {
         showNotification('Шлем не надет');
+        return;
+    }
+    if (helmet.integratedWithArmor) {
+        showNotification('Встроенный шлем снимается только вместе с бронёй');
         return;
     }
     const templates = await loadTemplatesForLobby('helmet');
@@ -9756,19 +10022,35 @@ async function renderInventoryTab(data) {
     const backpackWeightReduction = Number(equippedBackpack?.attributes?.weight_reduction || 0);
     const backpackFill = backpack.reduce((sum, item) => sum + (item.volume || 0) * (item.quantity || 1), 0);
 
-    const rawTotalWeight = pockets.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0) +
-                           backpack.reduce((sum, item) => sum + (item.weight || 0) * (item.quantity || 1), 0);
-    const weightPerPenalty = getWeightPerMovementPenalty(data);
-    const movePenaltyFromWeight = Math.floor(rawTotalWeight / weightPerPenalty);
-    const movePenalty = Math.max(0, movePenaltyFromWeight - backpackWeightReduction);
+    const rawTotalWeight = calculateCarriedWeight(data);
+    const movementPenalty = getMovementPenaltyBreakdown(data, rawTotalWeight);
 
     let html = `
-        <div style="display: flex; gap: 20px; margin-bottom: 15px;">
-            <div><strong>Общий вес:</strong> <span id="total-weight-display">${rawTotalWeight}</span></div>
+        <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; margin-bottom:15px;">
+            <div><strong>Общий вес:</strong> <span id="total-weight-display">${rawTotalWeight.toFixed(1)}</span> кг</div>
             <div>
-                <strong>Штраф перемещения:</strong> <span id="move-penalty-display">${movePenalty}</span>
-                <small style="opacity:0.65;">(1 за <span id="move-penalty-weight-step">${weightPerPenalty.toFixed(1)}</span> кг)</small>
+                <strong>Штраф веса:</strong> <span id="weight-penalty-display">${movementPenalty.weightPenalty}</span>
+                <small style="opacity:0.65;">
+                    (1 за <span id="move-penalty-weight-step">${movementPenalty.weightPerPenalty.toFixed(1)}</span> кг)
+                </small>
             </div>
+            <details id="movement-penalty-details" style="min-width:min(100%, 310px);">
+                <summary style="cursor:pointer;">
+                    <strong>Итоговый штраф перемещения:</strong>
+                    <span id="move-penalty-display">${movementPenalty.total}</span>
+                </summary>
+                <div style="display:grid; grid-template-columns:minmax(0,1fr) auto; gap:5px 14px; margin-top:8px; padding:9px 11px; background:rgba(0,0,0,.12); border-radius:7px;">
+                    <span>Вес до рюкзака</span><span id="weight-penalty-raw">${movementPenalty.rawWeightPenalty}</span>
+                    <span>Снижение от рюкзака</span><span id="weight-penalty-backpack">−${movementPenalty.backpackReduction}</span>
+                    <span>Итог от веса</span><span id="weight-penalty-source">${movementPenalty.weightPenalty}</span>
+                    <span>Броня</span><span id="armor-penalty-source">${movementPenalty.armorPenalty}</span>
+                    <span>Травмы ног</span><span id="injury-penalty-source">${movementPenalty.injuries}</span>
+                    <span>Временные модификаторы</span><span id="temporary-penalty-source">${movementPenalty.temporary}</span>
+                    <span id="exoskeleton-weight-rule" style="grid-column:span 2; opacity:.7; font-size:12px; display:${movementPenalty.poweredExoskeleton ? 'block' : 'none'};">
+                        Запитанный экзоскелет: броня устанавливает штраф 5, перегруз не учитывается.
+                    </span>
+                </div>
+            </details>
         </div>
         ${window.isGM ? `<div style="margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
             <button type="button" class="btn btn-sm btn-primary" onclick="openCreateInventoryItemModal()">➕ Создать предмет</button>
@@ -11183,13 +11465,27 @@ function recalculateInventoryTotals() {
         backpackFillSpan.textContent = `Заполнено: ${backpackVolume.toFixed(1)} / ${backpackLimit}`;
     }
 
-    const weightPerPenalty = getWeightPerMovementPenalty(currentCharacterData);
-    const movePenaltyFromWeight = Math.floor(totalWeight / weightPerPenalty);
-    const movePenalty = Math.max(0, movePenaltyFromWeight - backpackWeightReduction);
+    const movementPenalty = getMovementPenaltyBreakdown(currentCharacterData, totalWeight);
     const movePenaltySpan = document.getElementById('move-penalty-display');
-    if (movePenaltySpan) movePenaltySpan.textContent = movePenalty;
+    if (movePenaltySpan) movePenaltySpan.textContent = movementPenalty.total;
+    const weightPenaltySpan = document.getElementById('weight-penalty-display');
+    if (weightPenaltySpan) weightPenaltySpan.textContent = movementPenalty.weightPenalty;
     const weightStepSpan = document.getElementById('move-penalty-weight-step');
-    if (weightStepSpan) weightStepSpan.textContent = weightPerPenalty.toFixed(1);
+    if (weightStepSpan) weightStepSpan.textContent = movementPenalty.weightPerPenalty.toFixed(1);
+    const sourceValues = {
+        'weight-penalty-raw': movementPenalty.rawWeightPenalty,
+        'weight-penalty-backpack': `−${movementPenalty.backpackReduction}`,
+        'weight-penalty-source': movementPenalty.weightPenalty,
+        'armor-penalty-source': movementPenalty.armorPenalty,
+        'injury-penalty-source': movementPenalty.injuries,
+        'temporary-penalty-source': movementPenalty.temporary,
+    };
+    Object.entries(sourceValues).forEach(([id, value]) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    });
+    const exoskeletonRule = document.getElementById('exoskeleton-weight-rule');
+    if (exoskeletonRule) exoskeletonRule.style.display = movementPenalty.poweredExoskeleton ? 'block' : 'none';
 
     // Заполненность карманов
     const pocketMaxVolume = inv.pocketMaxVolume || 10;
@@ -12184,6 +12480,8 @@ window.rollSkill = function(skillPath, skillLabel) {
         if (eq.earrings?.charismaBonus) eqBonus += eq.earrings.charismaBonus;
         if (eq.bracelet1?.charismaBonus) eqBonus += eq.bracelet1.charismaBonus;
         if (eq.bracelet2?.charismaBonus) eqBonus += eq.bracelet2.charismaBonus;
+        if (eq.helmet?.charismaBonus) eqBonus += eq.helmet.charismaBonus;
+        if (eq.gasMask?.charismaBonus) eqBonus += eq.gasMask.charismaBonus;
         equipmentBonus += eqBonus;
     }
 
@@ -12241,6 +12539,15 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
             let matches = false;
             if (slotType === 'battery') {
                 matches = (it.category === 'device' && it.subcategory === 'battery');
+            } else if (slotType === 'exoskeleton_battery') {
+                matches = (
+                    it.category === 'exoskeleton_module'
+                    && (
+                        it.subcategory === 'battery'
+                        || it.attributes?.slot_type === 'exoskeleton_battery'
+                    )
+                    && Number(it.attributes?.remaining_days) > 0
+                );
             } else if (slotType === 'filter') {
                 matches = (
                     (it.category === 'gas_mask_module' && (it.subcategory === 'filter' || it.attributes?.slot_type === 'filter'))
@@ -12300,6 +12607,8 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
         } else if (slotType === 'battery') {
             const power = entry.item.attributes?.power;
             desc += ` (заряд ${power !== undefined ? power : '?'}%)`;
+        } else if (slotType === 'exoskeleton_battery') {
+            desc += ` (заряд на ${Number(entry.item.attributes?.remaining_days) || 0} сут.)`;
         }
         opt.textContent = desc;
         select.appendChild(opt);
@@ -12345,6 +12654,7 @@ function universalUninstallModule(targetItem, targetPath, slotType) {
 
     const moduleItem = targetItem.installedModules[index];
     targetItem.installedModules.splice(index, 1);
+    if (slotType === 'exoskeleton_battery') targetItem.powered = false;
 
     let restoredItem;
     const templateId = moduleItem.templateId;

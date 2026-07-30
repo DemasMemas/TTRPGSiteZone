@@ -442,9 +442,9 @@ def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
 
 
 def _armor_protection_zones(name: str) -> List[str]:
-    normalized = _normalize_text(name).lower()
-    torso_only = {
-        "армейский бронежилет",
+    normalized = _normalize_text(name).lower().replace("ё", "е")
+    torso_only = {"армейский бронежилет"}
+    torso_and_arms = {
         "кожаная куртка",
         "бандитская куртка",
         "броня путника",
@@ -453,14 +453,35 @@ def _armor_protection_zones(name: str) -> List[str]:
         "костюм химзащиты",
         "комбинезон купол",
         "комбинезон купол м",
+        "комбинезон купол-м",
         "комбинезон гроб",
         "экзоскелет",
     }
     if normalized in torso_only:
         return ["torso"]
+    if normalized in torso_and_arms:
+        return ["torso", "arms"]
     if normalized in includes_head:
         return ["torso", "arms", "legs", "head"]
     return ["torso", "arms", "legs"]
+
+
+def _integrated_helmet_profile(name: str) -> Optional[Dict[str, Any]]:
+    normalized = _normalize_text(name).lower().replace("ё", "е")
+    profiles = {
+        "костюм химзащиты": {"physical": 0.0, "charisma_penalty": 2, "accuracy_penalty": 2},
+        "комбинезон купол": {"physical": 0.1, "charisma_penalty": 3, "accuracy_penalty": 3},
+        "комбинезон купол м": {"physical": 0.35, "charisma_penalty": 2, "accuracy_penalty": 3},
+        "комбинезон купол-м": {"physical": 0.35, "charisma_penalty": 2, "accuracy_penalty": 3},
+        "комбинезон гроб": {"physical": 0.4, "charisma_penalty": 4, "accuracy_penalty": 4},
+        "экзоскелет": {
+            "physical_formula": "armor_physical_minus_10_percent",
+            "charisma_penalty": 0,
+            "accuracy_penalty": 2,
+        },
+    }
+    profile = profiles.get(normalized)
+    return dict(profile) if profile else None
 
 
 def _parse_armor(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
@@ -482,6 +503,18 @@ def _parse_armor(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
             "protection_zones": _armor_protection_zones(name),
             "raw_row": row,
         }
+        if "head" in attributes["protection_zones"]:
+            attributes["integrated_helmet"] = True
+            attributes["integrated_helmet_profile"] = _integrated_helmet_profile(name)
+        if _normalize_text(name).lower().replace("ё", "е") == "экзоскелет":
+            attributes.update({
+                "is_exoskeleton": True,
+                "powered": False,
+                "requires_exoskeleton_battery": True,
+                "slots": [{"type": "exoskeleton_battery", "label": "Аккумулятор", "maxItems": 1}],
+                "movement_penalty_mode": "set",
+                "ignore_weight_penalty_when_powered": True,
+            })
         templates.append(
             {
                 "name": name,
@@ -583,15 +616,43 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     return templates
 
 
+def _parse_exoskeleton_battery(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    for row in rows:
+        name = _normalize_text(row.get("A"))
+        if name.lower().replace("ё", "е") != "аккумуляторы экзоскелета":
+            continue
+        return [{
+            "name": name,
+            "category": "exoskeleton_module",
+            "subcategory": "battery",
+            "item_class": None,
+            "description": _normalize_text(row.get("E")),
+            "price": _as_int(row.get("C")),
+            "weight": _as_float(row.get("B")),
+            "volume": _as_float(row.get("D")),
+            "attributes": {
+                "import_source": "equipment_workbook",
+                "slot_type": "exoskeleton_battery",
+                "charge_days": 1,
+                "remaining_days": 1,
+                "raw_row": row,
+            },
+            "compatible_ids": [],
+        }]
+    return []
+
+
 def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
     rows = _read_sheet_rows(workbook_path, "Магазины и Патроны")
     weapon_rows = _read_sheet_rows(workbook_path, "Оружие")
     armor_rows = _read_sheet_rows(workbook_path, "Броня")
+    misc_rows = _read_sheet_rows(workbook_path, "Прочее")
     templates: List[Dict[str, Any]] = [
         *_parse_ranged_weapons(weapon_rows),
         *_parse_melee_weapons(weapon_rows),
         *_parse_armor(armor_rows),
         *_parse_helmets(armor_rows),
+        *_parse_exoskeleton_battery(misc_rows),
     ]
     for row in rows:
         name_a = _normalize_text(row.get("A"))

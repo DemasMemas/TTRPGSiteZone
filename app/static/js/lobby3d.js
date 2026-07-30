@@ -2,12 +2,18 @@ import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { updateRain } from './weather.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
+import {
+    createCompatibleWebGLRenderer,
+    createUnavailableRenderer,
+    showWebGLUnavailable,
+} from './webglSupport.js';
 
 const CHUNK_SIZE = 32;
 export const chunksMap = new Map();
 
 let lastMouseX = 0, lastMouseY = 0;
 let lastModifiers = { alt: false, shift: false };
+const globalCameraKeys = new Set();
 
 let postRenderCallbacks = [];
 
@@ -220,12 +226,20 @@ const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerH
 camera.position.set(256, 300, 256);
 camera.lookAt(256, 0, 256);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+const renderer = createCompatibleWebGLRenderer(THREE, {
+    antialias: true,
+    logarithmicDepthBuffer: true,
+}) || createUnavailableRenderer();
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.shadowMap.enabled = true;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.shadowMap.enabled = !renderer.isUnavailableRenderer;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-document.getElementById('canvas-container').appendChild(renderer.domElement);
+const globalCanvasContainer = document.getElementById('canvas-container');
+globalCanvasContainer.appendChild(renderer.domElement);
+if (renderer.isUnavailableRenderer) {
+    window.webGLUnavailable = true;
+    showWebGLUnavailable(globalCanvasContainer);
+}
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enablePointerCapture = false;
@@ -1335,22 +1349,51 @@ window.addEventListener('dblclick', (event) => {
 });
 
 let lastTime = performance.now();
+function updateGlobalCameraMovement(deltaSeconds) {
+    if (window.isLocationActive || globalCameraKeys.size === 0) return;
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    forward.y = 0;
+    if (forward.lengthSq() < 0.0001) return;
+    forward.normalize();
+    const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+    const movement = new THREE.Vector3();
+    if (globalCameraKeys.has('KeyW')) movement.add(forward);
+    if (globalCameraKeys.has('KeyS')) movement.sub(forward);
+    if (globalCameraKeys.has('KeyD')) movement.add(right);
+    if (globalCameraKeys.has('KeyA')) movement.sub(right);
+    if (movement.lengthSq() === 0) return;
+
+    const distanceToTarget = camera.position.distanceTo(controls.target);
+    movement.normalize().multiplyScalar(Math.max(20, distanceToTarget * 0.7) * deltaSeconds);
+    const oldTarget = controls.target.clone();
+    const nextTarget = oldTarget.clone().add(movement);
+    nextTarget.x = THREE.MathUtils.clamp(nextTarget.x, 0.5, (MAX_CHUNK_X + 1) * CHUNK_SIZE - 0.5);
+    nextTarget.z = THREE.MathUtils.clamp(nextTarget.z, 0.5, (MAX_CHUNK_Y + 1) * CHUNK_SIZE - 0.5);
+    const appliedMovement = nextTarget.sub(oldTarget);
+    controls.target.add(appliedMovement);
+    camera.position.add(appliedMovement);
+}
+
 function animate() {
     const now = performance.now();
     const delta = (now - lastTime) / 1000;
     lastTime = now;
 
     requestAnimationFrame(animate);
-    controls.update();
-    updateChunkVisibility();
-    updateRain(delta);
-    animateChunkAnomalies(now);
+    if (!renderer.isUnavailableRenderer) {
+        updateGlobalCameraMovement(Math.min(0.1, Math.max(0, delta)));
+        controls.update();
+        updateChunkVisibility();
+        updateRain(delta);
+        animateChunkAnomalies(now);
+    }
 
-    if (lastMouseX !== 0 || lastMouseY !== 0) {
+    if (!renderer.isUnavailableRenderer && (lastMouseX !== 0 || lastMouseY !== 0)) {
         performRaycast(lastMouseX, lastMouseY);
     }
 
-    renderer.render(scene, camera);
+    if (!renderer.isUnavailableRenderer) renderer.render(scene, camera);
     postRenderCallbacks.forEach(cb => cb());
 }
 animate();
@@ -1415,7 +1458,11 @@ window.addEventListener('pointermove', (event) => {
 }, { capture: true });
 
 window.addEventListener('keydown', (e) => {
-    if (e.key === 'Alt') {
+    const isTyping = Boolean(e.target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+    if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && !isTyping && !window.isLocationActive) {
+        globalCameraKeys.add(e.code);
+        e.preventDefault();
+    } else if (e.key === 'Alt') {
         lastModifiers.alt = true;
         e.preventDefault();
     } else if (e.key === 'Shift') {
@@ -1424,12 +1471,17 @@ window.addEventListener('keydown', (e) => {
 }, { capture: true });
 
 window.addEventListener('keyup', (e) => {
+    if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code)) {
+        globalCameraKeys.delete(e.code);
+    }
     if (e.key === 'Alt') {
         lastModifiers.alt = false;
     } else if (e.key === 'Shift') {
         lastModifiers.shift = false;
     }
 }, { capture: true });
+
+window.addEventListener('blur', () => globalCameraKeys.clear());
 
 export function getTileHeightAt(globalX, globalZ) {
     const chunkX = Math.floor(globalX / CHUNK_SIZE);

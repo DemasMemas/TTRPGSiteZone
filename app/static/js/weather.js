@@ -5,6 +5,9 @@ let rainParticles = null;
 let rainSound = null;
 let emissionSound = null;
 let rainSpeeds = [];
+let weatherAudioUnlocked = false;
+let desiredRainAudio = { enabled: false, volume: 0 };
+let desiredEmissionAudio = { enabled: false, volume: 0 };
 
 const RAIN_VOLUME_FACTOR = 0.5;
 const EMISSION_VOLUME_FACTOR = 0.05; // ещё тише
@@ -14,6 +17,36 @@ const DEFAULT_RAIN_INTENSITY = 0.5;
 const DEFAULT_SUN_INTENSITY = 0.5;
 const DEFAULT_EMISSION_INTENSITY = 0.5;
 
+function setLoopingSound(sound, state) {
+    if (!sound) return;
+    sound.volume(state.volume);
+    if (!state.enabled) {
+        sound.pause();
+        return;
+    }
+    if (weatherAudioUnlocked && !sound.playing()) sound.play();
+}
+
+function syncWeatherAudio() {
+    setLoopingSound(rainSound, desiredRainAudio);
+    setLoopingSound(emissionSound, desiredEmissionAudio);
+}
+
+async function unlockWeatherAudio() {
+    try {
+        const context = window.Howler?.ctx;
+        if (context?.state === 'suspended') await context.resume();
+        weatherAudioUnlocked = !context || context.state === 'running';
+    } catch (error) {
+        console.warn('Weather audio could not be unlocked.', error);
+    }
+    if (!weatherAudioUnlocked) return;
+    syncWeatherAudio();
+    ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => {
+        window.removeEventListener(eventName, unlockWeatherAudio, true);
+    });
+}
+
 export function initWeather() {
     if (typeof window.Howl !== 'function') {
         console.warn('Howler could not be loaded; weather audio is disabled.');
@@ -21,6 +54,11 @@ export function initWeather() {
     }
     rainSound = new window.Howl({ src: ['/static/audio/rain.mp3'], loop: true, volume: 0 });
     emissionSound = new window.Howl({ src: ['/static/audio/emission.mp3'], loop: true, volume: 0 });
+    weatherAudioUnlocked = window.Howler?.ctx?.state === 'running';
+    ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => {
+        window.addEventListener(eventName, unlockWeatherAudio, { capture: true, passive: true });
+    });
+    syncWeatherAudio();
 }
 
 export function applyWeather(settings) {
@@ -63,13 +101,10 @@ export function applyWeather(settings) {
             updateRainIntensity(rain.intensity);
         }
         rainParticles.visible = true;
-        if (rainSound) {
-            rainSound.volume(rain.intensity * RAIN_VOLUME_FACTOR);
-            rainSound.play();
-        }
+        desiredRainAudio = { enabled: true, volume: rain.intensity * RAIN_VOLUME_FACTOR };
     } else {
         if (rainParticles) rainParticles.visible = false;
-        rainSound?.pause();
+        desiredRainAudio = { enabled: false, volume: 0 };
     }
 
     // Солнце + небо
@@ -103,15 +138,13 @@ export function applyWeather(settings) {
             scene.fog.color.lerpColors(new THREE.Color(0xcccccc), new THREE.Color(0xaa3333), intensity);
         }
 
-        if (emissionSound) {
-            emissionSound.volume(intensity * EMISSION_VOLUME_FACTOR);
-            emissionSound.play();
-        }
+        desiredEmissionAudio = { enabled: true, volume: intensity * EMISSION_VOLUME_FACTOR };
     } else {
         directionalLight.color.setHex(0xffffff);
         ambientLight.color.setHex(0xffffff);
-        emissionSound?.pause();
+        desiredEmissionAudio = { enabled: false, volume: 0 };
     }
+    syncWeatherAudio();
 }
 
 function createRainParticles(intensity = 0.5) {

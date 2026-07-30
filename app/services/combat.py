@@ -645,6 +645,11 @@ class CombatService:
     def _movement_penalty(loc_char):
         character = loc_char.character
         data = character.data if character and isinstance(character.data, dict) else {}
+        return CombatService._movement_penalty_breakdown(data)['total']
+
+    @staticmethod
+    def _movement_penalty_breakdown(data):
+        data = data if isinstance(data, dict) else {}
         equipment = data.get('equipment', {}) if isinstance(data, dict) else {}
         armor = equipment.get('armor', {}) if isinstance(equipment, dict) else {}
 
@@ -655,16 +660,54 @@ class CombatService:
         if armor_penalty is None and isinstance(armor, dict):
             armor_penalty = armor.get('movement_penalty')
 
-        weight_penalty = CombatService._inventory_movement_penalty(data)
+        weight_details = CombatService._inventory_weight_details(data)
+        weight_penalty = weight_details['penalty']
         temporary_penalty = CombatService._consumable_stat_bonus(data, 'movement_points')
         limb_penalty = CombatService._disabled_limb_penalties(data)['movement']
-        return max(
+        armor_name = str(armor.get('name') or '').strip().lower() if isinstance(armor, dict) else ''
+        armor_attributes = CombatService._template_attributes(armor) if isinstance(armor, dict) else {}
+        is_exoskeleton = armor_name == 'экзоскелет' or bool(armor_attributes.get('is_exoskeleton'))
+        is_powered = False
+        if is_exoskeleton:
+            explicit_power = armor.get('powered', armor_attributes.get('powered'))
+            battery = next(
+                (
+                    module for module in armor.get('installedModules', [])
+                    if isinstance(module, dict) and module.get('slotType') == 'exoskeleton_battery'
+                ),
+                None,
+            )
+            if battery is not None:
+                battery_attributes = battery.get('attributes', {})
+                remaining_days = CombatService._coerce_float(
+                    battery_attributes.get('remaining_days') if isinstance(battery_attributes, dict) else 0,
+                    0,
+                )
+                is_powered = remaining_days > 0
+            elif explicit_power is not None and armor.get('requiresExoskeletonBattery') is False:
+                is_powered = bool(explicit_power)
+            if is_powered:
+                armor_penalty = 5
+                weight_penalty = 0
+        total = max(
             0,
             CombatService._coerce_int(armor_penalty, 0)
             + weight_penalty
             + temporary_penalty
             + limb_penalty,
         )
+        return {
+            'total': total,
+            'armor': CombatService._coerce_int(armor_penalty, 0),
+            'weight': weight_penalty,
+            'weight_raw': weight_details['raw_penalty'],
+            'backpack_reduction': weight_details['backpack_reduction'],
+            'weight_per_penalty': weight_details['weight_per_penalty'],
+            'total_weight': weight_details['total_weight'],
+            'temporary': temporary_penalty,
+            'injuries': limb_penalty,
+            'powered_exoskeleton': bool(is_exoskeleton and is_powered),
+        }
 
     @staticmethod
     def _item_total_weight(item):
@@ -707,8 +750,19 @@ class CombatService:
 
     @staticmethod
     def _inventory_movement_penalty(character_data):
+        return CombatService._inventory_weight_details(character_data)['penalty']
+
+    @staticmethod
+    def _inventory_weight_details(character_data):
         if not isinstance(character_data, dict):
-            return 0
+            return {
+                'penalty': 0,
+                'raw_penalty': 0,
+                'backpack_reduction': 0,
+                'weight_per_penalty': 5.0,
+                'total_weight': 0.0,
+                'strength_bonus': 0,
+            }
         inventory = character_data.get('inventory')
         inventory = inventory if isinstance(inventory, dict) else {}
         equipment = character_data.get('equipment')
@@ -730,9 +784,12 @@ class CombatService:
             carried_items.extend(weapons)
 
         total_weight = sum(CombatService._item_total_weight(item) for item in carried_items)
-        strength_bonus = CombatService._skill_modifier(
-            character_data,
-            'skills.physical.strength',
+        strength = ((character_data.get('skills') or {}).get('physical') or {}).get('strength')
+        strength = strength if isinstance(strength, dict) else {}
+        strength_bonus = (
+            math.floor((CombatService._coerce_int(strength.get('base'), 10) - 10) / 2)
+            + CombatService._coerce_int(strength.get('bonus'), 0)
+            + CombatService._consumable_stat_bonus(character_data, 'strength')
         )
         weight_per_penalty = max(0.5, 5 * (1 + strength_bonus * 0.1))
         backpack_reduction = 0
@@ -744,10 +801,15 @@ class CombatService:
                 0,
                 CombatService._coerce_int(attributes.get('weight_reduction'), 0),
             )
-        return max(
-            0,
-            math.floor(total_weight / weight_per_penalty) - backpack_reduction,
-        )
+        raw_penalty = math.floor(total_weight / weight_per_penalty)
+        return {
+            'penalty': max(0, raw_penalty - backpack_reduction),
+            'raw_penalty': raw_penalty,
+            'backpack_reduction': backpack_reduction,
+            'weight_per_penalty': weight_per_penalty,
+            'total_weight': total_weight,
+            'strength_bonus': strength_bonus,
+        }
 
     @staticmethod
     def _health_roll_modifier(character_data, skill_path, include_pain=True):
@@ -905,6 +967,11 @@ class CombatService:
             return default
 
     @staticmethod
+    def _protection_percent(value, default=0.0):
+        parsed = CombatService._parse_percent(value, default)
+        return parsed * 100 if 0 < abs(parsed) <= 1 else parsed
+
+    @staticmethod
     def _random_hit_zone(roll, aimed_zone=None, melee=False):
         if aimed_zone in {'head', 'chest', 'abdomen', 'left_arm', 'right_arm', 'left_leg', 'right_leg'}:
             return aimed_zone
@@ -1002,20 +1069,26 @@ class CombatService:
         )
         name = str(item.get('name') or '').strip().lower()
         if slot == 'armor':
-            if name in {
-                'армейский бронежилет',
+            torso_only = {'армейский бронежилет'}
+            torso_and_arms = {
                 'кожаная куртка',
                 'бандитская куртка',
                 'броня путника',
-            }:
-                return zone_group == 'torso'
-            if name in {
+            }
+            full_body = {
                 'костюм химзащиты',
                 'комбинезон купол',
                 'комбинезон купол м',
+                'комбинезон купол-м',
                 'комбинезон гроб',
                 'экзоскелет',
-            }:
+            }
+            normalized_name = name.replace('ё', 'е')
+            if normalized_name in torso_only:
+                return zone_group == 'torso'
+            if normalized_name in torso_and_arms:
+                return zone_group in {'torso', 'arms'}
+            if normalized_name in full_body:
                 return zone_group in {'torso', 'arms', 'legs', 'head'}
         declared = attributes.get('protection_zones')
         if isinstance(declared, list) and declared:
@@ -1122,13 +1195,90 @@ class CombatService:
         }
 
     @staticmethod
+    def _integrated_helmet_profile(armor):
+        if not isinstance(armor, dict):
+            return None
+        name = str(armor.get('name') or '').strip().lower().replace('ё', 'е')
+        fixed_profiles = {
+            'костюм химзащиты': (0, 2, 2),
+            'комбинезон купол': (10, 3, 3),
+            'комбинезон купол м': (35, 2, 3),
+            'комбинезон купол-м': (35, 2, 3),
+            'комбинезон гроб': (40, 4, 4),
+        }
+        if name == 'экзоскелет':
+            protection = armor.get('protection')
+            protection = protection if isinstance(protection, dict) else {}
+            physical = max(
+                0,
+                CombatService._protection_percent(protection.get('physical'), 0) - 10,
+            )
+            return {
+                'physical': physical,
+                'charisma_penalty': 0,
+                'accuracy_penalty': 2,
+            }
+        profile = fixed_profiles.get(name)
+        if not profile:
+            attributes = CombatService._template_attributes(armor)
+            configured = attributes.get('integrated_helmet_profile')
+            if not isinstance(configured, dict):
+                return None
+            return {
+                'physical': CombatService._protection_percent(configured.get('physical'), 0),
+                'charisma_penalty': max(0, CombatService._coerce_int(configured.get('charisma_penalty'), 0)),
+                'accuracy_penalty': max(0, CombatService._coerce_int(configured.get('accuracy_penalty'), 0)),
+            }
+        physical, charisma_penalty, accuracy_penalty = profile
+        return {
+            'physical': physical,
+            'charisma_penalty': charisma_penalty,
+            'accuracy_penalty': accuracy_penalty,
+        }
+
+    @staticmethod
+    def _equipment_accuracy_penalty(character_data):
+        equipment = character_data.get('equipment') if isinstance(character_data, dict) else {}
+        equipment = equipment if isinstance(equipment, dict) else {}
+        armor = equipment.get('armor') if isinstance(equipment.get('armor'), dict) else {}
+        integrated_profile = CombatService._integrated_helmet_profile(armor)
+        if integrated_profile:
+            return integrated_profile['accuracy_penalty']
+
+        total = 0
+        for slot in ('helmet', 'gasMask'):
+            item = equipment.get(slot) if isinstance(equipment.get(slot), dict) else {}
+            penalty = item.get('accuracyPenalty')
+            if penalty is None:
+                penalty = item.get('accuracy_penalty')
+            if penalty is None:
+                penalty = (item.get('attributes') or {}).get('accuracy_penalty')
+            total += max(0, CombatService._coerce_int(penalty, 0))
+        return total
+
+    @staticmethod
     def _target_armor(target_data, zone):
         equipment = target_data.get('equipment') if isinstance(target_data, dict) else {}
         equipment = equipment if isinstance(equipment, dict) else {}
         candidates = []
+        armor_item = equipment.get('armor') if isinstance(equipment.get('armor'), dict) else {}
+        integrated_profile = (
+            CombatService._integrated_helmet_profile(armor_item)
+            if zone == 'head'
+            else None
+        )
+        if integrated_profile:
+            candidates.append((
+                'integratedHelmet',
+                armor_item,
+                CombatService._template_attributes(armor_item),
+                {'physical': integrated_profile['physical']},
+            ))
         for slot in ('armor', 'helmet', 'gasMask'):
             item = equipment.get(slot)
             if isinstance(item, dict):
+                if integrated_profile and zone == 'head':
+                    continue
                 attrs = CombatService._template_attributes(item)
                 if not CombatService._armor_covers_zone(slot, item, attrs, zone):
                     continue
@@ -1141,7 +1291,7 @@ class CombatService:
         details = []
         for slot, item, attrs, protection in candidates:
             value = protection.get(zone_group, protection.get('physical', 0))
-            parsed = max(0.0, min(100.0, CombatService._parse_percent(value, 0)))
+            parsed = max(0.0, min(100.0, CombatService._protection_percent(value, 0)))
             parsed = max(0.0, parsed - CombatService._armor_stage_penalty(item, 'physical'))
             if parsed:
                 total = max(total, parsed)
@@ -2999,6 +3149,7 @@ class CombatService:
                 weapon.get('accuracy', (weapon.get('attributes') or {}).get('accuracy')), 0
             )
             hit_difficulty = 12 - shooting_bonus - weapon_accuracy
+            hit_difficulty += CombatService._equipment_accuracy_penalty(data)
             hit_difficulty -= attack_details['ergonomics_accuracy_applied']
             hit_difficulty -= attack_details['posture_shooting_bonus']
             hit_difficulty += CombatService._coerce_int(

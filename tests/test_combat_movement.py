@@ -105,6 +105,140 @@ def test_movement_penalty_combines_weight_armor_and_temporary_modifier():
     assert CombatService._movement_penalty(location_character) == 3
 
 
+def test_powered_exoskeleton_sets_base_penalty_and_ignores_overload():
+    character_data = {
+        "inventory": {
+            "pockets": [{"category": "item", "weight": 100, "quantity": 1}],
+        },
+        "equipment": {
+            "armor": {
+                "name": "Экзоскелет",
+                "movementPenalty": 5,
+                "installedModules": [{
+                    "slotType": "exoskeleton_battery",
+                    "attributes": {"remaining_days": 1},
+                }],
+            },
+        },
+        "health": {
+            "zones": {
+                "leftLeg": {"current": 0},
+                "rightLeg": {"current": 100},
+            },
+        },
+    }
+    location_character = LocationCharacter()
+    location_character.character = LobbyCharacter(data=character_data)
+
+    assert CombatService._movement_penalty(location_character) == 8
+
+
+def test_exoskeleton_without_charged_battery_keeps_weight_penalty():
+    character_data = {
+        "inventory": {
+            "pockets": [{"category": "item", "weight": 5, "quantity": 1}],
+        },
+        "equipment": {
+            "armor": {
+                "name": "Экзоскелет",
+                "movementPenalty": 5,
+                "installedModules": [],
+            },
+        },
+    }
+    location_character = LocationCharacter()
+    location_character.character = LobbyCharacter(data=character_data)
+
+    details = CombatService._movement_penalty_breakdown(character_data)
+
+    assert details["powered_exoskeleton"] is False
+    assert details["weight"] == 1
+    assert CombatService._movement_penalty(location_character) == 6
+
+
+def test_carrying_capacity_uses_strength_bonus_without_health_roll_penalties():
+    character_data = {
+        "skills": {
+            "physical": {
+                "strength": {"base": 5, "bonus": 0},
+            },
+        },
+        "inventory": {
+            "pockets": [{"category": "item", "weight": 3.5, "quantity": 1}],
+        },
+        "health": {
+            "painLevel": 4,
+            "exhaustion": 3,
+            "blood": "severe",
+        },
+    }
+
+    details = CombatService._inventory_weight_details(character_data)
+
+    assert details["strength_bonus"] == -3
+    assert details["weight_per_penalty"] == pytest.approx(3.5)
+    assert details["penalty"] == 1
+
+
+@pytest.mark.parametrize(
+    ("armor_name", "covered", "not_covered"),
+    [
+        ("Армейский бронежилет", ("chest", "abdomen"), ("left_arm", "left_leg", "head")),
+        ("Кожаная куртка", ("chest", "abdomen", "left_arm"), ("left_leg", "head")),
+        ("Бронекостюм", ("chest", "abdomen", "left_arm", "left_leg"), ("head",)),
+        ("Костюм Химзащиты", ("chest", "abdomen", "left_arm", "left_leg", "head"), ()),
+    ],
+)
+def test_named_armor_uses_rulebook_protection_zones(armor_name, covered, not_covered):
+    item = {"name": armor_name}
+
+    for zone in covered:
+        assert CombatService._armor_covers_zone("armor", item, {}, zone)
+    for zone in not_covered:
+        assert not CombatService._armor_covers_zone("armor", item, {}, zone)
+
+
+def test_integrated_exoskeleton_helmet_uses_separate_head_protection():
+    armor = {
+        "name": "Экзоскелет",
+        "protection": {"physical": 0.8},
+    }
+    character_data = {
+        "equipment": {
+            "armor": armor,
+            "helmet": {
+                "integratedWithArmor": True,
+                "protection": {"physical": 0.7},
+            },
+        },
+    }
+
+    head_protection, head_layers = CombatService._target_armor(character_data, "head")
+    torso_protection, _ = CombatService._target_armor(character_data, "chest")
+
+    assert head_protection == 70
+    assert torso_protection == 80
+    assert len(head_layers) == 1
+    assert head_layers[0]["item"] is armor
+
+
+def test_integrated_helmet_accuracy_penalty_is_applied_once():
+    character_data = {
+        "equipment": {
+            "armor": {
+                "name": "Комбинезон ГРОБ",
+                "protection": {"physical": 0.5},
+            },
+            "helmet": {
+                "integratedWithArmor": True,
+                "accuracyPenalty": 4,
+            },
+        },
+    }
+
+    assert CombatService._equipment_accuracy_penalty(character_data) == 4
+
+
 def test_legacy_root_movement_penalty_is_not_applied():
     location_character = LocationCharacter()
     location_character.character = LobbyCharacter(data={"movementPenalty": 9})
