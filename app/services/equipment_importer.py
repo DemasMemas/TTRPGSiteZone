@@ -827,7 +827,10 @@ def upsert_equipment_templates(workbook_path: str | Path, session=None) -> Dict[
             session.delete(item)
             removed_grenades += 1
 
-    imported_categories = ["ammo", "magazine", "weapon", "melee_weapon", "armor", "helmet", "gas_mask"]
+    imported_categories = [
+        "ammo", "magazine", "weapon", "melee_weapon", "armor", "helmet",
+        "gas_mask", "exoskeleton_module",
+    ]
     existing_by_category: Dict[str, List[ItemTemplate]] = {}
     for item in ItemTemplate.query.filter(ItemTemplate.category.in_(imported_categories)).all():
         existing_by_category.setdefault(item.category, []).append(item)

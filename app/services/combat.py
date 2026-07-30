@@ -553,6 +553,7 @@ class CombatService:
         strength = (
             CombatService._skill_value(data, 'skills.physical.strength')
             + CombatService._consumable_stat_bonus(data, 'strength')
+            + CombatService._exoskeleton_power_profile(data)['strength_level_bonus']
         )
         deficit = max(0, effective_required - strength)
         return {
@@ -605,6 +606,16 @@ class CombatService:
         if movement_mode == 'correction' and not posture_profile['can_correction']:
             raise ValidationError("Correction movement is unavailable while prone")
         return posture_profile
+
+    @staticmethod
+    def _validate_equipment_movement(character_data, movement_mode):
+        profile = CombatService._exoskeleton_power_profile(character_data)
+        if (
+            movement_mode in {'run', 'sprint'}
+            and profile['blocks_strenuous_movement']
+        ):
+            raise ValidationError("Running and sprinting are unavailable in an exoskeleton")
+        return profile
 
     @staticmethod
     def _movement_route_cost(path, movement_mode, posture='standing'):
@@ -726,29 +737,9 @@ class CombatService:
         weight_penalty = weight_details['penalty']
         temporary_penalty = CombatService._consumable_stat_bonus(data, 'movement_points')
         limb_penalty = CombatService._disabled_limb_penalties(data)['movement']
-        armor_name = str(armor.get('name') or '').strip().lower() if isinstance(armor, dict) else ''
-        armor_attributes = CombatService._template_attributes(armor) if isinstance(armor, dict) else {}
-        is_exoskeleton = armor_name == 'экзоскелет' or bool(armor_attributes.get('is_exoskeleton'))
-        is_powered = False
-        if is_exoskeleton:
-            explicit_power = armor.get('powered', armor_attributes.get('powered'))
-            battery = next(
-                (
-                    module for module in armor.get('installedModules', [])
-                    if isinstance(module, dict) and module.get('slotType') == 'exoskeleton_battery'
-                ),
-                None,
-            )
-            if battery is not None:
-                battery_attributes = battery.get('attributes', {})
-                remaining_days = CombatService._coerce_float(
-                    battery_attributes.get('remaining_days') if isinstance(battery_attributes, dict) else 0,
-                    0,
-                )
-                is_powered = remaining_days > 0
-            elif explicit_power is not None and armor.get('requiresExoskeletonBattery') is False:
-                is_powered = bool(explicit_power)
-            if is_powered:
+        exoskeleton = CombatService._exoskeleton_power_profile(data)
+        if exoskeleton['is_exoskeleton']:
+            if exoskeleton['powered']:
                 armor_penalty = 5
                 weight_penalty = 0
         total = max(
@@ -768,7 +759,51 @@ class CombatService:
             'total_weight': weight_details['total_weight'],
             'temporary': temporary_penalty,
             'injuries': limb_penalty,
-            'powered_exoskeleton': bool(is_exoskeleton and is_powered),
+            'is_exoskeleton': exoskeleton['is_exoskeleton'],
+            'powered_exoskeleton': exoskeleton['powered'],
+        }
+
+    @staticmethod
+    def _exoskeleton_power_profile(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        equipment = data.get('equipment') if isinstance(data.get('equipment'), dict) else {}
+        armor = equipment.get('armor') if isinstance(equipment.get('armor'), dict) else {}
+        attributes = CombatService._template_attributes(armor)
+        armor_name = str(armor.get('name') or '').strip().lower().replace('ё', 'е')
+        is_exoskeleton = armor_name == 'экзоскелет' or bool(
+            armor.get('isExoskeleton') or attributes.get('is_exoskeleton')
+        )
+        powered = False
+        if is_exoskeleton:
+            battery = next(
+                (
+                    module for module in armor.get('installedModules', [])
+                    if isinstance(module, dict)
+                    and (
+                        module.get('slotType') == 'exoskeleton_battery'
+                        or (module.get('attributes') or {}).get('slot_type') == 'exoskeleton_battery'
+                    )
+                ),
+                None,
+            )
+            if battery is not None:
+                battery_attributes = (
+                    battery.get('attributes')
+                    if isinstance(battery.get('attributes'), dict)
+                    else {}
+                )
+                powered = CombatService._coerce_float(
+                    battery_attributes.get('remaining_days'),
+                    0,
+                ) > 0
+            elif armor.get('requiresExoskeletonBattery') is False:
+                powered = bool(armor.get('powered', attributes.get('powered')))
+        return {
+            'is_exoskeleton': is_exoskeleton,
+            'powered': powered,
+            'strength_level_bonus': 8 if powered else 0,
+            'strength_roll_bonus': 4 if powered else 0,
+            'blocks_strenuous_movement': is_exoskeleton,
         }
 
     @staticmethod
@@ -823,6 +858,7 @@ class CombatService:
                 'backpack_reduction': 0,
                 'weight_per_penalty': 5.0,
                 'total_weight': 0.0,
+                'effective_strength': 10,
                 'strength_bonus': 0,
             }
         inventory = character_data.get('inventory')
@@ -848,12 +884,16 @@ class CombatService:
         total_weight = sum(CombatService._item_total_weight(item) for item in carried_items)
         strength = ((character_data.get('skills') or {}).get('physical') or {}).get('strength')
         strength = strength if isinstance(strength, dict) else {}
-        strength_bonus = (
-            math.floor((CombatService._coerce_int(strength.get('base'), 10) - 10) / 2)
-            + CombatService._coerce_int(strength.get('bonus'), 0)
+        effective_strength = (
+            CombatService._coerce_int(strength.get('base'), 10)
             + CombatService._consumable_stat_bonus(character_data, 'strength')
+            + CombatService._exoskeleton_power_profile(character_data)['strength_level_bonus']
         )
-        weight_per_penalty = max(0.5, 5 * (1 + strength_bonus * 0.1))
+        strength_capacity_modifier = math.floor((effective_strength - 10) / 2)
+        weight_per_penalty = max(
+            0.5,
+            5 * (1 + strength_capacity_modifier * 0.1),
+        )
         backpack_reduction = 0
         backpack = equipment.get('backpack')
         if isinstance(backpack, dict):
@@ -870,7 +910,8 @@ class CombatService:
             'backpack_reduction': backpack_reduction,
             'weight_per_penalty': weight_per_penalty,
             'total_weight': total_weight,
-            'strength_bonus': strength_bonus,
+            'effective_strength': effective_strength,
+            'strength_bonus': strength_capacity_modifier,
         }
 
     @staticmethod
@@ -1257,6 +1298,81 @@ class CombatService:
         }
 
     @staticmethod
+    def _is_gas_mask_item(slot, item, attributes):
+        attributes = attributes if isinstance(attributes, dict) else {}
+        category = str(item.get('category') or '').strip().lower()
+        return bool(
+            slot == 'gasMask'
+            or category == 'gas_mask'
+            or attributes.get('requires_filter')
+            or attributes.get('is_gas_mask')
+        )
+
+    @staticmethod
+    def _damage_gas_mask(item, source):
+        if not isinstance(item, dict):
+            return None
+        source_key = str(source or '').strip().lower()
+        durability_damage = 1 if source_key == 'anomaly' else (
+            10 if source_key in {'bullet', 'melee'} else 0
+        )
+        before = max(0, CombatService._coerce_int(item.get('durability'), 0))
+        after = max(0, before - durability_damage)
+        item['durability'] = after
+        item.pop('stage', None)
+        item.pop('stageDurability', None)
+        item.pop('currentStageDurability', None)
+        item.pop('brokenDamage', None)
+        item.pop('brokenProtectionLoss', None)
+        item['condition'] = 'Целый' if after > 0 else 'Сломан'
+        return {
+            'name': item.get('name'),
+            'durability_before': before,
+            'durability_after': after,
+            'damage': durability_damage,
+            'source': source_key,
+        }
+
+    @staticmethod
+    def _is_gas_or_chemical_profile(profile):
+        profile = profile if isinstance(profile, dict) else {}
+        values = {
+            str(profile.get('damage_type') or '').strip().lower(),
+            str(profile.get('ammo_variant') or '').strip().lower(),
+            str(profile.get('ammo_kind') or '').strip().lower(),
+        }
+        return bool(values & {'gas', 'chemical', 'химический', 'газовый', 'газ'})
+
+    @staticmethod
+    def _functioning_gas_protection(character_data):
+        equipment = (
+            character_data.get('equipment')
+            if isinstance(character_data, dict)
+            and isinstance(character_data.get('equipment'), dict)
+            else {}
+        )
+        for slot in ('gasMask', 'helmet'):
+            item = equipment.get(slot)
+            if not isinstance(item, dict):
+                continue
+            attributes = CombatService._template_attributes(item)
+            if (
+                CombatService._is_gas_mask_item(slot, item, attributes)
+                and CombatService._coerce_int(
+                    item.get(
+                        'durability',
+                        item.get(
+                            'maxDurability',
+                            attributes.get('max_durability', 0),
+                        ),
+                    ),
+                    0,
+                ) > 0
+            ):
+                return item
+        return None
+
+    @staticmethod
     def _integrated_helmet_profile(armor):
         if not isinstance(armor, dict):
             return None
@@ -1352,16 +1468,28 @@ class CombatService:
         total = 0.0
         details = []
         for slot, item, attrs, protection in candidates:
+            is_gas_mask = CombatService._is_gas_mask_item(slot, item, attrs)
+            if is_gas_mask and CombatService._coerce_int(
+                item.get(
+                    'durability',
+                    item.get('maxDurability', attrs.get('max_durability', 0)),
+                ),
+                0,
+            ) <= 0:
+                continue
             value = protection.get(zone_group, protection.get('physical', 0))
             parsed = max(0.0, min(100.0, CombatService._protection_percent(value, 0)))
-            parsed = max(0.0, parsed - CombatService._armor_stage_penalty(item, 'physical'))
+            if not is_gas_mask:
+                parsed = max(0.0, parsed - CombatService._armor_stage_penalty(item, 'physical'))
             if parsed:
                 total = max(total, parsed)
+            if parsed or is_gas_mask:
                 details.append({
                     'slot': slot,
                     'item': item,
                     'attributes': attrs,
                     'protection': parsed,
+                    'is_gas_mask': is_gas_mask,
                 })
         return total, details
 
@@ -1681,19 +1809,47 @@ class CombatService:
                 if distance_over:
                     profile['damage'] *= max(0.1, 1 - 0.05 * distance_over)
                     profile['armor_piercing'] = max(0, profile['armor_piercing'] - 5 * distance_over)
+        if (
+            CombatService._is_gas_or_chemical_profile(profile)
+            and CombatService._functioning_gas_protection(target_data)
+        ):
+            result.update({
+                'zone': zone,
+                'base_damage': profile['damage'],
+                'armor': 100,
+                'armor_piercing': profile['armor_piercing'],
+                'effective_armor': 100,
+                'penetration_deficit': 100,
+                'damage_multiplier': 0,
+                'damage': 0,
+                'armor_damage': [],
+                'bleeding_check': None,
+                'gas_or_chemical_blocked': True,
+                'health': (target_data.get('health') or {}).get('current'),
+                'zone_health': (
+                    (target_data.get('health') or {}).get('zones') or {}
+                ).get({
+                    'left_arm': 'leftArm', 'right_arm': 'rightArm',
+                    'left_leg': 'leftLeg', 'right_leg': 'rightLeg',
+                }.get(zone, zone), {}).get('current'),
+            })
+            return result
         armor, armor_layers = CombatService._target_armor(target_data, zone)
-        armor_damage = [
-            result
-            for result in (
-                CombatService._damage_armor_item(
+        armor_damage = []
+        for layer in armor_layers:
+            if layer.get('is_gas_mask'):
+                damage_result = CombatService._damage_gas_mask(
+                    layer['item'],
+                    'melee' if melee else 'bullet',
+                )
+            else:
+                damage_result = CombatService._damage_armor_item(
                     layer['item'],
                     layer['attributes'],
                     profile['damage'],
                 )
-                for layer in armor_layers
-            )
-            if result
-        ]
+            if damage_result:
+                armor_damage.append(damage_result)
         effective_armor = max(0.0, armor - profile['armor_piercing'])
         penetration_deficit = max(0.0, effective_armor)
         damage_reduction_steps = math.ceil(penetration_deficit / 5) if penetration_deficit else 0
@@ -1752,10 +1908,16 @@ class CombatService:
             bonus = current.get('bonus', 0)
             base_mod = math.floor((CombatService._coerce_int(base, 10) - 10) / 2)
         temp_bonus = CombatService._consumable_stat_bonus(character_data, skill_path.split('.')[-1])
+        equipment_bonus = (
+            CombatService._exoskeleton_power_profile(character_data)['strength_roll_bonus']
+            if skill_path == 'skills.physical.strength'
+            else 0
+        )
         return (
             base_mod
             + CombatService._coerce_int(bonus, 0)
             + temp_bonus
+            + equipment_bonus
             + CombatService._health_roll_modifier(character_data, skill_path, include_pain)
         )
 
@@ -2361,6 +2523,8 @@ class CombatService:
             'movement_points_current': loc_char.movement_points_current or 0,
             'movement_penalty': profile['movement_penalty'],
             'movement_gain': profile['movement_gain'],
+            'is_exoskeleton': CombatService._exoskeleton_power_profile(data)['is_exoskeleton'],
+            'powered_exoskeleton': CombatService._exoskeleton_power_profile(data)['powered'],
             'movement_mode_this_turn': loc_char.movement_mode_this_turn,
             'movement_distance_this_turn': loc_char.movement_distance_this_turn or 0,
             'correction_distance_this_turn': loc_char.correction_distance_this_turn or 0,
@@ -3472,6 +3636,7 @@ class CombatService:
                 if character.character and isinstance(character.character.data, dict)
                 else {}
             )
+            CombatService._validate_equipment_movement(character_data, movement_mode)
             if (
                 movement_mode == 'sprint'
                 and CombatService._disabled_limb_penalties(character_data)['sprint_blocked']

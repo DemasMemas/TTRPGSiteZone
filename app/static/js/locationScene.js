@@ -490,6 +490,11 @@ function getMovementModeAvailability(movementType, route = null) {
         reason = 'Бег возможен только стоя';
     } else if (movementType === 'sprint' && posture !== 'standing') {
         reason = 'Спринт возможен только стоя';
+    } else if (
+        ['run', 'sprint'].includes(movementType)
+        && current.is_exoskeleton
+    ) {
+        reason = 'Бег и спринт недоступны в экзоскелете';
     } else if (movementType === 'correction' && posture === 'prone') {
         reason = 'Корректировка недоступна лёжа';
     } else if (

@@ -133,6 +133,56 @@ def test_powered_exoskeleton_sets_base_penalty_and_ignores_overload():
     assert CombatService._movement_penalty(location_character) == 8
 
 
+def test_exoskeleton_blocks_run_and_sprint_even_when_powered():
+    data = {
+        "equipment": {
+            "armor": {
+                "name": "Экзоскелет",
+                "installedModules": [{
+                    "slotType": "exoskeleton_battery",
+                    "attributes": {"remaining_days": 1},
+                }],
+            },
+        },
+    }
+
+    CombatService._validate_equipment_movement(data, "walk")
+    CombatService._validate_equipment_movement(data, "correction")
+    with pytest.raises(ValidationError, match="unavailable in an exoskeleton"):
+        CombatService._validate_equipment_movement(data, "run")
+    with pytest.raises(ValidationError, match="unavailable in an exoskeleton"):
+        CombatService._validate_equipment_movement(data, "sprint")
+
+
+def test_powered_exoskeleton_adds_strength_level_and_roll_bonuses():
+    data = {
+        "skills": {"physical": {"strength": {"base": 10, "bonus": 0}}},
+        "equipment": {
+            "armor": {
+                "name": "Экзоскелет",
+                "installedModules": [{
+                    "slotType": "exoskeleton_battery",
+                    "attributes": {"remaining_days": 1},
+                }],
+            },
+        },
+    }
+    character = LocationCharacter()
+    character.character = LobbyCharacter(data=data)
+
+    profile = CombatService._weapon_strength_profile(
+        character,
+        {"minStrength": 18},
+    )
+
+    assert profile["strength"] == 18
+    assert profile["accuracy_penalty"] == 0
+    assert CombatService._skill_modifier(data, "skills.physical.strength") == 4
+    weight_details = CombatService._inventory_weight_details(data)
+    assert weight_details["effective_strength"] == 18
+    assert weight_details["weight_per_penalty"] == pytest.approx(7)
+
+
 def test_exoskeleton_without_charged_battery_keeps_weight_penalty():
     character_data = {
         "inventory": {
@@ -178,6 +228,21 @@ def test_carrying_capacity_uses_strength_bonus_without_health_roll_penalties():
     assert details["strength_bonus"] == -3
     assert details["weight_per_penalty"] == pytest.approx(3.5)
     assert details["penalty"] == 1
+
+
+def test_skill_roll_bonus_does_not_change_carrying_capacity():
+    data = {
+        "skills": {
+            "physical": {
+                "strength": {"base": 10, "bonus": 6},
+            },
+        },
+    }
+
+    details = CombatService._inventory_weight_details(data)
+
+    assert details["effective_strength"] == 10
+    assert details["weight_per_penalty"] == pytest.approx(5)
 
 
 @pytest.mark.parametrize(

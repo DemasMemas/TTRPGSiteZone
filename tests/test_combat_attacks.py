@@ -71,6 +71,91 @@ def test_broken_armor_loses_durability_and_protection_per_50_damage():
     assert armor["brokenProtectionLoss"] == 2
 
 
+def test_gas_mask_has_no_stages_and_loses_fixed_durability():
+    gas_mask = {
+        "name": "Противогаз",
+        "durability": 25,
+        "stage": 3,
+        "currentStageDurability": 4,
+    }
+
+    bullet = CombatService._damage_gas_mask(gas_mask, "bullet")
+    anomaly = CombatService._damage_gas_mask(gas_mask, "anomaly")
+
+    assert bullet["durability_after"] == 15
+    assert anomaly["durability_after"] == 14
+    assert gas_mask["durability"] == 14
+    assert "stage" not in gas_mask
+    assert "currentStageDurability" not in gas_mask
+
+
+def test_broken_gas_mask_loses_all_protection():
+    data = {
+        "equipment": {
+            "gasMask": {
+                "name": "Противогаз",
+                "category": "gas_mask",
+                "durability": 0,
+                "protection": {"physical": 0.75},
+            },
+        },
+    }
+
+    protection, layers = CombatService._target_armor(data, "head")
+
+    assert protection == 0
+    assert layers == []
+    assert CombatService._functioning_gas_protection(data) is None
+
+
+def test_functioning_gas_mask_fully_blocks_gas_projectile(monkeypatch):
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({
+            "damage": 80,
+            "armor_piercing": 100,
+            "bleeding": "",
+            "effective_range": 20,
+            "damage_type": "chemical",
+        }, None),
+    )
+    target_data = {
+        "health": {
+            "current": 700,
+            "zones": {"head": {"current": 50, "max": 50}},
+        },
+        "equipment": {
+            "gasMask": {
+                "name": "Противогаз",
+                "category": "gas_mask",
+                "durability": 30,
+                "protection": {"physical": 0.1},
+            },
+        },
+    }
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
+    target = SimpleNamespace(character=SimpleNamespace(data=target_data), hp_zones={})
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": 0,
+            "hit_difficulty": 1,
+            "fire_mode": "single",
+            "round_number": 1,
+        },
+        aimed_zone="head",
+        forced_roll=20,
+    )
+
+    assert result["gas_or_chemical_blocked"] is True
+    assert result["damage"] == 0
+    assert target_data["health"]["current"] == 700
+    assert target_data["equipment"]["gasMask"]["durability"] == 30
+
+
 def test_firearm_bleeding_uses_caliber_and_ammo_variant_modifiers():
     profile = {
         "caliber": "7.62x39",

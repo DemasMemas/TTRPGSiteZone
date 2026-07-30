@@ -321,7 +321,8 @@ async function getAllItemTemplates(forceRefresh = false) {
         'weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
         'consumable', 'crafting_material', 'artifact', 'backpack', 'vest', 'pouch',
         'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module', 'visor', 'belt',
-        'grenade', 'device', 'armor_plate', 'melee_weapon', 'headphones', 'glasses', 'gloves', 'jewelry'
+        'exoskeleton_module', 'grenade', 'device', 'armor_plate', 'melee_weapon',
+        'headphones', 'glasses', 'gloves', 'jewelry'
     ];
 
     let all = [];
@@ -350,7 +351,7 @@ function clearAllTemplatesCache() {
     allTemplatesCache = null;
     const categories = ['weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
                         'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch',
-                        'weapon_module', 'ammo'];
+                        'weapon_module', 'ammo', 'exoskeleton_module'];
     categories.forEach(cat => clearTemplatesCache(cat));
 }
 
@@ -1115,10 +1116,8 @@ function hasHealthRollDisadvantage(data, skillPath) {
 function getWeightPerMovementPenalty(data) {
     const strength = data?.skills?.physical?.strength || {};
     const base = Number(strength.base);
-    const baseBonus = Number.isFinite(base) ? Math.floor((base - 10) / 2) : 0;
-    const permanentBonus = Number(strength.bonus) || 0;
     const modifiers = data?.health?.combatMeta?.consumableModifiers;
-    const temporaryBonus = Array.isArray(modifiers)
+    const temporaryStrength = Array.isArray(modifiers)
         ? modifiers.reduce((sum, modifier) => {
             if (!modifier || !['strength', 'strength_delta', 'generic', 'generic_multiplier'].includes(modifier.stat)) {
                 return sum;
@@ -1127,8 +1126,36 @@ function getWeightPerMovementPenalty(data) {
             return sum + (Number(modifier.value) || 0);
         }, 0)
         : 0;
-    const strengthBonus = baseBonus + permanentBonus + temporaryBonus;
-    return Math.max(0.5, 5 * (1 + strengthBonus * 0.1));
+    const effectiveStrength = (Number.isFinite(base) ? base : 10)
+        + temporaryStrength
+        + getExoskeletonPowerProfile(data).strengthLevelBonus;
+    const capacityModifier = Math.floor((effectiveStrength - 10) / 2);
+    return Math.max(0.5, 5 * (1 + capacityModifier * 0.1));
+}
+
+function getExoskeletonPowerProfile(data) {
+    const armor = data?.equipment?.armor || {};
+    const armorName = String(armor.name || '').trim().toLowerCase().replaceAll('ё', 'е');
+    const isExoskeleton = Boolean(
+        armorName === 'экзоскелет'
+        || armor.isExoskeleton
+        || armor.attributes?.is_exoskeleton
+    );
+    const battery = (armor.installedModules || []).find(module =>
+        module?.slotType === 'exoskeleton_battery'
+        || module?.attributes?.slot_type === 'exoskeleton_battery'
+    );
+    const powered = Boolean(
+        isExoskeleton
+        && battery
+        && Number(battery.attributes?.remaining_days) > 0
+    );
+    return {
+        isExoskeleton,
+        powered,
+        strengthLevelBonus: powered ? 8 : 0,
+        strengthRollBonus: powered ? 4 : 0,
+    };
 }
 
 function calculateCarriedWeight(data) {
@@ -1156,16 +1183,9 @@ function getMovementPenaltyBreakdown(data, suppliedWeight = null) {
     const backpackReduction = Math.max(0, Number(eq.backpack?.attributes?.weight_reduction) || 0);
     let weightPenalty = Math.max(0, rawWeightPenalty - backpackReduction);
     let armorPenalty = Number(armor.movementPenalty ?? armor.movement_penalty) || 0;
-    const armorName = String(armor.name || '').trim().toLowerCase();
-    const isExoskeleton = armorName === 'экзоскелет' || armor.isExoskeleton || armor.attributes?.is_exoskeleton;
-    const battery = (armor.installedModules || []).find(
-        module => module?.slotType === 'exoskeleton_battery'
-    );
-    const powered = Boolean(
-        isExoskeleton
-        && battery
-        && Number(battery.attributes?.remaining_days) > 0
-    );
+    const exoskeleton = getExoskeletonPowerProfile(data);
+    const isExoskeleton = exoskeleton.isExoskeleton;
+    const powered = exoskeleton.powered;
     if (isExoskeleton) armor.powered = powered;
     if (powered) {
         armorPenalty = 5;
@@ -2506,6 +2526,12 @@ async function renderSkillsTab(data) {
 
     function renderSkillRow(label, base, bonus, xp, path) {
         const required = getRequiredXp(base);
+        const equipmentNote = (
+            path === 'physical.strength'
+            && getExoskeletonPowerProfile(data).powered
+        )
+            ? '<span style="font-size:0.7rem; color:#b8c994;">Экзоскелет: +8 к Силе, +4 к броску</span>'
+            : '';
         return `
             <div style="display: flex; align-items: center; gap: 3px; margin-bottom: 5px; flex-wrap: wrap;">
                 <span style="width: 125px; word-break: break-word; line-height: 1.3;" onclick="window.rollSkill('${path}', '${label}')" title="${label}">${label}</span>
@@ -2516,6 +2542,7 @@ async function renderSkillsTab(data) {
                 <button type="button" class="btn btn-sm btn-secondary" onclick="addSkillXpFromPoints('${path}')" style="padding: 2px 4px; font-size: 0.7rem;" title="Взять 1 свободное очко навыка">➕</button>
                 <button type="button" class="btn btn-sm btn-secondary" onclick="addSkillXpFromUse('${path}')" style="padding: 2px 4px; font-size: 0.7rem;" title="Добавить опыт за использование">💡</button>
                 <span style="cursor: pointer; font-size: 1.1em;" onclick="window.rollSkill('${path}', '${label}')">🎲</span>
+                ${equipmentNote}
             </div>
         `;
     }
@@ -2935,22 +2962,6 @@ async function renderEquipmentTab(data) {
                         <div class="field-group field-number">
                             <label>Прочность</label>
                             <input type="number" class="number-input form-control" name="equipment.gasMask.durability" value="${gasMask.durability || 0}">
-                        </div>
-                        <div class="field-group field-select">
-                            <label>Стадия</label>
-                            <select name="equipment.gasMask.stage" class="form-control" onchange="updateArmorStageFromSelect(this, 'gasMask')">
-                                ${['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'].map((name, idx) =>
-                                    `<option value="${idx+1}" ${gasMask.stage == (idx+1) ? 'selected' : ''}>${name}</option>`
-                                ).join('')}
-                            </select>
-                        </div>
-                        <div class="field-group field-number" style="min-width: 100px;">
-                            <label>Прочность стадии</label>
-                            <input type="number" class="number-input form-control" name="equipment.gasMask.currentStageDurability" value="${gasMask.currentStageDurability ?? gasMask.stageDurability ?? 0}" step="1" min="0">
-                        </div>
-                        <div class="field-group field-number" style="min-width: 130px;">
-                            <label>Макс. прочность стадии</label>
-                            <input type="number" class="number-input form-control" value="${calculateStageDurability(gasMask.durability || 0, gasMask.material || 'Текстиль')}" readonly disabled>
                         </div>
                         <div class="field-group field-select">
                             <label>Материал</label>
@@ -5658,7 +5669,12 @@ window.fillGasMaskFromPreset = async function(select) {
     gasMask.createdByPlayer = !window.isGM;
     gasMask.isWorn = gasMask.isWorn || false;
 
-    initArmorStagedDurability(gasMask, template);
+    gasMask.maxDurability = template.attributes?.max_durability || gasMask.maxDurability || 1;
+    gasMask.durability = gasMask.maxDurability;
+    delete gasMask.stage;
+    delete gasMask.stageDurability;
+    delete gasMask.currentStageDurability;
+    delete gasMask.condition;
 
     if (!currentCharacterData.equipment) currentCharacterData.equipment = {};
     currentCharacterData.equipment.gasMask = gasMask;
@@ -5911,13 +5927,11 @@ window.equipGasMaskFromInventory = async function(itemPath) {
         installedModules: item.installedModules ? [...item.installedModules] : [],
         isWorn: item.isWorn || false
     };
-    initArmorStagedDurability(gasMaskToEquip, template);
+    gasMaskToEquip.maxDurability = template.attributes?.max_durability || 1;
+    gasMaskToEquip.durability = gasMaskToEquip.maxDurability;
     if (item.durability !== undefined) {
         gasMaskToEquip.durability = item.durability;
         gasMaskToEquip.maxDurability = item.maxDurability || template.attributes?.max_durability || 100;
-        gasMaskToEquip.stage = item.stage || 1;
-        gasMaskToEquip.condition = item.condition || '1. Целая';
-        gasMaskToEquip.currentStageDurability = item.currentStageDurability ?? gasMaskToEquip.stageDurability;
     }
     if (!removeItemByPath(itemPath)) {
         showNotification('Не удалось найти предмет в инвентаре');
@@ -5932,9 +5946,6 @@ window.equipGasMaskFromInventory = async function(itemPath) {
             oldItem.durability = oldGasMask.durability;
             oldItem.maxDurability = oldGasMask.maxDurability;
             oldItem.material = oldGasMask.material;
-            oldItem.stage = oldGasMask.stage;
-            oldItem.condition = oldGasMask.condition;
-            oldItem.currentStageDurability = oldGasMask.currentStageDurability;
             oldItem.protection = { ...oldGasMask.protection };
             oldItem.modifications = oldGasMask.modifications || [];
             oldItem.installedModules = oldGasMask.installedModules || [];
@@ -6925,9 +6936,6 @@ window.unequipGasMask = async function() {
     restoredItem.durability = gasMask.durability;
     restoredItem.maxDurability = gasMask.maxDurability;
     restoredItem.material = gasMask.material;
-    restoredItem.stage = gasMask.stage;
-    restoredItem.condition = gasMask.condition;
-    restoredItem.currentStageDurability = gasMask.currentStageDurability;
     restoredItem.protection = { ...gasMask.protection };
     restoredItem.modifications = gasMask.modifications || [];
     restoredItem.installedModules = gasMask.installedModules || [];
@@ -10052,7 +10060,7 @@ async function renderInventoryTab(data) {
                     <span>Травмы ног</span><span id="injury-penalty-source">${movementPenalty.injuries}</span>
                     <span>Временные модификаторы</span><span id="temporary-penalty-source">${movementPenalty.temporary}</span>
                     <span id="exoskeleton-weight-rule" style="grid-column:span 2; opacity:.7; font-size:12px; display:${movementPenalty.poweredExoskeleton ? 'block' : 'none'};">
-                        Запитанный экзоскелет: броня устанавливает штраф 5, перегруз не учитывается.
+                        Запитанный экзоскелет: броня устанавливает штраф 5, перегруз не учитывается, Сила +8, броски Силы +4. Бег и спринт недоступны.
                     </span>
                 </div>
             </details>
@@ -12849,6 +12857,9 @@ async function rerenderContainer(containerPath, parentElement = null, options = 
         containerDiv.style.display = '';
     } else if (wasCollapsed) {
         containerDiv.style.display = 'none';
+    }
+    if (skillPath === 'physical.strength') {
+        equipmentBonus += getExoskeletonPowerProfile(currentCharacterData).strengthRollBonus;
     }
     if (parentItem && parentItem._toggleIcon) {
         parentItem._toggleIcon.textContent = wasCollapsed ? '▶' : '▼';
