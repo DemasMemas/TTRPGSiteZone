@@ -1040,11 +1040,21 @@ function ensureMedicalConsumableMenu() {
     document.addEventListener('pointercancel', stopMedicalMenuDrag);
 }
 
-async function showMedicalConsumableMenu(characterId) {
+async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = null) {
     ensureMedicalConsumableMenu();
     medicalConsumableMenuState = { characterId };
 
     const character = await Server.getCharacter(characterId).catch(() => null);
+    const actorLocationCharacterId = findCombatCharacterByCharacterId(characterId)?.location_character_id
+        || pendingStructureAction?.actorLocationCharacterId;
+    const interactionTarget = forcedTargetCharacterId && actorLocationCharacterId
+        ? await Server.inspectLocationCharacter(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            forcedTargetCharacterId,
+            actorLocationCharacterId
+        ).catch(() => null)
+        : null;
     const characterData = character?.data || null;
     const consumables = characterData ? getMedicalConsumableEntries(characterData) : [];
 
@@ -1101,7 +1111,7 @@ async function showMedicalConsumableMenu(characterId) {
                         || direct.requires_injury
                         || direct.wound_treatment
                         || direct.requires_infusion_tool;
-                    if (needsTarget) {
+                    if (needsTarget && !forcedTargetCharacterId) {
                         const actor = findCombatCharacterByCharacterId(characterId);
                         if (!actor) throw new Error('Не удалось найти действующего персонажа');
                         beginPendingCombatAction({
@@ -1117,7 +1127,16 @@ async function showMedicalConsumableMenu(characterId) {
                             ),
                         });
                     } else {
-                        await module.useCharacterInventoryItem(characterId, entry.path, { itemId: item.id });
+                        await module.useCharacterInventoryItem(characterId, entry.path, {
+                            itemId: item.id,
+                            targetCharacterId: forcedTargetCharacterId || undefined,
+                            targetData: interactionTarget?.target_data,
+                            interactionContext: forcedTargetCharacterId ? {
+                                lobbyId: window.currentLobbyId,
+                                locationId: getCurrentLocationId(),
+                                actorLocationCharacterId,
+                            } : undefined,
+                        });
                     }
                     closeMedicalConsumableMenu();
                 } catch (error) {
@@ -1150,13 +1169,14 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     ensureCombatActionMenu();
     combatActionMenuCharacterId = characterId;
     const combatCharacter = findCombatCharacterByCharacterId(characterId);
-    const canAct = canActWithCombatCharacter(combatCharacter);
+    const condition = getLocationCharacterCondition(characterId);
+    const canAct = canActWithCombatCharacter(combatCharacter) && condition.state === 'active';
     const isCurrentTurn = Boolean(
         combatState?.status !== 'active' ||
         combatState?.current_character?.character_id === combatCharacter?.character_id
     );
     const hasFullAccess = !combatState || combatState.status !== 'active' ? canControlCharacter(characterId) : (canAct && isCurrentTurn);
-    const menuItems = [
+    let menuItems = [
         {
             label: 'Движение',
             title: 'Перетащить персонажа по карте',
@@ -1210,12 +1230,68 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         },
     ];
 
-    menuItems.splice(2, 0, {
-        label: 'Взаим.',
-        title: 'Действия со структурой',
-        angle: 14,
-        action: () => beginStructureInteractionMode(characterId),
-    });
+    if (condition.state === 'pain_shock') {
+        menuItems = condition.can_recover === false ? [{
+            label: 'Боль 10',
+            icon: '!',
+            title: 'Выход из болевого шока невозможен, пока боль не снизится до 9',
+            angle: -90,
+            requiresCombat: true,
+            allowIncapacitated: true,
+            action: () => showNotification(
+                'Сначала снизьте уровень боли хотя бы до 9',
+                'system'
+            ),
+        }] : [{
+            label: 'Очнуться',
+            icon: '◉',
+            title: 'Совершить проверку Воли и попытаться выйти из болевого шока',
+            angle: -90,
+            requiresCombat: true,
+            allowIncapacitated: true,
+            action: async () => {
+                try {
+                    const result = await Server.performLocationCombatAction(
+                        window.currentLobbyId,
+                        getCurrentLocationId(),
+                        {
+                            location_character_id: combatCharacter.location_character_id,
+                            action_key: 'recover_from_shock',
+                        }
+                    );
+                    const check = result?.melee_action || {};
+                    const rolls = Array.isArray(check.rolls) ? check.rolls.join(', ') : check.roll;
+                    showNotification(
+                        `${check.success ? 'Персонаж очнулся и остался лежать' : 'Персонаж не смог очнуться'}: d20 ${rolls}, СЛ ${check.difficulty ?? '?'}. Ход завершён`,
+                        check.success ? 'success' : 'system'
+                    );
+                } catch (error) {
+                    showNotification(error.message || 'Не удалось попытаться очнуться', 'system');
+                }
+            },
+        }];
+    } else if (condition.state !== 'active') {
+        menuItems = [];
+    }
+
+    if (condition.state === 'active') {
+        menuItems.push({
+            label: 'Ближний бой',
+            icon: '⚔',
+            title: 'Замах, блок, толкание, захват и другие действия ближнего боя',
+            angle: -116,
+            ringRadius: 165,
+            requiresCombat: true,
+            action: () => showMeleeCombatMenu(characterId),
+        });
+
+        menuItems.splice(2, 0, {
+            label: 'Взаим.',
+            title: 'Действия со структурой или недееспособным персонажем',
+            angle: 14,
+            action: () => beginStructureInteractionMode(characterId),
+        });
+    }
     if (window.isGM) {
         menuItems.push({
             label: 'Убрать',
@@ -1252,7 +1328,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             font-size:13px;
             box-shadow:0 12px 30px rgba(0,0,0,0.4);
             backdrop-filter: blur(8px);
-        ">${canAct ? 'Действия' : 'Просмотр'}</div>
+        ">${condition.state === 'active' ? (canAct ? 'Действия' : 'Просмотр') : condition.label}</div>
     `;
 
     const radius = 98;
@@ -1282,7 +1358,11 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             backdrop-filter: blur(8px);
             padding: 8px;
         `;
-        const allowed = (item.allowAlways || hasFullAccess)
+        const allowed = (
+            item.allowAlways
+            || hasFullAccess
+            || (item.allowIncapacitated && canControlCharacter(characterId) && isCurrentTurn)
+        )
             && (!item.requiresCombat || combatState?.status === 'active');
         button.disabled = !allowed;
         button.style.opacity = allowed ? '1' : '0.45';
@@ -1313,6 +1393,115 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     if (top < rect.height / 2 + 10) top = rect.height / 2 + 10;
     combatActionMenu.style.left = `${left}px`;
     combatActionMenu.style.top = `${top}px`;
+}
+
+function showMeleeCombatMenu(characterId) {
+    const actor = findCombatCharacterByCharacterId(characterId);
+    if (!actor?.location_character_id || !isCurrentCombatTurnForCharacter(characterId)) {
+        showNotification('Сейчас не ход этого персонажа', 'system');
+        return;
+    }
+    let menu = document.getElementById('melee-combat-menu');
+    if (!menu) {
+        menu = document.createElement('div');
+        menu.id = 'melee-combat-menu';
+        menu.style.cssText = `
+            position:fixed; inset:0; z-index:10040; display:none;
+            align-items:center; justify-content:center; background:rgba(0,0,0,.38);
+        `;
+        menu.addEventListener('pointerdown', (event) => {
+            if (event.target === menu) menu.style.display = 'none';
+        });
+        document.body.appendChild(menu);
+    }
+    const directAction = async (actionKey, extra = {}) => {
+        try {
+            const result = await Server.performLocationCombatAction(
+                window.currentLobbyId,
+                getCurrentLocationId(),
+                {
+                    location_character_id: actor.location_character_id,
+                    action_key: actionKey,
+                    ...extra,
+                }
+            );
+            const details = result?.melee_action;
+            const outcome = details?.success === undefined
+                ? ''
+                : (details.success ? ' Успех.' : ' Провал.');
+            showNotification(`${extra.label || actionKey}.${outcome}`, details?.success === false ? 'system' : 'success');
+            menu.style.display = 'none';
+        } catch (error) {
+            showNotification(error.message || 'Не удалось выполнить действие', 'system');
+        }
+    };
+    const targetAction = (actionKey, extra = {}) => {
+        menu.style.display = 'none';
+        beginPendingCombatAction({
+            actorCharacterId: characterId,
+            actorLocationCharacterId: actor.location_character_id,
+            actionKey,
+            ...extra,
+        });
+    };
+    const actions = [
+        { label: 'Замах · 1 ОД', run: () => directAction('melee_swing', { label: 'Замах подготовлен' }) },
+        { label: 'Выхватить вещь · 3 ОД', run: () => targetAction('melee_disarm') },
+        { label: 'Толкнуть · 2 ОД', run: () => targetAction('melee_shove') },
+        { label: 'Захват · 4 ОД', run: () => targetAction('grapple') },
+    ];
+    if (actor.grappled_by_id) {
+        actions.push({
+            label: 'Освободиться · 4 ОД',
+            run: () => directAction('grapple_escape', { label: 'Попытка освобождения' }),
+        });
+        actions.push({
+            label: 'Отчаянная атака · 3 ОД',
+            run: () => directAction('grapple_desperate_attack', { label: 'Отчаянная атака' }),
+        });
+    }
+    if (actor.grapple_target_id) {
+        actions.push(
+            { label: 'Усилить хват · 3 ОД', run: () => directAction('grapple_strengthen', { label: 'Хват усилен' }) },
+            { label: 'Живой щит · 3 ОД', run: () => directAction('grapple_live_shield', { label: 'Цель используется как живой щит' }) },
+            { label: 'Удушение · 5 ОД', run: () => directAction('grapple_choke', { label: 'Удушение' }) },
+            { label: 'Болевой прием · 3 ОД', run: () => directAction('grapple_pain_hold', { label: 'Болевой прием' }) },
+            { label: 'Отпустить · 1 СД', run: () => directAction('grapple_release', { label: 'Цель отпущена' }) },
+        );
+    }
+    const blockButtons = [1, 2, 3, 4].map(cost =>
+        `<button type="button" class="btn btn-sm btn-secondary melee-block-option" data-cost="${cost}">Блок · ${cost} ОД</button>`
+    ).join('');
+    menu.innerHTML = `
+        <div style="width:min(540px,calc(100vw - 24px)); max-height:calc(100vh - 30px);
+            overflow:auto; padding:16px; border:1px solid rgba(255,255,255,.16);
+            border-radius:14px; background:rgba(20,24,22,.98); color:#eee;
+            box-shadow:0 18px 55px rgba(0,0,0,.55);">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+                <strong>Ближний бой</strong>
+                <button type="button" class="btn btn-sm btn-secondary melee-menu-close">×</button>
+            </div>
+            <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px;">${blockButtons}</div>
+            <div class="melee-action-options" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;"></div>
+        </div>
+    `;
+    menu.querySelector('.melee-menu-close').onclick = () => { menu.style.display = 'none'; };
+    menu.querySelectorAll('.melee-block-option').forEach((button) => {
+        button.onclick = () => directAction('melee_block', {
+            action_points: Number(button.dataset.cost),
+            label: `Блок за ${button.dataset.cost} ОД`,
+        });
+    });
+    const container = menu.querySelector('.melee-action-options');
+    actions.forEach((entry) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-sm btn-primary';
+        button.textContent = entry.label;
+        button.onclick = entry.run;
+        container.appendChild(button);
+    });
+    menu.style.display = 'flex';
 }
 
 async function removeCharacterFromCurrentLocation(characterId) {
@@ -1955,8 +2144,10 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         volley_count: action.volleyCount,
         action_points: action.actionPoints,
         item_path: action.itemPath,
+        payment: action.payment,
+        attribute_choice: action.attributeChoice,
     };
-    if (action.fireMode === 'aimed') {
+    if (action.fireMode === 'aimed' || action.meleeAimed) {
         const zone = await selectAimedTargetZone(target.name);
         if (!zone) return false;
         payload.target_zone = zone;
@@ -2181,6 +2372,14 @@ function createCharacterModel(userId) {
     head.castShadow = true;
     head.receiveShadow = true;
     group.add(head);
+    const facingMarker = new THREE.Mesh(
+        new THREE.ConeGeometry(0.07, 0.22, 6),
+        new THREE.MeshStandardMaterial({ color: 0xf2b84b })
+    );
+    facingMarker.rotation.x = Math.PI / 2;
+    facingMarker.position.set(0, 0.68, 0.28);
+    facingMarker.userData.posturePart = 'facingMarker';
+    group.add(facingMarker);
     group.userData.isCharacter = true;
     return group;
 }
@@ -2261,6 +2460,17 @@ export function applyCharacterPostureVisual(characterId, posture = 'standing') {
     entry.model.userData.posture = normalized;
     entry.label.position.y = tileHeight + labelOffset;
     entry.posture = normalized;
+}
+
+function applyCharacterFacingVisual(characterId, facingX = 0, facingY = 1) {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry) return;
+    const x = Number(facingX) || 0;
+    const y = Number(facingY) || 0;
+    if (x === 0 && y === 0) return;
+    entry.model.rotation.y = Math.atan2(x, y);
+    entry.facingX = x;
+    entry.facingY = y;
 }
 
 export function updateCharacterPosition(characterId, posX, posY) {
@@ -2672,11 +2882,25 @@ function renderCombatHud() {
         endTurnBtn.onclick = async () => {
             endTurnBtn.disabled = true;
             try {
-                await Server.endLocationCombatTurn(
+                const result = await Server.endLocationCombatTurn(
                     window.currentLobbyId,
                     getCurrentLocationId(),
                     combatState.current_character?.location_character_id || null
                 );
+                const check = result?.pain_shock_check;
+                if (check) {
+                    const message = check.guaranteed
+                        ? 'Боль достигла 10: персонаж гарантированно впал в болевой шок'
+                        : (
+                            check.success
+                                ? `Проверка болевого шока пройдена: d20 ${check.roll}, СЛ ${check.difficulty}`
+                                : `Персонаж впал в болевой шок: d20 ${check.roll}, СЛ ${check.difficulty}`
+                        );
+                    showNotification(
+                        message,
+                        check.success ? 'system' : 'error'
+                    );
+                }
             } catch (error) {
                 showNotification(error.message || 'Не удалось закончить ход');
             } finally {
@@ -2704,6 +2928,11 @@ export function setCombatState(state) {
     window.locationCombatState = combatState;
     (combatState?.characters || []).forEach((character) => {
         applyCharacterPostureVisual(character.character_id, character.posture);
+        applyCharacterFacingVisual(
+            character.character_id,
+            character.facing_x,
+            character.facing_y,
+        );
     });
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
     renderCombatHud();
@@ -3206,6 +3435,33 @@ function getLocationCharacterById(characterId) {
     return getCharacterModelEntry(characterId);
 }
 
+function getLocationCharacterCondition(characterId) {
+    const combatCharacter = findCombatCharacterByCharacterId(characterId);
+    if (combatCharacter?.condition?.state) return combatCharacter.condition;
+    const entry = getLocationCharacterById(characterId);
+    const effects = Array.isArray(entry?.effects) ? entry.effects : [];
+    const types = new Set(effects
+        .filter(effect => effect?.active !== false)
+        .map(effect => String(effect?.type || '').toLowerCase()));
+    const names = effects.map(effect => String(effect?.name || '').toLowerCase()).join(' ');
+    if (types.has('death') || /\bсмерт|м[её]ртв/.test(names)) {
+        return { state: 'dead', label: 'Мёртв', can_act: false, can_recover: false };
+    }
+    if (
+        types.has('critical_condition')
+        || types.has('unconsciousness')
+        || types.has('unconscious')
+        || types.has('sleep')
+        || /критическ|без сознания/.test(names)
+    ) {
+        return { state: 'critical', label: 'Критическое состояние', can_act: false, can_recover: false };
+    }
+    if (types.has('shock') || types.has('pain_shock') || /болевой шок/.test(names)) {
+        return { state: 'pain_shock', label: 'Болевой шок', can_act: false, can_recover: true };
+    }
+    return { state: 'active', label: 'В сознании', can_act: true, can_recover: false };
+}
+
 window.getLocationCharacterPosition = function(characterId) {
     const entry = getLocationCharacterById(characterId);
     if (!entry) return null;
@@ -3647,9 +3903,172 @@ function beginStructureInteractionMode(characterId) {
     clearMovementPreview();
     clearStructureActionMenu();
     clearStructureMovePreview();
-    showNotification('Наведи на структуру и выбери действие', 'system');
+    showNotification('Наведи на структуру или недееспособного персонажа и выбери действие', 'system');
     renderCombatHud();
     return true;
+}
+
+function canInteractWithIncapacitatedCharacter(actorCharacterId, targetCharacterId) {
+    if (!actorCharacterId || !targetCharacterId || Number(actorCharacterId) === Number(targetCharacterId)) {
+        return false;
+    }
+    const actor = getLocationCharacterById(actorCharacterId);
+    const target = getLocationCharacterById(targetCharacterId);
+    if (!actor || !target || getLocationCharacterCondition(targetCharacterId).state === 'active') {
+        return false;
+    }
+    return Math.max(
+        Math.abs(Number(actor.posX) - Number(target.posX)),
+        Math.abs(Number(actor.posY) - Number(target.posY))
+    ) <= 1;
+}
+
+async function inspectIncapacitatedCharacter(actorLocationCharacterId, targetCharacterId) {
+    const snapshot = await Server.inspectLocationCharacter(
+        window.currentLobbyId,
+        getCurrentLocationId(),
+        targetCharacterId,
+        actorLocationCharacterId
+    );
+    const health = snapshot.health || {};
+    const effects = (health.effects || [])
+        .filter(effect => effect?.active !== false)
+        .map(effect => effect.name || effect.type)
+        .filter(Boolean);
+    showNotification(
+        [
+            `${snapshot.target_name}: ${snapshot.condition?.label || 'состояние неизвестно'}`,
+            health.current !== null && health.current !== undefined
+                ? `ОЗ ${health.current}/${health.max ?? '?'}`
+                : null,
+            `Кровопотеря: ${health.blood_stage || 'normal'}`,
+            `Боль: ${health.pain_level ?? 0}`,
+            effects.length ? `Эффекты: ${effects.join(', ')}` : 'Активных эффектов нет',
+        ].filter(Boolean).join('. '),
+        'system'
+    );
+    return snapshot;
+}
+
+async function showCharacterLootMenu(actorLocationCharacterId, targetCharacterId) {
+    closeContainerInteractionMenu();
+    const snapshot = await Server.inspectLocationCharacter(
+        window.currentLobbyId,
+        getCurrentLocationId(),
+        targetCharacterId,
+        actorLocationCharacterId
+    );
+    if (!containerInteractionMenu) {
+        containerInteractionMenu = document.createElement('div');
+        containerInteractionMenu.style.cssText = `
+            position:fixed; z-index:1210; width:min(620px,calc(100vw - 24px));
+            max-height:min(82vh,760px); overflow:hidden; display:none;
+            background:rgba(14,18,26,.98); border:1px solid rgba(255,255,255,.16);
+            border-radius:16px; box-shadow:0 20px 42px rgba(0,0,0,.45);
+            color:#fff; backdrop-filter:blur(10px);
+        `;
+        document.body.appendChild(containerInteractionMenu);
+    }
+    containerInteractionState = {
+        characterId: targetCharacterId,
+        actorLocationCharacterId,
+    };
+    containerInteractionMenu.innerHTML = `
+        <div class="container-drag-handle" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.08);cursor:move;">
+            <div><strong>Обыск: ${escapeHtml(snapshot.target_name || 'Персонаж')}</strong><div style="font-size:12px;opacity:.7;">${escapeHtml(snapshot.condition?.label || '')}</div></div>
+            <button type="button" class="container-close-btn" style="width:32px;height:32px;border:0;border-radius:50%;background:rgba(255,255,255,.08);color:#fff;font-size:18px;">×</button>
+        </div>
+        <div class="character-loot-list" style="padding:12px 14px;max-height:calc(min(82vh,760px) - 72px);overflow:auto;"></div>
+    `;
+    const list = containerInteractionMenu.querySelector('.character-loot-list');
+    const entries = getCharacterTransferEntries(snapshot.target_data || {});
+    if (!entries.length) {
+        list.innerHTML = '<div style="opacity:.75;padding:10px 2px;">Нечего обыскивать</div>';
+    } else {
+        entries.forEach(entry => {
+            list.appendChild(buildTransferRow(entry, '→', async (amount = 1) => {
+                try {
+                    await Server.lootLocationCharacter(
+                        window.currentLobbyId,
+                        getCurrentLocationId(),
+                        targetCharacterId,
+                        {
+                            actor_location_character_id: actorLocationCharacterId,
+                            item_path: entry.path,
+                            amount,
+                        }
+                    );
+                    showNotification('Предмет забран', 'success');
+                    await showCharacterLootMenu(actorLocationCharacterId, targetCharacterId);
+                } catch (error) {
+                    showNotification(error.message || 'Не удалось забрать предмет', 'system');
+                }
+            }));
+        });
+    }
+    containerInteractionMenu.querySelector('.container-close-btn').onclick = closeContainerInteractionMenu;
+    containerInteractionMenu.style.display = 'block';
+    containerInteractionMenu.style.left = `${Math.max(8, window.innerWidth / 2 - 310)}px`;
+    containerInteractionMenu.style.top = `${Math.max(8, window.innerHeight / 2 - Math.min(window.innerHeight * .4, 360))}px`;
+}
+
+function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
+    const actorCharacterId = pendingStructureAction?.actorCharacterId;
+    const actorLocationCharacterId = pendingStructureAction?.actorLocationCharacterId;
+    if (!canInteractWithIncapacitatedCharacter(actorCharacterId, targetCharacterId)) {
+        clearStructureActionMenu();
+        return;
+    }
+    ensureStructureActionMenu();
+    const target = getLocationCharacterById(targetCharacterId);
+    const condition = getLocationCharacterCondition(targetCharacterId);
+    structureActionMenuState = {
+        objectId: `character:${targetCharacterId}`,
+        characterId: targetCharacterId,
+    };
+    structureActionMenu.innerHTML = `
+        <div style="padding:10px 12px 8px;border-bottom:1px solid rgba(255,255,255,.08);font-size:12px;font-weight:700;">
+            ${escapeHtml(target?.name || 'Персонаж')} · ${escapeHtml(condition.label)}
+        </div>
+    `;
+    const actions = [
+        {
+            icon: '◉',
+            label: 'Осмотреть',
+            run: () => inspectIncapacitatedCharacter(actorLocationCharacterId, targetCharacterId),
+        },
+        {
+            icon: '⌕',
+            label: 'Обыскать',
+            run: () => showCharacterLootMenu(actorLocationCharacterId, targetCharacterId),
+        },
+        {
+            icon: '✚',
+            label: 'Попытаться лечить',
+            run: () => showMedicalConsumableMenu(actorCharacterId, targetCharacterId),
+        },
+    ];
+    actions.forEach(action => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = action.icon;
+        button.title = action.label;
+        button.style.cssText = 'width:52px;height:52px;margin:8px;border:0;border-radius:14px;background:rgba(255,255,255,.06);color:#fff;font-size:20px;cursor:pointer;';
+        button.onclick = async event => {
+            event.stopPropagation();
+            clearStructureActionMenu();
+            try {
+                await action.run();
+            } catch (error) {
+                showNotification(error.message || 'Не удалось выполнить взаимодействие', 'system');
+            }
+        };
+        structureActionMenu.appendChild(button);
+    });
+    const rect = structureActionMenu.getBoundingClientRect();
+    structureActionMenu.style.left = `${Math.max(8, Math.min(clientX + 18, window.innerWidth - rect.width - 8))}px`;
+    structureActionMenu.style.top = `${Math.max(8, Math.min(clientY + 18, window.innerHeight - rect.height - 8))}px`;
+    structureActionMenu.style.display = 'block';
 }
 
 async function executeStructureAction(object, actionKey) {
@@ -5017,6 +5436,23 @@ function setupCharacterDragging() {
             updateStructureMovePreview(e.clientX, e.clientY);
         }
         if (pendingStructureAction && !pendingObjectMoveId) {
+            const targetCharacterObject = getCharacterAtScreen(e.clientX, e.clientY);
+            const targetCharacterId = targetCharacterObject?.userData?.characterId;
+            if (
+                targetCharacterId
+                && canInteractWithIncapacitatedCharacter(
+                    pendingStructureAction.actorCharacterId,
+                    targetCharacterId
+                )
+            ) {
+                hoveredStructureObjectId = null;
+                canvas.style.cursor = 'pointer';
+                const interactionKey = `character:${targetCharacterId}`;
+                if (structureActionMenuState?.objectId !== interactionKey) {
+                    showCharacterInteractionMenu(e.clientX, e.clientY, targetCharacterId);
+                }
+                return;
+            }
             const structureObj = getLocationObjectAtScreen(e.clientX, e.clientY);
             const structure = structureObj?.userData?.locationObject || null;
             if (structure) {
@@ -5084,6 +5520,16 @@ function setupCharacterDragging() {
             e.preventDefault();
             e.stopPropagation();
             resolveCombatTargetSelection(charId);
+            return;
+        }
+        if (pendingStructureAction) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (canInteractWithIncapacitatedCharacter(pendingStructureAction.actorCharacterId, charId)) {
+                showCharacterInteractionMenu(e.clientX, e.clientY, charId);
+            } else {
+                showNotification('Взаимодействовать можно с соседним недееспособным персонажем', 'system');
+            }
             return;
         }
         if (combatState?.status === 'active' && !isCurrentCombatTurnForCharacter(charId)) {

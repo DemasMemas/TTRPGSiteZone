@@ -20,6 +20,8 @@ const EFFECT_TYPE_META = {
     fracture: { label: 'Перелом', group: 'injury' },
     shock: { label: 'Шок', group: 'injury' },
     unconsciousness: { label: 'Без сознания', group: 'critical' },
+    critical_condition: { label: 'Критическое состояние', group: 'critical' },
+    death: { label: 'Смерть', group: 'critical' },
     blindness: { label: 'Слепота', group: 'sense' },
     deafness: { label: 'Глухота', group: 'sense' },
     sleep: { label: 'Сон', group: 'critical' },
@@ -77,9 +79,17 @@ const TYPE_ALIASES = {
     перелом: 'fracture',
     shock: 'shock',
     шок: 'shock',
+    pain_shock: 'shock',
+    'болевой шок': 'shock',
     unconsciousness: 'unconsciousness',
     unconscious: 'unconsciousness',
     безсознания: 'unconsciousness',
+    critical_condition: 'critical_condition',
+    критическоесостояние: 'critical_condition',
+    death: 'death',
+    dead: 'death',
+    смерть: 'death',
+    мертв: 'death',
     blindness: 'blindness',
     blind: 'blindness',
     слепота: 'blindness',
@@ -118,6 +128,8 @@ const STATUS_EFFECT_TYPES = new Set([
     'fracture',
     'shock',
     'unconsciousness',
+    'critical_condition',
+    'death',
     'blindness',
     'deafness',
     'sleep',
@@ -176,6 +188,8 @@ const EFFECT_IMPACT_RULES = {
     fracture: { areas: ['limb'], requiresMedicineCheck: true, treatment: 'medical' },
     shock: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
     unconsciousness: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
+    critical_condition: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
+    death: { areas: ['whole_body'], requiresMedicineCheck: false, treatment: 'none' },
     blindness: { areas: ['eyes', 'vision', 'head'], requiresMedicineCheck: true, treatment: 'medical' },
     deafness: { areas: ['ears', 'hearing', 'head'], requiresMedicineCheck: true, treatment: 'medical' },
     sleep: { areas: ['whole_body', 'mind'], requiresMedicineCheck: false, treatment: 'rest' },
@@ -225,6 +239,8 @@ function canonicalType(type, name = '') {
     if (raw.includes('перелом')) return 'fracture';
     if (raw.includes('боль')) return 'pain';
     if (raw.includes('шок')) return 'shock';
+    if (raw.includes('критичес')) return 'critical_condition';
+    if (raw.includes('смерт') || raw.includes('мертв')) return 'death';
     if (raw.includes('слеп')) return 'blindness';
     if (raw.includes('глух')) return 'deafness';
     if (raw.includes('зараж')) return 'infection';
@@ -526,7 +542,7 @@ export function applyEffectToHealth(healthInput = {}, rawEffect = {}) {
         return { health, effect, applied: true, summary: `infection:+${magnitude}` };
     }
 
-    if (effect.type === 'bleeding' || effect.type === 'fracture' || effect.type === 'shock' || effect.type === 'unconsciousness' || effect.type === 'blindness' || effect.type === 'deafness' || effect.type === 'bleeding_external_light' || effect.type === 'bleeding_external_medium' || effect.type === 'bleeding_external_severe' || effect.type === 'bleeding_external_extreme' || effect.type === 'bleeding_internal_light' || effect.type === 'bleeding_internal_medium' || effect.type === 'bleeding_internal_severe' || effect.type === 'bleeding_internal_extreme') {
+    if (effect.type === 'bleeding' || effect.type === 'fracture' || effect.type === 'shock' || effect.type === 'unconsciousness' || effect.type === 'critical_condition' || effect.type === 'death' || effect.type === 'blindness' || effect.type === 'deafness' || effect.type === 'bleeding_external_light' || effect.type === 'bleeding_external_medium' || effect.type === 'bleeding_external_severe' || effect.type === 'bleeding_external_extreme' || effect.type === 'bleeding_internal_light' || effect.type === 'bleeding_internal_medium' || effect.type === 'bleeding_internal_severe' || effect.type === 'bleeding_internal_extreme') {
         upsertStatusEffect(health, effect);
         syncHealthDerivedStatuses(health);
         return { health, effect, applied: true, summary: effect.type };

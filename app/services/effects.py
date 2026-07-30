@@ -26,6 +26,8 @@ EFFECT_TYPE_META = {
     "fracture": {"label": "Перелом", "group": "injury"},
     "shock": {"label": "Шок", "group": "injury"},
     "unconsciousness": {"label": "Без сознания", "group": "critical"},
+    "critical_condition": {"label": "Критическое состояние", "group": "critical"},
+    "death": {"label": "Смерть", "group": "critical"},
     "blindness": {"label": "Слепота", "group": "sense"},
     "deafness": {"label": "Глухота", "group": "sense"},
     "sleep": {"label": "Сон", "group": "critical"},
@@ -83,9 +85,17 @@ TYPE_ALIASES = {
     "перелом": "fracture",
     "shock": "shock",
     "шок": "shock",
+    "pain_shock": "shock",
+    "болевой шок": "shock",
     "unconsciousness": "unconsciousness",
     "unconscious": "unconsciousness",
     "без сознания": "unconsciousness",
+    "critical_condition": "critical_condition",
+    "критическое состояние": "critical_condition",
+    "death": "death",
+    "dead": "death",
+    "смерть": "death",
+    "мертв": "death",
     "blindness": "blindness",
     "blind": "blindness",
     "слепота": "blindness",
@@ -115,7 +125,8 @@ TYPE_ALIASES = {
 
 STATUS_EFFECT_TYPES = {
     "bleeding", "pain", "exhaustion", "stress", "intoxication",
-    "infection", "fracture", "shock", "unconsciousness", "blindness", "deafness",
+    "infection", "fracture", "shock", "unconsciousness", "critical_condition", "death",
+    "blindness", "deafness",
     "sleep",
     "amputation", "organ_loss",
     "bleeding_external_light", "bleeding_external_medium", "bleeding_external_severe", "bleeding_external_extreme",
@@ -144,6 +155,8 @@ EFFECT_IMPACT_RULES = {
     "fracture": {"areas": ["limb"], "requiresMedicineCheck": True, "treatment": "medical"},
     "shock": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
     "unconsciousness": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "critical_condition": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "death": {"areas": ["whole_body"], "requiresMedicineCheck": False, "treatment": "none"},
     "blindness": {"areas": ["eyes", "vision", "head"], "requiresMedicineCheck": True, "treatment": "medical"},
     "deafness": {"areas": ["ears", "hearing", "head"], "requiresMedicineCheck": True, "treatment": "medical"},
     "sleep": {"areas": ["whole_body", "mind"], "requiresMedicineCheck": False, "treatment": "rest"},
@@ -223,6 +236,10 @@ def canonical_type(effect_type: Any = None, name: str = "") -> str:
         return "pain"
     if "шок" in raw:
         return "shock"
+    if "критичес" in raw:
+        return "critical_condition"
+    if "смерт" in raw or "мертв" in raw:
+        return "death"
     if "слеп" in raw:
         return "blindness"
     if "глух" in raw:
@@ -411,6 +428,18 @@ def get_bleeding_state(health: Dict[str, Any]) -> Dict[str, Any]:
 def sync_health_derived_statuses(health: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(health, dict):
         return health
+    effects = normalize_effect_list(health.get("effects") or [])
+    if _to_int(health.get("painLevel", 0), 0) >= 10 and not any(
+        effect.get("type") == "shock" and effect.get("active", True)
+        for effect in effects
+    ):
+        effects.append(normalize_effect({
+            "type": "shock",
+            "name": "Болевой шок",
+            "source": "maximum_pain",
+            "tick": "manual",
+        }))
+    health["effects"] = effects
     bleeding = get_bleeding_state(health)
     health["bleeding"] = bleeding
     health["bleedingSeverity"] = bleeding["totalSeverity"]
@@ -583,6 +612,8 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
         "fracture",
         "shock",
         "unconsciousness",
+        "critical_condition",
+        "death",
         "blindness",
         "deafness",
         "bleeding_external_light",

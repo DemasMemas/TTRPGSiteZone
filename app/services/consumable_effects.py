@@ -622,14 +622,15 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
     applications = []
     def bleeding(max_stage: str, *, internal: bool = False, ap: int = 1, treated: bool = False, all_bleeds: bool = False) -> None:
         applications.append({"kind": "bleeding", "max_stage": max_stage, "internal": internal,
-                             "action_points": ap, "treated": treated, "all": all_bleeds})
+                             "action_points": ap, "treated": treated, "all": all_bleeds,
+                             "allow_weakening": True})
 
     if "бинт" in lower:
         direct["uses"] = 1
         bleeding("light", treated="стерильный" in lower)
         applications.append({"kind": "bleeding", "max_stage": "medium", "internal": False,
                              "action_points": 1, "treated": "стерильный" in lower,
-                             "item_uses": 2, "medicine_bonus": 2})
+                             "item_uses": 2, "medicine_bonus": 2, "allow_weakening": True})
     if "антисептический тампон" in lower:
         bleeding("light", treated=True)
     if "пластырь с гемостатиком" in lower:

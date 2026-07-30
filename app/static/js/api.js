@@ -264,6 +264,37 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`, { method: 'DELETE' });
     },
 
+    async inspectLocationCharacter(lobbyId, locationId, characterId, actorLocationCharacterId) {
+        const params = new URLSearchParams({
+            actor_location_character_id: actorLocationCharacterId,
+        });
+        return apiFetch(
+            `/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/interaction?${params}`
+        );
+    },
+
+    async lootLocationCharacter(lobbyId, locationId, characterId, payload) {
+        return apiFetch(
+            `/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/loot`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            }
+        );
+    },
+
+    async treatLocationCharacter(lobbyId, locationId, characterId, payload) {
+        return apiFetch(
+            `/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/treatment`,
+            {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            }
+        );
+    },
+
     async createLocationObject(lobbyId, locationId, objectData) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/objects`, {
             method: 'POST',

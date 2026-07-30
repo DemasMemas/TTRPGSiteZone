@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 
+import pytest
+
 import app.services.combat as combat_module
 from app.services.combat import CombatService
+from app.services.effects import sync_health_derived_statuses
+from app.services.exceptions import ValidationError
 
 
 def test_ranged_hit_zone_boundaries_follow_rules():
@@ -29,6 +33,556 @@ def test_melee_attack_variants_change_damage_and_penetration():
     assert piercing["armor_piercing"] == 30
     assert cutting["damage"] == 75
     assert cutting["armor_piercing"] == 10
+
+
+def test_unarmed_damage_uses_strength_bonus_with_minimum_ten():
+    weak = {"skills": {"physical": {"strength": {"base": 5, "bonus": 0}}}}
+    strong = {"skills": {"physical": {"strength": {"base": 18, "bonus": 0}}}}
+
+    assert CombatService._virtual_melee_profile("unarmed", character_data=weak)["damage"] == 10
+    assert CombatService._virtual_melee_profile("unarmed", character_data=strong)["damage"] == 40
+
+
+def test_firearm_butt_uses_grip_damage_for_weapons_under_one_kilogram():
+    grip = CombatService._virtual_melee_profile("firearm_butt", {"weight": 0.5})
+    butt = CombatService._virtual_melee_profile("firearm_butt", {"weight": 3.5})
+
+    assert grip["damage"] == 25
+    assert butt["damage"] == 40
+    assert grip["armor_piercing"] == 0
+    assert grip["melee_damage_type"] == "crushing"
+    assert butt["melee_damage_type"] == "crushing"
+
+
+def test_melee_action_cost_uses_attack_and_weight_class_rules():
+    assert CombatService._melee_action_cost(
+        {"weight_class": "light"}, "unarmed"
+    ) == 2
+    assert CombatService._melee_action_cost({"weight_class": "Легкое"}) == 2
+    assert CombatService._melee_action_cost({"weight_class": "Тяжелое"}) == 3
+    assert CombatService._melee_action_cost({"weight_class": "Очень тяжелое"}) == 4
+
+
+def test_melee_adjacency_includes_diagonal_but_not_two_tiles():
+    actor = SimpleNamespace(pos_x=5, pos_y=5)
+
+    assert CombatService._is_adjacent(
+        actor, SimpleNamespace(pos_x=6, pos_y=6)
+    )
+    assert not CombatService._is_adjacent(
+        actor, SimpleNamespace(pos_x=7, pos_y=5)
+    )
+
+
+@pytest.mark.parametrize(
+    ("effects", "expected_state"),
+    [
+        ([{"type": "pain_shock", "name": "Болевой шок"}], "pain_shock"),
+        ([{"type": "unconscious", "name": "Без сознания"}], "critical"),
+        ([{"type": "critical_condition"}], "critical"),
+        ([{"type": "death"}], "dead"),
+    ],
+)
+def test_character_condition_recognizes_incapacitating_effects(effects, expected_state):
+    condition = CombatService._character_condition({"health": {"current": 100, "effects": effects}})
+
+    assert condition["state"] == expected_state
+    assert condition["can_act"] is False
+
+
+def test_pain_shock_only_allows_recovery_attempt():
+    character = SimpleNamespace(
+        character=SimpleNamespace(
+            data={"health": {"current": 100, "effects": [{"type": "shock"}]}}
+        )
+    )
+
+    with pytest.raises(ValidationError, match="Only an attempt"):
+        CombatService.ensure_character_can_act(character, "attack")
+
+    condition = CombatService.ensure_character_can_act(character, "recover_from_shock")
+    assert condition["can_recover"] is True
+
+
+@pytest.mark.parametrize("effect_type", ["critical_condition", "death"])
+def test_critical_and_dead_characters_cannot_use_recovery(effect_type):
+    character = SimpleNamespace(
+        character=SimpleNamespace(
+            data={"health": {"current": 100, "effects": [{"type": effect_type}]}}
+        )
+    )
+
+    with pytest.raises(ValidationError):
+        CombatService.ensure_character_can_act(character, "recover_from_shock")
+
+
+def test_end_turn_pain_shock_check_uses_pain_times_two_minus_will_bonus(monkeypatch):
+    data = {
+        "skills": {"physical": {"will": {"base": 14, "bonus": 0}}},
+        "health": {"current": 100, "painLevel": 6, "effects": []},
+    }
+    character = SimpleNamespace(data=data)
+    location_character = SimpleNamespace(
+        character=character,
+        posture="standing",
+        cover_object_id=1,
+        weapon_braced=True,
+        braced_weapon_index=0,
+    )
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: 9)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda instance, key: None)
+
+    result = CombatService._resolve_pain_shock_check(location_character, 2)
+
+    assert result["will_bonus"] == 2
+    assert result["difficulty"] == 10
+    assert result["success"] is False
+    assert location_character.posture == "prone"
+    assert CombatService._character_condition(data)["state"] == "pain_shock"
+    assert data["health"]["painLevel"] == 6
+
+
+def test_pain_shock_check_is_skipped_in_recovery_round(monkeypatch):
+    data = {
+        "skills": {"physical": {"will": {"base": 10, "bonus": 0}}},
+        "health": {
+            "current": 100,
+            "painLevel": 5,
+            "effects": [],
+            "combatMeta": {"painShockRecovered": True},
+        },
+    }
+    location_character = SimpleNamespace(character=SimpleNamespace(data=data))
+    monkeypatch.setattr(
+        combat_module.random,
+        "randint",
+        lambda start, end: pytest.fail("No roll should be made"),
+    )
+
+    assert CombatService._resolve_pain_shock_check(location_character, 4) is None
+    assert data["health"]["painLevel"] == 5
+
+
+def test_pain_below_five_does_not_require_shock_check(monkeypatch):
+    data = {"health": {"current": 100, "painLevel": 4, "effects": []}}
+    location_character = SimpleNamespace(character=SimpleNamespace(data=data))
+    monkeypatch.setattr(
+        combat_module.random,
+        "randint",
+        lambda start, end: pytest.fail("No roll should be made"),
+    )
+
+    assert CombatService._resolve_pain_shock_check(location_character, 2) is None
+
+
+def test_recovered_character_checks_again_after_running(monkeypatch):
+    data = {
+        "skills": {"physical": {"will": {"base": 10, "bonus": 0}}},
+        "health": {
+            "current": 100,
+            "painLevel": 5,
+            "effects": [],
+            "combatMeta": {"painShockRecovered": True},
+        },
+    }
+    location_character = SimpleNamespace(
+        character=SimpleNamespace(data=data),
+        movement_mode_this_turn="run",
+        posture="standing",
+        cover_object_id=None,
+        weapon_braced=False,
+        braced_weapon_index=None,
+    )
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: 9)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda instance, key: None)
+
+    result = CombatService._resolve_pain_shock_check(location_character, 3)
+
+    assert result["difficulty"] == 10
+    assert result["recovered_triggers"]["strenuous_movement"] is True
+    assert result["success"] is False
+
+
+def test_pain_ten_applies_guaranteed_shock_and_blocks_recovery():
+    health = {"current": 100, "painLevel": 10, "effects": []}
+
+    sync_health_derived_statuses(health)
+    data = {"health": health}
+    condition = CombatService._character_condition(data)
+
+    assert condition["state"] == "pain_shock"
+    assert condition["can_recover"] is False
+    with pytest.raises(ValidationError, match="reduced below 10"):
+        CombatService.ensure_character_can_act(
+            SimpleNamespace(character=SimpleNamespace(data=data)),
+            "recover_from_shock",
+        )
+
+
+def test_back_attack_uses_target_facing():
+    target = SimpleNamespace(pos_x=5, pos_y=5, facing_x=0, facing_y=1)
+
+    assert CombatService._is_behind(
+        SimpleNamespace(pos_x=5, pos_y=4), target
+    )
+    assert not CombatService._is_behind(
+        SimpleNamespace(pos_x=5, pos_y=6), target
+    )
+
+
+def test_duplet_reuses_one_hit_roll_for_sequential_impacts(monkeypatch):
+    forced_rolls = []
+
+    def resolve(target, attacker, details, **kwargs):
+        forced_rolls.append(kwargs.get("forced_roll"))
+        return {
+            "roll": kwargs.get("forced_roll") or 14,
+            "hit": True,
+            "damage": 10,
+        }
+
+    monkeypatch.setattr(CombatService, "_resolve_attack", resolve)
+    results = CombatService._resolve_shot_sequence(
+        [SimpleNamespace()],
+        SimpleNamespace(),
+        {"shot_count": 2},
+        share_hit_roll=True,
+    )
+
+    assert forced_rolls == [None, 14]
+    assert len(results) == 2
+    assert all(result["shared_hit_roll"] for result in results)
+
+
+def test_aimed_head_miss_hits_live_shield_head(monkeypatch):
+    shield = SimpleNamespace(
+        character=SimpleNamespace(data={"marker": "shield"}),
+        hp_zones={},
+        grapple_live_shield=False,
+        grapple_target_id=None,
+    )
+    holder = SimpleNamespace(
+        character=SimpleNamespace(data={"marker": "holder"}),
+        hp_zones={},
+        grapple_live_shield=True,
+        grapple_target_id=2,
+    )
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
+    monkeypatch.setattr(CombatService, "_live_shield_target", lambda target: shield)
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({
+            "damage": 100,
+            "armor_piercing": 20,
+            "bleeding": "",
+            "effective_range": 0,
+        }, None),
+    )
+    monkeypatch.setattr(CombatService, "_target_armor", lambda data, zone: (0, []))
+    damaged = []
+
+    def apply_damage(target, damage, zone, profile, **kwargs):
+        damaged.append((target, damage, zone))
+        return {"current": 600, "zones": {"head": {"current": 0}}}
+
+    monkeypatch.setattr(CombatService, "_apply_attack_damage", apply_damage)
+    result = CombatService._resolve_attack(
+        holder,
+        attacker,
+        {
+            "weapon_index": 0,
+            "hit_difficulty": 10,
+            "fire_mode": "aimed",
+            "round_number": 1,
+        },
+        aimed_zone="head",
+        forced_roll=1,
+    )
+
+    assert result["hit"] is False
+    assert result["live_shield_reason"] == "aimed_head_miss"
+    assert damaged == [(shield, 100, "head")]
+
+
+def test_live_shield_takes_same_zone_before_remaining_penetration_hits_holder(
+    monkeypatch,
+):
+    shield = SimpleNamespace(
+        character=SimpleNamespace(data={"marker": "shield"}),
+        hp_zones={},
+        grapple_live_shield=False,
+        grapple_target_id=None,
+    )
+    holder = SimpleNamespace(
+        character=SimpleNamespace(data={"marker": "holder"}),
+        hp_zones={},
+        grapple_live_shield=True,
+        grapple_target_id=2,
+    )
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
+    monkeypatch.setattr(CombatService, "_live_shield_target", lambda target: shield)
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({
+            "damage": 100,
+            "armor_piercing": 40,
+            "bleeding": "",
+            "effective_range": 0,
+        }, None),
+    )
+    monkeypatch.setattr(
+        CombatService,
+        "_target_armor",
+        lambda data, zone: ((20, []) if data.get("marker") == "shield" else (10, [])),
+    )
+    damaged = []
+
+    def apply_damage(target, damage, zone, profile, **kwargs):
+        damaged.append((target, damage, zone, profile["armor_piercing"]))
+        return {"current": 600, "zones": {"chest": {"current": 50}}}
+
+    monkeypatch.setattr(CombatService, "_apply_attack_damage", apply_damage)
+    result = CombatService._resolve_attack(
+        holder,
+        attacker,
+        {
+            "weapon_index": 0,
+            "hit_difficulty": 1,
+            "fire_mode": "unaimed",
+            "round_number": 1,
+        },
+        aimed_zone="chest",
+        forced_roll=20,
+    )
+
+    assert damaged[0] == (shield, 100, "chest", 40)
+    assert damaged[1] == (holder, 100, "chest", 20)
+    assert result["live_shield_blocked"] is False
+    assert result["combined_damage"] == 200
+
+
+def test_behind_armor_damage_uses_caliber_rules_and_ammo_exceptions():
+    assert CombatService._behind_armor_damage_multiplier({"caliber": "7.62x39"}) == 0.20
+    assert CombatService._behind_armor_damage_multiplier({"caliber": "9х39"}) == 0.25
+    assert CombatService._behind_armor_damage_multiplier({"caliber": "12.7x55"}) == 0.25
+    assert CombatService._behind_armor_damage_multiplier({
+        "caliber": "7.62x39", "ammo_variant": "ep",
+    }) == 0
+    assert CombatService._behind_armor_damage_multiplier({
+        "caliber": "12x70", "ammo_name": "12x70 Картечь",
+    }) == 0
+
+
+def test_12x70_slug_and_exoskeleton_use_special_behind_armor_damage():
+    slug = {"caliber": "12x70", "ammo_name": "12х70 Пуля"}
+    expanding_slug = {**slug, "ammo_variant": "ep"}
+    exoskeleton = {
+        "equipment": {
+            "armor": {
+                "name": "Экзоскелет",
+                "attributes": {"is_exoskeleton": True},
+            },
+        },
+    }
+
+    assert CombatService._behind_armor_damage_multiplier(slug) == pytest.approx(1 / 3)
+    assert CombatService._behind_armor_damage_multiplier(expanding_slug) == 0.10
+    assert CombatService._behind_armor_damage_multiplier(
+        slug, target_data=exoskeleton,
+    ) == pytest.approx(1 / 6)
+
+
+def test_buckshot_deals_half_damage_to_mutant_on_large_non_penetration():
+    buckshot = {"caliber": "12x70", "ammo_name": "12х70 Картечь"}
+    mutant = {"basic": {"species": "Мутант"}}
+
+    assert CombatService._behind_armor_damage_multiplier(
+        buckshot,
+        target_data=mutant,
+        penetration_deficit=10,
+    ) == 0.50
+    assert CombatService._behind_armor_damage_multiplier(
+        buckshot,
+        target_data={"basic": {"species": "Человек"}},
+        penetration_deficit=20,
+    ) == 0
+
+
+def test_full_non_penetration_applies_behind_armor_damage(monkeypatch):
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({
+            "damage": 100,
+            "armor_piercing": 0,
+            "bleeding": "",
+            "caliber": "7.62x39",
+            "effective_range": 0,
+        }, None),
+    )
+    monkeypatch.setattr(CombatService, "_target_armor", lambda data, zone: (100, []))
+    monkeypatch.setattr(
+        CombatService,
+        "_apply_attack_damage",
+        lambda *args, **kwargs: {
+            "current": 680,
+            "zones": {"chest": {"current": 130}},
+        },
+    )
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
+    target = SimpleNamespace(character=SimpleNamespace(data={}), hp_zones={})
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": 0,
+            "hit_difficulty": 1,
+            "fire_mode": "single",
+            "round_number": 1,
+        },
+        aimed_zone="chest",
+        forced_roll=20,
+    )
+
+    assert result["full_non_penetration"] is True
+    assert result["behind_armor_multiplier"] == 0.20
+    assert result["damage"] == 20
+
+
+def test_127x55_full_penetration_checks_additional_trauma_twice(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({
+            "damage": 130,
+            "armor_piercing": 60,
+            "bleeding": "",
+            "caliber": "12.7x55",
+            "effective_range": 0,
+        }, None),
+    )
+    monkeypatch.setattr(CombatService, "_target_armor", lambda data, zone: (40, []))
+
+    def capture_damage(*args, **kwargs):
+        captured.update(kwargs)
+        return {"current": 570, "zones": {"chest": {"current": 20}}}
+
+    monkeypatch.setattr(CombatService, "_apply_attack_damage", capture_damage)
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
+    target = SimpleNamespace(character=SimpleNamespace(data={}), hp_zones={})
+
+    CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": 0,
+            "hit_difficulty": 1,
+            "fire_mode": "single",
+            "round_number": 1,
+        },
+        aimed_zone="chest",
+        forced_roll=20,
+    )
+
+    assert captured["trauma_checks"] == 2
+
+
+def test_buckshot_loses_fixed_damage_and_penetration_after_five_meters(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({
+            "damage": 250,
+            "armor_piercing": 25,
+            "bleeding": "",
+            "caliber": "12x70",
+            "ammo_name": "12х70 Картечь",
+            "effective_range": 10,
+        }, None),
+    )
+    monkeypatch.setattr(CombatService, "_target_armor", lambda data, zone: (0, []))
+
+    def capture_damage(target, damage, zone, profile, **kwargs):
+        captured.update({"damage": damage, "profile": profile, **kwargs})
+        return {"current": 550, "zones": {"chest": {"current": 0}}}
+
+    monkeypatch.setattr(CombatService, "_apply_attack_damage", capture_damage)
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
+    target = SimpleNamespace(character=SimpleNamespace(data={}), hp_zones={})
+
+    CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": 0,
+            "hit_difficulty": 1,
+            "fire_mode": "rapid",
+            "round_number": 1,
+            "target_distance": 7,
+        },
+        aimed_zone="chest",
+        forced_roll=20,
+    )
+
+    assert captured["damage"] == 150
+    assert captured["profile"]["armor_piercing"] == 15
+    assert captured["trauma_checks"] == 3
+    assert captured["trauma_difficulty_modifier"] == -20
+
+
+def test_buckshot_mutant_rule_overrides_partial_damage_at_ten_percent_deficit(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({
+            "damage": 250,
+            "armor_piercing": 5,
+            "bleeding": "",
+            "caliber": "12x70",
+            "ammo_name": "12х70 Картечь",
+            "effective_range": 10,
+        }, None),
+    )
+    monkeypatch.setattr(CombatService, "_target_armor", lambda data, zone: (20, []))
+    monkeypatch.setattr(
+        CombatService,
+        "_apply_attack_damage",
+        lambda *args, **kwargs: {
+            "current": 575,
+            "zones": {"chest": {"current": 25}},
+        },
+    )
+    attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={"basic": {"species": "Мутант"}}),
+        hp_zones={},
+    )
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": 0,
+            "hit_difficulty": 1,
+            "fire_mode": "single",
+            "round_number": 1,
+            "target_distance": 5,
+        },
+        aimed_zone="chest",
+        forced_roll=20,
+    )
+
+    assert result["full_non_penetration"] is False
+    assert result["buckshot_mutant_non_penetration"] is True
+    assert result["damage_multiplier"] == 0.50
+    assert result["damage"] == 125
 
 
 def test_armor_is_reduced_by_ammo_penetration_before_damage():
@@ -186,6 +740,33 @@ def test_firearm_bleeding_is_blocked_when_armor_is_penetrated_by_less_than_ten()
     assert result["stage"] is None
     assert result["roll"] is None
     assert result["blocked_by_armor"] is True
+
+
+def test_blocked_penetration_prevents_profile_and_trauma_bleeding(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    character = SimpleNamespace(data={
+        "health": {
+            "current": 700,
+            "max": 700,
+            "zones": {"chest": {"current": 150, "max": 150}},
+            "effects": [],
+        },
+    })
+    target = SimpleNamespace(character=character, hp_zones={})
+
+    CombatService._apply_attack_damage(
+        target,
+        20,
+        "chest",
+        {"bleeding": "Сильное"},
+        bleeding_result={"stage": "extreme"},
+        allow_bleeding=False,
+        round_number=1,
+    )
+
+    effects = character.data["health"]["effects"]
+    assert not any("bleeding" in str(effect.get("type")) for effect in effects)
 
 
 def test_damage_pain_uses_round_total_and_large_single_hit_thresholds():

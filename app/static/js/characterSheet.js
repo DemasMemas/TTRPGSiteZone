@@ -3725,6 +3725,13 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     const drawnWeaponIndex = combatState?.current_character?.drawn_weapon_index;
     const persistentWeaponIndex = currentCharacterData?.activeWeaponIndex;
     const isCombatActive = combatState?.status === 'active';
+    const weaponWeight = Number(weapon?.weight ?? template?.weight) || 0;
+    const buttLabel = weaponWeight < 1 ? 'Удар рукояткой' : 'Удар прикладом';
+    const buttCost = weaponWeight < 1 ? 2 : 3;
+    const swingPrepared = combatState?.current_character?.melee_swing_round === combatState?.round_number;
+    const buttButton = `
+        <button type="button" class="btn btn-sm btn-primary" ${disabledAttr} onclick="useMeleeAttack(${index}, 'firearm_butt')">${buttLabel} · ${buttCost} ОД</button>
+        <button type="button" class="btn btn-sm btn-warning" ${disabled || !swingPrepared ? 'disabled' : ''} title="${swingPrepared ? 'Выбрать часть тела' : 'Сначала выполните Замах'}" onclick="useMeleeAttack(${index}, 'firearm_butt', true)">Прицельный прикладом · ${buttCost} ОД</button>`;
     const requiresDraw = combatState?.status === 'active'
         && combatState.current_character?.character_id === currentCharacterId
         && (drawnWeaponIndex === null
@@ -3742,7 +3749,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
         const specialization = weaponSpecializationKey(template);
         const level = currentCharacterData?.skills?.specialized?.[specialization]?.level || 'unfamiliar';
         const cycleCost = cycleType === 'pump' && level === 'professional' ? 0 : 1;
-        return `<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="cycleWeaponFromEquipment(${index})">${cycleType === 'pump' ? 'Дослать патрон' : 'Передёрнуть затвор'} · ${cycleCost} ОД</button>`;
+        return `${buttButton}<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="cycleWeaponFromEquipment(${index})">${cycleType === 'pump' ? 'Дослать патрон' : 'Передёрнуть затвор'} · ${cycleCost} ОД</button>`;
     }
     if (!isCombatActive) {
         if (isSelectedWeaponIndex(persistentWeaponIndex, index)) {
@@ -3756,6 +3763,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     ) {
         buttons.push('<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>');
     }
+    buttons.push(buttButton);
     const singleOptions = Array.isArray(profile.single_shot_options) && profile.single_shot_options.length
         ? profile.single_shot_options
         : [1];
@@ -3832,6 +3840,33 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
     ];
 
     const weaponsHtml = [];
+    const combatState = window.locationCombatState;
+    const isCombatActive = Boolean(combatState?.status === 'active');
+    const isCurrentTurn = Boolean(
+        !isCombatActive
+        || combatState?.current_character?.character_id === currentCharacterId
+    );
+    const strengthValue = getSkillEffectiveValue(currentCharacterData, 'physical.strength');
+    const strengthBonus = Math.floor((strengthValue - 10) / 2);
+    const fistDamage = Math.max(10, 10 * strengthBonus);
+    weaponsHtml.push(`
+        <div style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
+            <div style="font-weight:bold; margin-bottom:5px;">Кулаки</div>
+            <div style="display:grid; grid-template-columns:repeat(4, minmax(90px, 1fr)); gap:8px; margin-bottom:10px; background:rgba(0,0,0,0.1); padding:8px; border-radius:4px;">
+                <div><strong>Урон:</strong> ${fistDamage}</div>
+                <div><strong>Точность:</strong> 0</div>
+                <div><strong>Бронебойность:</strong> 0%</div>
+                <div><strong>Атака:</strong> Дробящая</div>
+            </div>
+            <button type="button" class="btn btn-sm btn-primary"
+                ${isCombatActive && !isCurrentTurn ? 'disabled' : ''}
+                onclick="useMeleeAttack(-1, 'unarmed')">Удар кулаком · 2 ОД</button>
+            <button type="button" class="btn btn-sm btn-warning"
+                ${isCombatActive && (!isCurrentTurn || combatState?.current_character?.melee_swing_round !== combatState?.round_number) ? 'disabled' : ''}
+                title="Для прицельного удара сначала выполните Замах"
+                onclick="useMeleeAttack(-1, 'unarmed', true)">Прицельный кулаком · 2 ОД</button>
+        </div>
+    `);
     for (let index = 0; index < weapons.length; index++) {
         const weapon = weapons[index];
         const modifications = Array.isArray(weapon.modifications) ? weapon.modifications : [];
@@ -4006,13 +4041,17 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         let attackButtonsHtml = '';
         if (isMelee) {
             const allowedAttacks = template?.attributes?.allowed_attacks || [];
+            const weightClass = String(template?.attributes?.weight_class || weapon.weightClass || 'Тяжелое').toLowerCase();
+            const meleeCost = weightClass.includes('очень') ? 4 : (weightClass.includes('лег') ? 2 : 3);
             const drawnWeaponIndex = combatState?.current_character?.drawn_weapon_index;
             const activeWeaponIndex = isCombatActive ? drawnWeaponIndex : currentCharacterData?.activeWeaponIndex;
             const handsButton = isSelectedWeaponIndex(activeWeaponIndex, index)
                 ? '<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>'
                 : `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="drawWeaponFromEquipment(${index})">${isCombatActive ? 'Достать оружие' : 'Взять в руки'}</button>`;
+            const swingPrepared = combatState?.current_character?.melee_swing_round === combatState?.round_number;
             attackButtonsHtml = handsButton + allowedAttacks.map(attackType =>
-                `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="useMeleeAttack(${index}, '${attackType}')">${attackType}</button>`
+                `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="useMeleeAttack(${index}, '${attackType}')">${attackType} · ${meleeCost} ОД</button>
+                 <button type="button" class="btn btn-sm btn-warning" ${combatActionDisabled || !swingPrepared ? 'disabled' : ''} title="${swingPrepared ? 'Выбрать часть тела' : 'Сначала выполните Замах'}" onclick="useMeleeAttack(${index}, '${attackType}', true)">Прицельный · ${meleeCost} ОД</button>`
             ).join('');
         } else {
             attackButtonsHtml = renderRangedAttackButtons(weapon, template, index, combatActionDisabled);
@@ -7397,16 +7436,31 @@ window.useWeaponFromEquipment = function(
     });
 };
 
-window.useMeleeAttack = function(weaponIndex, attackType) {
+window.useMeleeAttack = function(weaponIndex, attackType, aimed = false) {
     const sheetData = currentCharacterData;
     const actorCharacterId = currentCharacterId;
+    const isUnarmed = attackType === 'unarmed';
+    const isFirearmButt = attackType === 'firearm_butt';
     const weapon = sheetData?.weapons?.[weaponIndex];
-    if (!weapon) return;
-    const template = (allTemplatesCache || []).find(t => t.id == weapon.templateId);
+    if (!weapon && !isUnarmed) return;
+    const template = (allTemplatesCache || []).find(t => t.id == weapon?.templateId);
     const attrs = template?.attributes || {};
-    const baseDamage = attrs.damage || 0;
-    const baseAP = attrs.armor_piercing || 0;
-    const modifiers = getMeleeAttackModifiers(attackType, baseDamage, baseAP);
+    const strengthBonus = Math.floor(
+        (getSkillEffectiveValue(sheetData, 'physical.strength') - 10) / 2
+    );
+    const baseDamage = isUnarmed
+        ? Math.max(10, 10 * strengthBonus)
+        : (isFirearmButt ? ((Number(weapon.weight ?? template?.weight) || 0) < 1 ? 25 : 40) : (attrs.damage || 0));
+    const baseAP = (isUnarmed || isFirearmButt) ? 0 : (attrs.armor_piercing || 0);
+    const modifiers = (isUnarmed || isFirearmButt)
+        ? { damage: baseDamage, ap: baseAP }
+        : getMeleeAttackModifiers(attackType, baseDamage, baseAP);
+    const attackLabel = isUnarmed
+        ? 'Удар кулаком'
+        : (isFirearmButt
+            ? ((Number(weapon.weight ?? template?.weight) || 0) < 1 ? 'Удар рукояткой' : 'Удар прикладом')
+            : attackType);
+    const weaponLabel = isUnarmed ? 'Кулаки' : weapon.name;
     const combatState = window.locationCombatState;
     const isCombatActive = Boolean(combatState && combatState.status === 'active');
     const isCurrentTurn = Boolean(
@@ -7418,7 +7472,7 @@ window.useMeleeAttack = function(weaponIndex, attackType) {
         return;
     }
     if (!isCombatActive) {
-        showNotification(`⚔️ Атака "${attackType}" оружием ${weapon.name}. Урон: ${modifiers.damage}, Бронебойность: ${modifiers.ap}%`, 'system');
+        showNotification(`Атака «${attackLabel}»: ${weaponLabel}. Урон: ${modifiers.damage}, Бронебойность: ${modifiers.ap}%`, 'system');
         return;
     }
 
@@ -7429,6 +7483,8 @@ window.useMeleeAttack = function(weaponIndex, attackType) {
             actionKey: 'attack',
             weaponIndex,
             attackType,
+            payment: aimed ? 'aimed' : null,
+            meleeAimed: aimed,
             source: 'sheet',
         });
     });
@@ -7611,6 +7667,13 @@ async function useItem(item, itemPath, options = {}) {
 }
 
 const BLEEDING_STAGE_RANK = { light: 1, medium: 2, severe: 3, extreme: 4 };
+const BLEEDING_STAGE_LABEL = {
+    light: 'лёгкое',
+    medium: 'среднее',
+    severe: 'сильное',
+    extreme: 'экстремальное',
+};
+const BLEEDING_KIND_LABEL = { external: 'внешнее', internal: 'внутреннее' };
 
 function getEffectAreaLabel(area) {
     return ({
@@ -7623,6 +7686,43 @@ function getBleedingInfo(effect) {
     const match = String(effect?.type || '').match(/^bleeding_(external|internal)_(light|medium|severe|extreme)$/);
     if (!match) return null;
     return { kind: match[1], stage: match[2], rank: BLEEDING_STAGE_RANK[match[2]] || 0 };
+}
+
+function getBleedingTreatmentOutcome(effect, application) {
+    const bleeding = getBleedingInfo(effect);
+    const maxStage = String(application?.max_stage || '').toLowerCase();
+    const medicineRank = BLEEDING_STAGE_RANK[maxStage] || 0;
+    if (!bleeding || !medicineRank) return null;
+    if (Boolean(application.internal) !== (bleeding.kind === 'internal')) return null;
+    if (bleeding.rank <= medicineRank) {
+        return { mode: 'close', bleeding, resultStage: null };
+    }
+    if (application.allow_weakening !== false && bleeding.rank === medicineRank + 1) {
+        return { mode: 'weaken', bleeding, resultStage: maxStage };
+    }
+    return null;
+}
+
+function getMedicalApplicationCostLabel(actionPoints, costContext = null) {
+    const baseCost = Math.max(0, Number(actionPoints) || 0);
+    if (!costContext) return `${baseCost} ОД`;
+    const useCost = Math.max(0, baseCost - Number(costContext.useActionDiscount || 0));
+    return `${Number(costContext.retrievalActionPoints || 0) + useCost} ОД всего`;
+}
+
+function getBleedingEffectLabel(effect, bleeding = getBleedingInfo(effect)) {
+    if (!bleeding) return effect?.name || effect?.type || 'Кровотечение';
+    return `${BLEEDING_KIND_LABEL[bleeding.kind]} ${BLEEDING_STAGE_LABEL[bleeding.stage]}`;
+}
+
+function getInjuryEffectLabel(effect) {
+    const labels = {
+        fracture: 'Перелом',
+        amputation: 'Отсутствующая часть тела',
+        organ_loss: 'Отсутствующий орган',
+        damaged_zone: 'Повреждённая часть тела',
+    };
+    return effect?.name || labels[effect?.type] || effect?.type || 'Травма';
 }
 
 function collectInventoryEntries(data, predicate) {
@@ -8113,9 +8213,9 @@ function findSmokingFireSource(data) {
     return matches ? { entry: matches, consume: true } : null;
 }
 
-function chooseConsumableApplication(title, choices) {
+function chooseConsumableApplication(title, choices, { alwaysShow = false } = {}) {
     if (!Array.isArray(choices) || choices.length === 0) return Promise.resolve(null);
-    if (choices.length === 1) return Promise.resolve(choices[0]);
+    if (choices.length === 1 && !alwaysShow) return Promise.resolve(choices[0]);
     return new Promise(resolve => {
         document.getElementById('consumable-application-modal')?.remove();
         const modal = document.createElement('div');
@@ -8128,7 +8228,14 @@ function chooseConsumableApplication(title, choices) {
                 <div class="consumable-application-list" style="display:flex; flex-direction:column; gap:8px;"></div>
                 <div class="form-actions" style="margin-top:12px;"><button type="button" class="btn btn-secondary cancel-btn">Отмена</button></div>
             </div>`;
-        const finish = value => { modal.remove(); resolve(value); };
+        const onKeyDown = event => {
+            if (event.key === 'Escape') finish(null);
+        };
+        const finish = value => {
+            document.removeEventListener('keydown', onKeyDown);
+            modal.remove();
+            resolve(value);
+        };
         modal.querySelector('.close').onclick = () => finish(null);
         modal.querySelector('.cancel-btn').onclick = () => finish(null);
         modal.addEventListener('click', event => { if (event.target === modal) finish(null); });
@@ -8142,11 +8249,12 @@ function chooseConsumableApplication(title, choices) {
             modal.querySelector('.consumable-application-list').appendChild(button);
         });
         document.body.appendChild(modal);
+        document.addEventListener('keydown', onKeyDown);
         modal.style.display = 'flex';
     });
 }
 
-async function resolveMedicalApplication(direct, health, itemName) {
+async function resolveMedicalApplication(direct, health, itemName, costContext = null) {
     const effects = Array.isArray(health.effects) ? health.effects : [];
     const applications = Array.isArray(direct.applications) ? direct.applications : [];
     if (direct.blood_type_test) {
@@ -8165,36 +8273,65 @@ async function resolveMedicalApplication(direct, health, itemName) {
             const bleed = getBleedingInfo(effect);
             if (!bleed || effect.closed || effect.suppressed) return;
             applications.forEach(application => {
-                if (Boolean(application.internal) !== (bleed.kind === 'internal')) return;
-                if (bleed.rank > (BLEEDING_STAGE_RANK[application.max_stage] || 0)) return;
+                const outcome = getBleedingTreatmentOutcome(effect, application);
+                if (!outcome) return;
                 if (direct.limb_only && !['leftArm', 'rightArm', 'leftLeg', 'rightLeg'].includes(effect.area)) return;
+                const actionPoints = Number(application.action_points || 1);
+                const treatmentLabel = outcome.mode === 'weaken'
+                    ? `ослабить до ${BLEEDING_STAGE_LABEL[outcome.resultStage]}`
+                    : 'остановить';
                 choices.push({
-                    label: `${getEffectAreaLabel(effect.area)}: ${bleed.kind === 'internal' ? 'внутреннее' : 'внешнее'} ${bleed.stage} · ${application.action_points || 1} ОД`,
-                    effect, application, actionPoints: application.action_points || 1,
+                    label: `${getEffectAreaLabel(effect.area)}: ${getBleedingEffectLabel(effect, bleed)} → ${treatmentLabel} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                    effect,
+                    application,
+                    treatmentMode: outcome.mode,
+                    resultStage: outcome.resultStage,
+                    actionPoints,
                 });
             });
         });
         if (!choices.length) throw new Error('Нет подходящего активного кровотечения');
-        const selected = await chooseConsumableApplication(`Применить: ${itemName}`, choices);
+        const selected = await chooseConsumableApplication(`Выберите кровотечение: ${itemName}`, choices, { alwaysShow: true });
         if (!selected) return null;
         return { kind: 'bleeding', ...selected };
     }
     if (direct.wound_treatment) {
+        const actionPoints = Number(direct.action_points_cost || 1);
         const choices = effects.filter(effect => effect.type === 'untreated_wound').map(effect => ({
-            label: `Обработать рану: ${getEffectAreaLabel(effect.area)}`,
-            effect, actionPoints: Number(direct.action_points_cost || 1),
+            label: `Обработать рану: ${getEffectAreaLabel(effect.area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+            effect,
+            actionPoints,
         }));
         if (!choices.length) throw new Error('Нет необработанной раны');
-        const selected = await chooseConsumableApplication(`Применить: ${itemName}`, choices);
+        const selected = await chooseConsumableApplication(`Выберите рану: ${itemName}`, choices, { alwaysShow: true });
         return selected ? { kind: 'wound', ...selected } : null;
     }
     if (direct.fracture_splint || direct.cure_fracture || direct.target_body_part) {
-        const choices = effects.filter(effect => ['fracture', 'amputation', 'organ_loss'].includes(effect.type)).map(effect => ({
-            label: `${effect.name || effect.type}: ${getEffectAreaLabel(effect.area)}`,
-            effect, actionPoints: Number(direct.action_points_cost || 1),
+        const actionPoints = Number(direct.action_points_cost || 1);
+        const allowedTypes = new Set();
+        if (direct.fracture_splint || direct.cure_fracture) allowedTypes.add('fracture');
+        if (direct.restore_missing_part || direct.target_body_part) {
+            allowedTypes.add('amputation');
+            allowedTypes.add('organ_loss');
+        }
+        const choices = effects.filter(effect => allowedTypes.has(effect.type)).map(effect => ({
+            label: `${getInjuryEffectLabel(effect)}: ${getEffectAreaLabel(effect.area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+            effect,
+            actionPoints,
         }));
+        if (direct.restore_limb_health && !direct.restore_missing_part && !direct.fracture_splint && !direct.cure_fracture) {
+            Object.entries(health.zones || {}).forEach(([area, zone]) => {
+                if (Number(zone?.current || 0) >= Number(zone?.max || 0)) return;
+                const effect = { type: 'damaged_zone', area };
+                choices.push({
+                    label: `${getInjuryEffectLabel(effect)}: ${getEffectAreaLabel(area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                    effect,
+                    actionPoints,
+                });
+            });
+        }
         if (!choices.length) throw new Error('Нет подходящей травмы');
-        const selected = await chooseConsumableApplication(`Применить: ${itemName}`, choices);
+        const selected = await chooseConsumableApplication(`Выберите травму: ${itemName}`, choices, { alwaysShow: true });
         return selected ? { kind: 'injury', ...selected } : null;
     }
     const defaultMedicalCost = direct.medical_difficulty !== undefined || direct.application_form === 'injectable' ? 1 : 0;
@@ -8331,9 +8468,24 @@ async function useConsumable(item, itemPath, options = {}) {
         hasChanges = true;
     };
 
+    let medicalCostContext = null;
+    if (isCombatActive) {
+        try {
+            medicalCostContext = await calculateInventoryAccess(item, itemPath);
+        } catch (error) {
+            showNotification(error.message || 'Не удалось рассчитать стоимость применения');
+            return false;
+        }
+    }
+
     let application;
     try {
-        application = await resolveMedicalApplication(direct, health, item.name || 'предмет');
+        application = await resolveMedicalApplication(
+            direct,
+            health,
+            item.name || 'предмет',
+            medicalCostContext
+        );
     } catch (error) {
         showNotification(error.message || 'Предмет сейчас нельзя применить');
         return false;
@@ -8486,12 +8638,26 @@ async function useConsumable(item, itemPath, options = {}) {
 
     if (application.kind === 'bleeding') {
         const targetId = application.effect.id;
-        health.effects = (health.effects || []).filter(effect => effect.id !== targetId);
-        if (!application.application.treated) {
-            applyEffectToHealth(health, {
-                type: 'untreated_wound', name: 'Необработанная рана', area: application.effect.area,
-                source: targetId || application.effect.source || item.name, tick: 'manual'
-            });
+        if (application.treatmentMode === 'weaken') {
+            const bleeding = getBleedingInfo(application.effect);
+            application.effect.type = `bleeding_${bleeding.kind}_${application.resultStage}`;
+            application.effect.name = `Кровотечение ${BLEEDING_KIND_LABEL[bleeding.kind]} ${BLEEDING_STAGE_LABEL[application.resultStage]}`;
+            application.effect.closed = false;
+            application.effect.suppressed = false;
+            showNotification(
+                `${getEffectAreaLabel(application.effect.area)}: кровотечение ослаблено до уровня «${BLEEDING_STAGE_LABEL[application.resultStage]}»`,
+                'success'
+            );
+        } else {
+            health.effects = (health.effects || []).filter(effect =>
+                effect !== application.effect && (!targetId || effect.id !== targetId)
+            );
+            if (!application.application.treated) {
+                applyEffectToHealth(health, {
+                    type: 'untreated_wound', name: 'Необработанная рана', area: application.effect.area,
+                    source: targetId || application.effect.source || item.name, tick: 'manual'
+                });
+            }
         }
         if (direct.tourniquet) {
             health.effects.forEach(effect => {
@@ -8912,8 +9078,12 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
         let targetData = currentCharacterData;
         const targetCharacterId = Number(options.targetCharacterId || characterId);
         if (targetCharacterId !== Number(characterId)) {
-            const loadedTarget = await Server.getCharacter(targetCharacterId);
-            targetData = loadedTarget?.data || {};
+            if (options.targetData && typeof options.targetData === 'object') {
+                targetData = options.targetData;
+            } else {
+                const loadedTarget = await Server.getCharacter(targetCharacterId);
+                targetData = loadedTarget?.data || {};
+            }
             normalizeCharacterEffects(targetData);
         }
 
@@ -8928,7 +9098,19 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
     if (applied === false) return false;
     await Server.updateCharacter(characterId, { data: currentCharacterData });
     if (targetCharacterId !== Number(characterId)) {
-        await Server.updateCharacter(targetCharacterId, { data: targetData });
+        if (options.interactionContext?.actorLocationCharacterId) {
+            await Server.treatLocationCharacter(
+                options.interactionContext.lobbyId,
+                options.interactionContext.locationId,
+                targetCharacterId,
+                {
+                    actor_location_character_id: options.interactionContext.actorLocationCharacterId,
+                    health: targetData.health || {},
+                }
+            );
+        } else {
+            await Server.updateCharacter(targetCharacterId, { data: targetData });
+        }
     }
     if (currentCharacterId === characterId) {
         renderInventoryTab(currentCharacterData);

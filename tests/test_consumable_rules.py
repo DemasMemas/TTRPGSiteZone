@@ -228,6 +228,46 @@ def test_hinged_splint_is_not_mistaken_for_tourniquet():
     assert "tourniquet" not in profile["direct"]
 
 
+def test_hemostatic_applications_allow_weakening_next_bleeding_stage():
+    profile = parse_consumable_effects(
+        "Губка коллагеновая. Имеет возможность остановить Слабое кровотечение за 1 ОД "
+        "или Среднее за 2 ОД."
+    )
+
+    applications = profile["direct"]["applications"]
+    assert applications == [
+        {
+            "kind": "bleeding",
+            "max_stage": "light",
+            "internal": False,
+            "action_points": 1,
+            "treated": False,
+            "all": False,
+            "allow_weakening": True,
+        },
+        {
+            "kind": "bleeding",
+            "max_stage": "medium",
+            "internal": False,
+            "action_points": 2,
+            "treated": False,
+            "all": False,
+            "allow_weakening": True,
+        },
+    ]
+
+
+def test_internal_hemostatic_keeps_internal_targeting_and_weakening():
+    profile = parse_consumable_effects(
+        "Глобулин. Останавливает внутреннее Сильное кровотечение."
+    )
+
+    application = profile["direct"]["applications"][0]
+    assert application["max_stage"] == "severe"
+    assert application["internal"] is True
+    assert application["allow_weakening"] is True
+
+
 def test_adrenaline_keeps_its_own_action_point_profile():
     profile = parse_consumable_effects(
         "Адреналин. Ампула. +3 ОД на 3 хода. Убирает одышку. -50 здоровья -1 Уровень истощения. "

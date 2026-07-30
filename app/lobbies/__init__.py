@@ -912,6 +912,10 @@ def change_character_posture_outside_combat(
     )
     if not can_control:
         return jsonify({'error': 'You do not control this character'}), 403
+    try:
+        CombatService.ensure_character_can_act(location_character)
+    except Exception as error:
+        return jsonify({'error': str(error)}), 409
 
     target_posture = str((request.get_json() or {}).get('posture') or '').lower()
     if target_posture not in {'standing', 'sitting', 'prone'}:
@@ -937,6 +941,104 @@ def change_character_posture_outside_combat(
         room=f"location_{location_id}",
     )
     return jsonify(payload), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/interaction',
+    methods=['GET'],
+)
+@jwt_required()
+@requires_participant
+def inspect_incapacitated_location_character(
+    lobby_id,
+    location_id,
+    character_id,
+    lobby,
+    participant,
+):
+    actor_location_character_id = request.args.get('actor_location_character_id', type=int)
+    if not actor_location_character_id:
+        return jsonify({'error': 'actor_location_character_id is required'}), 400
+    result = CombatService.inspect_incapacitated_character(
+        location_id,
+        participant.user_id,
+        actor_location_character_id,
+        character_id,
+    )
+    return jsonify(result), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/loot',
+    methods=['POST'],
+)
+@jwt_required()
+@requires_participant
+def loot_incapacitated_location_character(
+    lobby_id,
+    location_id,
+    character_id,
+    lobby,
+    participant,
+):
+    data = request.get_json() or {}
+    actor_location_character_id = data.get('actor_location_character_id')
+    if not actor_location_character_id:
+        return jsonify({'error': 'actor_location_character_id is required'}), 400
+    result = CombatService.loot_incapacitated_character(
+        location_id,
+        participant.user_id,
+        actor_location_character_id,
+        character_id,
+        data.get('item_path'),
+        data.get('amount', 1),
+    )
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': character_id,
+            'updates': {'data': result['target_data']},
+            'updated_by': participant.user_id,
+        },
+        room=f"character_{character_id}",
+    )
+    return jsonify(result), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/treatment',
+    methods=['PATCH'],
+)
+@jwt_required()
+@requires_participant
+def treat_incapacitated_location_character(
+    lobby_id,
+    location_id,
+    character_id,
+    lobby,
+    participant,
+):
+    data = request.get_json() or {}
+    actor_location_character_id = data.get('actor_location_character_id')
+    if not actor_location_character_id:
+        return jsonify({'error': 'actor_location_character_id is required'}), 400
+    result = CombatService.update_incapacitated_character_health(
+        location_id,
+        participant.user_id,
+        actor_location_character_id,
+        character_id,
+        data.get('health'),
+    )
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': character_id,
+            'updates': {'data': result['target_data']},
+            'updated_by': participant.user_id,
+        },
+        room=f"character_{character_id}",
+    )
+    return jsonify(result), 200
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat', methods=['GET'])
@@ -1090,6 +1192,7 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         magazine_template_id=data.get('magazine_template_id'),
         inventory_retrieval_action_points=data.get('inventory_retrieval_action_points'),
         inventory_use_action_discount=data.get('inventory_use_action_discount'),
+        attribute_choice=data.get('attribute_choice'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
