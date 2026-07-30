@@ -2120,7 +2120,14 @@ class CombatService:
                     'source': 'disabled_body_zone',
                     'area': zone_key,
                 })
+        created_bleedings = []
         if allow_bleeding and bleeding_result and bleeding_result.get('stage'):
+            created_bleedings.append({
+                'kind': 'external',
+                'stage': bleeding_result['stage'],
+                'area': zone_key,
+                'source': 'firearm_wound',
+            })
             apply_effect_to_health(health, {
                 'type': f"bleeding_external_{bleeding_result['stage']}",
                 'area': zone_key,
@@ -2132,6 +2139,12 @@ class CombatService:
         stage = next((suffix for label, suffix in bleeding_map.items() if label in bleeding_type), None)
         if allow_bleeding and stage:
             kind = 'internal' if 'внут' in bleeding_type else 'external'
+            created_bleedings.append({
+                'kind': kind,
+                'stage': stage,
+                'area': zone_key,
+                'source': 'combat_attack',
+            })
             apply_effect_to_health(health, {
                 'type': f'bleeding_{kind}_{stage}',
                 'area': zone_key,
@@ -2169,6 +2182,17 @@ class CombatService:
                     'area': zone_key,
                     'chance_roll': trauma_chance_roll,
                     'roll': trauma_roll,
+                    'fracture': bool(trauma_rules['fracture']),
+                    'bleeding': (
+                        {
+                            'kind': trauma_rules['bleeding'][0],
+                            'stage': trauma_rules['bleeding'][1],
+                        }
+                        if trauma_rules['bleeding']
+                        else None
+                    ),
+                    'pain': trauma_rules['pain'],
+                    'shock': bool(trauma_rules['shock']),
                 }
                 traumas.append(trauma)
                 effects = normalize_effect_list(health.get('effects') or [])
@@ -2180,6 +2204,12 @@ class CombatService:
                     })
                 if allow_bleeding and trauma_rules['bleeding']:
                     kind, trauma_stage = trauma_rules['bleeding']
+                    created_bleedings.append({
+                        'kind': kind,
+                        'stage': trauma_stage,
+                        'area': zone_key,
+                        'source': 'additional_trauma',
+                    })
                     apply_effect_to_health(health, {
                         'type': f'bleeding_{kind}_{trauma_stage}', 'area': zone_key,
                         'source': 'combat_attack'
@@ -2205,6 +2235,10 @@ class CombatService:
         flag_modified(target, 'hp_zones')
         health['lastTrauma'] = trauma
         health['lastTraumas'] = traumas
+        health['_attackOutcome'] = {
+            'bleedings': created_bleedings,
+            'additional_traumas': traumas,
+        }
         return health
 
     @staticmethod
@@ -2223,6 +2257,13 @@ class CombatService:
     ):
         attacker_data = attacker.character.data if attacker.character and isinstance(attacker.character.data, dict) else {}
         target_data = target.character.data if target.character and isinstance(target.character.data, dict) else {}
+        target_character = getattr(target, 'character', None)
+        target_character_id = getattr(
+            target,
+            'character_id',
+            getattr(target_character, 'id', None),
+        )
+        target_name = getattr(target_character, 'name', None)
         weapons = attacker_data.get('weapons') or []
         weapon_index = CombatService._coerce_int(attack_details.get('weapon_index'), -1)
         weapon = weapons[weapon_index] if 0 <= weapon_index < len(weapons) else {}
@@ -2262,6 +2303,8 @@ class CombatService:
                 'difficulty': difficulty,
                 'hit': hit,
                 'mode': 'melee',
+                'target_character_id': target_character_id,
+                'target_name': target_name,
             }
             if not hit:
                 return result
@@ -2292,6 +2335,8 @@ class CombatService:
                 'hit': hit,
                 'mode': attack_details['fire_mode'],
                 'strength_requirement': attack_details.get('strength_requirement'),
+                'target_character_id': target_character_id,
+                'target_name': target_name,
             }
             if not profile_adjusted:
                 if (
@@ -2473,6 +2518,7 @@ class CombatService:
             trauma_checks=trauma_checks,
             trauma_difficulty_modifier=trauma_difficulty_modifier,
         )
+        attack_outcome = health.pop('_attackOutcome', {})
         result.update({
             'zone': zone,
             'base_damage': profile['damage'],
@@ -2491,6 +2537,8 @@ class CombatService:
             'damage': final_damage,
             'armor_damage': armor_damage,
             'bleeding_check': bleeding_result,
+            'bleedings': attack_outcome.get('bleedings') or [],
+            'additional_traumas': attack_outcome.get('additional_traumas') or [],
             'health': health.get('current'),
             'zone_health': (
                 health.get('zones') or {}
@@ -2535,6 +2583,144 @@ class CombatService:
                 result['shared_hit_roll'] = True
             results.append(result)
         return results
+
+    @staticmethod
+    def format_attack_summary(result):
+        attack = result.get('attack') if isinstance(result, dict) else None
+        if not isinstance(attack, dict):
+            return None
+        results = attack.get('results')
+        if not isinstance(results, list) or not results:
+            return None
+
+        zone_labels = {
+            'head': 'голова',
+            'chest': 'грудь',
+            'abdomen': 'живот',
+            'left_arm': 'левая рука',
+            'right_arm': 'правая рука',
+            'left_leg': 'левая нога',
+            'right_leg': 'правая нога',
+        }
+        bleeding_kind_labels = {
+            'external': 'внешнее',
+            'internal': 'внутреннее',
+        }
+        bleeding_stage_labels = {
+            'light': 'лёгкое',
+            'medium': 'среднее',
+            'severe': 'сильное',
+            'extreme': 'экстремальное',
+        }
+        mode_labels = {
+            'melee': 'атака ближнего боя',
+            'unaimed': 'неприцельный выстрел',
+            'rapid': 'беглый выстрел',
+            'aimed': 'прицельный выстрел',
+            'burst': 'очередь',
+            'area': 'огонь по области',
+        }
+
+        actor = (
+            (result.get('character') or {}).get('name')
+            or 'Персонаж'
+        )
+        mode = mode_labels.get(
+            results[0].get('mode'),
+            attack.get('attack_type') or attack.get('fire_mode') or 'атака',
+        )
+        lines = [f"{actor}: {mode}."]
+        for index, hit_result in enumerate(results, start=1):
+            target_name = hit_result.get('target_name') or 'цель'
+            rolls = hit_result.get('rolls') or [hit_result.get('roll')]
+            rolls = [roll for roll in rolls if roll is not None]
+            roll_text = '/'.join(str(roll) for roll in rolls) or '—'
+            difficulty = hit_result.get('difficulty', '—')
+            prefix = f"{index}. {target_name}: d20 {roll_text}, СЛ {difficulty}"
+            if not hit_result.get('hit'):
+                lines.append(f"{prefix} — промах.")
+                continue
+
+            zone = zone_labels.get(
+                hit_result.get('zone'),
+                hit_result.get('zone') or 'неизвестная зона',
+            )
+            damage = round(CombatService._coerce_float(
+                hit_result.get('damage'),
+                0,
+            ))
+            armor = round(CombatService._coerce_float(
+                hit_result.get('armor'),
+                0,
+            ))
+            penetration = round(CombatService._coerce_float(
+                hit_result.get('armor_piercing'),
+                0,
+            ))
+            lines.append(
+                f"{prefix} — попадание: {zone}, урон {damage}; "
+                f"защита {armor}%, пробитие {penetration}%."
+            )
+
+            bleedings = hit_result.get('bleedings') or []
+            if bleedings:
+                bleeding_labels = []
+                for bleeding in bleedings:
+                    kind = bleeding_kind_labels.get(
+                        bleeding.get('kind'),
+                        bleeding.get('kind') or '',
+                    )
+                    stage = bleeding_stage_labels.get(
+                        bleeding.get('stage'),
+                        bleeding.get('stage') or '',
+                    )
+                    bleeding_labels.append(f"{stage} {kind}".strip())
+                lines.append(
+                    f"   Кровотечение: {', '.join(bleeding_labels)}."
+                )
+            else:
+                lines.append("   Кровотечение: нет.")
+
+            traumas = hit_result.get('additional_traumas') or []
+            if traumas:
+                trauma_labels = []
+                for trauma in traumas:
+                    consequences = []
+                    if trauma.get('fracture'):
+                        consequences.append('перелом')
+                    trauma_bleeding = trauma.get('bleeding')
+                    if isinstance(trauma_bleeding, dict):
+                        kind = bleeding_kind_labels.get(
+                            trauma_bleeding.get('kind'),
+                            trauma_bleeding.get('kind') or '',
+                        )
+                        stage = bleeding_stage_labels.get(
+                            trauma_bleeding.get('stage'),
+                            trauma_bleeding.get('stage') or '',
+                        )
+                        consequences.append(
+                            f"{stage} {kind} кровотечение".strip()
+                        )
+                    if trauma.get('pain'):
+                        consequences.append(f"боль +{trauma['pain']}")
+                    if trauma.get('shock'):
+                        consequences.append('шок')
+                    details = ', '.join(consequences) or 'без доп. эффекта'
+                    trauma_labels.append(
+                        f"d20 {trauma.get('roll', '—')} ({details})"
+                    )
+                lines.append(
+                    f"   Доп. травма: {'; '.join(trauma_labels)}."
+                )
+            else:
+                lines.append("   Доп. травма: нет.")
+
+        if len(results) > 1:
+            lines.append(
+                f"Итого: попаданий {attack.get('hits', 0)}/{len(results)}, "
+                f"урон {round(CombatService._coerce_float(attack.get('damage_total'), 0))}."
+            )
+        return '\n'.join(lines)
 
     @staticmethod
     def _coerce_float(value, default=0.0):

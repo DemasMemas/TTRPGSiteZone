@@ -1,5 +1,6 @@
 from app.extensions import db
 from app.models import (
+    ChatMessage,
     Lobby,
     LobbyCharacter,
     LobbyParticipant,
@@ -112,6 +113,47 @@ def test_joining_twice_is_idempotent(client, create_user, auth_headers):
         user_id=player["id"],
     ).count()
     assert count == 1
+
+
+def test_banned_user_is_kept_only_in_banned_list(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("ban-list-gm")
+    player = create_user("ban-list-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/ban/{player['id']}",
+        headers=auth_headers(gm),
+    )
+    details = client.get(
+        f"/lobbies/{lobby['id']}",
+        headers=auth_headers(gm),
+    )
+    participants = client.get(
+        f"/lobbies/{lobby['id']}/participants_characters",
+        headers=auth_headers(gm),
+    )
+    banned = client.get(
+        f"/lobbies/{lobby['id']}/banned",
+        headers=auth_headers(gm),
+    )
+
+    assert response.status_code == 200
+    assert [item["user_id"] for item in details.get_json()["participants"]] == [gm["id"]]
+    assert [item["user_id"] for item in participants.get_json()] == [gm["id"]]
+    assert banned.get_json() == [{
+        "user_id": player["id"],
+        "username": player["username"],
+    }]
+    stored = db.session.get(
+        LobbyParticipant,
+        {"lobby_id": lobby["id"], "user_id": player["id"]},
+    )
+    assert stored.is_banned is True
 
 
 def test_non_participant_cannot_open_private_lobby(
@@ -402,6 +444,12 @@ def test_combat_start_rolls_tactics_initiative_only_for_selected_characters(
     assert selected_state["initiative_bonus"] == 4
     assert selected_state["initiative_total"] == 14
     assert excluded_state["initiative_roll"] is None
+    chat_message = ChatMessage.query.filter_by(
+        lobby_id=lobby["id"],
+        username="Бой",
+    ).one()
+    assert "Инициатива:" in chat_message.message
+    assert "Test character: d20 10 +4 = 14" in chat_message.message
     assert excluded_state["initiative_total"] is None
 
 

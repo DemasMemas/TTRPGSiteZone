@@ -2,6 +2,7 @@
 from marshmallow import Schema, fields, validate, validates, ValidationError
 from app.constants import MAX_CHUNKS_WIDTH, MAX_CHUNKS_HEIGHT
 from app.models import Lobby
+from app.schemas.participant import ParticipantSchema
 
 class LobbyCreateSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
@@ -25,14 +26,25 @@ class LobbyResponseSchema(LobbySchema):
     gm_username = fields.Method("get_gm_username")
 
     def get_participants_count(self, obj):
-        return len(obj.participants)
+        return sum(not participant.is_banned for participant in obj.participants)
 
     def get_gm_username(self, obj):
         return obj.gm.username if obj.gm else None
 
 class LobbyDetailSchema(LobbyResponseSchema):
-    participants = fields.Nested('ParticipantSchema', many=True, only=('user_id', 'username'))
+    participants = fields.Method("get_active_participants")
     weather_settings = fields.Dict()
+
+    def get_active_participants(self, obj):
+        active = [
+            participant
+            for participant in obj.participants
+            if not participant.is_banned
+        ]
+        return ParticipantSchema(
+            many=True,
+            only=('user_id', 'username'),
+        ).dump(active)
 
 class LobbyMySchema(Schema):
     id = fields.Int()

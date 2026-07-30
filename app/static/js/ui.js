@@ -13,8 +13,10 @@ export let currentVisibilityCharacterId = null;
 let currentLobbyId;
 
 export function setLobbyData(participants, gm) {
-    lobbyParticipants = participants;
-    window.lobbyParticipants = participants;
+    lobbyParticipants = (participants || []).filter(
+        participant => !participant.is_banned
+    );
+    window.lobbyParticipants = lobbyParticipants;
     gmId = gm;
     setGmId(gmId);
     isGM = (gmId == localStorage.getItem('user_id'));
@@ -63,6 +65,7 @@ async function banUserHandler(userId) {
     try {
         await Server.banUser(currentLobbyId, userId);
         lobbyParticipants = lobbyParticipants.filter(p => p.user_id !== userId);
+        window.lobbyParticipants = lobbyParticipants;
         onlineUserIds.delete(userId);
         updateParticipantsList();
         showNotification('Участник заблокирован');
@@ -76,8 +79,19 @@ export function addMessage(username, text, timestamp) {
     if (!chat) return;
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message';
+    msgDiv.style.whiteSpace = 'pre-wrap';
     const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : '';
-    msgDiv.innerHTML = `<span class="username">${username}:</span> ${text} <span class="timestamp">${timeStr}</span>`;
+    const usernameSpan = document.createElement('span');
+    usernameSpan.className = 'username';
+    usernameSpan.textContent = `${username}:`;
+    const timestampSpan = document.createElement('span');
+    timestampSpan.className = 'timestamp';
+    timestampSpan.textContent = timeStr;
+    msgDiv.append(
+        usernameSpan,
+        document.createTextNode(` ${text} `),
+        timestampSpan,
+    );
     chat.appendChild(msgDiv);
     chat.scrollTop = chat.scrollHeight;
 }

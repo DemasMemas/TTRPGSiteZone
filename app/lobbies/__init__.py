@@ -18,6 +18,7 @@ from app.schemas.character import CharacterSchema, CharacterCreateSchema
 from app.schemas.map import GameStateSchema, MapChunkSchema, TileUpdateSchema
 from app.models import (
     GameState,
+    ChatMessage,
     Lobby,
     LobbyCharacter,
     LobbyParticipant,
@@ -29,6 +30,24 @@ from app.models.location import Location
 from app.models.location_character import LocationCharacter
 from app.models.location_object import LocationObject
 from app.schemas.location import LocationCreateSchema, LocationSchema, LocationObjectSchema
+
+
+def _emit_lobby_chat_message(lobby_id, user_id, message, username='Бой'):
+    chat_message = ChatMessage(
+        lobby_id=lobby_id,
+        user_id=user_id,
+        username=username,
+        message=message,
+    )
+    db.session.add(chat_message)
+    db.session.commit()
+    payload = {
+        'username': username,
+        'message': message,
+        'timestamp': chat_message.timestamp.isoformat(),
+    }
+    socketio.emit('new_message', payload, room=f"lobby_{lobby_id}")
+    return payload
 
 # Импорты для универсальных шаблонов
 from app.models.templates import ItemTemplate
@@ -127,7 +146,10 @@ def lobby_page(lobby_id):
 def get_participants_characters(lobby_id, lobby, participant):
     is_gm = (lobby.gm_id == participant.user_id)
 
-    participants = LobbyParticipant.query.filter_by(lobby_id=lobby_id).all()
+    participants = LobbyParticipant.query.filter_by(
+        lobby_id=lobby_id,
+        is_banned=False,
+    ).all()
     result = []
     for p in participants:
         user_data = {
@@ -135,8 +157,9 @@ def get_participants_characters(lobby_id, lobby, participant):
             'username': p.user.username,
             'color': p.user.color
         }
-        if p.character_id:
-            char = LobbyCharacter.query.get(p.character_id)
+        participant_character_id = getattr(p, 'character_id', None)
+        if participant_character_id:
+            char = db.session.get(LobbyCharacter, participant_character_id)
             if char:
                 user_data['character'] = {
                     'id': char.id,
@@ -1060,6 +1083,28 @@ def start_location_combat(lobby_id, location_id, lobby):
         location_character_ids=data.get('location_character_ids'),
     )
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    participants = [
+        character
+        for character in (state.get('characters') or [])
+        if character.get('initiative_roll') is not None
+    ]
+    participants.sort(
+        key=lambda character: character.get('initiative_total') or 0,
+        reverse=True,
+    )
+    initiative_lines = ['Инициатива:']
+    for character in participants:
+        bonus = character.get('initiative_bonus') or 0
+        initiative_lines.append(
+            f"{character.get('name') or 'Персонаж'}: "
+            f"d20 {character.get('initiative_roll')} "
+            f"{bonus:+d} = {character.get('initiative_total')}"
+        )
+    _emit_lobby_chat_message(
+        lobby_id,
+        lobby.gm_id,
+        '\n'.join(initiative_lines),
+    )
     return jsonify(state), 200
 
 
@@ -1196,6 +1241,13 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
+    attack_summary = CombatService.format_attack_summary(result)
+    if attack_summary:
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            attack_summary,
+        )
     affected_character_ids = {
         character_id
         for character_id in (

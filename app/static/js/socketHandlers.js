@@ -76,6 +76,12 @@ export function initSocket(lobbyId, token) {
         loadLobbyCharacters();
     });
 
+    socket.on('participant_banned', (data) => {
+        onlineUserIds.delete(Number(data.user_id));
+        loadLobbyInfo();
+        loadLobbyCharacters();
+    });
+
     socket.on('kicked', () => {
         showNotification('Вы были заблокированы в этой комнате', 'error', 'top-right');
         window.location.href = '/';

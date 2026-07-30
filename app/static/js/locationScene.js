@@ -2830,17 +2830,7 @@ async function showCombatParticipantSelection() {
                 getCurrentLocationId(),
                 selectedIds,
             );
-            const results = (state.characters || [])
-                .filter(character => selectedIds.includes(Number(character.location_character_id)))
-                .sort((left, right) => (right.initiative_total || 0) - (left.initiative_total || 0))
-                .map(character => (
-                    `${character.name}: d20 ${character.initiative_roll} `
-                    + `${Number(character.initiative_bonus) >= 0 ? '+' : ''}${character.initiative_bonus} `
-                    + `= ${character.initiative_total}`
-                ))
-                .join('; ');
             close();
-            showNotification(`Инициатива: ${results}`, 'system');
         } catch (error) {
             event.currentTarget.disabled = false;
             showNotification(error.message || 'Не удалось начать бой');
@@ -2865,8 +2855,7 @@ function renderCombatHud() {
             const character = charactersByLocationId.get(id);
             if (!character) return `#${id}`;
             if (combatState.status !== 'active') return character.name;
-            const bonus = Number(character.initiative_bonus) || 0;
-            return `${character.name} (${character.initiative_roll}${bonus >= 0 ? '+' : ''}${bonus}=${character.initiative_total})`;
+            return character.name;
         })
         .filter(Boolean);
     const visibleOrderLabels = orderLabels.length

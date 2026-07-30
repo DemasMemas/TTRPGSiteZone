@@ -158,6 +158,55 @@ def test_melee_adjacency_includes_diagonal_but_not_two_tiles():
     )
 
 
+def test_attack_summary_lists_each_target_damage_bleeding_and_trauma():
+    summary = CombatService.format_attack_summary({
+        "character": {"name": "Атакующий"},
+        "attack": {
+            "hits": 1,
+            "damage_total": 42,
+            "results": [
+                {
+                    "target_name": "Первая цель",
+                    "roll": 17,
+                    "rolls": [17],
+                    "difficulty": 12,
+                    "hit": True,
+                    "mode": "melee",
+                    "zone": "right_arm",
+                    "damage": 42,
+                    "armor": 20,
+                    "armor_piercing": 30,
+                    "bleedings": [{
+                        "kind": "external",
+                        "stage": "medium",
+                    }],
+                    "additional_traumas": [{
+                        "roll": 8,
+                        "fracture": True,
+                        "bleeding": None,
+                        "pain": 1,
+                        "shock": False,
+                    }],
+                },
+                {
+                    "target_name": "Вторая цель",
+                    "roll": 4,
+                    "rolls": [4],
+                    "difficulty": 15,
+                    "hit": False,
+                    "mode": "melee",
+                },
+            ],
+        },
+    })
+
+    assert "Первая цель: d20 17, СЛ 12 — попадание: правая рука, урон 42" in summary
+    assert "Кровотечение: среднее внешнее." in summary
+    assert "Доп. травма: d20 8 (перелом, боль +1)." in summary
+    assert "Вторая цель: d20 4, СЛ 15 — промах." in summary
+    assert "Итого: попаданий 1/2, урон 42." in summary
+
+
 @pytest.mark.parametrize(
     ("effects", "expected_state"),
     [
