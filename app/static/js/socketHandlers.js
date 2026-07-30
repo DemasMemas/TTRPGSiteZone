@@ -5,6 +5,8 @@ import { loadLobbyInfo, loadAllChunks } from './lobbyData.js';
 import { addMessage, updateParticipantsList, onlineUserIds, lobbyParticipants } from './ui.js';
 import { updateTileInChunk } from './lobby3d.js';
 import { applyWeather } from './weather.js';
+import { setUserColor } from './colors.js';
+import { refreshUserColor } from './locationScene.js';
 
 let socket;
 let currentLobbyId;
@@ -80,6 +82,17 @@ export function initSocket(lobbyId, token) {
         onlineUserIds.delete(Number(data.user_id));
         loadLobbyInfo();
         loadLobbyCharacters();
+    });
+
+    socket.on('user_color_updated', (data) => {
+        const userId = Number(data.user_id);
+        setUserColor(userId, data.color);
+        const participant = lobbyParticipants.find(
+            item => Number(item.user_id) === userId
+        );
+        if (participant) participant.color = data.color;
+        updateParticipantsList();
+        refreshUserColor(userId);
     });
 
     socket.on('kicked', () => {

@@ -283,6 +283,31 @@ body {
   color: var(--offline-color);
   opacity: 0.7;
 }
+.participant-identity {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.participant-color {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin: 0 8px 0 0;
+  padding: 0;
+  flex: 0 0 12px;
+  border: 1px solid rgba(255,255,255,0.28);
+  border-radius: 50%;
+}
+.participant-color-editable {
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.participant-color-editable:hover,
+.participant-color-editable:focus-visible {
+  transform: scale(1.3);
+  box-shadow: 0 0 0 2px rgba(214,194,120,0.45);
+  outline: none;
+}
 .ban-btn {
   background: none;
   border: none;

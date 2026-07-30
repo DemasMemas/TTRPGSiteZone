@@ -275,6 +275,49 @@ def test_end_turn_pain_shock_check_uses_pain_times_two_minus_will_bonus(monkeypa
     assert data["health"]["painLevel"] == 6
 
 
+def test_bleeding_check_keeps_base_will_bonus_separate_from_blood_penalty():
+    data = {
+        "skills": {"physical": {"will": {"base": 5, "bonus": 0}}},
+        "health": {
+            "blood": "light",
+            "effects": [{
+                "type": "bleeding_external_severe",
+                "area": "rightArm",
+            }],
+        },
+    }
+    sync_health_derived_statuses(data["health"])
+
+    profile = CombatService._bleeding_check_profile(data)
+
+    assert profile["willBonus"] == -3
+    assert profile["stateModifier"] == 0
+    assert profile["severity"] == 5
+    assert profile["stagePenalty"] == 1
+    assert profile["difficulty"] == 12
+
+
+def test_bleeding_check_applies_exhaustion_without_changing_will_bonus():
+    data = {
+        "skills": {"physical": {"will": {"base": 5, "bonus": 0}}},
+        "health": {
+            "blood": "normal",
+            "exhaustion": 1,
+            "effects": [{
+                "type": "bleeding_external_light",
+                "area": "leftArm",
+            }],
+        },
+    }
+    sync_health_derived_statuses(data["health"])
+
+    profile = CombatService._bleeding_check_profile(data)
+
+    assert profile["willBonus"] == -3
+    assert profile["stateModifier"] == -1
+    assert profile["difficulty"] == 10
+
+
 def test_pain_shock_check_is_skipped_in_recovery_round(monkeypatch):
     data = {
         "skills": {"physical": {"will": {"base": 10, "bonus": 0}}},

@@ -164,6 +164,25 @@ def test_numeric_status_effects_are_clamped():
     assert health["intoxication"] == 100
 
 
+def test_new_fracture_adds_three_pain_only_once():
+    health = {"painLevel": 1, "effects": []}
+    fracture = {
+        "type": "fracture",
+        "area": "rightArm",
+        "source": "combat_attack",
+    }
+
+    apply_effect_to_health(health, fracture)
+    apply_effect_to_health(health, fracture)
+
+    assert health["painLevel"] == 4
+    assert len([
+        effect
+        for effect in health["effects"]
+        if effect["type"] == "fracture"
+    ]) == 1
+
+
 def test_five_minute_delayed_effect_advances_in_six_second_rounds():
     health = {"stress": 5}
     effects = [{

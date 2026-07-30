@@ -2505,6 +2505,27 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     invalidateMovementMapCache();
 }
 
+export function refreshUserColor(userId) {
+    const normalizedUserId = Number(userId);
+    const colorHex = getUserColorHex(normalizedUserId);
+    characterModels.forEach((entry) => {
+        if (Number(entry.ownerId) !== normalizedUserId) return;
+        entry.model?.traverse((child) => {
+            if (
+                child.userData?.posturePart === 'body'
+                && child.material?.color
+            ) {
+                child.material.color.set(colorHex);
+            }
+        });
+        const labelElement = entry.label?.element;
+        if (labelElement) {
+            labelElement.style.backgroundColor = colorHex;
+            labelElement.style.borderColor = colorHex;
+        }
+    });
+}
+
 export function applyCharacterPostureVisual(characterId, posture = 'standing') {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;

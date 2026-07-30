@@ -639,13 +639,21 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
                 existing = idx
                 break
 
-        if existing is None:
+        is_new_effect = existing is None
+        if is_new_effect:
             health["effects"].append(effect)
         else:
             current = normalize_effect(health["effects"][existing])
             current.update(effect)
             current["stacks"] = max(_to_int(current.get("stacks", 1), 1), _to_int(effect.get("stacks", 1), 1))
             health["effects"][existing] = current
+        if effect_type == "fracture" and is_new_effect:
+            apply_effect_to_health(health, {
+                "type": "pain",
+                "value": 3,
+                "source": "fracture",
+                "area": effect.get("area"),
+            })
         sync_health_derived_statuses(health)
         return health
 

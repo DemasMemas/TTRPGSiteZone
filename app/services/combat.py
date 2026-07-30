@@ -1020,7 +1020,13 @@ class CombatService:
         }
 
     @staticmethod
-    def _health_roll_modifier(character_data, skill_path, include_pain=True):
+    def _health_roll_modifier(
+        character_data,
+        skill_path,
+        include_pain=True,
+        include_blood=True,
+        include_psy=True,
+    ):
         health = character_data.get('health') if isinstance(character_data, dict) else {}
         if not isinstance(health, dict):
             return 0
@@ -1029,12 +1035,15 @@ class CombatService:
             modifier -= CombatService._coerce_int(health.get('painLevel'), 0)
         exhaustion = CombatService._coerce_int(health.get('exhaustion'), 0)
         modifier -= {1: 1, 2: 2, 3: 4}.get(exhaustion, 6 if exhaustion >= 4 else 0)
-        blood_stage = str(health.get('blood') or health.get('bloodStage') or 'normal').lower()
-        modifier -= {
-            'light': 2,
-            'medium': 3,
-            'severe': 5,
-        }.get(blood_stage, 0)
+        if include_blood:
+            blood_stage = str(
+                health.get('blood') or health.get('bloodStage') or 'normal'
+            ).lower()
+            modifier -= {
+                'light': 2,
+                'medium': 3,
+                'severe': 5,
+            }.get(blood_stage, 0)
         limb_penalties = CombatService._disabled_limb_penalties(character_data)
         modifier -= limb_penalties['all']
         if skill_path == 'skills.physical.shooting':
@@ -1081,7 +1090,7 @@ class CombatService:
             if effect.get('type') == 'stimulant_crash':
                 modifier -= CombatService._coerce_int(effect.get('phase_penalty', effect.get('value', 0)), 0)
 
-        if skill_path == 'skills.physical.will':
+        if include_psy and skill_path == 'skills.physical.will':
             psy_state = CombatService._coerce_int(health.get('psyState', health.get('psy_state')), 0)
             modifier -= 1 if psy_state >= 10 else 0
         return modifier
@@ -2731,6 +2740,17 @@ class CombatService:
 
     @staticmethod
     def _skill_modifier(character_data, skill_path, include_pain=True):
+        return (
+            CombatService._base_skill_modifier(character_data, skill_path)
+            + CombatService._health_roll_modifier(
+                character_data,
+                skill_path,
+                include_pain,
+            )
+        )
+
+    @staticmethod
+    def _base_skill_modifier(character_data, skill_path):
         current = character_data if isinstance(character_data, dict) else {}
         for part in skill_path.split('.'):
             if not isinstance(current, dict):
@@ -2738,17 +2758,9 @@ class CombatService:
                 break
             current = current.get(part)
         if not isinstance(current, dict):
-            return CombatService._health_roll_modifier(
-                character_data,
-                skill_path,
-                include_pain,
-            )
+            return 0
         skill_value = CombatService._skill_value(character_data, skill_path)
-        base_mod = math.floor((skill_value - 10) / 2)
-        return (
-            base_mod
-            + CombatService._health_roll_modifier(character_data, skill_path, include_pain)
-        )
+        return math.floor((skill_value - 10) / 2)
 
     @staticmethod
     def _consumable_stat_value_bonus(character_data, stat_name):
@@ -2821,6 +2833,60 @@ class CombatService:
         return order[next_index]
 
     @staticmethod
+    def _bleeding_check_profile(character_data):
+        health = (
+            character_data.get('health')
+            if isinstance(character_data, dict)
+            else {}
+        )
+        if not isinstance(health, dict):
+            health = {}
+        bleeding = (
+            health.get('bleeding')
+            if isinstance(health.get('bleeding'), dict)
+            else {}
+        )
+        severity = CombatService._coerce_int(
+            bleeding.get('totalSeverity', health.get('bleedingSeverity', 0)),
+            0,
+        )
+        stage_penalty = CombatService._coerce_int(
+            bleeding.get(
+                'stagePenalty',
+                health.get('bleedingStagePenalty', 0),
+            ),
+            0,
+        )
+        modifier_total = CombatService._bleeding_modifier_total(health)
+        will_bonus = CombatService._base_skill_modifier(
+            character_data,
+            'skills.physical.will',
+        )
+        state_modifier = CombatService._health_roll_modifier(
+            character_data,
+            'skills.physical.will',
+            include_pain=False,
+            include_blood=False,
+            include_psy=False,
+        )
+        return {
+            'severity': severity,
+            'stagePenalty': stage_penalty,
+            'modifierTotal': modifier_total,
+            'willBonus': will_bonus,
+            'stateModifier': state_modifier,
+            'difficulty': max(
+                0,
+                5
+                + severity
+                - stage_penalty
+                + modifier_total
+                - will_bonus
+                - state_modifier,
+            ),
+        }
+
+    @staticmethod
     def _resolve_bleeding_check(loc_char):
         if not loc_char or not getattr(loc_char, 'character', None):
             return None
@@ -2836,20 +2902,22 @@ class CombatService:
 
         sync_health_derived_statuses(health)
         bleeding = health.get('bleeding') if isinstance(health.get('bleeding'), dict) else {}
-        severity = CombatService._coerce_int(bleeding.get('totalSeverity', health.get('bleedingSeverity', 0)), 0)
+        profile = CombatService._bleeding_check_profile(character_data)
+        severity = profile['severity']
         if severity <= 0:
             return None
 
         stage = str(health.get('blood') or health.get('bloodStage') or 'normal').lower()
-        stage_penalty = CombatService._coerce_int(bleeding.get('stagePenalty', 0), 0)
-        modifier_total = CombatService._bleeding_modifier_total(health)
-        will_bonus = CombatService._skill_modifier(character_data, 'skills.physical.will', include_pain=False)
+        stage_penalty = profile['stagePenalty']
+        modifier_total = profile['modifierTotal']
+        will_bonus = profile['willBonus']
+        state_modifier = profile['stateModifier']
         roll = random.randint(1, 20)
         # Проверка кровопотери не является обычной проверкой Воли и не получает
         # Помеху от пси-состояния.
         disadvantage = False
-        total = roll + will_bonus
-        difficulty = max(0, 5 + severity - stage_penalty + modifier_total - will_bonus)
+        total = roll
+        difficulty = profile['difficulty']
         success = total >= difficulty
 
         meta = health.setdefault('combatMeta', {})
@@ -2861,6 +2929,7 @@ class CombatService:
             'severity': severity,
             'stagePenalty': stage_penalty,
             'modifierTotal': modifier_total,
+            'stateModifier': state_modifier,
             'disadvantage': disadvantage,
             'success': success,
         }
@@ -3469,6 +3538,7 @@ class CombatService:
         health = data.get('health') if isinstance(data, dict) else {}
         if not isinstance(health, dict):
             health = {}
+        bleeding_profile = CombatService._bleeding_check_profile(data)
         condition = CombatService._character_condition(data)
         return {
             'location_character_id': loc_char.id,
@@ -3541,9 +3611,9 @@ class CombatService:
             'blood': health.get('blood') or health.get('bloodStage') or 'normal',
             'blood_stage': health.get('bloodStage') or health.get('blood') or 'normal',
             'bleeding_severity': CombatService._coerce_int(health.get('bleedingSeverity', 0), 0),
-            'bleeding_difficulty': CombatService._coerce_int(health.get('bleedingDifficulty', 0), 0),
+            'bleeding_difficulty': bleeding_profile['difficulty'],
             'bleeding_modifier_total': CombatService._coerce_int(health.get('bleedingModifierTotal', 0), 0),
-            'will_bonus': CombatService._skill_modifier(data, 'skills.physical.will'),
+            'will_bonus': bleeding_profile['willBonus'],
             'bleeding': health.get('bleeding', {}),
             'condition': condition,
             'is_current_turn': loc_char.id == current_turn_id,

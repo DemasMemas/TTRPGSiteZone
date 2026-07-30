@@ -2,8 +2,8 @@ import logging
 import re
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
-from app.extensions import db
-from app.models import User
+from app.extensions import db, socketio
+from app.models import LobbyParticipant, User
 from app.schemas.user import UserSchema, UserLoginSchema, UserProfileSchema
 
 logger = logging.getLogger(__name__)
@@ -53,5 +53,18 @@ def update_color():
         return jsonify({'error': 'User not found'}), 404
     user.color = color
     db.session.commit()
+    lobby_ids = {
+        participant.lobby_id
+        for participant in LobbyParticipant.query.filter_by(
+            user_id=user_id,
+            is_banned=False,
+        ).all()
+    }
+    for lobby_id in lobby_ids:
+        socketio.emit(
+            'user_color_updated',
+            {'user_id': user_id, 'color': color},
+            room=f'lobby_{lobby_id}',
+        )
     logger.info(f"User {user.username} updated color to {color}")
     return jsonify({'message': 'Color updated', 'color': color}), 200

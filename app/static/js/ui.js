@@ -2,7 +2,12 @@
 import { showNotification } from './utils.js';
 import { Server } from './api.js';
 import { loadLobbyCharacters } from './characters.js';
-import { setGmId, getUserColorHex } from './colors.js';
+import {
+    setGmId,
+    getUserColorHex,
+    setUserColor,
+    updateMyColor,
+} from './colors.js';
 
 export let lobbyParticipants = [];
 export let gmId = null;
@@ -16,6 +21,9 @@ export function setLobbyData(participants, gm) {
     lobbyParticipants = (participants || []).filter(
         participant => !participant.is_banned
     );
+    lobbyParticipants.forEach((participant) => {
+        setUserColor(Number(participant.user_id), participant.color);
+    });
     window.lobbyParticipants = lobbyParticipants;
     gmId = gm;
     setGmId(gmId);
@@ -37,10 +45,32 @@ export function updateParticipantsList() {
     lobbyParticipants.forEach(p => {
         const li = document.createElement('li');
         const colorHex = getUserColorHex(p.user_id);
-        li.innerHTML = `
-            <span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:${colorHex}; margin-right:8px; flex-shrink:0;"></span>
-            ${p.username} ${p.user_id === gmId ? '(ГМ)' : ''}
-        `;
+        const currentUserId = Number(localStorage.getItem('user_id'));
+        const canChangeColor = Number(p.user_id) === currentUserId
+            && Number(p.user_id) !== Number(gmId);
+        const identity = document.createElement('span');
+        identity.className = 'participant-identity';
+        const colorCircle = document.createElement(
+            canChangeColor ? 'button' : 'span'
+        );
+        colorCircle.className = `participant-color${canChangeColor ? ' participant-color-editable' : ''}`;
+        colorCircle.style.backgroundColor = colorHex;
+        if (canChangeColor) {
+            colorCircle.type = 'button';
+            colorCircle.title = 'Выбрать свой цвет';
+            colorCircle.setAttribute('aria-label', 'Выбрать свой цвет');
+            colorCircle.addEventListener('pointerdown', (event) => {
+                event.stopPropagation();
+            });
+            colorCircle.addEventListener('click', (event) => {
+                event.stopPropagation();
+                openOwnColorPicker(p);
+            });
+        }
+        const name = document.createElement('span');
+        name.textContent = `${p.username} ${p.user_id === gmId ? '(ГМ)' : ''}`;
+        identity.append(colorCircle, name);
+        li.appendChild(identity);
 
         if (isGM && p.user_id !== gmId) {
             const banBtn = document.createElement('button');
@@ -58,6 +88,35 @@ export function updateParticipantsList() {
             offlineList.appendChild(li);
         }
     });
+}
+
+function openOwnColorPicker(participant) {
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = getUserColorHex(Number(participant.user_id));
+    input.style.position = 'fixed';
+    input.style.left = '-10000px';
+    document.body.appendChild(input);
+
+    const removeInput = () => input.remove();
+    input.addEventListener('change', async () => {
+        try {
+            const result = await updateMyColor(input.value);
+            participant.color = result.color;
+            setUserColor(Number(participant.user_id), result.color);
+            updateParticipantsList();
+            showNotification('Цвет обновлён', 'success');
+        } catch (error) {
+            showNotification(
+                error.message || 'Не удалось изменить цвет',
+                'error',
+            );
+        } finally {
+            removeInput();
+        }
+    }, { once: true });
+    input.addEventListener('cancel', removeInput, { once: true });
+    input.click();
 }
 
 async function banUserHandler(userId) {
