@@ -3788,6 +3788,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         { key: 'caliber', label: 'Калибр', width: 90, type: 'text', readonly: true },
         { key: 'range', label: 'Дальность', width: 60, type: 'number' },
         { key: 'ergonomics', label: 'Эргономика', width: 70, type: 'number' },
+        { key: 'minStrength', templateKey: 'min_strength', label: 'Мин. Сила', width: 70, type: 'number', readonly: true },
         { key: 'burst', label: 'Очередь', width: 75, type: 'text' },
         { key: 'durability', label: 'Прочность', width: 60, type: 'number' },
         { key: 'fireRate', label: 'Скорострельность', width: 105, type: 'number' },
@@ -3826,10 +3827,14 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 : null;
 
             columns.forEach(col => {
-                const templateValue = template?.attributes?.[col.key];
+                const templateValue = template?.attributes?.[col.templateKey || col.key];
                 const baseValue = col.key === 'caliber'
                     ? (templateValue || weapon.caliber || '')
-                    : (weapon[col.key] !== undefined ? weapon[col.key] : (col.type === 'number' ? 0 : ''));
+                    : (
+                        weapon[col.key] !== undefined
+                            ? weapon[col.key]
+                            : (templateValue ?? (col.type === 'number' ? 0 : ''))
+                    );
                 let effectiveValue = null;
                 if (effectiveStats && (col.key === 'accuracy' || col.key === 'noise' || col.key === 'range' || col.key === 'ergonomics')) {
                     effectiveValue = effectiveStats[col.key];

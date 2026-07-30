@@ -1976,8 +1976,12 @@ async function resolveCombatTargetSelection(targetCharacterId) {
                     const outcome = item.hit ? 'попадание' : 'промах';
                     return `${index + 1}: d20 ${dice}, СЛ ${item.difficulty} — ${outcome}`;
                 }).join('; ');
+                const strength = attack.results[0]?.strength_requirement;
+                const strengthText = strength?.accuracy_penalty
+                    ? ` Требование Силы ${strength.effective_required}, Сила ${strength.strength}: точность −${strength.accuracy_penalty}.`
+                    : '';
                 showNotification(
-                    `${rolls}. Итоговый урон: ${damage}`,
+                    `${rolls}. Итоговый урон: ${damage}.${strengthText}`,
                     hits.length ? 'success' : 'system'
                 );
             }

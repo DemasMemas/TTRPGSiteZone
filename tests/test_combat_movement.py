@@ -239,6 +239,62 @@ def test_integrated_helmet_accuracy_penalty_is_applied_once():
     assert CombatService._equipment_accuracy_penalty(character_data) == 4
 
 
+@pytest.mark.parametrize(
+    ("posture", "effective_required", "accuracy_penalty"),
+    [
+        ("standing", 8, 6),
+        ("sitting", 6, 2),
+        ("prone", 2, 0),
+    ],
+)
+def test_weapon_strength_requirement_accounts_for_posture(
+    posture,
+    effective_required,
+    accuracy_penalty,
+):
+    character = LocationCharacter(posture=posture)
+    character.character = LobbyCharacter(data={
+        "skills": {
+            "physical": {
+                "strength": {"base": 5, "bonus": 0},
+            },
+        },
+    })
+
+    profile = CombatService._weapon_strength_profile(
+        character,
+        {"minStrength": 8},
+    )
+
+    assert profile["effective_required"] == effective_required
+    assert profile["accuracy_penalty"] == accuracy_penalty
+
+
+def test_bipod_removes_strength_requirement_while_prone():
+    character = LocationCharacter(posture="prone")
+    character.character = LobbyCharacter(data={
+        "skills": {
+            "physical": {
+                "strength": {"base": 1, "bonus": 0},
+            },
+        },
+    })
+    weapon = {
+        "minStrength": 15,
+        "installedModules": [{
+            "name": "Сошки",
+            "slotType": "handguard",
+            "attributes": {"bipod": True},
+        }],
+    }
+
+    profile = CombatService._weapon_strength_profile(character, weapon)
+
+    assert profile["ignored_by_bipod"] is True
+    assert profile["effective_required"] == 0
+    assert profile["accuracy_penalty"] == 0
+
+
 def test_legacy_root_movement_penalty_is_not_applied():
     location_character = LocationCharacter()
     location_character.character = LobbyCharacter(data={"movementPenalty": 9})

@@ -505,6 +505,68 @@ class CombatService:
         }
 
     @staticmethod
+    def _weapon_strength_profile(loc_char, weapon):
+        character = getattr(loc_char, 'character', None)
+        data = character.data if character and isinstance(character.data, dict) else {}
+        weapon = weapon if isinstance(weapon, dict) else {}
+        template = None
+        template_id = CombatService._coerce_int(weapon.get('templateId'), 0)
+        if template_id:
+            template = db.session.get(ItemTemplate, template_id)
+        template_attributes = template.attributes if template and isinstance(template.attributes, dict) else {}
+        attributes = weapon.get('attributes') if isinstance(weapon.get('attributes'), dict) else {}
+        required = CombatService._coerce_int(
+            weapon.get(
+                'minStrength',
+                weapon.get(
+                    'min_strength',
+                    attributes.get('min_strength', template_attributes.get('min_strength')),
+                ),
+            ),
+            0,
+        )
+        base_required = required
+        has_bipod = False
+        for module in weapon.get('installedModules') or []:
+            if not isinstance(module, dict):
+                continue
+            module_attributes = module.get('attributes') if isinstance(module.get('attributes'), dict) else {}
+            modifiers = module.get('modifiers')
+            modifiers = modifiers if isinstance(modifiers, dict) else module_attributes.get('modifiers', {})
+            modifier = modifiers.get('min_strength') if isinstance(modifiers, dict) else None
+            if modifier is None and isinstance(modifiers, dict):
+                modifier = modifiers.get('required_strength')
+            required = CombatService._apply_numeric_modifier(required, modifier)
+            has_bipod = has_bipod or bool(
+                module.get('slotType') == 'handguard'
+                and (
+                    module.get('bipod')
+                    or module_attributes.get('bipod')
+                    or module.get('name') == 'Сошки'
+                )
+            )
+
+        posture = CombatService._posture_key(loc_char)
+        posture_reduction = {'standing': 0, 'sitting': 2, 'prone': 6}[posture]
+        ignored_by_bipod = posture == 'prone' and has_bipod
+        effective_required = 0 if ignored_by_bipod else max(0, required - posture_reduction)
+        strength = (
+            CombatService._skill_value(data, 'skills.physical.strength')
+            + CombatService._consumable_stat_bonus(data, 'strength')
+        )
+        deficit = max(0, effective_required - strength)
+        return {
+            'base_required': base_required,
+            'module_modifier': required - base_required,
+            'posture_reduction': posture_reduction,
+            'effective_required': effective_required,
+            'strength': strength,
+            'deficit': deficit,
+            'accuracy_penalty': deficit * 2,
+            'ignored_by_bipod': ignored_by_bipod,
+        }
+
+    @staticmethod
     def _posture_key(loc_char):
         posture = str(getattr(loc_char, 'posture', None) or 'standing').lower()
         return posture if posture in POSTURES else 'standing'
@@ -1609,6 +1671,7 @@ class CombatService:
                 'difficulty': difficulty,
                 'hit': hit,
                 'mode': attack_details['fire_mode'],
+                'strength_requirement': attack_details.get('strength_requirement'),
             }
             if not hit:
                 return result
@@ -2955,6 +3018,10 @@ class CombatService:
                 weapon,
                 weapon_index,
             )
+            strength_profile = CombatService._weapon_strength_profile(
+                character,
+                weapon,
+            )
             shots = max(1, CombatService._coerce_int(shot_count, 1))
             volley_count = CombatService._coerce_int(volley_count, 1)
             single_options = profile.get('single_shot_options') or [1]
@@ -3087,6 +3154,7 @@ class CombatService:
                 'posture_ergonomics_bonus': POSTURES[CombatService._posture_key(character)]['ergonomics_bonus'],
                 'shooter_movement_mode': character.movement_mode_this_turn,
                 'ergonomics': ergonomics_profile,
+                'strength_requirement': strength_profile,
                 'target_distance': target_distance,
                 'weapon_range': weapon_range,
                 'ergonomics_accuracy_applied': (
@@ -3150,6 +3218,7 @@ class CombatService:
             )
             hit_difficulty = 12 - shooting_bonus - weapon_accuracy
             hit_difficulty += CombatService._equipment_accuracy_penalty(data)
+            hit_difficulty += strength_profile['accuracy_penalty']
             hit_difficulty -= attack_details['ergonomics_accuracy_applied']
             hit_difficulty -= attack_details['posture_shooting_bonus']
             hit_difficulty += CombatService._coerce_int(
