@@ -228,6 +228,73 @@ def test_hinged_splint_is_not_mistaken_for_tourniquet():
     assert "tourniquet" not in profile["direct"]
 
 
+def test_named_limb_restoratives_target_a_limb_for_ten_minutes():
+    cases = (
+        ("Ампула Миколия", False),
+        ("Стимулятор Варвар", False),
+        ("Стимулятор Викинг", True),
+        ("Препарат 02", False),
+    )
+
+    for name, keeps_limb_active in cases:
+        direct = parse_consumable_effects(name)["direct"]
+        assert direct["temporary_limb_health_minutes"] == 10
+        assert direct["suppress_limb_trauma"] is True
+        assert direct["affects_all_limbs"] is True
+        assert bool(direct.get("minimum_limb_health")) is keeps_limb_active
+
+
+def test_special_ampoules_use_delayed_targeted_limb_treatment():
+    second_life = parse_consumable_effects(
+        '"Вторая жизнь". Ампула. Излечивает перелом и восстанавливает конечность. '
+        'Она имеет 50 здоровья. Срабатывает через 1 минуту.'
+    )["direct"]
+    chimera = parse_consumable_effects(
+        '"Химера". Ампула. Излечивает перелом. Срабатывает через 1 минуту. '
+        'При использовании на конечности без перелома -200 Здоровья в эту конечность.'
+    )["direct"]
+
+    assert second_life["special_limb_treatment"] == "second_life"
+    assert second_life["delayed_limb_treatment_minutes"] == 1
+    assert chimera["special_limb_treatment"] == "chimera"
+    assert chimera["invalid_limb_damage"] == -200
+
+
+def test_aybolit_is_a_surgical_kit():
+    direct = parse_consumable_effects(
+        'Кустарный набор "Айболит". Восстанавливает часть тела. Она имеет 1 здоровье.'
+    )["direct"]
+
+    assert direct["surgical_kit"] is True
+
+
+def test_full_limb_restoration_kit_parses_cost_pain_and_full_healing():
+    direct = parse_consumable_effects(
+        "Набор полного восстановления конечности. Время использования - 15 ОД. "
+        "Восстанавливает утерянный орган или искореженную конечность. "
+        "Бонус медикамента +3. 5 использований. Усиливает боль на 3 уровня"
+    )["direct"]
+
+    assert direct["action_points_cost"] == 15
+    assert direct["pain_delta"] == 3
+    assert direct["med_bonus"] == 3
+    assert direct["uses"] == 5
+    assert direct["surgical_kit"] is True
+    assert direct["restore_missing_part"] is True
+    assert direct["restore_full_body_part"] is True
+    assert direct["catastrophic_limb_surgery"] == "full_restoration"
+
+
+def test_surgeon_kit_can_restore_mangled_limb():
+    direct = parse_consumable_effects(
+        'Хирургический набор "Хирург". Время использования - 10 ОД. '
+        'Восстанавливает часть тела. Она имеет 30 здоровья.'
+    )["direct"]
+
+    assert direct["catastrophic_limb_surgery"] == "surgeon"
+    assert direct["surgical_kit"] is True
+
+
 def test_hemostatic_applications_allow_weakening_next_bleeding_stage():
     profile = parse_consumable_effects(
         "Губка коллагеновая. Имеет возможность остановить Слабое кровотечение за 1 ОД "
@@ -266,6 +333,29 @@ def test_internal_hemostatic_keeps_internal_targeting_and_weakening():
     assert application["max_stage"] == "severe"
     assert application["internal"] is True
     assert application["allow_weakening"] is True
+
+
+def test_shov_hemostatic_targets_only_severe_internal_bleeding():
+    profile = parse_consumable_effects(
+        'Гемостатик "Шов". Ампула. Останавливает Сильное внутреннее кровотечение. '
+        'Не пригодно для внешних кровотечений. Бонус медикамента -8.'
+    )
+
+    assert profile["direct"]["medical_difficulty"] == 4
+    assert profile["direct"]["application_form"] == "injectable"
+    assert profile["direct"]["med_bonus"] == -8
+    assert profile["direct"]["applications"] == [
+        {
+            "kind": "bleeding",
+            "max_stage": "severe",
+            "internal": True,
+            "internal_only": True,
+            "action_points": 1,
+            "treated": False,
+            "all": False,
+            "allow_weakening": True,
+        }
+    ]
 
 
 def test_adrenaline_keeps_its_own_action_point_profile():

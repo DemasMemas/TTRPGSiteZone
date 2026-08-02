@@ -18,16 +18,19 @@ export let currentVisibilityCharacterId = null;
 let currentLobbyId;
 
 export function setLobbyData(participants, gm) {
-    lobbyParticipants = (participants || []).filter(
-        participant => !participant.is_banned
-    );
+    lobbyParticipants = (participants || [])
+        .filter(participant => !participant.is_banned)
+        .map(participant => ({
+            ...participant,
+            user_id: Number(participant.user_id),
+        }));
     lobbyParticipants.forEach((participant) => {
         setUserColor(Number(participant.user_id), participant.color);
     });
     window.lobbyParticipants = lobbyParticipants;
-    gmId = gm;
+    gmId = Number(gm);
     setGmId(gmId);
-    isGM = (gmId == localStorage.getItem('user_id'));
+    isGM = gmId === Number(localStorage.getItem('user_id'));
 }
 
 export function setCurrentLobbyId(id) {
@@ -43,11 +46,12 @@ export function updateParticipantsList() {
     offlineList.innerHTML = '';
 
     lobbyParticipants.forEach(p => {
+        const participantId = Number(p.user_id);
         const li = document.createElement('li');
-        const colorHex = getUserColorHex(p.user_id);
+        const colorHex = getUserColorHex(participantId);
         const currentUserId = Number(localStorage.getItem('user_id'));
-        const canChangeColor = Number(p.user_id) === currentUserId
-            && Number(p.user_id) !== Number(gmId);
+        const canChangeColor = participantId === currentUserId
+            && participantId !== Number(gmId);
         const identity = document.createElement('span');
         identity.className = 'participant-identity';
         const colorCircle = document.createElement(
@@ -68,21 +72,21 @@ export function updateParticipantsList() {
             });
         }
         const name = document.createElement('span');
-        name.textContent = `${p.username} ${p.user_id === gmId ? '(ГМ)' : ''}`;
+        name.textContent = `${p.username} ${participantId === Number(gmId) ? '(ГМ)' : ''}`;
         identity.append(colorCircle, name);
         li.appendChild(identity);
 
-        if (isGM && p.user_id !== gmId) {
+        if (isGM && participantId !== Number(gmId)) {
             const banBtn = document.createElement('button');
             banBtn.className = 'ban-btn';
             banBtn.innerHTML = '⛔';
             banBtn.onclick = (e) => {
-                banUserHandler(p.user_id);
+                banUserHandler(participantId);
             };
             li.appendChild(banBtn);
         }
 
-        if (onlineUserIds.has(p.user_id)) {
+        if (onlineUserIds.has(participantId)) {
             onlineList.appendChild(li);
         } else {
             offlineList.appendChild(li);

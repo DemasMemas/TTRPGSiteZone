@@ -208,6 +208,7 @@ def parse_consumable_templates(workbook_path: Path) -> List[Dict[str, Any]]:
             "volume": volume,
             "attributes": {
                 "section": current_section,
+                "source_order": len(templates),
                 "import_tier": col_b if col_b else None,
                 "consumable": profile,
                 "effects": profile["effects"],
@@ -287,6 +288,7 @@ def parse_consumable_templates_v2(workbook_path: Path) -> List[Dict[str, Any]]:
         is_gas_mask_filter = filter_charges is not None
         attributes = {
             "section": current_section,
+            "source_order": len(templates),
             "import_tier": import_tier,
             "consumable": profile,
             "is_alcohol": bool(profile["direct"].get("is_alcohol")),

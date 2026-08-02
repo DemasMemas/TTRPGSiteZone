@@ -3,6 +3,7 @@ import json
 import gzip
 import io
 from copy import deepcopy
+from sqlalchemy.orm.attributes import flag_modified
 from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.extensions import socketio, db
@@ -12,6 +13,7 @@ from app.services.map import MapService
 from app.services.character import CharacterService
 from app.services.combat import CombatService
 from app.services.health import apply_health_maximums
+from app.services.effects import advance_timed_effects
 from app.schemas.lobby import LobbyCreateSchema, LobbyDetailSchema, LobbyMySchema, LobbySchema
 from app.schemas.participant import BannedUserSchema
 from app.schemas.character import CharacterSchema, CharacterCreateSchema
@@ -114,6 +116,57 @@ def list_lobbies():
 def get_lobby(lobby_id, lobby, participant):
     schema = LobbyDetailSchema()
     return jsonify(schema.dump(lobby)), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/time', methods=['PATCH'])
+@jwt_required()
+@requires_gm
+def update_lobby_time(lobby_id, lobby):
+    data = request.get_json(silent=True) or {}
+    try:
+        game_day = int(data.get('game_day'))
+        game_time_minutes = int(data.get('game_time_minutes'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'game_day and game_time_minutes must be integers'}), 400
+    if game_day < 1:
+        return jsonify({'error': 'game_day must be at least 1'}), 400
+    if not 0 <= game_time_minutes < 24 * 60:
+        return jsonify({'error': 'game_time_minutes must be between 0 and 1439'}), 400
+
+    previous_absolute_minutes = (lobby.game_day or 1) * 1440 + (lobby.game_time_minutes or 0)
+    next_absolute_minutes = game_day * 1440 + game_time_minutes
+    elapsed_seconds = max(0, next_absolute_minutes - previous_absolute_minutes) * 60
+    lobby.game_day = game_day
+    lobby.game_time_minutes = game_time_minutes
+    updated_characters = []
+    if elapsed_seconds > 0:
+        for character in LobbyCharacter.query.filter_by(lobby_id=lobby_id).all():
+            character_data = dict(character.data or {})
+            health = character_data.get('health')
+            if not isinstance(health, dict):
+                continue
+            health['effects'] = advance_timed_effects(
+                health,
+                health.get('effects') or [],
+                elapsed_seconds,
+            )
+            character.data = character_data
+            flag_modified(character, 'data')
+            updated_characters.append(character)
+    db.session.commit()
+    payload = {'game_day': game_day, 'game_time_minutes': game_time_minutes}
+    socketio.emit('lobby_time_updated', payload, room=f"lobby_{lobby_id}")
+    for character in updated_characters:
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': character.id,
+                'updates': {'data': character.data},
+                'updated_by': lobby.gm_id,
+            },
+            room=f"character_{character.id}",
+        )
+    return jsonify(payload), 200
 
 @lobbies_bp.route('/<int:lobby_id>/join', methods=['POST'])
 @jwt_required()
@@ -579,7 +632,7 @@ def update_location(lobby_id, location_id, lobby):
         return jsonify({'error': 'Access denied'}), 403
 
     data = request.get_json()
-    allowed = ['name', 'description', 'type', 'tiles_data', 'spawn_points']
+    allowed = ['name', 'description', 'type', 'grid_width', 'grid_height', 'tiles_data', 'spawn_points', 'world_radius']
     for field in allowed:
         if field in data:
             setattr(location, field, data[field])
@@ -1025,6 +1078,17 @@ def loot_incapacitated_location_character(
         },
         room=f"character_{character_id}",
     )
+    actor = db.session.get(LocationCharacter, actor_location_character_id)
+    if actor and actor.character:
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': actor.character.id,
+                'updates': {'data': actor.character.data},
+                'updated_by': participant.user_id,
+            },
+            room=f"character_{actor.character.id}",
+        )
     return jsonify(result), 200
 
 
@@ -1175,8 +1239,11 @@ def spend_location_combat_resources(lobby_id, location_id, lobby, participant):
         action_points=data.get('action_points', 0),
         free_actions=data.get('free_actions', 0),
         movement_points=data.get('movement_points', 0),
+        allow_deferred=bool(data.get('allow_deferred')),
+        pending_action_id=data.get('pending_action_id'),
+        pending_action_label=data.get('pending_action_label'),
     )
-    state = CombatService.get_state(location_id, participant.user_id)
+    state = updated_character.pop('state', None) or CombatService.get_state(location_id, participant.user_id)
     socketio.emit('combat_character_updated', updated_character, room=f"location_{location_id}")
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     return jsonify(updated_character), 200
@@ -1238,6 +1305,8 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         inventory_retrieval_action_points=data.get('inventory_retrieval_action_points'),
         inventory_use_action_discount=data.get('inventory_use_action_discount'),
         attribute_choice=data.get('attribute_choice'),
+        pending_action_id=data.get('pending_action_id'),
+        resume_pending_action_id=data.get('resume_pending_action_id'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")

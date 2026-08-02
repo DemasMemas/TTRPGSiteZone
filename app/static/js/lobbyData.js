@@ -8,6 +8,22 @@ import { updateMapTileSize } from './markers.js';
 
 let currentLobbyId;
 
+function applyLobbyTime(data) {
+    const dayInput = document.getElementById('lobby-game-day');
+    const timeInput = document.getElementById('lobby-game-time');
+    const minutes = Math.max(0, Math.min(1439, Number(data?.game_time_minutes ?? 480)));
+    if (dayInput) dayInput.value = Math.max(1, Number(data?.game_day || 1));
+    if (timeInput) {
+        const hours = Math.floor(minutes / 60);
+        const mins = minutes % 60;
+        timeInput.value = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+    }
+}
+
+export function updateDisplayedLobbyTime(data) {
+    applyLobbyTime(data);
+}
+
 export function initLobbyData(lobbyId) {
     currentLobbyId = lobbyId;
 }
@@ -24,6 +40,32 @@ export async function loadLobbyInfo() {
 
         window.isGM = (lobby.gm_id == localStorage.getItem('user_id'));
         AppState.setIsGM(window.isGM);
+        applyLobbyTime(lobby);
+        const dayInput = document.getElementById('lobby-game-day');
+        const timeInput = document.getElementById('lobby-game-time');
+        [dayInput, timeInput].forEach(input => { if (input) input.disabled = !window.isGM; });
+        const saveTime = async () => {
+            if (!window.isGM || !dayInput || !timeInput || !timeInput.value) return;
+            const [hours, minutes] = timeInput.value.split(':').map(Number);
+            try {
+                await Server.updateLobbyTime(
+                    currentLobbyId,
+                    Number(dayInput.value),
+                    hours * 60 + minutes,
+                );
+            } catch (error) {
+                window.showNotification?.(error.message);
+                applyLobbyTime(lobby);
+            }
+        };
+        if (dayInput && !dayInput._lobbyTimeBound) {
+            dayInput.addEventListener('change', saveTime);
+            dayInput._lobbyTimeBound = true;
+        }
+        if (timeInput && !timeInput._lobbyTimeBound) {
+            timeInput.addEventListener('change', saveTime);
+            timeInput._lobbyTimeBound = true;
+        }
 
         window.MAP_CHUNKS_WIDTH = lobby.chunks_width;
         window.MAP_CHUNKS_HEIGHT = lobby.chunks_height;

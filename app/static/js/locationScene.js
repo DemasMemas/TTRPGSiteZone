@@ -73,6 +73,7 @@ let combatHudCollapsed = storedCombatHudCollapsed === null
 let combatActionMenu = null;
 let combatActionMenuCharacterId = null;
 let pendingCombatAction = null;
+const deferredCombatActions = new Map();
 let structureActionMenu = null;
 let structureActionMenuState = null;
 let structureRotationMenu = null;
@@ -139,7 +140,7 @@ const COMBAT_MOVEMENT_TYPES = {
     },
     sprint: {
         label: 'Спринт',
-        icon: '»',
+        icon: '⚡',
         maxDistance: 30,
         divisor: 3,
         actionPoints: 4,
@@ -467,6 +468,9 @@ function getMovementModeAvailability(movementType, route = null) {
         : mode.maxDistance;
     const round = Math.max(1, Number(combatState?.round_number) || 1);
     const usedMode = current.movement_mode_this_turn || null;
+    const selectingMode = !usedMode;
+    const modeActionPoints = selectingMode ? mode.actionPoints : 0;
+    const modeFreeActions = selectingMode ? mode.freeActions : 0;
     const usedDistance = movementType === 'correction'
         ? Number(current.correction_distance_this_turn) || 0
         : Number(current.movement_distance_this_turn) || 0;
@@ -478,7 +482,7 @@ function getMovementModeAvailability(movementType, route = null) {
         && routeCost.climbCost > 0
         && routeCost.movementPoints > availableMovement
         && routeCost.travelMovementPoints <= availableMovement
-        && (Number(current.action_points_current) || 0) >= mode.actionPoints + climbActionPoints
+        && (Number(current.action_points_current) || 0) >= modeActionPoints + climbActionPoints
     );
     let reason = '';
 
@@ -499,12 +503,14 @@ function getMovementModeAvailability(movementType, route = null) {
         reason = 'Корректировка недоступна лёжа';
     } else if (
         ['run', 'sprint'].includes(movementType)
-        && (Number(current.strenuous_movement_blocked_until_round) || 0) >= round
+        && !usedMode
+        && (Number(current.strenuous_movement_blocked_until_round) || 0) > 0
+        && round <= (Number(current.strenuous_movement_blocked_until_round) || 0)
     ) {
         reason = 'Бег и спринт недоступны из-за одышки';
-    } else if ((Number(current.action_points_current) || 0) < mode.actionPoints) {
-        reason = `Нужно ${mode.actionPoints} ОД`;
-    } else if ((Number(current.free_actions_current) || 0) < mode.freeActions) {
+    } else if ((Number(current.action_points_current) || 0) < modeActionPoints) {
+        reason = `Нужно ${modeActionPoints} ОД`;
+    } else if ((Number(current.free_actions_current) || 0) < modeFreeActions) {
         reason = 'Нужно 1 СД';
     } else if (usedDistance >= maxDistance) {
         reason = 'Лимит дистанции в этом ходу исчерпан';
@@ -525,6 +531,8 @@ function getMovementModeAvailability(movementType, route = null) {
         remainingDistance: Math.max(0, maxDistance - usedDistance),
         usesClimbAction,
         climbActionPoints: usesClimbAction ? climbActionPoints : 0,
+        modeActionPoints,
+        modeFreeActions,
         ...routeCost,
     };
 }
@@ -688,6 +696,31 @@ function updateAttackPreview(clientX, clientY) {
         return;
     }
     const targetObj = getCharacterAtScreen(clientX, clientY);
+    if (
+        pendingCombatAction.actionKey === 'attack'
+        && pendingCombatAction.targetType === 'character'
+        && !targetObj
+    ) {
+        const structure = getLocationObjectAtScreen(clientX, clientY);
+        if (structure?.userData?.locationObject) {
+            if (!attackPreviewLine) {
+                attackPreviewLine = createPreviewLine(0xff8c42);
+                scene.add(attackPreviewLine);
+            }
+            const start = new THREE.Vector3(
+                actorEntry.model.position.x,
+                actorEntry.model.position.y + 1.6,
+                actorEntry.model.position.z
+            );
+            const end = new THREE.Vector3();
+            structure.getWorldPosition(end);
+            end.y += Math.max(0.25, getObjectTraversalHeight(
+                structure.userData.locationObject
+            ) / 2);
+            attackPreviewLine.geometry.setFromPoints([start, end]);
+            return;
+        }
+    }
     if (!targetObj || !targetObj.userData?.characterId) {
         clearAttackPreview();
         return;
@@ -1054,12 +1087,13 @@ function ensureMedicalConsumableMenu() {
     document.addEventListener('pointercancel', stopMedicalMenuDrag);
 }
 
-async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = null) {
+async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = null, actorLocationCharacterIdHint = null) {
     ensureMedicalConsumableMenu();
     medicalConsumableMenuState = { characterId };
 
     const character = await Server.getCharacter(characterId).catch(() => null);
-    const actorLocationCharacterId = findCombatCharacterByCharacterId(characterId)?.location_character_id
+    const actorLocationCharacterId = actorLocationCharacterIdHint
+        || findCombatCharacterByCharacterId(characterId)?.location_character_id
         || pendingStructureAction?.actorLocationCharacterId;
     const interactionTarget = forcedTargetCharacterId && actorLocationCharacterId
         ? await Server.inspectLocationCharacter(
@@ -1128,6 +1162,7 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
                     if (needsTarget && !forcedTargetCharacterId) {
                         const actor = findCombatCharacterByCharacterId(characterId);
                         if (!actor) throw new Error('Не удалось найти действующего персонажа');
+                        closeMedicalConsumableMenu();
                         beginPendingCombatAction({
                             actorCharacterId: characterId,
                             actorLocationCharacterId: actor.location_character_id,
@@ -1141,6 +1176,7 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
                             ),
                         });
                     } else {
+                        closeMedicalConsumableMenu();
                         await module.useCharacterInventoryItem(characterId, entry.path, {
                             itemId: item.id,
                             targetCharacterId: forcedTargetCharacterId || undefined,
@@ -1588,7 +1624,7 @@ function selectAimedTargetZone(targetName) {
     }
     const zones = [
         { key: 'head', label: 'Голова', icon: '●', note: '+5 к сложности' },
-        { key: 'chest', label: 'Грудь', icon: '▰', note: 'Торс' },
+        { key: 'chest', label: 'Грудь', icon: '▣', note: 'Торс' },
         { key: 'abdomen', label: 'Живот', icon: '◆', note: 'Торс' },
         { key: 'left_arm', label: 'Левая рука', icon: '◀', note: 'Конечность' },
         { key: 'right_arm', label: 'Правая рука', icon: '▶', note: 'Конечность' },
@@ -1950,6 +1986,10 @@ function showMovementTypeMenu(characterId) {
                 grid-template-columns:repeat(auto-fit, minmax(230px, 1fr));
                 gap:10px;
             "></div>
+            <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; opacity:0.9;">
+                <input type="checkbox" id="movement-gain-op-if-needed" checked>
+                <span>Получить ОП, если их нет</span>
+            </label>
         </div>
     `;
 
@@ -1990,7 +2030,29 @@ function showMovementTypeMenu(characterId) {
                 ${availability.reason ? `<span style="display:block; margin-top:6px; font-size:11px; color:#ffb0a8;">${availability.reason}</span>` : ''}
             </span>
         `;
-        button.onclick = () => {
+        button.onclick = async () => {
+            const gainOpIfNeeded = Boolean(menu.querySelector('#movement-gain-op-if-needed')?.checked);
+            if (gainOpIfNeeded && (Number(current.movement_points_current) || 0) <= 0) {
+                const combatCharacter = findCombatCharacterByCharacterId(characterId);
+                if (combatCharacter?.location_character_id) {
+                    try {
+                        const result = await Server.performLocationCombatAction(
+                            window.currentLobbyId,
+                            getCurrentLocationId(),
+                            {
+                                location_character_id: combatCharacter.location_character_id,
+                                action_key: 'convert_free_action_to_movement',
+                            }
+                        );
+                        if (result?.character) {
+                            combatState = result.state || combatState;
+                        }
+                    } catch (error) {
+                        showNotification(error.message || 'Не удалось получить ОП', 'system');
+                        return;
+                    }
+                }
+            }
             closeMovementTypeMenu();
             beginCharacterMoveMode(characterId, key);
         };
@@ -2098,6 +2160,8 @@ export function startCharacterMoveMode(characterId) {
     }
     hideStructureInteraction();
     if (combatState?.status === 'active') {
+        const selectedMode = combatState?.current_character?.movement_mode_this_turn;
+        if (selectedMode) return beginCharacterMoveMode(characterId, selectedMode);
         showMovementTypeMenu(characterId);
         return true;
     }
@@ -2181,6 +2245,7 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         item_path: action.itemPath,
         payment: action.payment,
         attribute_choice: action.attributeChoice,
+        pending_action_id: `combat-${action.actorLocationCharacterId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     };
     if (action.fireMode === 'aimed' || action.meleeAimed) {
         const zone = await selectAimedTargetZone(target.name);
@@ -2196,6 +2261,15 @@ async function resolveCombatTargetSelection(targetCharacterId) {
             }
         } else {
             const result = await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload);
+            if (result?.pending_action) {
+                deferredCombatActions.set(result.pending_action_id, { ...payload });
+                showNotification(
+                    'Действие начато. Оставшиеся ОД будут списаны в следующих ходах.',
+                    'system'
+                );
+                clearPendingCombatAction();
+                return true;
+            }
             const attack = result?.attack;
             if (attack?.results?.length) {
                 const hits = attack.results.filter(item => item.hit);
@@ -2238,8 +2312,13 @@ async function resolveCombatTargetSelection(targetCharacterId) {
             `${action.actionKey === 'use_item' ? 'Действие' : (action.actionKey === 'aim' ? 'Прицеливание' : 'Атака')} выполнено по ${target.name || 'цели'}`,
             'success'
         );
+        const reopenEquipment = action.actionKey === 'aim' && action.source === 'sheet';
         clearPendingCombatAction();
         hideStructureInteraction();
+        if (reopenEquipment) {
+            const sheet = await import('./characterSheet.js');
+            await sheet.openCharacterSheet(action.actorCharacterId, 'equipment');
+        }
         return true;
     } catch (error) {
         showNotification(error.message || 'Не удалось выполнить действие', 'system');
@@ -2319,7 +2398,9 @@ async function finalizeAreaFire() {
 
 async function resolveCombatStructureSelection(clientX, clientY) {
     const action = pendingCombatAction;
-    if (!action || action.targetType !== 'structure') return false;
+    const directCoverAttack = action?.actionKey === 'attack'
+        && action?.targetType === 'character';
+    if (!action || (action.targetType !== 'structure' && !directCoverAttack)) return false;
     const object = getLocationObjectAtScreen(clientX, clientY);
     const locationObject = object?.userData?.locationObject;
     if (!locationObject?.id) {
@@ -2327,7 +2408,7 @@ async function resolveCombatStructureSelection(clientX, clientY) {
         return false;
     }
     try {
-        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+        const result = await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
             location_character_id: action.actorLocationCharacterId,
             action_key: action.actionKey,
             weapon_index: action.weaponIndex,
@@ -2340,8 +2421,15 @@ async function resolveCombatStructureSelection(clientX, clientY) {
         if (typeof action.onResolve === 'function') {
             await action.onResolve({ targetObject: locationObject });
         }
+        const coverHit = result?.attack?.results?.find((entry) => entry?.cover_hit === true);
+        const coverState = coverHit?.cover_damage;
+        const coverDetails = coverHit
+            ? ` · защита ${Number(coverHit.cover_protection) || 0}% → ${Number(coverState?.physical_protection) || 0}% · ОЗ ${Number(coverState?.hp) || 0}/${Number(coverState?.max_hp) || 0}`
+            : '';
         showNotification(
-            action.actionKey === 'take_cover'
+            directCoverAttack
+                ? `Атака укрытия: ${locationObject.name || 'объект'}${coverDetails}${result?.attack?.damage_total ? ` · урон за ним ${result.attack.damage_total}` : ''}`
+                : action.actionKey === 'take_cover'
                 ? `Укрытие занято: ${locationObject.name || 'объект'}`
                 : `Огонь на подавление: ${locationObject.name || 'укрытие'}`,
             'success'
@@ -2786,7 +2874,7 @@ async function showCombatParticipantSelection() {
                 <div>
                     <h3 style="margin:0;">Участники боя</h3>
                     <div style="margin-top:4px; font-size:12px; opacity:.72;">
-                        Отмеченные персонажи бросят 1к20 + Бонус Тактики.
+                        Отмеченные персонажи бросают 1к20 + Бонус Тактики.
                     </div>
                 </div>
                 <button type="button" class="combat-participant-close btn btn-sm btn-secondary">×</button>
@@ -2875,7 +2963,6 @@ function renderCombatHud() {
         .map((id) => {
             const character = charactersByLocationId.get(id);
             if (!character) return `#${id}`;
-            if (combatState.status !== 'active') return character.name;
             return character.name;
         })
         .filter(Boolean);
@@ -2888,8 +2975,9 @@ function renderCombatHud() {
     const isCollapsed = combatHudCollapsed ?? combatState.status !== 'active';
     const compactStatus = combatState.status === 'active'
         ? `Раунд ${combatState.round_number || 0} · ${combatState.current_character?.name || 'нет хода'} · ${combatState.current_character?.posture_label || 'Стоя'}`
-        : 'бой не активен';
+        : 'Бой не активен';
     combatHud.style.minWidth = isCollapsed ? '230px' : '260px';
+    combatHud.style.maxHeight = isCollapsed ? '120px' : 'calc(80vh - 24px)';
     combatHud.innerHTML = `
         <div class="combat-hud-header" style="
             display:flex;
@@ -2925,6 +3013,9 @@ function renderCombatHud() {
                     cursor:pointer;
                 "
             >${isCollapsed ? '+' : '−'}</button>
+            ${isCollapsed && combatState.status === 'active' && combatState.current_character && canActWithCombatCharacter(combatState.current_character)
+                ? '<button class="btn btn-sm btn-secondary combat-end-turn-btn" style="margin-left:8px;">Закончить ход</button>'
+                : ''}
         </div>
         <div class="combat-hud-body" style="display:${isCollapsed ? 'none' : 'block'}; padding:12px 14px; font-size:13px; line-height:1.45;">
             <div>Статус: <strong>${combatState.status || 'idle'}</strong></div>
@@ -2941,14 +3032,14 @@ function renderCombatHud() {
             <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
             ${pendingCombatAction ? `<div style="margin-top:8px; padding:8px 10px; border-radius:10px; background: rgba(255,255,255,0.06);"><strong>Выбор:</strong> ${
                 pendingCombatAction.targetType === 'structure'
-                    ? 'укрытие для подавления'
+                    ? 'Укрытие для подавления'
                     : (pendingCombatAction.targetType === 'multi_character'
                         ? (pendingCombatAction.areaAnchor
-                            ? `цели в области ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для огня`
-                            : 'центр области 5×5')
+                            ? `Цели в области ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для огня`
+                            : 'Центр области 5x5')
                         : (pendingCombatAction.targetType === 'multi_melee'
-                            ? `соседние цели ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для атаки`
-                            : (pendingCombatAction.fireMode || pendingCombatAction.actionKey || 'действие')))
+                            ? `Соседние цели ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для атаки`
+                            : (pendingCombatAction.fireMode || pendingCombatAction.actionKey || 'действие')))}
             }</div>` : ''}
             <div style="margin-top:10px;">
                 ${combatState.status !== 'active' && window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn" style="margin-top:8px;">Начать бой</button>' : ''}
@@ -2994,10 +3085,7 @@ function renderCombatHud() {
                                 ? `Проверка болевого шока пройдена: d20 ${check.roll}, СЛ ${check.difficulty}`
                                 : `Персонаж впал в болевой шок: d20 ${check.roll}, СЛ ${check.difficulty}`
                         );
-                    showNotification(
-                        message,
-                        check.success ? 'system' : 'error'
-                    );
+                    showNotification(message, check.success ? 'system' : 'error');
                 }
             } catch (error) {
                 showNotification(error.message || 'Не удалось закончить ход');
@@ -3034,7 +3122,34 @@ export function setCombatState(state) {
         applyCharacterGrappleVisual(character.character_id, character);
     });
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
+    resumeCompletedCombatAction(combatState);
     renderCombatHud();
+}
+
+async function resumeCompletedCombatAction(state) {
+    const current = state?.current_character;
+    const actionId = current?.completed_pending_action_id;
+    const payload = actionId ? deferredCombatActions.get(actionId) : null;
+    if (!payload) return;
+    deferredCombatActions.delete(actionId);
+    try {
+        const result = await Server.performLocationCombatAction(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            {
+                ...payload,
+                pending_action_id: undefined,
+                resume_pending_action_id: actionId,
+            },
+        );
+        if (result?.attack) {
+            showNotification('Длительная атака завершена', 'success');
+        } else {
+            showNotification('Длительное действие завершено', 'success');
+        }
+    } catch (error) {
+        showNotification(error.message || 'Не удалось завершить длительное действие');
+    }
 }
 
 export function getCombatState() {
@@ -3247,11 +3362,11 @@ function getStructureActionLabel(object, actionKey) {
 function getStructureActionIcon(actionKey) {
     if (actionKey === 'toggle_door') return '🚪';
     if (actionKey === 'open_container') return '↑';
-    if (actionKey === 'move') return '⤢';
+    if (actionKey === 'move') return '↔';
     if (actionKey === 'rotate') return '↻';
-    if (actionKey === 'climb') return '↑';
-    if (actionKey === 'take_cover') return '◒';
-    if (actionKey === 'leave_cover') return '○';
+    if (actionKey === 'climb') return '↕';
+    if (actionKey === 'take_cover') return '▣';
+    if (actionKey === 'leave_cover') return '◯';
     if (actionKey === 'brace_weapon') return '⊥';
     return '•';
 }
@@ -3718,8 +3833,8 @@ function showStructureRotationMenu(object) {
     `;
 
     const actions = [
-        { label: '↺', title: 'Повернуть влево', rotation: currentRotation + (Math.PI / 2) },
-        { label: '↻', title: 'Повернуть вправо', rotation: currentRotation - (Math.PI / 2) },
+        { label: '↶', title: 'Повернуть влево', rotation: currentRotation + (Math.PI / 2) },
+        { label: '↷', title: 'Повернуть вправо', rotation: currentRotation - (Math.PI / 2) },
     ];
 
     actions.forEach((item) => {
@@ -3918,20 +4033,6 @@ function findMovementPath(startX, startY, endX, endY, movingCharacterId = null) 
             const nx = current.x + dx;
             const ny = current.y + dy;
             if (!inBounds(nx, ny)) continue;
-
-            if (dx !== 0 && dy !== 0) {
-                const sideA = getTileMovementProfile(current.x + dx, current.y, movingCharacterId);
-                const sideB = getTileMovementProfile(current.x, current.y + dy, movingCharacterId);
-                if ((sideA.blocked && sideA.climbCost === 0) || (sideB.blocked && sideB.climbCost === 0)) {
-                    continue;
-                }
-                if (
-                    !companionCanOccupy(current.x + dx, current.y)
-                    || !companionCanOccupy(current.x, current.y + dy)
-                ) {
-                    continue;
-                }
-            }
 
             const tileProfile = getTileMovementProfile(nx, ny, movingCharacterId);
             if (nx === endX && ny === endY && tileProfile.climbCost > 0) continue;
@@ -4171,7 +4272,7 @@ function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
         {
             icon: '✚',
             label: 'Попытаться лечить',
-            run: () => showMedicalConsumableMenu(actorCharacterId, targetCharacterId),
+            run: () => showMedicalConsumableMenu(actorCharacterId, targetCharacterId, actorLocationCharacterId),
         },
     ];
     actions.forEach(action => {
@@ -4182,7 +4283,7 @@ function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
         button.style.cssText = 'width:52px;height:52px;margin:8px;border:0;border-radius:14px;background:rgba(255,255,255,.06);color:#fff;font-size:20px;cursor:pointer;';
         button.onclick = async event => {
             event.stopPropagation();
-            clearStructureActionMenu();
+            hideStructureInteraction();
             try {
                 await action.run();
             } catch (error) {
@@ -5625,6 +5726,17 @@ function setupCharacterDragging() {
             return;
         }
         if (pendingCombatAction?.targetType === 'structure') {
+            e.preventDefault();
+            e.stopPropagation();
+            resolveCombatStructureSelection(e.clientX, e.clientY);
+            return;
+        }
+        if (
+            pendingCombatAction?.actionKey === 'attack'
+            && pendingCombatAction?.targetType === 'character'
+            && !getCharacterAtScreen(e.clientX, e.clientY)
+            && getLocationObjectAtScreen(e.clientX, e.clientY)?.userData?.locationObject
+        ) {
             e.preventDefault();
             e.stopPropagation();
             resolveCombatStructureSelection(e.clientX, e.clientY);

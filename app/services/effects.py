@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
+import random
 from typing import Any, Dict, Iterable, List, Optional
 
 EFFECT_TYPE_META = {
@@ -24,6 +25,13 @@ EFFECT_TYPE_META = {
     "intoxication": {"label": "Опьянение", "group": "need"},
     "infection": {"label": "Заражение", "group": "disease"},
     "fracture": {"label": "Перелом", "group": "injury"},
+    "fracture_fixed": {"label": "Зафиксированный перелом", "group": "injury"},
+    "fracture_unfixed": {"label": "Незафиксированный перелом", "group": "injury"},
+    "fracture_sequela": {"label": "Постоянный штраф после перелома", "group": "injury"},
+    "mangled_limb": {"label": "Искореженная конечность", "group": "injury"},
+    "temporary_limb_restoration": {"label": "Временное восстановление конечности", "group": "medical"},
+    "delayed_limb_treatment": {"label": "Отложенное лечение конечности", "group": "medical"},
+    "organ_failure": {"label": "Смертельное повреждение органа", "group": "critical"},
     "shock": {"label": "Шок", "group": "injury"},
     "unconsciousness": {"label": "Без сознания", "group": "critical"},
     "critical_condition": {"label": "Критическое состояние", "group": "critical"},
@@ -52,6 +60,7 @@ EFFECT_TYPE_META = {
 }
 
 TYPE_ALIASES = {
+    "organ_failure": "organ_failure",
     "heal": "heal",
     "healing": "heal",
     "лечение": "heal",
@@ -83,6 +92,14 @@ TYPE_ALIASES = {
     "заражение": "infection",
     "fracture": "fracture",
     "перелом": "fracture",
+    "fracture_fixed": "fracture_fixed",
+    "fixed_fracture": "fracture_fixed",
+    "зафиксированный перелом": "fracture_fixed",
+    "фиксированный перелом": "fracture_fixed",
+    "fracture_unfixed": "fracture_unfixed",
+    "незафиксированный перелом": "fracture_unfixed",
+    "fracture_sequela": "fracture_sequela",
+    "последствие незафиксированного перелома": "fracture_sequela",
     "shock": "shock",
     "шок": "shock",
     "pain_shock": "shock",
@@ -109,6 +126,8 @@ TYPE_ALIASES = {
     "регенерация": "regeneration",
     "amputation": "amputation",
     "ампутация": "amputation",
+    "mangled_limb": "mangled_limb",
+    "искореженная конечность": "mangled_limb",
     "organloss": "organ_loss",
     "organ_loss": "organ_loss",
     "потеряоргана": "organ_loss",
@@ -119,16 +138,18 @@ TYPE_ALIASES = {
         "tourniquet", "blood_loss_freeze", "bleeding_prevention", "infection_growth_block",
         "analgesia", "stimulant_crash", "radiation_filter", "temperature_control",
         "limb_trauma_suppression",
+        "temporary_limb_restoration",
+        "delayed_limb_treatment",
         "pain_block",
     )},
 }
 
 STATUS_EFFECT_TYPES = {
     "bleeding", "pain", "exhaustion", "stress", "intoxication",
-    "infection", "fracture", "shock", "unconsciousness", "critical_condition", "death",
+    "infection", "fracture", "fracture_fixed", "shock", "unconsciousness", "critical_condition", "death",
     "blindness", "deafness",
     "sleep",
-    "amputation", "organ_loss",
+    "amputation", "organ_loss", "organ_failure", "mangled_limb",
     "bleeding_external_light", "bleeding_external_medium", "bleeding_external_severe", "bleeding_external_extreme",
     "bleeding_internal_light", "bleeding_internal_medium", "bleeding_internal_severe", "bleeding_internal_extreme",
 }
@@ -153,6 +174,7 @@ EFFECT_IMPACT_RULES = {
     "intoxication": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
     "infection": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
     "fracture": {"areas": ["limb"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "fracture_fixed": {"areas": ["limb"], "requiresMedicineCheck": True, "treatment": "medical"},
     "shock": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
     "unconsciousness": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
     "critical_condition": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
@@ -161,6 +183,7 @@ EFFECT_IMPACT_RULES = {
     "deafness": {"areas": ["ears", "hearing", "head"], "requiresMedicineCheck": True, "treatment": "medical"},
     "sleep": {"areas": ["whole_body", "mind"], "requiresMedicineCheck": False, "treatment": "rest"},
     "amputation": {"areas": ["missing_limb"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "mangled_limb": {"areas": ["limb"], "requiresMedicineCheck": True, "treatment": "surgery"},
     "organ_loss": {"areas": ["missing_organ"], "requiresMedicineCheck": True, "treatment": "medical"},
 }
 
@@ -230,6 +253,8 @@ def canonical_type(effect_type: Any = None, name: str = "") -> str:
         return "stress"
     if "опьян" in raw:
         return "intoxication"
+    if "зафикс" in raw or "фиксир" in raw or "fixed fracture" in raw:
+        return "fracture_fixed"
     if "перелом" in raw:
         return "fracture"
     if "боль" in raw:
@@ -295,7 +320,7 @@ def create_effect_draft(effect_type: str = "generic", overrides: Optional[Dict[s
     normalized_type = canonical_type(effect_type, overrides.get("name", ""))
     meta = get_effect_meta(normalized_type)
     remaining = overrides.get("remaining", overrides.get("duration", None))
-    return {
+    result = {
         "id": overrides.get("id") or None,
         "type": normalized_type,
         "name": overrides.get("name") or meta["label"],
@@ -310,6 +335,10 @@ def create_effect_draft(effect_type: str = "generic", overrides: Optional[Dict[s
         "scope": overrides.get("scope", "character"),
         "active": overrides.get("active", True),
     }
+    if normalized_type == "organ_loss":
+        result["treatment_window_seconds"] = overrides.get("treatment_window_seconds", 3600)
+        result["treatment_window_expired"] = overrides.get("treatment_window_expired", False)
+    return result
 
 
 def normalize_effect(raw: Any) -> Dict[str, Any]:
@@ -338,6 +367,8 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
         "scope": raw.get("scope", "character"),
         "active": raw.get("active", True),
         "area": raw.get("area") or raw.get("zone") or raw.get("bodyPart") or raw.get("target"),
+        "treatment_window_seconds": raw.get("treatment_window_seconds", 3600),
+        "treatment_window_expired": raw.get("treatment_window_expired", False),
     })
     # Consumables attach executable metadata (delayed adjustments, expiry
     # consequences, wound state). Keep it while still normalizing core fields.
@@ -429,6 +460,31 @@ def sync_health_derived_statuses(health: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(health, dict):
         return health
     effects = normalize_effect_list(health.get("effects") or [])
+    organs = health.get("organs") or {}
+    brain = organs.get("brain")
+    skull = organs.get("skull")
+    fatal_total_health = (
+        health.get("current") is not None
+        and health.get("max") is not None
+        and _to_float(health.get("max"), 0) > 0
+        and _to_float(health.get("current"), 0) <= 0
+    )
+    fatal_brain_health = isinstance(brain, dict) and _to_float(brain.get("current"), 1) <= 0
+    fatal_skull_health = isinstance(skull, dict) and _to_float(skull.get("current"), 1) <= 0
+    if (fatal_total_health or fatal_brain_health or fatal_skull_health) and not any(
+        effect.get("type") == "death" for effect in effects
+    ):
+        death_source = (
+            "zero_brain_health" if fatal_brain_health
+            else "zero_skull_health" if fatal_skull_health
+            else "zero_total_health"
+        )
+        effects.append(normalize_effect({
+            "type": "death",
+            "name": "Смерть",
+            "source": death_source,
+            "tick": "manual",
+        }))
     if _to_int(health.get("painLevel", 0), 0) >= 10 and not any(
         effect.get("type") == "shock" and effect.get("active", True)
         for effect in effects
@@ -496,28 +552,46 @@ def _adjust_field(health: Dict[str, Any], field: str, delta: int, minimum: Optio
 
 def _distribute_zone_healing(health: Dict[str, Any], amount: float) -> None:
     remaining = max(0, int(_to_float(amount, 0)))
-    zones = [zone for zone in (health.get("zones") or {}).values() if isinstance(zone, dict)]
-    for zone in zones:
+    temporary_caps = {
+        str(effect.get("area") or ""): max(1, int(_to_float(effect.get("health_cap"), 1)))
+        for effect in normalize_effect_list(health.get("effects") or [])
+        if effect.get("type") == "temporary_limb_restoration"
+        and effect.get("health_cap") is not None
+        and effect.get("active", True)
+        and (effect.get("remaining") is None or _to_float(effect.get("remaining"), 0) > 0)
+    }
+    zones = [
+        (area, zone)
+        for area, zone in (health.get("zones") or {}).items()
+        if isinstance(zone, dict)
+    ]
+    for area, zone in zones:
         maximum = max(0, int(round(_to_float(zone.get("max", 0), 0))))
+        maximum = min(maximum, temporary_caps.get(area, maximum))
         zone["current"] = min(maximum, max(0, int(round(_to_float(zone.get("current", 0), 0)))))
     while remaining > 0:
         damaged = [
-            zone for zone in zones
-            if _to_float(zone.get("current", 0), 0) < _to_float(zone.get("max", 0), 0)
+            (area, zone) for area, zone in zones
+            if _to_float(zone.get("current", 0), 0) > 0
+            and _to_float(zone.get("current", 0), 0) < min(
+                _to_float(zone.get("max", 0), 0),
+                temporary_caps.get(area, float("inf")),
+            )
         ]
         if not damaged:
             break
         share = remaining // len(damaged)
         if share == 0:
-            for zone in damaged[:remaining]:
+            for _, zone in damaged[:remaining]:
                 zone["current"] += 1
             break
         applied = 0
-        for zone in damaged:
+        for area, zone in damaged:
             current = int(zone.get("current", 0))
-            maximum = int(zone.get("max", 0))
+            maximum = min(int(zone.get("max", 0)), temporary_caps.get(area, int(zone.get("max", 0))))
             healed = min(share, maximum - current)
             zone["current"] = current + healed
+            zone["destructionDamage"] = max(0, maximum - zone["current"])
             applied += healed
         if applied <= 0:
             break
@@ -610,6 +684,9 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
     if effect_type in {
         "bleeding",
         "fracture",
+        "fracture_fixed",
+        "fracture_unfixed",
+        "fracture_sequela",
         "shock",
         "unconsciousness",
         "critical_condition",
@@ -648,6 +725,12 @@ def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str,
             current["stacks"] = max(_to_int(current.get("stacks", 1), 1), _to_int(effect.get("stacks", 1), 1))
             health["effects"][existing] = current
         if effect_type == "fracture" and is_new_effect:
+            health["effects"][-1]["regular_fixation_seconds"] = _to_float(
+                effect.get("regular_fixation_seconds"), 1800
+            )
+            health["effects"][-1]["hinged_fixation_seconds"] = _to_float(
+                effect.get("hinged_fixation_seconds"), 1800
+            )
             apply_effect_to_health(health, {
                 "type": "pain",
                 "value": 3,
@@ -728,6 +811,7 @@ def apply_periodic_effects_to_health(health: Dict[str, Any], effects: Iterable[A
 
 def apply_expired_effects_to_health(health: Dict[str, Any], effects: Iterable[Any], phase: str = "turn_end") -> Dict[str, Any]:
     activated: List[Dict[str, Any]] = []
+    cured_fracture_areas = set()
     for raw_effect in effects or []:
         effect = normalize_effect(raw_effect)
         if effect.get("tick") == "manual" or effect.get("tick") not in (None, phase):
@@ -750,14 +834,45 @@ def apply_expired_effects_to_health(health: Dict[str, Any], effects: Iterable[An
         for activated_effect in effect.get("activate_effects") or effect.get("activateEffects") or []:
             if isinstance(activated_effect, dict):
                 activated.append(activated_effect)
+        if effect.get("death_on_expire"):
+            activated.append({
+                "type": "death", "name": "Смерть",
+                "source": effect.get("source") or "expired_organ_failure",
+                "tick": "manual",
+            })
         if effect.get("type") == "pain_block":
             meta = health.setdefault("combatMeta", {})
             blocked = _to_float(meta.pop("blockedPain", 0), 0)
             returned = blocked * _to_float(effect.get("return_fraction", 1), 1)
             _adjust_field(health, "painLevel", returned, 0, 10)
             _adjust_field(health, "exhaustion", _to_float(effect.get("exhaustion_on_expire", 0), 0), 0, 10)
+        if effect.get("type") == "temporary_limb_restoration" and effect.get("restore_on_expire", True):
+            zone = (health.get("zones") or {}).get(effect.get("area"))
+            if isinstance(zone, dict):
+                zone["current"] = min(
+                    _to_float(zone.get("current"), 0),
+                    _to_float(effect.get("previous_health"), 0),
+                )
+        if effect.get("type") == "delayed_limb_treatment":
+            area = str(effect.get("area") or "")
+            if effect.get("cure_fracture") and area:
+                cured_fracture_areas.add(area)
+            zone = (health.get("zones") or {}).get(area)
+            if isinstance(zone, dict) and effect.get("restore_limb_health") is not None:
+                maximum = _to_float(zone.get("max"), effect.get("restore_limb_health"))
+                zone["current"] = min(maximum, max(0, _to_float(effect.get("restore_limb_health"), 0)))
     for activated_effect in activated:
         apply_effect_to_health(health, activated_effect)
+    if cured_fracture_areas:
+        health["effects"] = [
+            effect for effect in normalize_effect_list(health.get("effects") or [])
+            if not (
+                effect.get("type") in {
+                    "fracture", "fracture_fixed", "fracture_unfixed", "fracture_sequela"
+                }
+                and str(effect.get("area") or "") in cured_fracture_areas
+            )
+        ]
     if health.get("max") is not None and health.get("current") is not None:
         health["current"] = min(_to_float(health.get("current"), 0), _to_float(health.get("max"), 0))
     sync_health_derived_statuses(health)
@@ -785,10 +900,43 @@ def advance_timed_effects(
     unit_seconds = {"second": 1, "minute": 60, "movement": 600, "hour": 3600}
     survivors = []
     activated = []
+    cured_fracture_areas = set()
     elapsed = max(0.0, _to_float(elapsed_seconds, 0))
 
     for raw_effect in effects or []:
         effect = normalize_effect(raw_effect)
+        if effect.get("type") == "fracture":
+            regular = max(0, _to_float(effect.get("regular_fixation_seconds"), 1800) - elapsed)
+            hinged = max(0, _to_float(effect.get("hinged_fixation_seconds"), 1800) - elapsed)
+            effect["regular_fixation_seconds"] = regular
+            effect["hinged_fixation_seconds"] = hinged
+            effect["regular_fixation_expired"] = regular <= 0
+            if hinged <= 0:
+                consequence_roll = random.randint(1, 100)
+                effect.update({
+                    "type": "fracture_unfixed",
+                    "name": "Незафиксированный перелом",
+                    "tick": "manual",
+                    "fixation_consequence_roll": consequence_roll,
+                    "permanent_penalty": consequence_roll <= 50,
+                })
+                if consequence_roll <= 50:
+                    activated.append({
+                        "type": "fracture_sequela",
+                        "name": "Постоянный штраф после перелома",
+                        "area": effect.get("area"),
+                        "source": "unfixed_fracture",
+                        "tick": "manual",
+                    })
+            survivors.append(effect)
+            continue
+        if effect.get("treatment_window_seconds") is not None:
+            treatment_window = max(
+                0,
+                _to_float(effect.get("treatment_window_seconds"), 0) - elapsed,
+            )
+            effect["treatment_window_seconds"] = treatment_window
+            effect["treatment_window_expired"] = treatment_window <= 0
         unit = str(effect.get("time_unit") or "").lower()
         tick = str(effect.get("tick") or "")
         if effect.get("remaining") is None and _to_float(effect.get("max_hours"), 0) > 0:
@@ -841,6 +989,27 @@ def advance_timed_effects(
             item for item in (effect.get("activate_effects") or effect.get("activateEffects") or [])
             if isinstance(item, dict)
         )
+        if effect.get("death_on_expire"):
+            activated.append({
+                "type": "death", "name": "Смерть",
+                "source": effect.get("source") or "expired_organ_failure",
+                "tick": "manual",
+            })
+        if effect.get("type") == "temporary_limb_restoration" and effect.get("restore_on_expire", True):
+            zone = (health.get("zones") or {}).get(effect.get("area"))
+            if isinstance(zone, dict):
+                zone["current"] = min(
+                    _to_float(zone.get("current"), 0),
+                    _to_float(effect.get("previous_health"), 0),
+                )
+        if effect.get("type") == "delayed_limb_treatment":
+            area = str(effect.get("area") or "")
+            if effect.get("cure_fracture") and area:
+                cured_fracture_areas.add(area)
+            zone = (health.get("zones") or {}).get(area)
+            if isinstance(zone, dict) and effect.get("restore_limb_health") is not None:
+                maximum = _to_float(zone.get("max"), effect.get("restore_limb_health"))
+                zone["current"] = min(maximum, max(0, _to_float(effect.get("restore_limb_health"), 0)))
 
     combat_meta = health.get("combatMeta")
     if isinstance(combat_meta, dict):
@@ -886,6 +1055,16 @@ def advance_timed_effects(
                 active_modifiers.append(modifier)
             combat_meta["consumableModifiers"] = active_modifiers
 
+    if cured_fracture_areas:
+        survivors = [
+            effect for effect in survivors
+            if not (
+                effect.get("type") in {
+                    "fracture", "fracture_fixed", "fracture_unfixed", "fracture_sequela"
+                }
+                and str(effect.get("area") or "") in cured_fracture_areas
+            )
+        ]
     health["effects"] = survivors
     for effect in activated:
         apply_effect_to_health(health, effect)

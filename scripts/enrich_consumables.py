@@ -100,7 +100,8 @@ def main() -> int:
         items = ItemTemplate.query.filter_by(category="consumable").all()
         updated = 0
         for item in items:
-            profile = parse_consumable_effects(item.description or item.attributes.get("raw_description", ""))
+            description = item.description or item.attributes.get("raw_description", "")
+            profile = parse_consumable_effects(f"{item.name}. {description}")
             manual = MANUAL_CONSUMABLE_FIXUPS.get(item.name)
             if manual:
                 profile["direct"].update(manual.get("direct", {}))

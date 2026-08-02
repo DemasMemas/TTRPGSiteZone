@@ -1,10 +1,14 @@
+import pytest
+
 from app.services.effects import (
     advance_timed_effects,
     apply_effect_to_health,
     apply_periodic_effects_to_health,
     canonical_type,
+    create_effect_draft,
     get_bleeding_state,
     normalize_effect,
+    sync_health_derived_statuses,
     tick_effect,
     tick_effects,
 )
@@ -183,6 +187,121 @@ def test_new_fracture_adds_three_pain_only_once():
     ]) == 1
 
 
+def test_fixed_fracture_is_kept_as_separate_status_without_extra_pain():
+    health = {"painLevel": 3, "effects": []}
+
+    apply_effect_to_health(health, {
+        "type": "fracture_fixed",
+        "area": "rightArm",
+        "source": "splint",
+    })
+
+    assert health["painLevel"] == 3
+    assert any(
+        effect["type"] == "fracture_fixed" and effect["area"] == "rightArm"
+        for effect in health["effects"]
+    )
+
+
+def test_fixed_fracture_expires_after_one_day_without_restoring_original_fracture():
+    health = {"painLevel": 3, "effects": []}
+
+    effects = [{
+        "type": "fracture_fixed",
+        "area": "rightArm",
+        "remaining": 24,
+        "remaining_seconds": 86400,
+        "time_unit": "hour",
+        "tick": "time_elapsed",
+    }]
+
+    effects = advance_timed_effects(health, effects, 86399)
+    assert effects[0]["remaining_seconds"] == 1
+
+    assert advance_timed_effects(health, effects, 1) == []
+    assert health["effects"] == []
+
+
+def test_regular_healing_does_not_restore_knocked_out_limb():
+    health = {
+        "current": 500,
+        "max": 700,
+        "zones": {
+            "leftArm": {"current": 0, "max": 90},
+            "rightArm": {"current": 50, "max": 90},
+        },
+        "effects": [],
+    }
+
+    apply_effect_to_health(health, {"type": "heal", "value": 20})
+
+    assert health["current"] == 520
+    assert health["zones"]["leftArm"]["current"] == 0
+    assert health["zones"]["rightArm"]["current"] == 70
+
+
+def test_temporary_limb_restoration_caps_healing_and_returns_limb_to_zero():
+    health = {
+        "current": 500,
+        "max": 700,
+        "zones": {"leftArm": {"current": 1, "max": 90}},
+        "effects": [{
+            "type": "temporary_limb_restoration",
+            "area": "leftArm",
+            "previous_health": 0,
+            "health_cap": 1,
+            "remaining": 4,
+            "tick": "turn_end",
+        }],
+    }
+
+    apply_effect_to_health(health, {"type": "heal", "value": 20})
+    assert health["zones"]["leftArm"]["current"] == 1
+
+    assert advance_timed_effects(health, health["effects"], 24, include_turn_effects=True) == []
+    assert health["zones"]["leftArm"]["current"] == 0
+
+
+def test_delayed_limb_treatment_cures_fractures_and_sets_zone_health_after_minute():
+    health = {
+        "zones": {"leftArm": {"current": 0, "max": 90}},
+        "effects": [
+            {"type": "fracture", "area": "leftArm", "active": True},
+            {"type": "fracture_fixed", "area": "leftArm", "active": True},
+            {
+                "type": "delayed_limb_treatment",
+                "area": "leftArm",
+                "cure_fracture": True,
+                "restore_limb_health": 50,
+                "remaining": 1,
+                "remaining_seconds": 60,
+                "tick": "time_elapsed",
+                "time_unit": "minute",
+            },
+        ],
+    }
+
+    effects = advance_timed_effects(health, health["effects"], 59)
+    assert health["zones"]["leftArm"]["current"] == 0
+    assert any(effect["type"] == "fracture" for effect in effects)
+
+    effects = advance_timed_effects(health, effects, 1)
+    assert health["zones"]["leftArm"]["current"] == 50
+    assert not any(effect["type"] in {"fracture", "fracture_fixed"} for effect in effects)
+
+
+def test_lost_organ_treatment_window_expires_without_removing_status():
+    health = {"effects": []}
+    effect = create_effect_draft("organ_loss", {"area": "leftEye"})
+
+    effects = advance_timed_effects(health, [effect], 3600)
+
+    assert len(effects) == 1
+    assert effects[0]["type"] == "organ_loss"
+    assert effects[0]["treatment_window_expired"] is True
+    assert effects[0]["treatment_window_seconds"] == 0
+
+
 def test_five_minute_delayed_effect_advances_in_six_second_rounds():
     health = {"stress": 5}
     effects = [{
@@ -260,3 +379,69 @@ def test_radiation_filter_uses_max_hours_as_duration():
     assert effects[0]["time_unit"] == "hour"
     assert effects[0]["remaining_seconds"] == 16 * 3600
     assert advance_timed_effects(health, effects, 16 * 3600) == []
+
+
+def test_zero_total_health_creates_permanent_death_once():
+    health = {
+        "current": 0,
+        "max": 700,
+        "zones": {},
+        "effects": [{"type": "shock", "source": "combat_damage"}],
+    }
+
+    sync_health_derived_statuses(health)
+    sync_health_derived_statuses(health)
+
+    deaths = [effect for effect in health["effects"] if effect["type"] == "death"]
+    assert len(deaths) == 1
+    assert deaths[0]["source"] == "zero_total_health"
+    assert deaths[0]["tick"] == "manual"
+
+
+def test_zero_head_health_does_not_create_death():
+    health = {
+        "current": 650,
+        "max": 700,
+        "zones": {"head": {"current": 0, "max": 50}},
+        "effects": [],
+    }
+
+    sync_health_derived_statuses(health)
+
+    assert not any(effect["type"] == "death" for effect in health["effects"])
+
+
+@pytest.mark.parametrize(
+    ("organ", "source"),
+    [("brain", "zero_brain_health"), ("skull", "zero_skull_health")],
+)
+def test_zero_brain_or_skull_health_creates_death(organ, source):
+    health = {
+        "current": 650,
+        "max": 700,
+        "organs": {organ: {"current": 0, "max": 1}},
+        "effects": [],
+    }
+
+    sync_health_derived_statuses(health)
+
+    death = next(effect for effect in health["effects"] if effect["type"] == "death")
+    assert death["source"] == source
+
+
+def test_fracture_becomes_unfixed_after_thirty_minutes(monkeypatch):
+    health = {"effects": []}
+    apply_effect_to_health(health, {"type": "fracture", "area": "leftLeg"})
+
+    effects = advance_timed_effects(health, health["effects"], 10 * 60)
+    fracture = next(effect for effect in effects if effect["type"] == "fracture")
+    assert fracture["regular_fixation_seconds"] == 20 * 60
+    assert fracture["hinged_fixation_seconds"] == 20 * 60
+
+    monkeypatch.setattr("app.services.effects.random.randint", lambda *_: 25)
+    effects = advance_timed_effects(health, effects, 20 * 60)
+
+    unfixed = next(effect for effect in effects if effect["type"] == "fracture_unfixed")
+    consequence = next(effect for effect in effects if effect["type"] == "fracture_sequela")
+    assert unfixed["permanent_penalty"] is True
+    assert consequence["area"] == "leftLeg"

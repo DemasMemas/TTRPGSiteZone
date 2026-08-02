@@ -8,6 +8,7 @@ from app.models import (
     Location,
     LocationCharacter,
 )
+from app.models.templates import ItemTemplate
 
 
 def create_lobby(client, user, auth_headers, name="Rookie camp"):
@@ -108,6 +109,50 @@ def test_joining_twice_is_idempotent(client, create_user, auth_headers):
 
     assert first.status_code == 200
     assert second.status_code == 200
+
+
+def test_lobby_detail_restores_participant_color(client, create_user, auth_headers):
+    gm = create_user("color-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+
+    changed = client.patch(
+        "/auth/color",
+        json={"color": "#4a7b52"},
+        headers=auth_headers(gm),
+    )
+    detail = client.get(f"/lobbies/{lobby['id']}", headers=auth_headers(gm))
+
+    assert changed.status_code == 200
+    assert detail.status_code == 200
+    participant = detail.get_json()["participants"][0]
+    assert participant["color"] == "#4a7b52"
+
+
+def test_only_gm_can_update_persisted_lobby_time(
+    client, create_user, auth_headers
+):
+    gm = create_user("time-gm")
+    player = create_user("time-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    endpoint = f"/lobbies/{lobby['id']}/time"
+
+    forbidden = client.patch(
+        endpoint,
+        json={"game_day": 3, "game_time_minutes": 19 * 60 + 25},
+        headers=auth_headers(player),
+    )
+    updated = client.patch(
+        endpoint,
+        json={"game_day": 3, "game_time_minutes": 19 * 60 + 25},
+        headers=auth_headers(gm),
+    )
+    detail = client.get(f"/lobbies/{lobby['id']}", headers=auth_headers(player))
+
+    assert forbidden.status_code == 403
+    assert updated.status_code == 200
+    assert detail.get_json()["game_day"] == 3
+    assert detail.get_json()["game_time_minutes"] == 19 * 60 + 25
     count = LobbyParticipant.query.filter_by(
         lobby_id=lobby["id"],
         user_id=player["id"],
@@ -583,6 +628,111 @@ def test_only_gm_or_controller_can_end_combat_turn(
     assert forbidden.status_code == 403
     assert allowed_for_controller.status_code == 200
     assert allowed_for_gm.status_code == 200
+
+
+def test_reload_can_be_paid_across_combat_turns(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("reload-pending-gm")
+    actor = create_user("reload-pending-actor")
+    other = create_user("reload-pending-other")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, actor, auth_headers)
+    join_lobby(client, lobby, other, auth_headers)
+    actor_character = create_character(client, lobby, actor, auth_headers, data={
+        "weapons": [{"name": "Test rifle", "ergonomics": 60}],
+        "health": {"effects": []},
+    })
+    other_character = create_character(client, lobby, other, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Reload arena",
+        world_tile_x=0,
+        world_tile_z=0,
+    )
+    magazine = ItemTemplate(
+        name="Test magazine",
+        category="magazine",
+        attributes={"reload_time_od": 6, "ergonomics": 0},
+    )
+    db.session.add_all([location, magazine])
+    db.session.flush()
+    actor_loc_char = LocationCharacter(
+        location_id=location.id,
+        character_id=actor_character["id"],
+        controlled_by=actor["id"],
+        action_points_current=2,
+        action_points_max=5,
+    )
+    other_loc_char = LocationCharacter(
+        location_id=location.id,
+        character_id=other_character["id"],
+        controlled_by=other["id"],
+        action_points_current=5,
+        action_points_max=5,
+    )
+    db.session.add_all([actor_loc_char, other_loc_char])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[actor_loc_char.id, other_loc_char.id],
+        current_location_character_id=actor_loc_char.id,
+    ))
+    db.session.commit()
+
+    started = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(actor),
+        json={
+            "location_character_id": actor_loc_char.id,
+            "action_key": "reload_weapon",
+            "weapon_index": 0,
+            "magazine_template_id": magazine.id,
+            "pending_action_id": "reload-test-1",
+        },
+    )
+
+    assert started.status_code == 200
+    assert started.get_json()["pending_action"] is True
+    db.session.refresh(actor_loc_char)
+    assert actor_loc_char.action_points_current == 0
+    pending = actor_loc_char.character.data["health"]["combatMeta"]["pendingAction"]
+    assert pending["remaining_action_points"] == 4
+
+    next_turn = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(other),
+        json={},
+    )
+    assert next_turn.status_code == 200
+    db.session.refresh(actor_loc_char)
+    assert actor_loc_char.action_points_current == 1
+    assert actor_loc_char.character.data["health"]["combatMeta"][
+        "completedPendingActionId"
+    ] == "reload-test-1"
+
+    completed = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(actor),
+        json={
+            "location_character_id": actor_loc_char.id,
+            "action_key": "reload_weapon",
+            "weapon_index": 0,
+            "magazine_template_id": magazine.id,
+            "resume_pending_action_id": "reload-test-1",
+        },
+    )
+
+    assert completed.status_code == 200
+    assert completed.get_json()["reload_weapon"]["action_points"] == 6
+    db.session.refresh(actor_loc_char)
+    assert actor_loc_char.action_points_current == 1
+    assert "completedPendingActionId" not in actor_loc_char.character.data["health"]["combatMeta"]
 
 
 def test_player_may_move_and_add_marked_player_item(

@@ -15,6 +15,8 @@ class Lobby(db.Model):
     chunks_width = db.Column(db.Integer, nullable=False, default=16)
     chunks_height = db.Column(db.Integer, nullable=False, default=16)
     weather_settings = db.Column(db.JSON, default=default_weather_settings)
+    game_day = db.Column(db.Integer, nullable=False, default=1)
+    game_time_minutes = db.Column(db.Integer, nullable=False, default=8 * 60)
 
     # связи
     gm = db.relationship('User', foreign_keys=[gm_id])

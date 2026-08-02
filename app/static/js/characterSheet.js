@@ -31,6 +31,8 @@ let currentCharacterData = null;
 let currentCharacterCanEdit = false;
 let autoSaveTimer = null;
 const AUTO_SAVE_DELAY = 500;
+const pendingConsumableActions = new Map();
+const pendingReloadActions = new Map();
 
 // ========== DRAG-AND-DROP ==========
 let draggedItem = null;
@@ -260,6 +262,175 @@ const AMMO_VARIANT_MODIFIERS = {
     smoke: { damagePercent: 0, penetrationDeltaPercent: -100 },
     gas: { damagePercent: 0, penetrationDeltaPercent: -100 }
 };
+const WEAPON_SUBCATEGORY_ORDER = [
+    'Пистолеты',
+    'Дробовики',
+    'Пистолеты-пулеметы',
+    'Штурмовые винтовки и карабины',
+    'Снайперские винтовки',
+    'Гранатометы',
+    'Пулемёты',
+    'Оружие ближнего боя',
+];
+const ITEM_CATEGORY_ORDER = [
+    'Оружие', 'Оружие ближнего боя', 'Броня', 'Шлемы', 'Противогазы',
+    'Магазины', 'Патроны', 'Гранаты', 'Оружейные модули', 'Бронеплиты',
+    'Рюкзаки', 'Разгрузки', 'Пояс', 'Подсумки', 'Контейнеры',
+    'Расходники', 'Приборы', 'Детекторы', 'Фильтры противогазов',
+    'Модули шлемов', 'Артефакты', 'Материалы', 'Прочее',
+];
+const CONSUMABLE_SECTION_ORDER = [
+    'Продукты', 'Кровь', 'Обезболивающее', 'Стимуляторы',
+    'Восстановление здоровья', 'Радиация', 'Травмы', 'Прочее',
+];
+
+function compareRussianNames(left, right) {
+    return String(left?.name || left || '').localeCompare(
+        String(right?.name || right || ''),
+        'ru',
+        { sensitivity: 'base', numeric: true },
+    );
+}
+
+function compareByFixedOrder(left, right, order) {
+    const leftIndex = order.indexOf(left);
+    const rightIndex = order.indexOf(right);
+    if (leftIndex !== -1 || rightIndex !== -1) {
+        if (leftIndex === -1) return 1;
+        if (rightIndex === -1) return -1;
+        return leftIndex - rightIndex;
+    }
+    return compareRussianNames(left, right);
+}
+
+function compareTemplatesBySourceOrder(left, right) {
+    const leftOrder = Number(left?.attributes?.source_order);
+    const rightOrder = Number(right?.attributes?.source_order);
+    const leftHasOrder = Number.isFinite(leftOrder);
+    const rightHasOrder = Number.isFinite(rightOrder);
+    if (leftHasOrder || rightHasOrder) {
+        if (!leftHasOrder) return 1;
+        if (!rightHasOrder) return -1;
+        if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    }
+    const leftId = Number(left?.id);
+    const rightId = Number(right?.id);
+    if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) {
+        return leftId - rightId;
+    }
+    return 0;
+}
+
+const TOOLTIP_ATTRIBUTE_LABELS = {
+    damage: 'Урон', accuracy: 'Точность', penetration: 'Пробитие', armor_piercing: 'Бронебойность',
+    range: 'Дальность', ergonomics: 'Эргономика', caliber: 'Калибр', capacity: 'Ёмкость',
+    max_durability: 'Прочность', movement_penalty: 'Штраф перемещения',
+    accuracy_penalty: 'Штраф точности', ergonomics_penalty: 'Штраф эргономики',
+    charisma_bonus: 'Бонус харизмы', uses: 'Использований', duration: 'Длительность',
+};
+const TOOLTIP_DIRECT_LABELS = {
+    action_points_cost: 'Стоимость', med_bonus: 'Бонус медикамента',
+    pain: 'Боль', stress: 'Стресс', exhaustion: 'Истощение', radiation: 'Радиация',
+    intoxication: 'Опьянение', heal: 'Лечение', regeneration: 'Регенерация',
+    nutrition: 'Питание', hydration: 'Вода', uses: 'Использований', duration: 'Длительность',
+    delayed_stress: 'Отложенный стресс', blood_severity_reduction: 'Снижение тяжести кровотечений',
+};
+
+function formatTooltipMetric(key, value) {
+    if (value === null || value === undefined || value === '' || value === false) return null;
+    if (typeof value === 'object') return null;
+    const label = TOOLTIP_ATTRIBUTE_LABELS[key] || TOOLTIP_DIRECT_LABELS[key];
+    if (!label) return null;
+    const percentKeys = new Set(['penetration', 'armor_piercing']);
+    const shown = percentKeys.has(key) ? formatAmmoPenetration(value) : String(value);
+    return `<span><strong>${escapeHtml(label)}:</strong> ${escapeHtml(shown)}</span>`;
+}
+
+function buildItemTooltipHtml(template) {
+    if (!template) return '';
+    const attrs = template.attributes || {};
+    const consumable = attrs.consumable || {};
+    const metrics = [
+        `<span><strong>Категория:</strong> ${escapeHtml(template.subcategory || getCategoryDisplay(template.category))}</span>`,
+        template.weight !== undefined ? `<span><strong>Вес:</strong> ${escapeHtml(String(template.weight || 0))} кг</span>` : null,
+        template.volume !== undefined ? `<span><strong>Объём:</strong> ${escapeHtml(String(template.volume || 0))}</span>` : null,
+        ...Object.entries(attrs).map(([key, value]) => formatTooltipMetric(key, value)),
+        ...Object.entries(consumable.direct || {}).map(([key, value]) => formatTooltipMetric(key, value)),
+    ].filter(Boolean);
+    const effects = Array.isArray(consumable.effects) ? consumable.effects : (
+        Array.isArray(attrs.effects) ? attrs.effects : []
+    );
+    const effectLines = effects.map(effect => effectSummary(effect)).filter(Boolean);
+    const protection = attrs.protection || template.protection;
+    const protectionLine = protection && typeof protection === 'object'
+        ? Object.entries(protection).map(([key, value]) => `${key}: ${formatProtectionPercent(value)}`).join(' · ')
+        : '';
+    const description = template.description || attrs.raw_description || attrs.notes || '';
+    return `
+        <div style="font-size:14px;font-weight:700;margin-bottom:5px;color:#e4d8a6;">${escapeHtml(template.name)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;line-height:1.35;">${metrics.join('')}</div>
+        ${protectionLine ? `<div style="margin-top:6px;font-size:12px;"><strong>Защита:</strong> ${escapeHtml(protectionLine)}</div>` : ''}
+        ${description ? `<div style="margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,.12);font-size:12px;line-height:1.4;">${escapeHtml(description)}</div>` : ''}
+        ${effectLines.length ? `<div style="margin-top:7px;font-size:12px;"><strong>Эффекты:</strong><br>${effectLines.map(line => `• ${escapeHtml(line)}`).join('<br>')}</div>` : ''}`;
+}
+
+function initializeDelayedItemTooltips() {
+    if (document._itemTooltipBound) return;
+    document._itemTooltipBound = true;
+    let timer = null;
+    let activeAnchor = null;
+    let pointer = { x: 0, y: 0 };
+    const tooltip = document.createElement('div');
+    tooltip.id = 'delayed-item-tooltip';
+    tooltip.style.cssText = 'display:none;position:fixed;z-index:20000;pointer-events:none;max-width:430px;max-height:55vh;overflow:hidden;padding:10px 12px;border:1px solid rgba(190,180,125,.45);border-radius:7px;background:rgba(18,20,17,.97);color:#ddd;box-shadow:0 12px 30px rgba(0,0,0,.55);';
+    document.body.appendChild(tooltip);
+
+    const hide = () => {
+        clearTimeout(timer);
+        timer = null;
+        activeAnchor = null;
+        tooltip.style.display = 'none';
+    };
+    const position = () => {
+        const margin = 14;
+        const width = tooltip.offsetWidth || 360;
+        const height = tooltip.offsetHeight || 180;
+        tooltip.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, pointer.x + margin))}px`;
+        tooltip.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, pointer.y + margin))}px`;
+    };
+    const findAnchor = target => target?.closest?.('[data-item-template-id], select[name$=".templateId"]');
+    document.addEventListener('pointermove', (event) => {
+        pointer = { x: event.clientX, y: event.clientY };
+        if (tooltip.style.display !== 'none') position();
+    }, true);
+    document.addEventListener('pointerover', (event) => {
+        const anchor = findAnchor(event.target);
+        if (!anchor || anchor === activeAnchor) return;
+        hide();
+        activeAnchor = anchor;
+        timer = setTimeout(async () => {
+            if (activeAnchor !== anchor || !anchor.isConnected) return;
+            const templateId = Number(anchor.dataset.itemTemplateId || anchor.value);
+            if (!Number.isFinite(templateId) || templateId <= 0) return;
+            const templates = await getAllItemTemplates();
+            const template = templates.find(item => Number(item.id) === templateId);
+            if (!template || activeAnchor !== anchor) return;
+            tooltip.innerHTML = buildItemTooltipHtml(template);
+            tooltip.style.display = 'block';
+            position();
+        }, 1000);
+    }, true);
+    document.addEventListener('pointerout', (event) => {
+        const anchor = findAnchor(event.target);
+        if (!anchor || anchor !== activeAnchor) return;
+        if (anchor.contains(event.relatedTarget)) return;
+        hide();
+    }, true);
+    document.addEventListener('pointerdown', hide, true);
+    document.addEventListener('scroll', hide, true);
+}
+
+initializeDelayedItemTooltips();
 
 function getAmmoVariantStats(baseDamage, basePenetration, variant) {
     const normalized = normalizeAmmoVariant(variant);
@@ -1113,8 +1284,13 @@ function getHealthRollModifier(data, skillPath, options = {}) {
         modifier -= Number(skillPath.startsWith('physical.') ? penalties.physical : penalties.other) || 0;
     });
 
-    (Array.isArray(health.effects) ? health.effects : []).forEach(effect => {
-        if (!effect || effect.active === false || (effect.remaining != null && Number(effect.remaining) <= 0)) return;
+    const activeEffects = (Array.isArray(health.effects) ? health.effects : []).filter(effect =>
+        effect && effect.active !== false && (effect.remaining == null || Number(effect.remaining) > 0)
+    );
+    const suppressedFractureAreas = new Set(activeEffects
+        .filter(effect => effect.suppress_fracture)
+        .map(effect => String(effect.area || '').toLowerCase()));
+    activeEffects.forEach(effect => {
         const penalties = effect.modifiers || {};
         modifier -= Number(effect.rollPenalty ?? effect.roll_penalty ?? effect.skillPenalty ?? 0) || 0;
         modifier -= Number(penalties.all ?? 0) || 0;
@@ -1122,6 +1298,15 @@ function getHealthRollModifier(data, skillPath, options = {}) {
         modifier -= Number(skillPath.startsWith('physical.') ? penalties.physical : penalties.other) || 0;
         if (effect.type === 'stimulant_crash') {
             modifier -= Number(effect.phase_penalty ?? effect.value ?? 0) || 0;
+        } else if (skillPath.startsWith('physical.') && ['fracture', 'fracture_fixed', 'fracture_unfixed'].includes(effect.type)) {
+            const area = String(effect.area || '').toLowerCase();
+            if (suppressedFractureAreas.has(area)) return;
+            if (area.includes('arm') || area.includes('hand')) {
+                modifier -= effect.type === 'fracture_fixed' ? 1 : 2;
+            }
+        } else if (skillPath.startsWith('physical.') && effect.type === 'fracture_sequela') {
+            const area = String(effect.area || '').toLowerCase();
+            if (area.includes('arm') || area.includes('hand')) modifier -= 1;
         }
     });
 
@@ -1222,10 +1407,29 @@ function getMovementPenaltyBreakdown(data, suppliedWeight = null) {
         }, 0)
         : 0;
     const zones = data?.health?.zones || {};
-    const injuries = ['leftLeg', 'rightLeg'].reduce(
-        (sum, key) => sum + (zones[key] && Number(zones[key].current) <= 0 ? 3 : 0),
-        0,
+    const activeHealthEffects = (Array.isArray(data?.health?.effects) ? data.health.effects : []).filter(effect =>
+        effect && effect.active !== false && (effect.remaining == null || Number(effect.remaining) > 0)
     );
+    const suppressedFractureAreas = new Set(activeHealthEffects
+        .filter(effect => effect.suppress_fracture)
+        .map(effect => String(effect.area || '').toLowerCase()));
+    const fractureInjuries = activeHealthEffects.reduce((sum, effect) => {
+        if (!['fracture', 'fracture_fixed', 'fracture_unfixed', 'fracture_sequela'].includes(effect.type)) return sum;
+        const area = String(effect.area || '').toLowerCase();
+        if (suppressedFractureAreas.has(area)) return sum;
+        if (!area.includes('leg') && !area.includes('foot')) return sum;
+        if (effect.type === 'fracture_sequela') return sum + 1;
+        return sum + (effect.type === 'fracture_fixed' ? 2 : 3);
+    }, 0);
+    const catastrophicByArea = new Map(activeHealthEffects
+        .filter(effect => ['mangled_limb', 'amputation'].includes(effect.type))
+        .map(effect => [String(effect.area || ''), effect.type]));
+    const injuries = ['leftLeg', 'rightLeg'].reduce((sum, key) => {
+        const injuryType = catastrophicByArea.get(key);
+        if (injuryType === 'amputation') return sum + 6;
+        if (injuryType === 'mangled_limb') return sum + 5;
+        return sum + (zones[key] && Number(zones[key].current) <= 0 ? 3 : 0);
+    }, fractureInjuries);
     return {
         total: Math.max(0, armorPenalty + helmetPenalty + weightPenalty + temporary + injuries),
         totalWeight,
@@ -2131,6 +2335,12 @@ const BASE_HEALTH_MAXIMUMS = {
         rightLeg: 100,
     },
 };
+const BASE_ORGAN_MAXIMUMS = {
+    heart: 20, rightLung: 40, leftLung: 40,
+    rightKidney: 25, leftKidney: 25, stomach: 25, liver: 20,
+    rightEye: 15, leftEye: 15, nose: 20, jaw: 20,
+    rightEar: 20, leftEar: 20, brain: 1, spine: 1,
+};
 
 function hasMountainBackground(data) {
     const background = data?.basic?.background || {};
@@ -2145,6 +2355,10 @@ function hasMountainBackground(data) {
 
 function ensureHealthMaximums(data) {
     const health = data.health || (data.health = {});
+    const temperature = Number(health.temperature);
+    if (!Number.isFinite(temperature) || temperature <= 0) {
+        health.temperature = 36;
+    }
     const mountain = hasMountainBackground(data);
     const profileName = mountain ? 'mountain' : 'base';
     const profile = {
@@ -2181,6 +2395,14 @@ function ensureHealthMaximums(data) {
             zone.max = newMax;
         }
     });
+    const organs = health.organs || (health.organs = {});
+    Object.entries(BASE_ORGAN_MAXIMUMS).forEach(([key, newMax]) => {
+        const organ = organs[key] || (organs[key] = {});
+        if (!Number.isFinite(Number(organ.max)) || Number(organ.max) <= 0) {
+            organ.current = scaleCurrent(organ.current, organ.max, newMax);
+            organ.max = newMax;
+        }
+    });
     health.maximumProfile = profileName;
     return health;
 }
@@ -2193,6 +2415,7 @@ function renderHealthTab(data, container = null) {
     const health = ensureHealthMaximums(data);
     syncHealthDerivedStatuses(health);
     const zones = health.zones || {};
+    const organs = health.organs || {};
     const bleeding = health.bleeding || {};
     const bleedingEffects = Array.isArray(bleeding.effects) ? bleeding.effects : [];
     const currentBlood = health.blood || health.bloodStage || 'normal';
@@ -2332,7 +2555,6 @@ function renderHealthTab(data, container = null) {
             <div class="health-needs-panel">
                 <div class="health-need-field"><label>Еда сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.mealsToday" value="${needs.mealsToday}"><small>${needs.mealsToday}/3</small></div>
                 <div class="health-need-field"><label>Вода сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.drinksToday" value="${needs.drinksToday}"><small>${needs.drinksToday}/3</small></div>
-                <div class="health-need-field"><label>Сон сегодня</label><select class="form-control" name="health.needs.sleptToday"><option value="false" ${!needs.sleptToday ? 'selected' : ''}>Не выполнен</option><option value="true" ${needs.sleptToday ? 'selected' : ''}>Выполнен</option></select><small>&nbsp;</small></div>
                 <div class="health-needs-actions">
                     <button type="button" class="btn btn-secondary" onclick="performCharacterRest(1)">Отдых 1 час</button>
                     <button type="button" class="btn btn-primary" onclick="performCharacterRest(8)">Поспать 8 часов</button>
@@ -2403,6 +2625,26 @@ function renderHealthTab(data, container = null) {
                     </div>
                 </div>
             </div>
+            <details class="health-compact-panel">
+                <summary><span>Органы</span></summary>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;padding-top:8px;">
+                    ${[
+                        ['heart', 'Сердце'], ['rightLung', 'Правое лёгкое'], ['leftLung', 'Левое лёгкое'],
+                        ['rightKidney', 'Правая почка'], ['leftKidney', 'Левая почка'], ['stomach', 'Желудок'],
+                        ['liver', 'Печень'], ['brain', 'Мозг'], ['spine', 'Позвоночник'],
+                        ['rightEye', 'Правый глаз'], ['leftEye', 'Левый глаз'], ['nose', 'Нос'],
+                        ['jaw', 'Челюсть'], ['rightEar', 'Правое ухо'], ['leftEar', 'Левое ухо'],
+                    ].map(([key, label]) => `
+                        <div class="zone-item-vertical">
+                            <div class="zone-label">${label}</div>
+                            <div class="zone-fields">
+                                <input type="number" class="number-input" name="health.organs.${key}.current" value="${Number((organs[key] || {}).current ?? BASE_ORGAN_MAXIMUMS[key])}">
+                                <span class="slash">/</span>
+                                <input type="number" class="number-input" name="health.organs.${key}.max" value="${Number((organs[key] || {}).max ?? BASE_ORGAN_MAXIMUMS[key])}" readonly>
+                            </div>
+                        </div>`).join('')}
+                </div>
+            </details>
     `;
 
     const effects = normalizeEffectList(Array.isArray(health.effects) ? health.effects : []);
@@ -2414,6 +2656,7 @@ function renderHealthTab(data, container = null) {
         const hasRemaining = !isBleedingEffect;
         const remaining = effect.remaining ?? '';
         const selectedType = effect.type || 'generic';
+        const fractureStatus = getFractureStatusText(effect, effects);
         effectsHtml += `
             <div style="display: grid; grid-template-columns: 1.1fr 0.85fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
                 <select class="form-control" name="health.effects.${index}.type" style="width:100%;">
@@ -2423,12 +2666,18 @@ function renderHealthTab(data, container = null) {
                     ${[
                         ['', 'Источник'], ['head', 'Голова'], ['chest', 'Грудь'], ['abdomen', 'Живот'],
                         ['leftArm', 'Левая рука'], ['rightArm', 'Правая рука'],
-                        ['leftLeg', 'Левая нога'], ['rightLeg', 'Правая нога']
+                        ['leftLeg', 'Левая нога'], ['rightLeg', 'Правая нога'],
+                        ['nose', 'Нос'], ['jaw', 'Челюсть'],
+                        ['leftEar', 'Левое ухо'], ['rightEar', 'Правое ухо'],
+                        ['leftEye', 'Левый глаз'], ['rightEye', 'Правый глаз'],
+                        ['spine', 'Позвоночник'], ['internalOrgan', 'Внутренний орган']
                     ].map(([key, label]) => `<option value="${key}" ${key === (effect.area || '') ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
                 <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Значение" style="width:80px;">
                 ${hasRemaining ? `<input type="text" class="form-control number-input" name="health.effects.${index}.remaining" value="${escapeHtml(remaining)}" placeholder="Остаток" data-nullable-number="true" style="width:90px;">` : '<div></div>'}
+                ${selectedType === 'fracture_unfixed' ? `<button type="button" class="btn btn-sm btn-warning" onclick="rebreakUnfixedFracture(${index})" title="Сломать повторно и лечить как обычный перелом">↻</button>` : ''}
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">×</button>
+                ${fractureStatus ? `<div class="text-muted" style="grid-column:1/-1;font-size:12px;">${escapeHtml(fractureStatus)}</div>` : ''}
             </div>
         `;
     });
@@ -2824,7 +3073,10 @@ async function renderEquipmentTab(data) {
     let weaponTemplates = [], helmetTemplates = [], gasMaskTemplates = [], armorTemplates = [];
     let modificationTemplates = [];
     try {
-        weaponTemplates = (await loadTemplatesForLobby('weapon')).filter(t => window.isGM || t.source !== 'local');
+        const firearmTemplates = await loadTemplatesForLobby('weapon');
+        const meleeTemplates = await loadTemplatesForLobby('melee_weapon');
+        weaponTemplates = [...firearmTemplates, ...meleeTemplates]
+            .filter(t => window.isGM || t.source !== 'local');
         helmetTemplates = (await loadTemplatesForLobby('helmet')).filter(t => window.isGM || t.source !== 'local');
         gasMaskTemplates = (await loadTemplatesForLobby('gas_mask')).filter(t => window.isGM || t.source !== 'local');
         armorTemplates = (await loadTemplatesForLobby('armor')).filter(t => window.isGM || t.source !== 'local');
@@ -3635,6 +3887,47 @@ window.drawWeaponFromEquipment = async function(weaponIndex) {
     }
 };
 
+window.rebreakUnfixedFracture = function(index) {
+    updateDataFromFields();
+    const health = currentCharacterData.health || (currentCharacterData.health = {});
+    const effects = normalizeEffectList(health.effects || []);
+    const fracture = effects[index];
+    if (!fracture || fracture.type !== 'fracture_unfixed') return;
+    const medicine = currentCharacterData.skills?.physical?.medicine || {};
+    const medicineValue = Math.max(0, Number(medicine.base ?? medicine.value ?? 5) + Number(medicine.bonus || 0));
+    const penaltyRemainsChance = Math.max(0, Math.min(100, 100 - 4 * medicineValue));
+    const hadPermanentPenalty = Boolean(
+        fracture.permanent_penalty
+        || effects.some(effect => effect.type === 'fracture_sequela' && effect.area === fracture.area)
+    );
+    const roll = hadPermanentPenalty ? 1 + Math.floor(Math.random() * 100) : null;
+    const penaltyRemains = hadPermanentPenalty && roll <= penaltyRemainsChance;
+    health.effects = effects.filter((effect, effectIndex) => !(
+        effectIndex === index
+        || (effect.type === 'fracture_sequela' && effect.area === fracture.area)
+    ));
+    applyEffectToHealth(health, {
+        type: 'fracture', name: 'Перелом', area: fracture.area,
+        source: 'rebroken_fracture', tick: 'manual',
+        regular_fixation_seconds: 1800, hinged_fixation_seconds: 1800,
+    });
+    if (penaltyRemains) {
+        applyEffectToHealth(health, {
+            type: 'fracture_sequela', name: 'Постоянный штраф после перелома',
+            area: fracture.area, source: 'rebroken_fracture', tick: 'manual',
+        });
+    }
+    applyEffectToHealth(health, {
+        type: 'pain', value: 3, area: fracture.area, source: 'rebroken_fracture',
+    });
+    refreshHealthPanel();
+    scheduleAutoSave();
+    const resultMessage = hadPermanentPenalty
+        ? `Повторный перелом выполнен. Постоянный штраф был: d100 ${roll} при шансе сохранения ${penaltyRemainsChance}%. ${penaltyRemains ? 'Штраф сохранился.' : 'Штраф устранён.'}`
+        : 'Повторный перелом выполнен. Постоянного штрафа до процедуры не было; конечность снова имеет обычный перелом.';
+    showNotification(resultMessage, penaltyRemains ? 'system' : 'success');
+};
+
 window.cycleWeaponFromEquipment = async function(weaponIndex) {
     const weapon = currentCharacterData?.weapons?.[weaponIndex];
     if (!weapon?.requiresManualCycle) return;
@@ -3810,6 +4103,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         if (!groupedWeapons[cat]) groupedWeapons[cat] = [];
         groupedWeapons[cat].push(t);
     });
+    Object.values(groupedWeapons).forEach(items => items.sort(compareTemplatesBySourceOrder));
 
     const groupedModules = {};
     moduleTemplates.forEach(t => {
@@ -3942,7 +4236,9 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
 
         let modelBlock = '';
         if (!weapon.model && !isMelee) {
-            const options = Object.entries(groupedWeapons).map(([cat, items]) => `
+            const options = Object.entries(groupedWeapons)
+                .sort(([left], [right]) => compareByFixedOrder(left, right, WEAPON_SUBCATEGORY_ORDER))
+                .map(([cat, items]) => `
                 <optgroup label="${cat}">
                     ${items.map(t => `<option value="${t.id}">${t.name} ${t.source === 'local' ? '(кастом)' : ''}</option>`).join('')}
                 </optgroup>
@@ -4093,7 +4389,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         });
 
         weaponsHtml.push(`
-            <div style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
+            <div ${weapon.templateId ? `data-item-template-id="${weapon.templateId}"` : ''} style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
                 ${renderCreatedByPlayerBadge(weapon)}
                 ${modelBlock}
                 ${fieldsHtml}
@@ -4411,7 +4707,7 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
     modal.style.display = 'flex';
 };
 
-async function confirmEquipMagazineDirect(weaponIndex, selected) {
+async function confirmEquipMagazineDirect(weaponIndex, selected, options = {}) {
     const weapon = currentCharacterData.weapons[weaponIndex];
     if (!weapon) return;
 
@@ -4426,7 +4722,7 @@ async function confirmEquipMagazineDirect(weaponIndex, selected) {
     }
 
     const combatState = window.locationCombatState;
-    if (combatState?.status === 'active') {
+    if (combatState?.status === 'active' && !options.skipCombatPayment) {
         const actor = combatState.current_character;
         if (actor?.character_id !== currentCharacterId) {
             showNotification('Сменить магазин можно только в свой ход', 'system');
@@ -4434,14 +4730,35 @@ async function confirmEquipMagazineDirect(weaponIndex, selected) {
         }
         try {
             const access = await calculateInventoryAccess(selected.item, selected.path);
-            await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
+            const pendingActionId = `reload-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            const payload = {
                 location_character_id: actor.location_character_id,
                 action_key: 'reload_weapon',
                 weapon_index: weaponIndex,
                 magazine_template_id: selected.item.templateId,
                 inventory_retrieval_action_points: access.retrievalActionPoints,
                 inventory_use_action_discount: access.useActionDiscount,
-            });
+                pending_action_id: pendingActionId,
+            };
+            const result = await Server.performLocationCombatAction(
+                window.currentLobbyId,
+                window.currentLocationId,
+                payload,
+            );
+            if (result?.pending_action) {
+                pendingReloadActions.set(result.pending_action_id, {
+                    characterId: currentCharacterId,
+                    weaponIndex,
+                    itemId: selected.item.id,
+                    itemPath: selected.path,
+                    payload,
+                });
+                showNotification(
+                    'Перезарядка начата. Магазин будет установлен после полной оплаты ОД.',
+                    'system',
+                );
+                return;
+            }
         } catch (error) {
             showNotification(error.message || 'Не удалось сменить магазин', 'system');
             return;
@@ -5720,7 +6037,10 @@ window.selectWeaponModel = async function(index) {
     if (!currentCharacterData.weapons) currentCharacterData.weapons = [];
     const weapon = currentCharacterData.weapons[index];
 
-    const templates = await loadTemplatesForLobby('weapon');
+    const templates = [
+        ...(await loadTemplatesForLobby('weapon')),
+        ...(await loadTemplatesForLobby('melee_weapon')),
+    ];
     const template = templates.find(t => t.id === selectedId);
     if (!template) return;
 
@@ -7698,8 +8018,41 @@ const BLEEDING_KIND_LABEL = { external: 'внешнее', internal: 'внутр�
 function getEffectAreaLabel(area) {
     return ({
         head: 'голова', chest: 'грудь', abdomen: 'живот', leftArm: 'левая рука',
-        rightArm: 'правая рука', leftLeg: 'левая нога', rightLeg: 'правая нога', internal: 'внутреннее'
+        rightArm: 'правая рука', leftLeg: 'левая нога', rightLeg: 'правая нога', internal: 'внутреннее',
+        nose: 'нос', jaw: 'челюсть', leftEar: 'левое ухо', rightEar: 'правое ухо',
+        leftEye: 'левый глаз', rightEye: 'правый глаз', spine: 'позвоночник',
+        internalOrgan: 'внутренний орган', heart: 'сердце',
+        rightLung: 'правое лёгкое', leftLung: 'левое лёгкое',
+        rightKidney: 'правая почка', leftKidney: 'левая почка',
+        stomach: 'желудок', liver: 'печень', brain: 'мозг'
     })[area] || area || 'источник не указан';
+}
+
+function getFracturePenaltyText(area) {
+    const normalized = String(area || '').toLowerCase();
+    if (normalized.includes('leg') || normalized.includes('foot')) return 'штраф перемещения +1';
+    if (normalized.includes('arm') || normalized.includes('hand')) return '-1 к броскам, связанным с рукой';
+    return 'постоянный штраф травмы';
+}
+
+function getFractureStatusText(effect, effects = []) {
+    if (effect?.type === 'fracture') {
+        const seconds = Math.max(0, Number(effect.regular_fixation_seconds ?? 1800));
+        return `До перехода в незафиксированный перелом: ${Math.ceil(seconds / 60)} мин.`;
+    }
+    if (effect?.type === 'fracture_sequela') {
+        return `Действует постоянно: ${getFracturePenaltyText(effect.area)}.`;
+    }
+    if (effect?.type !== 'fracture_unfixed') return '';
+    const hasPenalty = Boolean(
+        effect.permanent_penalty
+        || effects.some(item => item.type === 'fracture_sequela' && item.area === effect.area)
+    );
+    const roll = Number(effect.fixation_consequence_roll) || null;
+    const rollText = roll ? `Результат проверки: d100 ${roll}. ` : '';
+    return hasPenalty
+        ? `${rollText}Получен постоянный штраф: ${getFracturePenaltyText(effect.area)}.`
+        : `${rollText}Постоянный штраф не получен.`;
 }
 
 function getBleedingInfo(effect) {
@@ -7713,7 +8066,8 @@ function getBleedingTreatmentOutcome(effect, application) {
     const maxStage = String(application?.max_stage || '').toLowerCase();
     const medicineRank = BLEEDING_STAGE_RANK[maxStage] || 0;
     if (!bleeding || !medicineRank) return null;
-    if (Boolean(application.internal) !== (bleeding.kind === 'internal')) return null;
+    if (!application.internal && bleeding.kind === 'internal') return null;
+    if (application.internal_only && bleeding.kind !== 'internal') return null;
     if (bleeding.rank <= medicineRank) {
         return { mode: 'close', bleeding, resultStage: null };
     }
@@ -7738,7 +8092,11 @@ function getBleedingEffectLabel(effect, bleeding = getBleedingInfo(effect)) {
 function getInjuryEffectLabel(effect) {
     const labels = {
         fracture: 'Перелом',
+        fracture_fixed: 'Зафиксированный перелом',
+        fracture_unfixed: 'Незафиксированный перелом',
+        fracture_sequela: 'Постоянный штраф после перелома',
         amputation: 'Отсутствующая часть тела',
+        mangled_limb: 'Искореженная конечность',
         organ_loss: 'Отсутствующий орган',
         damaged_zone: 'Повреждённая часть тела',
     };
@@ -7905,11 +8263,15 @@ async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints
         Number(baseUseActionPoints || 0) - access.useActionDiscount
     );
     const totalActionPoints = access.retrievalActionPoints + useActionPoints;
-    await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
+    const pendingActionId = `inventory-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const payment = await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
         location_character_id: actor.location_character_id,
         action_points: totalActionPoints,
+        allow_deferred: true,
+        pending_action_id: pendingActionId,
+        pending_action_label: `Использование: ${item?.name || 'предмет'}`,
     });
-    return { totalActionPoints, useActionPoints, access };
+    return { totalActionPoints, useActionPoints, access, payment, pendingActionId };
 }
 
 function combineCombatPayments(groups) {
@@ -8201,6 +8563,14 @@ function spendInventoryItemUses(entry, amount = 1) {
     return remaining <= 0;
 }
 
+function getInventoryItemAvailableUses(item) {
+    if (!item) return 0;
+    const quantity = Math.max(0, Number(item.quantity || 0));
+    const maxUses = Math.max(1, Number(item.maxUses ?? item.attributes?.uses ?? 1) || 1);
+    const currentUses = Math.max(0, Number(item.uses ?? item.attributes?.uses_remaining ?? maxUses) || 0);
+    return currentUses + Math.max(0, quantity - 1) * maxUses;
+}
+
 function spendWaterRequirement(data, fraction, allowAlcohol = false, consume = true) {
     const charges = Math.max(1, Math.ceil((Number(fraction) || 0) * 3 - 1e-6));
     const water = collectInventoryEntries(data, item => String(item?.name || '').trim().toLowerCase() === 'вода')
@@ -8326,26 +8696,131 @@ async function resolveMedicalApplication(direct, health, itemName, costContext =
         const selected = await chooseConsumableApplication(`Выберите рану: ${itemName}`, choices, { alwaysShow: true });
         return selected ? { kind: 'wound', ...selected } : null;
     }
-    if (direct.fracture_splint || direct.cure_fracture || direct.target_body_part) {
+    if (direct.catastrophic_limb_surgery) {
+        const actionPoints = Number(direct.action_points_cost || 1);
+        const fullRestoration = direct.catastrophic_limb_surgery === 'full_restoration';
+        const minorParts = new Set(['nose', 'jaw', 'leftEar', 'rightEar', 'ear']);
+        const choices = [];
+        effects.forEach((effect) => {
+            if (effect.type === 'fracture_unfixed') {
+                choices.push({
+                    label: `Лечить незафиксированный перелом: ${getEffectAreaLabel(effect.area)} · 3 зар. · 3 суток отдыха · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                    effect,
+                    treatmentMode: 'treat_unfixed_fracture',
+                    application: { item_uses: 3 },
+                    actionPoints,
+                });
+                return;
+            }
+            if (effect.type === 'mangled_limb') {
+                const itemUses = fullRestoration ? 1 : 5;
+                choices.push({
+                    label: `Восстановить искореженную конечность: ${getEffectAreaLabel(effect.area)} · ${itemUses} зар. · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                    effect,
+                    treatmentMode: 'restore_mangled_limb',
+                    application: { item_uses: itemUses },
+                    actionPoints,
+                });
+                return;
+            }
+            if (!fullRestoration || effect.type !== 'organ_loss' || effect.treatment_window_expired) return;
+            const itemUses = minorParts.has(String(effect.area || '')) ? 3 : 5;
+            choices.push({
+                label: `Восстановить утраченную часть: ${getEffectAreaLabel(effect.area)} · ${itemUses} зар. · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                effect,
+                treatmentMode: 'restore_lost_part',
+                application: { item_uses: itemUses },
+                actionPoints,
+            });
+        });
+        if (!choices.length) throw new Error('Нет травмы, которую можно восстановить этим набором');
+        const selected = await chooseConsumableApplication(
+            `Выберите операцию: ${itemName}`,
+            choices,
+            { alwaysShow: true }
+        );
+        return selected ? { kind: 'injury', ...selected } : null;
+    }
+    if (direct.special_limb_treatment) {
+        const actionPoints = Number(direct.action_points_cost || 1);
+        const areas = ['leftArm', 'rightArm', 'leftLeg', 'rightLeg'];
+        if (direct.special_limb_treatment === 'chimera') areas.push('head');
+        const choices = areas
+            .filter(area => health.zones?.[area])
+            .map(area => ({
+                label: `${getEffectAreaLabel(area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                effect: { type: 'body_zone', area },
+                treatmentMode: direct.special_limb_treatment,
+                actionPoints,
+            }));
+        if (!choices.length) throw new Error('Нет подходящих частей тела');
+        const selected = await chooseConsumableApplication(
+            `Выберите часть тела: ${itemName}`,
+            choices,
+            { alwaysShow: true }
+        );
+        return selected ? { kind: 'injury', ...selected } : null;
+    }
+    if (direct.fracture_splint || direct.cure_fracture || direct.target_body_part
+        || direct.restore_limb_health || direct.temporary_limb_health_minutes
+        || direct.temporary_limb_health_turns) {
+        if (direct.affects_all_limbs
+            && !direct.fracture_splint
+            && !direct.cure_fracture
+            && !direct.target_body_part
+            && !direct.restore_limb_health) {
+            return { kind: 'self', actionPoints: Number(direct.action_points_cost ?? 1) };
+        }
         const actionPoints = Number(direct.action_points_cost || 1);
         const allowedTypes = new Set();
         if (direct.fracture_splint || direct.cure_fracture) allowedTypes.add('fracture');
+        if (direct.suppress_limb_trauma) allowedTypes.add('fracture');
         if (direct.restore_missing_part || direct.target_body_part) {
             allowedTypes.add('amputation');
             allowedTypes.add('organ_loss');
         }
-        const choices = effects.filter(effect => allowedTypes.has(effect.type)).map(effect => ({
-            label: `${getInjuryEffectLabel(effect)}: ${getEffectAreaLabel(effect.area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+        const hingedSplint = Boolean(direct.fracture_splint && direct.temporary_limb_health_minutes);
+        const choices = effects.filter(effect => {
+            if (!allowedTypes.has(effect.type)) return false;
+            if (!direct.fracture_splint || effect.type !== 'fracture') return true;
+            const remaining = hingedSplint
+                ? Number(effect.hinged_fixation_seconds ?? 1800)
+                : Number(effect.regular_fixation_seconds ?? 1800);
+            return remaining > 0;
+        }).map(effect => ({
+            label: direct.fracture_splint && effect.type === 'fracture'
+                ? `Зафиксировать перелом: ${getEffectAreaLabel(effect.area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`
+                : `${getInjuryEffectLabel(effect)}: ${getEffectAreaLabel(effect.area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
             effect,
+            treatmentMode: direct.fracture_splint && effect.type === 'fracture'
+                ? 'fix_fracture'
+                : 'treat_injury',
             actionPoints,
         }));
-        if (direct.restore_limb_health && !direct.restore_missing_part && !direct.fracture_splint && !direct.cure_fracture) {
+        const selectableLimbAreas = new Set(['leftArm', 'rightArm', 'leftLeg', 'rightLeg']);
+        if (direct.restore_limb_health || direct.restore_full_body_part || direct.fracture_restore_health
+            || direct.temporary_limb_health_minutes || direct.temporary_limb_health_turns) {
+            const existingAreas = new Set(choices.map(choice => String(choice.effect?.area || '')));
+            const separateSplintRestoration = Boolean(
+                direct.fracture_splint
+                && (direct.temporary_limb_health_minutes || direct.temporary_limb_health_turns)
+            );
             Object.entries(health.zones || {}).forEach(([area, zone]) => {
-                if (Number(zone?.current || 0) >= Number(zone?.max || 0)) return;
+                if (!selectableLimbAreas.has(area)
+                    || (!separateSplintRestoration && existingAreas.has(area))) return;
+                const current = Number(zone?.current || 0);
+                const maximum = Number(zone?.max || 0);
+                const requiresKnockedOutLimb = Boolean(
+                    direct.temporary_limb_health_minutes || direct.temporary_limb_health_turns
+                ) && !direct.restore_missing_part;
+                if (requiresKnockedOutLimb ? current > 0 : current >= maximum) return;
                 const effect = { type: 'damaged_zone', area };
                 choices.push({
-                    label: `${getInjuryEffectLabel(effect)}: ${getEffectAreaLabel(area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                    label: separateSplintRestoration
+                        ? `Временно восстановить до 1 ОЗ: ${getEffectAreaLabel(area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`
+                        : `${getInjuryEffectLabel(effect)}: ${getEffectAreaLabel(area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
                     effect,
+                    treatmentMode: separateSplintRestoration ? 'restore_limb' : 'treat_injury',
                     actionPoints,
                 });
             });
@@ -8429,6 +8904,10 @@ async function useConsumable(item, itemPath, options = {}) {
     ].forEach(([key, type]) => {
         if (direct[key] !== undefined) directEffectTypes.add(type);
     });
+    if (direct.temporary_limb_health_minutes || direct.temporary_limb_health_turns) {
+        directEffectTypes.add('limb_trauma_suppression');
+        directEffectTypes.add('temporary_limb_restoration');
+    }
 
     const effects = (
         Array.isArray(consumable.effects)
@@ -8480,7 +8959,8 @@ async function useConsumable(item, itemPath, options = {}) {
 
     const adjust = (field, delta, min = 0, max = null) => {
         if (delta === undefined || delta === null || Number.isNaN(Number(delta)) || Number(delta) === 0) return;
-        const current = Number(health[field] ?? 0);
+        const defaultValue = field === 'temperature' ? 36 : 0;
+        const current = Number(health[field] ?? defaultValue);
         let next = current + Number(delta);
         if (min !== null) next = Math.max(min, next);
         if (max !== null) next = Math.min(max, next);
@@ -8500,7 +8980,7 @@ async function useConsumable(item, itemPath, options = {}) {
 
     let application;
     try {
-        application = await resolveMedicalApplication(
+        application = options.preselectedApplication || await resolveMedicalApplication(
             direct,
             health,
             item.name || 'предмет',
@@ -8511,6 +8991,11 @@ async function useConsumable(item, itemPath, options = {}) {
         return false;
     }
     if (!application) return false;
+    const requiredItemUses = Number(application.application?.item_uses || 1);
+    if (!direct.not_consumed && getInventoryItemAvailableUses(item) < requiredItemUses) {
+        showNotification(`Недостаточно зарядов: требуется ${requiredItemUses}`);
+        return false;
+    }
 
     if (direct.use_limit) {
         health.combatMeta = health.combatMeta || {};
@@ -8525,7 +9010,7 @@ async function useConsumable(item, itemPath, options = {}) {
     let infusionBonus = 0;
     if (direct.requires_infusion_tool) {
         const infusionTools = collectInventoryEntries(currentCharacterData, entry =>
-            /капельница|хирургический набор|набор полного восстановления конечности/i.test(String(entry?.name || ''))
+            /капельница|хирургический набор|кустарный набор\s*[«"]?айболит|набор полного восстановления конечности/i.test(String(entry?.name || ''))
         );
         if (!infusionTools.length) {
             showNotification('Для применения нужна капельница или хирургический набор');
@@ -8574,9 +9059,23 @@ async function useConsumable(item, itemPath, options = {}) {
         }
     }
 
-    if (isCombatActive) {
+    if (isCombatActive && !options.skipCombatPayment) {
         try {
-            await spendInventoryAccessForCombat(item, itemPath, application.actionPoints);
+            const payment = await spendInventoryAccessForCombat(item, itemPath, application.actionPoints);
+            if (payment.payment?.payment_complete === false) {
+                pendingConsumableActions.set(payment.pendingActionId, {
+                    characterId: currentCharacterId,
+                    itemId: item.id,
+                    itemPath: [...itemPath],
+                    application,
+                    options: { ...options, targetData },
+                });
+                showNotification(
+                    `Начато длительное действие «${item.name}». Остаток ОД будет списан в следующих ходах.`,
+                    'system'
+                );
+                return false;
+            }
         } catch (error) {
             showNotification(error.message || 'Не хватает ОД');
             return false;
@@ -8646,6 +9145,33 @@ async function useConsumable(item, itemPath, options = {}) {
         return false;
     }
 
+    const applyTemporaryLimbEffect = (area, zone) => {
+        const temporaryTurns = Number(direct.temporary_limb_health_turns || 0);
+        const temporaryMinutes = Number(direct.temporary_limb_health_minutes || 0);
+        if (!zone || (!temporaryTurns && !temporaryMinutes)) return false;
+        const previousHealth = Number(zone.current || 0);
+        if (previousHealth > 0 && !direct.suppress_limb_trauma && !direct.minimum_limb_health) {
+            return false;
+        }
+        if (previousHealth <= 0) zone.current = 1;
+        applyEffectToHealth(health, {
+            type: 'temporary_limb_restoration',
+            name: 'Временное восстановление конечности',
+            area,
+            source: item.id || item.name,
+            previous_health: previousHealth,
+            restore_on_expire: previousHealth <= 0,
+            health_cap: previousHealth <= 0 ? 1 : undefined,
+            minimum_limb_health: Number(direct.minimum_limb_health || 0),
+            suppress_fracture: Boolean(direct.suppress_limb_trauma),
+            remaining: temporaryMinutes || temporaryTurns,
+            tick: temporaryMinutes ? 'time_elapsed' : 'turn_end',
+            time_unit: temporaryMinutes ? 'minute' : undefined,
+            remaining_seconds: temporaryMinutes ? temporaryMinutes * 60 : undefined,
+        });
+        return true;
+    };
+
     effects.forEach(eff => {
         if (eff?.source === 'direct') return;
         const appliedEffect = { ...eff, source: eff.source || item.id || item.name };
@@ -8655,6 +9181,12 @@ async function useConsumable(item, itemPath, options = {}) {
         applyEffectToHealth(health, appliedEffect);
         hasChanges = true;
     });
+
+    if (direct.affects_all_limbs) {
+        ['leftArm', 'rightArm', 'leftLeg', 'rightLeg'].forEach((area) => {
+            if (applyTemporaryLimbEffect(area, health.zones?.[area])) hasChanges = true;
+        });
+    }
 
     if (application.kind === 'bleeding') {
         const targetId = application.effect.id;
@@ -8693,14 +9225,129 @@ async function useConsumable(item, itemPath, options = {}) {
         health.effects = (health.effects || []).filter(effect => effect.id !== application.effect.id);
         hasChanges = true;
     } else if (application.kind === 'injury') {
-        if (direct.cure_fracture || direct.fracture_splint) {
+        const targetArea = application.effect.area;
+        const areaFractures = (health.effects || []).filter(effect =>
+            ['fracture', 'fracture_fixed'].includes(effect?.type)
+            && effect.area === targetArea
+        );
+        const isDelayedSpecialTreatment = Boolean(direct.special_limb_treatment);
+        const isCatastrophicSurgery = ['restore_mangled_limb', 'restore_lost_part'].includes(
+            application.treatmentMode
+        );
+        if (isCatastrophicSurgery) {
+            health.effects = (health.effects || []).filter(effect =>
+                effect !== application.effect
+                && (!application.effect.id || effect.id !== application.effect.id)
+            );
+        }
+        if (direct.restore_missing_part) {
+            health.effects = (health.effects || []).filter(effect =>
+                effect !== application.effect
+                && (!application.effect.id || effect.id !== application.effect.id)
+            );
+        }
+        if (direct.cure_fracture && !isDelayedSpecialTreatment
+            && application.treatmentMode !== 'treat_unfixed_fracture') {
             health.effects = (health.effects || []).filter(effect => effect.id !== application.effect.id);
         }
-        const zone = health.zones?.[application.effect.area];
-        if (zone && direct.fracture_restore_health) zone.current = Math.max(Number(zone.current || 0), Number(direct.fracture_restore_health));
-        if (zone && direct.restore_limb_health) zone.current = Math.max(Number(zone.current || 0), Number(direct.restore_limb_health));
+        if (application.treatmentMode === 'treat_unfixed_fracture') {
+            applyEffectToHealth(health, {
+                type: 'delayed_limb_treatment',
+                name: `Лечение незафиксированного перелома: ${getEffectAreaLabel(targetArea)}`,
+                area: targetArea,
+                source: item.id || item.name,
+                cure_fracture: true,
+                remaining: 72,
+                remaining_seconds: 259200,
+                tick: 'time_elapsed',
+                time_unit: 'hour',
+            });
+        }
+        if (direct.fracture_splint && application.treatmentMode === 'fix_fracture') {
+            const targetArea = application.effect.area;
+            health.effects = (health.effects || []).filter(effect => {
+                if (!effect) return false;
+                if (application.effect.id && effect.id === application.effect.id) return false;
+                return !(effect.type === 'fracture'
+                    && effect.area === targetArea
+                    && (!application.effect.source || effect.source === application.effect.source));
+            });
+            adjust('painLevel', -1, 0, 10);
+            applyEffectToHealth(health, {
+                type: 'fracture_fixed',
+                name: 'Зафиксированный перелом',
+                area: targetArea,
+                source: item.id || item.name,
+                value: 1,
+                remaining: 24,
+                tick: 'time_elapsed',
+                time_unit: 'hour',
+                remaining_seconds: 86400,
+            });
+        }
+        const zone = health.zones?.[targetArea];
+        if (zone && application.treatmentMode === 'restore_mangled_limb') {
+            const restoredHealth = direct.catastrophic_limb_surgery === 'full_restoration'
+                ? Number(zone.max || 0)
+                : Math.min(Number(zone.max || 0), Number(direct.restore_limb_health || 30));
+            zone.current = Math.max(0, restoredHealth);
+            zone.destructionDamage = Math.max(0, Number(zone.max || 0) - zone.current);
+        }
+        if (zone && direct.restore_full_body_part
+            && application.treatmentMode !== 'treat_unfixed_fracture') {
+            zone.current = Math.max(0, Number(zone.max || 0));
+            zone.destructionDamage = 0;
+        }
+        if (isDelayedSpecialTreatment) {
+            if (direct.special_limb_treatment === 'chimera' && targetArea === 'head') {
+                applyEffectToHealth(health, {
+                    type: 'death',
+                    name: 'Смерть после применения «Химеры»',
+                    area: targetArea,
+                    source: item.id || item.name,
+                    tick: 'manual',
+                });
+            } else if (direct.special_limb_treatment === 'chimera' && !areaFractures.length) {
+                const damage = Math.abs(Number(direct.invalid_limb_damage || -200));
+                const zoneHealth = Math.max(0, Number(zone?.current || 0));
+                if (zone) zone.current = Math.max(0, zoneHealth - damage);
+                const overflow = Math.max(0, damage - zoneHealth);
+                if (overflow > 0) {
+                    health.current = Math.max(0, Number(health.current || 0) - overflow);
+                }
+            } else {
+                const delayMinutes = Number(direct.delayed_limb_treatment_minutes || direct.delay || 1);
+                applyEffectToHealth(health, {
+                    type: 'delayed_limb_treatment',
+                    name: `${item.name}: лечение ${getEffectAreaLabel(targetArea)}`,
+                    area: targetArea,
+                    source: item.id || item.name,
+                    cure_fracture: Boolean(direct.cure_fracture),
+                    restore_limb_health: direct.special_limb_treatment === 'second_life'
+                        ? Number(direct.restore_limb_health || 50)
+                        : undefined,
+                    remaining: delayMinutes,
+                    remaining_seconds: delayMinutes * 60,
+                    tick: 'time_elapsed',
+                    time_unit: 'minute',
+                });
+            }
+        }
+        if (!direct.fracture_splint || application.treatmentMode === 'restore_limb') {
+            if (!isDelayedSpecialTreatment) applyTemporaryLimbEffect(targetArea, zone);
+        }
+        if (zone && direct.restore_limb_health
+            && !direct.temporary_limb_health_minutes && !direct.temporary_limb_health_turns
+            && !isDelayedSpecialTreatment
+            && application.treatmentMode !== 'treat_unfixed_fracture') {
+            zone.current = Math.min(
+                Number(zone.max || direct.restore_limb_health),
+                Math.max(Number(zone.current || 0), Number(direct.restore_limb_health))
+            );
+            zone.destructionDamage = Math.max(0, Number(zone.max || 0) - zone.current);
+        }
         if (direct.close_area_bleeding) {
-            health.effects = (health.effects || []).filter(effect => !(getBleedingInfo(effect) && effect.area === application.effect.area));
+            health.effects = (health.effects || []).filter(effect => !(getBleedingInfo(effect) && effect.area === targetArea));
         }
         hasChanges = true;
     }
@@ -8941,6 +9588,7 @@ async function useConsumable(item, itemPath, options = {}) {
         health.combatMeta.fractureSplint = true;
         health.combatMeta.fractureSplintTurns = Number(direct.fracture_duration_turns) || 4;
         health.combatMeta.fractureRestoreHealth = Number(direct.fracture_restore_health) || 1;
+        health.combatMeta.fractureFixedDurationMinutes = Number(direct.fracture_duration_minutes) || 0;
         hasChanges = true;
     }
 
@@ -10655,6 +11303,20 @@ window.updateBackpackItemAtPath = function(pathStr, field, value) {
     scheduleAutoSave();
 };
 
+window.adjustBackpackItemQuantityAtPath = function(pathStr, delta) {
+    const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
+    const item = getItemByPath(path);
+    if (!item) return;
+
+    const currentQuantity = Math.max(1, Number(item.quantity) || 1);
+    const nextQuantity = currentQuantity + Number(delta || 0);
+    if (setBackpackItemQuantityAtPath(path, nextQuantity)) {
+        recalculateInventoryTotals();
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+    }
+};
+
 window.removeBackpackItemAtPath = function(pathStr) {
     const path = pathStr.split(',').map(p => isNaN(p) ? p : parseInt(p));
     if (path.length === 0) return;
@@ -11312,43 +11974,63 @@ function renderInventoryTemplatePicker(templates, query = '') {
         grouped[group].push(t);
     });
 
-    const order = Object.keys(grouped).sort((a, b) => a.localeCompare(b, 'ru'));
+    const renderCards = (items) => `
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:8px; margin-top:10px;">
+            ${items.map(t => {
+                const attrs = t.attributes || {};
+                const chips = [];
+                if (attrs.caliber) chips.push(`Калибр: ${escapeHtml(String(attrs.caliber))}`);
+                if (attrs.damage !== undefined && attrs.damage !== null && t.category === 'ammo') chips.push(`Урон: ${escapeHtml(String(attrs.damage))}`);
+                if (attrs.penetration !== undefined && attrs.penetration !== null && t.category === 'ammo') chips.push(`Пробитие: ${escapeHtml(formatAmmoPenetration(attrs.penetration))}`);
+                if (attrs.range !== undefined && attrs.range !== null && t.category === 'ammo') chips.push(`Дальность: ${escapeHtml(String(attrs.range))}`);
+                if (attrs.capacity !== undefined && attrs.capacity !== null && t.category === 'magazine') chips.push(`Ёмкость: ${escapeHtml(String(attrs.capacity))}`);
+                if (t.category === 'ammo') {
+                    const ammoVariants = attrs.ammo_variants?.length ? attrs.ammo_variants : (attrs.ammo_variant ? [attrs.ammo_variant] : []);
+                    if (ammoVariants.length) chips.push(`Вариации: ${escapeHtml(getAmmoVariantLabels(ammoVariants))}`);
+                }
+                if (attrs.isLoader && t.category === 'magazine') chips.push('Спидлоадер');
+                return `
+                    <button type="button" data-item-template-id="${t.id}" onclick="selectInventoryTemplate(${t.id})" style="text-align:left; width:100%; border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:10px; background: rgba(255,255,255,0.03); color:inherit; cursor:pointer;">
+                        <div style="display:flex; justify-content:space-between; gap:8px;">
+                            <div style="font-weight:600;">${escapeHtml(t.name)}</div>
+                            <div style="opacity:0.55; font-size:12px;">ID ${t.id}</div>
+                        </div>
+                        <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:6px;">
+                            ${chips.map(chip => `<span style="font-size:11px; padding:2px 6px; border-radius:999px; background: rgba(255,255,255,0.08);">${chip}</span>`).join('')}
+                        </div>
+                    </button>`;
+            }).join('')}
+        </div>`;
+
+    const order = Object.keys(grouped).sort((a, b) => compareByFixedOrder(a, b, ITEM_CATEGORY_ORDER));
     return order.map(group => {
-        const items = grouped[group];
+        const items = grouped[group].sort(compareTemplatesBySourceOrder);
+        let contents = renderCards(items);
+        if (group === 'Расходники') {
+            const sections = {};
+            items.forEach((template) => {
+                const rawSection = String(template.attributes?.section || template.subcategory || 'Прочее').trim();
+                const section = rawSection === 'fire_source' ? 'Прочее' : rawSection;
+                if (!sections[section]) sections[section] = [];
+                sections[section].push(template);
+            });
+            contents = Object.keys(sections)
+                .sort((a, b) => compareByFixedOrder(a, b, CONSUMABLE_SECTION_ORDER))
+                .map(section => `
+                    <details ${normalizedQuery ? 'open' : ''} style="border-left:2px solid rgba(174,165,120,.45); padding:6px 8px; margin-top:8px; background:rgba(255,255,255,.025);">
+                        <summary style="cursor:pointer; font-weight:600; display:flex; justify-content:space-between; gap:10px;">
+                            <span>${escapeHtml(section)}</span><span style="opacity:.6; font-weight:400;">${sections[section].length}</span>
+                        </summary>
+                        ${renderCards(sections[section].sort(compareTemplatesBySourceOrder))}
+                    </details>`).join('');
+        }
         return `
-            <details style="border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:8px 10px; background: rgba(0,0,0,0.12); margin-bottom:8px;">
+            <details ${normalizedQuery ? 'open' : ''} style="border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:8px 10px; background: rgba(0,0,0,0.12); margin-bottom:8px;">
                 <summary style="cursor:pointer; font-weight:700; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:12px;">
                     <span>${escapeHtml(group)}</span>
                     <span style="opacity:0.65; font-weight:400;">${items.length}</span>
                 </summary>
-                <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:8px; margin-top:10px;">
-                    ${items.map(t => {
-                        const attrs = t.attributes || {};
-                        const chips = [];
-                        if (attrs.caliber) chips.push(`Калибр: ${escapeHtml(String(attrs.caliber))}`);
-                        if (attrs.damage !== undefined && attrs.damage !== null && t.category === 'ammo') chips.push(`Урон: ${escapeHtml(String(attrs.damage))}`);
-                        if (attrs.penetration !== undefined && attrs.penetration !== null && t.category === 'ammo') chips.push(`Пробитие: ${escapeHtml(formatAmmoPenetration(attrs.penetration))}`);
-                        if (attrs.range !== undefined && attrs.range !== null && t.category === 'ammo') chips.push(`Дальность: ${escapeHtml(String(attrs.range))}`);
-                        if (attrs.capacity !== undefined && attrs.capacity !== null && t.category === 'magazine') chips.push(`Ёмкость: ${escapeHtml(String(attrs.capacity))}`);
-                        if (t.category === 'ammo') {
-                            const ammoVariants = attrs.ammo_variants?.length ? attrs.ammo_variants : (attrs.ammo_variant ? [attrs.ammo_variant] : []);
-                            if (ammoVariants.length) {
-                                chips.push(`Вариации: ${escapeHtml(getAmmoVariantLabels(ammoVariants))}`);
-                            }
-                        }
-                        if (attrs.isLoader && t.category === 'magazine') chips.push('Спидлоадер');
-                        return `
-                            <button type="button" onclick="selectInventoryTemplate(${t.id})" style="text-align:left; width:100%; border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:10px; background: rgba(255,255,255,0.03); color:inherit; cursor:pointer;">
-                                <div style="display:flex; justify-content:space-between; gap:8px;">
-                                    <div style="font-weight:600;">${escapeHtml(t.name)}</div>
-                                    <div style="opacity:0.55; font-size:12px;">ID ${t.id}</div>
-                                </div>
-                                <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:6px;">
-                                    ${chips.map(chip => `<span style="font-size:11px; padding:2px 6px; border-radius:999px; background: rgba(255,255,255,0.08);">${chip}</span>`).join('')}
-                                </div>
-                            </button>`;
-                    }).join('')}
-                </div>
+                ${contents}
             </details>`;
     }).join('');
 }
@@ -11416,7 +12098,7 @@ window.openInventoryTemplatePicker = async function(target = 'pockets', options 
             <div class="modal-content" style="max-width: 980px; width: 92vw; max-height: 85vh; overflow-y:auto;">
                 <span class="close" onclick="closeInventoryTemplatePicker()">&times;</span>
                 <h3 class="inventory-template-picker-title">Добавить предмет в инвентарь</h3>
-                <div class="form-group">
+                <div class="form-group" style="position: sticky; top: 0; z-index: 3; padding-top: 8px; padding-bottom: 8px; background: linear-gradient(180deg, rgba(0,0,0,0.96), rgba(0,0,0,0.86)); backdrop-filter: blur(6px);">
                     <label>Поиск</label>
                     <input type="text" id="inventory-template-picker-search" class="form-control" placeholder="Название, калибр, категория...">
                 </div>
@@ -11987,6 +12669,7 @@ function renderBackpackNew(items, groupedByCategory, allTemplates) {
 
 function renderBackpackItem(item, index, parentPath, parentContainer, allTemplates) {
     const itemDiv = document.createElement('div');
+    if (item.templateId) itemDiv.dataset.itemTemplateId = String(item.templateId);
     itemDiv.draggable = true;
     itemDiv.style.marginBottom = '5px';
     itemDiv.style.padding = '5px';
@@ -12129,12 +12812,46 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     volumeInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'volume', e.target.value);
 
     // --- Количество ---
+    const qtyCell = document.createElement('div');
+    qtyCell.style.display = 'flex';
+    qtyCell.style.alignItems = 'center';
+    qtyCell.style.gap = '4px';
+
+    const qtyDownBtn = document.createElement('button');
+    qtyDownBtn.type = 'button';
+    qtyDownBtn.className = 'btn btn-sm btn-secondary';
+    qtyDownBtn.textContent = '−';
+    qtyDownBtn.title = 'Уменьшить количество';
+    qtyDownBtn.style.width = '28px';
+    qtyDownBtn.style.height = '28px';
+    qtyDownBtn.style.padding = '0';
+    qtyDownBtn.style.lineHeight = '1';
+    qtyDownBtn.onclick = (e) => {
+        e.stopPropagation();
+        window.adjustBackpackItemQuantityAtPath(itemPath.join(','), -1);
+    };
+
     const qtyInput = document.createElement('input');
     qtyInput.type = 'number';
     qtyInput.className = 'form-control number-input';
+    qtyInput.style.minWidth = '54px';
     qtyInput.value = item.quantity || 1;
     qtyInput.setAttribute('data-field', 'quantity');
     qtyInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'quantity', e.target.value);
+
+    const qtyUpBtn = document.createElement('button');
+    qtyUpBtn.type = 'button';
+    qtyUpBtn.className = 'btn btn-sm btn-secondary';
+    qtyUpBtn.textContent = '+';
+    qtyUpBtn.title = 'Увеличить количество';
+    qtyUpBtn.style.width = '28px';
+    qtyUpBtn.style.height = '28px';
+    qtyUpBtn.style.padding = '0';
+    qtyUpBtn.style.lineHeight = '1';
+    qtyUpBtn.onclick = (e) => {
+        e.stopPropagation();
+        window.adjustBackpackItemQuantityAtPath(itemPath.join(','), 1);
+    };
 
     // Отключаем временно draggable у родителя при взаимодействии с инпутами (чтобы не мешать редактированию)
     const disableDragForInput = (input) => {
@@ -12279,7 +12996,8 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
 
     row.appendChild(weightInput);
     row.appendChild(volumeInput);
-    row.appendChild(qtyInput);
+    qtyCell.append(qtyDownBtn, qtyInput, qtyUpBtn);
+    row.appendChild(qtyCell);
     row.appendChild(actionsDiv);
     itemDiv.appendChild(row);
 
@@ -12772,7 +13490,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
             socket.emit('join_character', { token: localStorage.getItem('access_token'), character_id: characterId });
             socket.off('character_data_updated');
             socket.on('character_data_updated', (data) => {
-                if (data.character_id === currentCharacterId && data.updated_by !== parseInt(localStorage.getItem('user_id'))) {
+                if (data.character_id === currentCharacterId) {
                     currentCharacterData = data.updates.data || currentCharacterData;
                     normalizeCharacterEffects(currentCharacterData);
 
@@ -13460,3 +14178,68 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
 }
 
 window.getAllItemTemplates = getAllItemTemplates;
+
+window.addEventListener('combat-state-updated', async (event) => {
+    const current = event.detail?.current_character;
+    const actionId = current?.completed_pending_action_id;
+    const pendingReload = actionId ? pendingReloadActions.get(actionId) : null;
+    if (pendingReload && pendingReload.characterId === currentCharacterId) {
+        pendingReloadActions.delete(actionId);
+        let item = getInventoryValueByPath(currentCharacterData, pendingReload.itemPath);
+        let itemPath = pendingReload.itemPath;
+        if (!item || (pendingReload.itemId != null && item.id !== pendingReload.itemId)) {
+            const found = collectInventoryEntries(
+                currentCharacterData,
+                entry => pendingReload.itemId != null && entry?.id === pendingReload.itemId,
+            )[0];
+            item = found?.item;
+            itemPath = found?.path;
+        }
+        if (!item || !itemPath) {
+            showNotification('Перезарядка оплачена, но выбранный магазин больше не найден');
+            return;
+        }
+        try {
+            await Server.performLocationCombatAction(
+                window.currentLobbyId,
+                window.currentLocationId,
+                {
+                    ...pendingReload.payload,
+                    pending_action_id: undefined,
+                    resume_pending_action_id: actionId,
+                },
+            );
+            await confirmEquipMagazineDirect(
+                pendingReload.weaponIndex,
+                { item, path: itemPath },
+                { skipCombatPayment: true },
+            );
+        } catch (error) {
+            showNotification(error.message || 'Не удалось завершить перезарядку', 'system');
+        }
+        return;
+    }
+    const pending = actionId ? pendingConsumableActions.get(actionId) : null;
+    if (!pending || pending.characterId !== currentCharacterId) return;
+    pendingConsumableActions.delete(actionId);
+
+    let item = getInventoryValueByPath(currentCharacterData, pending.itemPath);
+    let itemPath = pending.itemPath;
+    if (!item || (pending.itemId != null && item.id !== pending.itemId)) {
+        const found = collectInventoryEntries(
+            currentCharacterData,
+            entry => pending.itemId != null && entry?.id === pending.itemId
+        )[0];
+        item = found?.item;
+        itemPath = found?.path;
+    }
+    if (!item || !itemPath) {
+        showNotification('Длительное действие завершено, но предмет больше не найден в инвентаре');
+        return;
+    }
+    await useConsumable(item, itemPath, {
+        ...pending.options,
+        preselectedApplication: pending.application,
+        skipCombatPayment: true,
+    });
+});

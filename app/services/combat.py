@@ -9,6 +9,7 @@ from app.models import Location, LocationCharacter, LocationCombatState, LobbyPa
 from app.models.templates import ItemTemplate
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 from app.services.effects import advance_timed_effects, apply_effect_to_health, apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
+from app.services.health import BASE_ORGAN_MAXIMUMS, apply_health_maximums
 from sqlalchemy.orm.attributes import flag_modified
 
 
@@ -169,7 +170,21 @@ class CombatService:
                 or CombatService._coerce_float(effect.get('remaining'), 0) > 0
             )
         }
-        if 'death' in active_types:
+        zones = health.get('zones') if isinstance(health.get('zones'), dict) else {}
+        head_health = CombatService._coerce_float(
+            (zones.get('head') or {}).get('current'), 1
+        )
+        chest_health = CombatService._coerce_float(
+            (zones.get('chest') or {}).get('current'), 1
+        )
+        organs = health.get('organs') if isinstance(health.get('organs'), dict) else {}
+        brain_health = CombatService._coerce_float(
+            (organs.get('brain') or {}).get('current'), 1
+        )
+        skull_health = CombatService._coerce_float(
+            (organs.get('skull') or {}).get('current'), 1
+        )
+        if 'death' in active_types or brain_health <= 0 or skull_health <= 0:
             return {'state': 'dead', 'label': 'Мёртв', 'can_act': False, 'can_recover': False}
 
         temperature = CombatService._coerce_float(health.get('temperature'), 36)
@@ -178,6 +193,8 @@ class CombatService:
         critical = bool(
             active_types.intersection({'critical_condition', 'unconsciousness', 'sleep'})
             or current_health <= 0
+            or head_health <= 0
+            or chest_health <= 0
             or blood_stage == 'critical'
             or temperature <= 29
             or temperature >= 41
@@ -267,20 +284,35 @@ class CombatService:
     def apply_cover_damage(obj, damage, damage_type):
         profile = CombatService._cover_profile(obj)
         damage = max(0, CombatService._coerce_int(damage, 0))
+        normalized_damage_type = str(damage_type or '').strip().lower()
+        destructive = normalized_damage_type in {
+            'explosive', 'blast', 'взрывной', 'взрыв',
+            'crushing', 'blunt', 'дробящий', 'дробление',
+        }
         remaining_hp = max(0, profile['hp'] - damage)
+        remaining_protection = min(
+            profile['physical_protection'],
+            round(profile['base_physical_protection'] * remaining_hp / profile['max_hp']),
+        )
         properties = dict(obj.properties or {})
         properties.update({
             'cover_class': profile['class'],
             'cover_max_hp': profile['max_hp'],
             'cover_hp': remaining_hp,
             'cover_base_physical_protection': profile['base_physical_protection'],
-            'cover_physical_protection': round(
-                profile['base_physical_protection'] * remaining_hp / profile['max_hp']
-            ),
+            'cover_physical_protection': remaining_protection,
         })
         obj.properties = properties
         flag_modified(obj, 'properties')
-        destroyed = str(damage_type or '').lower() in {'explosive', 'blast', 'взрывной'} and remaining_hp <= 0
+        destroyed = destructive and remaining_hp <= 0
+        result = {
+            'destroyed': destroyed,
+            'class': profile['class'], 'label': profile['label'],
+            'hp': remaining_hp, 'max_hp': profile['max_hp'],
+            'base_physical_protection': profile['base_physical_protection'],
+            'physical_protection': remaining_protection,
+            'mesh_hit_chance': profile['mesh_hit_chance'],
+        }
         if destroyed:
             LocationCharacter.query.filter_by(cover_object_id=obj.id).update({
                 'cover_object_id': None,
@@ -288,7 +320,69 @@ class CombatService:
                 'braced_weapon_index': None,
             })
             db.session.delete(obj)
-        return {'destroyed': destroyed, **CombatService._cover_profile(obj)}
+        return result
+
+    @staticmethod
+    def _characters_behind_cover(location_id, shooter, cover):
+        candidates = []
+        for target in LocationCharacter.query.filter_by(location_id=location_id).all():
+            if target.id == shooter.id:
+                continue
+            continuation_distance = CombatService._cover_continuation_distance(
+                shooter, cover, target
+            )
+            if continuation_distance is None:
+                continue
+            candidates.append((continuation_distance, target))
+        return [
+            target
+            for _, target in sorted(candidates, key=lambda item: item[0])
+        ]
+
+    @staticmethod
+    def _cover_continuation_distance(shooter, cover, target, max_tiles=3):
+        """Return distance behind cover only for cells on the aimed ray."""
+        start_x = float(shooter.pos_x) + 0.5
+        start_y = float(shooter.pos_y) + 0.5
+        cover_x = float(cover.tile_x) + 0.5
+        cover_y = float(cover.tile_y) + 0.5
+        target_x = float(target.pos_x) + 0.5
+        target_y = float(target.pos_y) + 0.5
+
+        ray_x = cover_x - start_x
+        ray_y = cover_y - start_y
+        scale = max(abs(ray_x), abs(ray_y))
+        if scale <= 1e-9:
+            return None
+        direction_x = ray_x / scale
+        direction_y = ray_y / scale
+        direction_length_sq = direction_x ** 2 + direction_y ** 2
+
+        target_offset_x = target_x - cover_x
+        target_offset_y = target_y - cover_y
+        distance_along_ray = (
+            target_offset_x * direction_x + target_offset_y * direction_y
+        ) / direction_length_sq
+        if distance_along_ray <= 0:
+            return None
+
+        perpendicular_distance = abs(
+            target_offset_x * direction_y - target_offset_y * direction_x
+        ) / math.sqrt(direction_length_sq)
+        if perpendicular_distance > 0.5:
+            return None
+
+        width, depth = CombatService._object_dimensions(cover)
+        exit_distances = []
+        if abs(direction_x) > 1e-9:
+            exit_distances.append((width / 2) / abs(direction_x))
+        if abs(direction_y) > 1e-9:
+            exit_distances.append((depth / 2) / abs(direction_y))
+        cover_exit = min(exit_distances) if exit_distances else 0
+        distance_behind_cover = distance_along_ray - cover_exit
+        if distance_behind_cover <= 0 or distance_behind_cover > max_tiles:
+            return None
+        return distance_behind_cover
 
     @staticmethod
     def _line_object_entry(shooter, target, obj):
@@ -368,15 +462,9 @@ class CombatService:
                             'distance_factor': round(entry, 4),
                             **CombatService._cover_profile(obj),
                         }
-        blocked_count = len(blocked)
-        if blocked_count == 0:
-            grade, accuracy_penalty, disadvantage, targetable = 'none', 0, False, True
-        elif blocked_count <= 3:
-            grade, accuracy_penalty, disadvantage, targetable = 'half', 2, False, True
-        elif blocked_count < len(zone_heights):
-            grade, accuracy_penalty, disadvantage, targetable = 'three_quarters', 2, True, True
-        else:
-            grade, accuracy_penalty, disadvantage, targetable = 'full', 0, False, False
+        grade, accuracy_penalty, disadvantage, targetable = (
+            CombatService._cover_grade(len(blocked), len(zone_heights))
+        )
         return {
             'grade': grade,
             'blocked_zones': list(blocked),
@@ -385,6 +473,20 @@ class CombatService:
             'disadvantage': disadvantage,
             'targetable': targetable,
         }
+
+    @staticmethod
+    def _cover_grade(blocked_count, total_zones=7):
+        blocked_count = max(0, CombatService._coerce_int(blocked_count, 0))
+        total_zones = max(1, CombatService._coerce_int(total_zones, 7))
+        if blocked_count == 0:
+            grade, accuracy_penalty, disadvantage, targetable = 'none', 0, False, True
+        elif blocked_count <= 3:
+            grade, accuracy_penalty, disadvantage, targetable = 'half', 2, False, True
+        elif blocked_count < total_zones:
+            grade, accuracy_penalty, disadvantage, targetable = 'three_quarters', 2, True, True
+        else:
+            grade, accuracy_penalty, disadvantage, targetable = 'full', 0, False, False
+        return grade, accuracy_penalty, disadvantage, targetable
 
     @staticmethod
     def _persistent_weapon_index(loc_char):
@@ -707,6 +809,17 @@ class CombatService:
         return profile
 
     @staticmethod
+    def _strenuous_movement_is_blocked(character, movement_mode, current_round):
+        if movement_mode not in {'run', 'sprint'}:
+            return False
+        # Breathlessness starts after selecting the mode, but must not interrupt
+        # further movement segments made with that mode in the same turn.
+        if character.movement_mode_this_turn == movement_mode:
+            return False
+        blocked_until = character.strenuous_movement_blocked_until_round or 0
+        return blocked_until > 0 and current_round <= blocked_until
+
+    @staticmethod
     def _movement_route_cost(path, movement_mode, posture='standing'):
         mode = MOVEMENT_MODES.get(movement_mode)
         if not mode:
@@ -842,6 +955,30 @@ class CombatService:
         weight_penalty = weight_details['penalty']
         temporary_penalty = CombatService._consumable_stat_bonus(data, 'movement_points')
         limb_penalty = CombatService._disabled_limb_penalties(data)['movement']
+        health = data.get('health', {}) if isinstance(data, dict) else {}
+        effects = normalize_effect_list(health.get('effects') or []) if isinstance(health, dict) else []
+        suppressed_fracture_areas = {
+            str(effect.get('area') or '').strip().lower()
+            for effect in effects
+            if effect.get('suppress_fracture')
+            and effect.get('active', True)
+            and (effect.get('remaining') is None or CombatService._coerce_float(effect.get('remaining'), 0) > 0)
+        }
+        fracture_penalty = 0
+        for effect in effects:
+            if not effect.get('active', True):
+                continue
+            if effect.get('remaining') is not None and CombatService._coerce_float(effect.get('remaining'), 0) <= 0:
+                continue
+            effect_type = str(effect.get('type') or '').strip()
+            area = str(effect.get('area') or '').strip().lower()
+            if area in suppressed_fracture_areas:
+                continue
+            if effect_type in {'fracture', 'fracture_fixed', 'fracture_unfixed'} and any(token in area for token in ('leg', 'foot')):
+                fracture_penalty += 2 if effect_type == 'fracture_fixed' else 3
+            elif effect_type == 'fracture_sequela' and any(token in area for token in ('leg', 'foot')):
+                fracture_penalty += 1
+        limb_penalty += fracture_penalty
         exoskeleton = CombatService._exoskeleton_power_profile(data)
         if exoskeleton['is_exoskeleton']:
             if exoskeleton['powered']:
@@ -1073,7 +1210,15 @@ class CombatService:
                 penalties.get('physical' if skill_path.startswith('skills.physical.') else 'other'), 0
             )
 
-        for effect in normalize_effect_list(health.get('effects') or []):
+        active_effects = normalize_effect_list(health.get('effects') or [])
+        suppressed_fracture_areas = {
+            str(effect.get('area') or '').strip().lower()
+            for effect in active_effects
+            if effect.get('suppress_fracture')
+            and effect.get('active', True)
+            and (effect.get('remaining') is None or CombatService._coerce_float(effect.get('remaining'), 0) > 0)
+        }
+        for effect in active_effects:
             if not effect.get('active', True):
                 continue
             if effect.get('remaining') is not None and CombatService._coerce_float(effect.get('remaining'), 0) <= 0:
@@ -1089,6 +1234,15 @@ class CombatService:
             )
             if effect.get('type') == 'stimulant_crash':
                 modifier -= CombatService._coerce_int(effect.get('phase_penalty', effect.get('value', 0)), 0)
+            if skill_path.startswith('skills.physical.'):
+                effect_type = str(effect.get('type') or '').strip()
+                area = str(effect.get('area') or '').strip().lower()
+                if area in suppressed_fracture_areas:
+                    continue
+                if effect_type in {'fracture', 'fracture_fixed', 'fracture_unfixed'} and any(token in area for token in ('arm', 'hand')):
+                    modifier -= 1 if effect_type == 'fracture_fixed' else 2
+                elif effect_type == 'fracture_sequela' and any(token in area for token in ('arm', 'hand')):
+                    modifier -= 1
 
         if include_psy and skill_path == 'skills.physical.will':
             psy_state = CombatService._coerce_int(health.get('psyState', health.get('psy_state')), 0)
@@ -1113,15 +1267,39 @@ class CombatService:
         left_leg = CombatService._zone_current_health(character_data, 'leftLeg')
         right_leg = CombatService._zone_current_health(character_data, 'rightLeg')
         abdomen = CombatService._zone_current_health(character_data, 'abdomen')
-        disabled_arms = sum(value is not None and value <= 0 for value in (left_arm, right_arm))
-        disabled_legs = sum(value is not None and value <= 0 for value in (left_leg, right_leg))
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        effects = normalize_effect_list(health.get('effects') or []) if isinstance(health, dict) else []
+        catastrophic_by_area = {
+            str(effect.get('area') or ''): str(effect.get('type') or '')
+            for effect in effects
+            if effect.get('active', True) and effect.get('type') in {'mangled_limb', 'amputation'}
+        }
+        arm_values = {'leftArm': left_arm, 'rightArm': right_arm}
+        leg_values = {'leftLeg': left_leg, 'rightLeg': right_leg}
+        disabled_arms = sum(
+            value is not None and value <= 0 or area in catastrophic_by_area
+            for area, value in arm_values.items()
+        )
+        leg_penalties = []
+        for area, value in leg_values.items():
+            injury_type = catastrophic_by_area.get(area)
+            if injury_type == 'amputation':
+                leg_penalties.append(6)
+            elif injury_type == 'mangled_limb':
+                leg_penalties.append(5)
+            elif value is not None and value <= 0:
+                leg_penalties.append(3)
+            else:
+                leg_penalties.append(0)
+        disabled_legs = sum(penalty > 0 for penalty in leg_penalties)
         return {
             'all': 3 if abdomen is not None and abdomen <= 0 else 0,
             'shooting': 3 * disabled_arms,
             'melee': 3 * disabled_arms,
-            'agility': 3 * disabled_legs,
-            'movement': 3 * disabled_legs,
+            'agility': sum(leg_penalties),
+            'movement': sum(leg_penalties),
             'sprint_blocked': disabled_legs > 0,
+            'unusable_arms': disabled_arms,
         }
 
     @staticmethod
@@ -2030,6 +2208,22 @@ class CombatService:
             'head': {3: 3, 15: 1},
             'limb': {2: 2, 5: 1, 9: 3, 12: 1, 14: 1, 15: 2, 17: 3, 19: 2},
         }
+        organs = {
+            'chest': {
+                1: 'heart', 3: 'rightLung', 4: 'leftLung', 6: 'rightLung',
+                7: 'leftLung', 12: 'leftLung', 14: 'rightLung',
+                16: 'rightLung', 17: 'leftLung', 20: 'spine',
+            },
+            'abdomen': {
+                1: 'kidney', 6: 'stomach', 10: 'liver',
+                17: 'spine', 20: 'kidney',
+            },
+            'head': {
+                1: 'jaw', 4: 'rightEye', 6: 'nose', 8: 'rightEar',
+                13: 'jaw', 14: 'leftEye', 16: 'nose', 17: 'jaw',
+                20: 'leftEar',
+            },
+        }
         group = 'limb' if zone in {'left_arm', 'right_arm', 'left_leg', 'right_leg'} else zone
         return {
             'bleeding': bleeding.get(group, {}).get(roll),
@@ -2040,7 +2234,91 @@ class CombatService:
                 or (zone == 'abdomen' and roll == 8)
                 or (zone == 'head' and roll in {10, 18})
             ),
+            'organ': organs.get(group, {}).get(roll),
+            'fall_or_drop': group == 'limb' and roll in {1, 13},
         }
+
+    @staticmethod
+    def _apply_organ_damage(health, organ_key, damage, area):
+        if organ_key == 'kidney':
+            organ_key = random.choice(('rightKidney', 'leftKidney'))
+        maximum = BASE_ORGAN_MAXIMUMS.get(organ_key)
+        if not maximum:
+            return None
+        organs = health.setdefault('organs', {})
+        organ = organs.setdefault(organ_key, {'current': maximum, 'max': maximum})
+        organ['max'] = maximum
+        before = max(0, CombatService._coerce_float(organ.get('current'), maximum))
+        organ['current'] = max(0, before - max(0, damage))
+        result = {
+            'organ': organ_key, 'current_before': before,
+            'current': organ['current'], 'max': maximum,
+            'disabled': before > 0 and organ['current'] <= 0,
+        }
+        if not result['disabled']:
+            return result
+
+        apply_effect_to_health(health, {
+            'type': 'organ_loss', 'name': 'Повреждённый орган',
+            'area': organ_key, 'source': 'organ_damage', 'tick': 'manual',
+        })
+        pain = {
+            'heart': 10, 'rightLung': 5, 'leftLung': 5,
+            'rightKidney': 8, 'leftKidney': 8, 'stomach': 8,
+            'liver': 8, 'rightEye': 2, 'leftEye': 2,
+            'rightEar': 2, 'leftEar': 2, 'nose': 2, 'jaw': 4, 'spine': 10,
+        }.get(organ_key, 0)
+        if pain:
+            apply_effect_to_health(health, {
+                'type': 'pain', 'value': pain,
+                'source': 'disabled_organ', 'area': organ_key,
+            })
+        bleeding = {
+            'rightLung': 'severe', 'leftLung': 'severe',
+            'rightKidney': 'extreme', 'leftKidney': 'extreme',
+            'stomach': 'severe',
+        }.get(organ_key)
+        if bleeding:
+            apply_effect_to_health(health, {
+                'type': f'bleeding_internal_{bleeding}',
+                'source': 'disabled_organ', 'area': area,
+            })
+            result['bleeding'] = {'kind': 'internal', 'stage': bleeding, 'area': area}
+
+        both_lungs = all(
+            CombatService._coerce_float((organs.get(key) or {}).get('current'), BASE_ORGAN_MAXIMUMS[key]) <= 0
+            for key in ('rightLung', 'leftLung')
+        )
+        both_kidneys = all(
+            CombatService._coerce_float((organs.get(key) or {}).get('current'), BASE_ORGAN_MAXIMUMS[key]) <= 0
+            for key in ('rightKidney', 'leftKidney')
+        )
+        if organ_key == 'brain':
+            apply_effect_to_health(health, {
+                'type': 'death', 'name': 'Смерть',
+                'source': 'brain_destroyed', 'tick': 'manual',
+            })
+            result['death'] = True
+        else:
+            death_seconds = (
+                60 if organ_key == 'heart' or both_lungs
+                else 3600 if organ_key in {'spine', 'liver'} or both_kidneys
+                else None
+            )
+            if death_seconds:
+                apply_effect_to_health(health, {
+                    'type': 'organ_failure',
+                    'name': 'Смертельное повреждение органа',
+                    'area': organ_key, 'source': 'organ_damage',
+                    'tick': 'time_elapsed',
+                    'remaining': 1,
+                    'time_unit': 'minute' if death_seconds == 60 else 'hour',
+                    'remaining_seconds': death_seconds,
+                    'duration_seconds': death_seconds,
+                    'death_on_expire': True,
+                })
+                result['death_in_seconds'] = death_seconds
+        return result
 
     @staticmethod
     def _damage_pain_requirement(accumulated_damage, single_hit_damage):
@@ -2065,7 +2343,7 @@ class CombatService:
     ):
         character = target.character
         data = dict(character.data or {})
-        health = data.setdefault('health', {})
+        health = apply_health_maximums(data)
         maximum = CombatService._coerce_float(health.get('max'), 700)
         health['max'] = maximum
         current = CombatService._coerce_float(health.get('current'), maximum)
@@ -2083,6 +2361,95 @@ class CombatService:
         zone_data['max'] = zone_max
         zone_current_before = CombatService._coerce_float(zone_data.get('current'), zone_max)
         zone_data['current'] = max(0, zone_current_before - damage)
+        fatal_vital_hit = bool(
+            zone_current_before <= 0 and zone_key in {'head', 'chest'}
+        )
+        if fatal_vital_hit:
+            apply_effect_to_health(health, {
+                'type': 'death',
+                'name': 'Смерть',
+                'area': zone_key,
+                'source': 'hit_disabled_vital_zone',
+                'tick': 'manual',
+            })
+        previous_destruction = CombatService._coerce_float(
+            zone_data.get('destructionDamage'),
+            max(0, zone_max - min(zone_max, zone_current_before)),
+        )
+        zone_data['destructionDamage'] = max(0, previous_destruction + max(0, damage))
+        active_effects = normalize_effect_list(health.get('effects') or [])
+        minimum_limb_health = max([
+            CombatService._coerce_float(effect.get('minimum_limb_health'), 0)
+            for effect in active_effects
+            if effect.get('type') == 'temporary_limb_restoration'
+            and str(effect.get('area') or '') == str(zone_key)
+            and effect.get('active', True)
+            and (effect.get('remaining') is None or CombatService._coerce_float(effect.get('remaining'), 0) > 0)
+        ] or [0])
+        if minimum_limb_health > 0:
+            zone_data['current'] = max(minimum_limb_health, zone_data['current'])
+        catastrophic_limb_injury = None
+        limb_zones = {'leftArm', 'rightArm', 'leftLeg', 'rightLeg'}
+        if zone_key in limb_zones and zone_max > 0 and minimum_limb_health <= 0:
+            destruction_ratio = zone_data['destructionDamage'] / zone_max
+            active_area_effects = [
+                effect for effect in normalize_effect_list(health.get('effects') or [])
+                if effect.get('active', True) and str(effect.get('area') or '') == str(zone_key)
+            ]
+            has_amputation = any(effect.get('type') == 'amputation' for effect in active_area_effects)
+            has_mangled_limb = any(effect.get('type') == 'mangled_limb' for effect in active_area_effects)
+            if destruction_ratio >= 5 and not has_amputation:
+                loss_roll = random.randint(1, 6)
+                loss_extent = (
+                    'entire_limb' if loss_roll <= 2
+                    else 'elbow_or_knee' if loss_roll <= 4
+                    else 'hand_or_foot'
+                )
+                health['effects'] = [
+                    effect for effect in normalize_effect_list(health.get('effects') or [])
+                    if not (
+                        effect.get('type') == 'mangled_limb'
+                        and str(effect.get('area') or '') == str(zone_key)
+                    )
+                ]
+                apply_effect_to_health(health, {
+                    'type': 'amputation',
+                    'name': 'Утраченная конечность',
+                    'area': zone_key,
+                    'source': 'catastrophic_limb_damage',
+                    'tick': 'manual',
+                    'loss_roll': loss_roll,
+                    'loss_extent': loss_extent,
+                    'treatment_window_seconds': 3600,
+                })
+                apply_effect_to_health(health, {
+                    'type': 'shock', 'area': zone_key,
+                    'source': 'catastrophic_limb_damage',
+                })
+                catastrophic_limb_injury = {
+                    'type': 'amputation',
+                    'area': zone_key,
+                    'damage_ratio': destruction_ratio,
+                    'loss_roll': loss_roll,
+                    'loss_extent': loss_extent,
+                }
+            elif destruction_ratio >= 3 and not has_mangled_limb and not has_amputation:
+                apply_effect_to_health(health, {
+                    'type': 'mangled_limb',
+                    'name': 'Искореженная конечность',
+                    'area': zone_key,
+                    'source': 'catastrophic_limb_damage',
+                    'tick': 'manual',
+                })
+                apply_effect_to_health(health, {
+                    'type': 'shock', 'area': zone_key,
+                    'source': 'catastrophic_limb_damage',
+                })
+                catastrophic_limb_injury = {
+                    'type': 'mangled_limb',
+                    'area': zone_key,
+                    'damage_ratio': destruction_ratio,
+                }
         meta = health.setdefault('combatMeta', {})
         current_round = max(0, CombatService._coerce_int(round_number, 0))
         if damage > 0:
@@ -2202,6 +2569,8 @@ class CombatService:
                     ),
                     'pain': trauma_rules['pain'],
                     'shock': bool(trauma_rules['shock']),
+                    'organ': trauma_rules['organ'],
+                    'fall_or_drop': trauma_rules['fall_or_drop'],
                 }
                 traumas.append(trauma)
                 effects = normalize_effect_list(health.get('effects') or [])
@@ -2232,8 +2601,16 @@ class CombatService:
                     apply_effect_to_health(health, {
                         'type': 'shock', 'area': zone_key, 'source': 'combat_attack'
                     })
+                if trauma_rules['organ']:
+                    organ_damage = CombatService._apply_organ_damage(
+                        health, trauma_rules['organ'], damage, zone_key
+                    )
+                    trauma['organ_damage'] = organ_damage
+                    if organ_damage and organ_damage.get('bleeding'):
+                        created_bleedings.append(organ_damage['bleeding'])
         sync_health_derived_statuses(health)
-        if CombatService._character_condition(data)['state'] == 'pain_shock':
+        resulting_condition = CombatService._character_condition(data)
+        if resulting_condition['state'] in {'pain_shock', 'critical', 'dead'}:
             target.posture = 'prone'
             target.cover_object_id = None
             target.weapon_braced = False
@@ -2247,6 +2624,8 @@ class CombatService:
         health['_attackOutcome'] = {
             'bleedings': created_bleedings,
             'additional_traumas': traumas,
+            'catastrophic_limb_injury': catastrophic_limb_injury,
+            'death': fatal_vital_hit,
         }
         return health
 
@@ -2263,6 +2642,7 @@ class CombatService:
         profile_override=None,
         profile_adjusted=False,
         ignore_live_shield=False,
+        ignore_cover=False,
     ):
         attacker_data = attacker.character.data if attacker.character and isinstance(attacker.character.data, dict) else {}
         target_data = target.character.data if target.character and isinstance(target.character.data, dict) else {}
@@ -2388,8 +2768,74 @@ class CombatService:
                         'live_shield_reason': 'aimed_head_miss',
                         'live_shield_result': shield_result,
                     })
+                cover_analysis = attack_details.get('cover') or {}
+                if (
+                    attack_details.get('fire_mode') == 'unaimed'
+                    and cover_analysis.get('blind_fire')
+                    and not ignore_cover
+                ):
+                    cover_zones = cover_analysis.get('zones') or {}
+                    cover_details = next(iter(cover_zones.values()), None)
+                    cover = (
+                        db.session.get(LocationObject, cover_details.get('object_id'))
+                        if isinstance(cover_details, dict)
+                        else None
+                    )
+                    if cover:
+                        cover_profile = CombatService._cover_profile(cover)
+                        incoming_penetration = CombatService._coerce_float(
+                            profile.get('armor_piercing'), 0
+                        )
+                        cover_damage = CombatService.apply_cover_damage(
+                            cover,
+                            profile.get('damage'),
+                            profile.get('damage_type') or 'bullet',
+                        )
+                        result['automatic_cover_hit'] = True
+                        result['cover_hit'] = {
+                            'object_id': cover.id,
+                            'object_name': cover.name or cover.type,
+                            'protection': cover_profile['physical_protection'],
+                            'penetrated': (
+                                incoming_penetration
+                                >= cover_profile['physical_protection']
+                            ),
+                            'damage': cover_damage,
+                        }
                 return result
             zone = CombatService._random_hit_zone(random.randint(1, 20), aimed_zone)
+            cover_zone = (
+                ((attack_details.get('cover') or {}).get('zones') or {}).get(zone)
+                if not ignore_cover
+                else None
+            )
+            if cover_zone:
+                cover = db.session.get(LocationObject, cover_zone.get('object_id'))
+                cover_profile = CombatService._cover_profile(cover) if cover else None
+                if cover and cover_profile and random.randint(1, 100) <= cover_profile['mesh_hit_chance']:
+                    incoming_penetration = CombatService._coerce_float(profile.get('armor_piercing'), 0)
+                    cover_damage = CombatService.apply_cover_damage(
+                        cover,
+                        profile.get('damage'),
+                        profile.get('damage_type') or 'bullet',
+                    )
+                    penetrated = incoming_penetration >= cover_profile['physical_protection']
+                    result['cover_hit'] = {
+                        'object_id': cover.id,
+                        'object_name': cover.name or cover.type,
+                        'protection': cover_profile['physical_protection'],
+                        'penetrated': penetrated,
+                        'damage': cover_damage,
+                    }
+                    if not penetrated:
+                        result.update({
+                            'zone': zone, 'damage': 0, 'combined_damage': 0,
+                            'blocked_by_cover': True,
+                        })
+                        return result
+                    profile['armor_piercing'] = max(
+                        0, incoming_penetration - cover_profile['physical_protection']
+                    )
             live_shield_result = None
             if live_shield and zone != 'head':
                 live_shield_result = CombatService._resolve_attack(
@@ -2548,6 +2994,8 @@ class CombatService:
             'bleeding_check': bleeding_result,
             'bleedings': attack_outcome.get('bleedings') or [],
             'additional_traumas': attack_outcome.get('additional_traumas') or [],
+            'catastrophic_limb_injury': attack_outcome.get('catastrophic_limb_injury'),
+            'death': bool(attack_outcome.get('death')),
             'health': health.get('current'),
             'zone_health': (
                 health.get('zones') or {}
@@ -2562,6 +3010,81 @@ class CombatService:
                     final_damage + live_shield_result.get('damage', 0)
                 ),
             })
+        return result
+
+    @staticmethod
+    def _resolve_cover_attack(location_id, cover, attacker, attack_details):
+        attacker_data = attacker.character.data if attacker.character else {}
+        weapons = (attacker_data or {}).get('weapons') or []
+        weapon_index = CombatService._coerce_int(attack_details.get('weapon_index'), -1)
+        weapon = weapons[weapon_index] if 0 <= weapon_index < len(weapons) else {}
+        profile, _ = CombatService._ranged_damage_profile(weapon)
+        result = {
+            'roll': None, 'rolls': [], 'difficulty': None,
+            'hit': True, 'automatic_cover_hit': True,
+            'mode': attack_details.get('fire_mode'),
+            'target_object_id': cover.id,
+            'target_name': cover.name or cover.type,
+        }
+        cover_profile = CombatService._cover_profile(cover)
+        cover_damage = CombatService.apply_cover_damage(
+            cover, profile.get('damage'), profile.get('damage_type') or 'bullet'
+        )
+        penetration = CombatService._coerce_float(profile.get('armor_piercing'), 0)
+        penetrated = penetration >= cover_profile['physical_protection']
+        result.update({
+            'cover_hit': True,
+            'cover_penetrated': penetrated,
+            'cover_protection': cover_profile['physical_protection'],
+            'cover_damage': cover_damage,
+            'damage': 0,
+        })
+        if not penetrated:
+            return result
+        behind = CombatService._characters_behind_cover(location_id, attacker, cover)
+        if not behind:
+            return result
+        target = behind[0]
+        continued_profile = dict(profile)
+        continued_profile['armor_piercing'] = max(
+            0, penetration - cover_profile['physical_protection']
+        )
+        continued_details = dict(attack_details)
+        continued_details['target_character_id'] = target.character_id
+        continued_details['cover'] = None
+        target_distance = max(
+            abs(attacker.pos_x - target.pos_x), abs(attacker.pos_y - target.pos_y)
+        )
+        continued_details['target_distance'] = target_distance
+        continued_details['shooting_disadvantage'] = True
+        continued_difficulty = CombatService._coerce_int(
+            attack_details.get('continuation_hit_difficulty'),
+            12,
+        )
+        if getattr(target, 'movement_mode_this_turn', None) in {'run', 'sprint'}:
+            continued_difficulty += 2
+        weapon_range = CombatService._coerce_int(
+            attack_details.get('weapon_range'), 0
+        )
+        cover_distance = CombatService._coerce_int(
+            attack_details.get('target_distance'), 0
+        )
+        if weapon_range and target_distance > weapon_range >= cover_distance:
+            continued_difficulty += 2
+        continued_details['hit_difficulty'] = max(1, continued_difficulty)
+        target_result = CombatService._resolve_attack(
+            target, attacker, continued_details,
+            profile_override=continued_profile,
+            profile_adjusted=True,
+            ignore_cover=True,
+        )
+        result.update({
+            'target_behind_cover_id': target.character_id,
+            'target_behind_cover_name': getattr(target.character, 'name', None),
+            'target_behind_cover_result': target_result,
+            'damage': target_result.get('damage', 0),
+            'combined_damage': target_result.get('combined_damage', target_result.get('damage', 0)),
+        })
         return result
 
     @staticmethod
@@ -2648,6 +3171,61 @@ class CombatService:
             prefix = f"{index}. {target_name}: d20 {roll_text}, СЛ {difficulty}"
             if not hit_result.get('hit'):
                 lines.append(f"{prefix} — промах.")
+                cover_impact = hit_result.get('cover_hit')
+                if isinstance(cover_impact, dict):
+                    cover_state = cover_impact.get('damage') or {}
+                    protection_before = round(CombatService._coerce_float(
+                        cover_impact.get('protection'), 0
+                    ))
+                    protection_after = round(CombatService._coerce_float(
+                        cover_state.get('physical_protection'), protection_before
+                    ))
+                    lines.append(
+                        f"   Пуля попала в {cover_impact.get('object_name') or 'укрытие'}: "
+                        f"без проверки; "
+                        f"защита {protection_before}% → {protection_after}%, ОЗ "
+                        f"{cover_state.get('hp', '—')}/{cover_state.get('max_hp', '—')}."
+                    )
+                continue
+
+            if hit_result.get('cover_hit') is True:
+                cover_state = hit_result.get('cover_damage') or {}
+                protection_before = round(CombatService._coerce_float(
+                    hit_result.get('cover_protection'), 0
+                ))
+                protection_after = round(CombatService._coerce_float(
+                    cover_state.get('physical_protection'), protection_before
+                ))
+                cover_prefix = (
+                    f"{index}. {target_name}: без проверки"
+                    if hit_result.get('automatic_cover_hit')
+                    else prefix
+                )
+                lines.append(
+                    f"{cover_prefix} — попадание по укрытию; защита "
+                    f"{protection_before}% → {protection_after}%, ОЗ "
+                    f"{cover_state.get('hp', '—')}/{cover_state.get('max_hp', '—')}; "
+                    f"пробитие: {'да' if hit_result.get('cover_penetrated') else 'нет'}."
+                )
+                behind_result = hit_result.get('target_behind_cover_result')
+                if isinstance(behind_result, dict):
+                    if not behind_result.get('hit'):
+                        behind_rolls = behind_result.get('rolls') or [behind_result.get('roll')]
+                        behind_rolls = [roll for roll in behind_rolls if roll is not None]
+                        behind_roll_text = '/'.join(str(roll) for roll in behind_rolls) or '—'
+                        lines.append(
+                            f"   За укрытием: {hit_result.get('target_behind_cover_name') or 'цель'}, "
+                            f"d20 {behind_roll_text}, СЛ {behind_result.get('difficulty', '—')} — промах."
+                        )
+                        continue
+                    behind_zone = zone_labels.get(
+                        behind_result.get('zone'),
+                        behind_result.get('zone') or 'неизвестная зона',
+                    )
+                    lines.append(
+                        f"   За укрытием: {hit_result.get('target_behind_cover_name') or 'цель'}, "
+                        f"{behind_zone}, урон {round(CombatService._coerce_float(behind_result.get('damage'), 0))}."
+                    )
                 continue
 
             zone = zone_labels.get(
@@ -2670,6 +3248,21 @@ class CombatService:
                 f"{prefix} — попадание: {zone}, урон {damage}; "
                 f"защита {armor}%, пробитие {penetration}%."
             )
+            cover_impact = hit_result.get('cover_hit')
+            if isinstance(cover_impact, dict):
+                cover_state = cover_impact.get('damage') or {}
+                protection_before = round(CombatService._coerce_float(
+                    cover_impact.get('protection'), 0
+                ))
+                protection_after = round(CombatService._coerce_float(
+                    cover_state.get('physical_protection'), protection_before
+                ))
+                lines.append(
+                    f"   Укрытие {cover_impact.get('object_name') or ''}: защита "
+                    f"{protection_before}% → {protection_after}%, ОЗ "
+                    f"{cover_state.get('hp', '—')}/{cover_state.get('max_hp', '—')}; "
+                    f"пробитие: {'да' if cover_impact.get('penetrated') else 'нет'}."
+                )
 
             bleedings = hit_result.get('bleedings') or []
             if bleedings:
@@ -2723,6 +3316,27 @@ class CombatService:
                 )
             else:
                 lines.append("   Доп. травма: нет.")
+
+            catastrophic = hit_result.get('catastrophic_limb_injury')
+            if isinstance(catastrophic, dict):
+                if catastrophic.get('type') == 'amputation':
+                    extent_labels = {
+                        'entire_limb': 'целиком',
+                        'elbow_or_knee': 'по локоть/колено',
+                        'hand_or_foot': 'по кисть/ступню',
+                    }
+                    extent = extent_labels.get(
+                        catastrophic.get('loss_extent'),
+                        catastrophic.get('loss_extent') or 'не указано',
+                    )
+                    lines.append(
+                        f"   Конечность утрачена: {extent}, "
+                        f"1к6 = {catastrophic.get('loss_roll', '—')}."
+                    )
+                else:
+                    lines.append("   Конечность искорежена.")
+            if hit_result.get('death'):
+                lines.append("   Смертельное попадание в выбитую жизненно важную зону.")
 
         if len(results) > 1:
             lines.append(
@@ -3023,6 +3637,13 @@ class CombatService:
             loc_char.effects = normalize_effect_list(health.get('effects') or [])
         else:
             loc_char.effects = []
+        if CombatService._character_condition(character_data)['state'] in {
+            'pain_shock', 'critical', 'dead',
+        }:
+            loc_char.posture = 'prone'
+            loc_char.cover_object_id = None
+            loc_char.weapon_braced = False
+            loc_char.braced_weapon_index = None
         return loc_char
 
     @staticmethod
@@ -3461,17 +4082,6 @@ class CombatService:
                 if not in_bounds(nx, ny):
                     continue
 
-                if dx and dy:
-                    side_a = step_cost(x + dx, y)
-                    side_b = step_cost(x, y + dy)
-                    if side_a is None or side_b is None:
-                        continue
-                    if companion_offset and (
-                        not companion_can_occupy(x + dx, y)
-                        or not companion_can_occupy(x, y + dy)
-                    ):
-                        continue
-
                 move_cost = step_cost(nx, ny)
                 if move_cost is None or not companion_can_occupy(nx, ny):
                     continue
@@ -3510,6 +4120,19 @@ class CombatService:
             health = data.get('health') if isinstance(data.get('health'), dict) else {}
             meta = health.setdefault('combatMeta', {})
             meta['consumableUsage'] = {}
+            pending_action = meta.get('pendingAction')
+            if isinstance(pending_action, dict):
+                remaining_cost = max(
+                    0,
+                    CombatService._coerce_int(pending_action.get('remaining_action_points'), 0),
+                )
+                paid = min(loc_char.action_points_current, remaining_cost)
+                loc_char.action_points_current -= paid
+                remaining_cost -= paid
+                pending_action['remaining_action_points'] = remaining_cost
+                if remaining_cost <= 0:
+                    meta.pop('pendingAction', None)
+                    meta['completedPendingActionId'] = pending_action.get('id')
             data['health'] = health
             loc_char.character.data = data
             flag_modified(loc_char.character, 'data')
@@ -3560,6 +4183,16 @@ class CombatService:
             'movement_points_max': loc_char.movement_points_max if loc_char.movement_points_max is not None else profile['movement_points'],
             'movement_points_current': loc_char.movement_points_current or 0,
             'movement_penalty': profile['movement_penalty'],
+            'pending_action': (
+                health.get('combatMeta', {}).get('pendingAction')
+                if isinstance(health.get('combatMeta'), dict)
+                else None
+            ),
+            'completed_pending_action_id': (
+                health.get('combatMeta', {}).get('completedPendingActionId')
+                if isinstance(health.get('combatMeta'), dict)
+                else None
+            ),
             'movement_gain': profile['movement_gain'],
             'is_exoskeleton': CombatService._exoskeleton_power_profile(data)['is_exoskeleton'],
             'powered_exoskeleton': CombatService._exoskeleton_power_profile(data)['powered'],
@@ -3965,7 +4598,7 @@ class CombatService:
         return CombatService._serialize_state(location, state)
 
     @staticmethod
-    def end_turn(location_id, user_id, location_character_id=None):
+    def end_turn(location_id, user_id, location_character_id=None, _continue_pending=False):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
         CombatService._release_invalid_grapples(location_id)
@@ -3994,7 +4627,7 @@ class CombatService:
         ).first()
         if not current_character:
             raise NotFoundError("Current character not found")
-        if not CombatService._can_end_turn_for_character(current_character, user_id, is_gm=is_gm):
+        if not _continue_pending and not CombatService._can_end_turn_for_character(current_character, user_id, is_gm=is_gm):
             raise PermissionDenied("You do not control this character")
 
         state.turn_order = list(dict.fromkeys(state.turn_order or []))
@@ -4056,12 +4689,41 @@ class CombatService:
         CombatService._sync_location_effects_from_character(next_character)
         db.session.commit()
 
+        next_data = (
+            next_character.character.data
+            if next_character.character and isinstance(next_character.character.data, dict)
+            else {}
+        )
+        next_health = next_data.get('health') if isinstance(next_data.get('health'), dict) else {}
+        next_meta = next_health.get('combatMeta') if isinstance(next_health.get('combatMeta'), dict) else {}
+        pending_action = next_meta.get('pendingAction')
+        if isinstance(pending_action, dict) and CombatService._coerce_int(
+            pending_action.get('remaining_action_points'), 0
+        ) > 0:
+            return CombatService.end_turn(
+                location_id,
+                user_id,
+                location_character_id=next_character.id,
+                _continue_pending=True,
+            )
+
         payload = CombatService._serialize_state(location, state)
         payload['pain_shock_check'] = pain_shock_check
         return payload
 
     @staticmethod
-    def spend_resources(location_id, user_id, location_character_id, action_points=0, free_actions=0, movement_points=0):
+    def spend_resources(
+        location_id,
+        user_id,
+        location_character_id,
+        action_points=0,
+        free_actions=0,
+        movement_points=0,
+        *,
+        allow_deferred=False,
+        pending_action_id=None,
+        pending_action_label=None,
+    ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
         CombatService._release_invalid_grapples(location_id)
@@ -4085,23 +4747,49 @@ class CombatService:
         free_actions = max(0, CombatService._coerce_int(free_actions, 0))
         movement_points = max(0, CombatService._coerce_int(movement_points, 0))
 
-        if action_points > character.action_points_current:
+        deferred = action_points > character.action_points_current
+        if deferred and not allow_deferred:
             raise ValidationError("Not enough action points")
         if free_actions > character.free_actions_current:
             raise ValidationError("Not enough free actions")
         if movement_points > character.movement_points_current:
             raise ValidationError("Not enough movement points")
 
-        character.action_points_current -= action_points
+        if deferred:
+            paid_action_points = max(0, character.action_points_current)
+            character.action_points_current = 0
+            character_data = character.character.data if isinstance(character.character.data, dict) else {}
+            health = character_data.setdefault('health', {})
+            meta = health.setdefault('combatMeta', {})
+            meta['pendingAction'] = {
+                'id': str(pending_action_id or f'action-{character.id}-{db.func.now()}'),
+                'label': str(pending_action_label or 'Длительное действие'),
+                'total_action_points': action_points,
+                'remaining_action_points': action_points - paid_action_points,
+            }
+            meta.pop('completedPendingActionId', None)
+            character.character.data = character_data
+            flag_modified(character.character, 'data')
+        else:
+            character.action_points_current -= action_points
         character.free_actions_current -= free_actions
         character.movement_points_current -= movement_points
         CombatService._clear_aim(character)
         character.last_action = db.func.now()
         db.session.commit()
-        return CombatService._serialize_character(
+        serialized = CombatService._serialize_character(
             character,
             current_turn_id=state.current_location_character_id,
         )
+        serialized['payment_complete'] = not deferred
+        if deferred:
+            serialized['pending_action_id'] = meta['pendingAction']['id']
+            serialized['state'] = CombatService.end_turn(
+                location_id,
+                user_id,
+                location_character_id=character.id,
+            )
+        return serialized
 
     @staticmethod
     def adjust_resources(location_id, user_id, location_character_id, action_points=0, movement_points=0):
@@ -4153,6 +4841,8 @@ class CombatService:
         inventory_retrieval_action_points=None,
         inventory_use_action_discount=None,
         attribute_choice=None,
+        pending_action_id=None,
+        resume_pending_action_id=None,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -4177,6 +4867,15 @@ class CombatService:
         if state.current_location_character_id != character.id:
             raise PermissionDenied("It is not this character's turn")
         CombatService.ensure_character_can_act(character, action_key)
+
+        health = data.setdefault('health', {})
+        combat_meta = health.setdefault('combatMeta', {})
+        resumed_paid_action = bool(
+            resume_pending_action_id
+            and str(combat_meta.get('completedPendingActionId') or '') == str(resume_pending_action_id)
+        )
+        if resume_pending_action_id and not resumed_paid_action:
+            raise ValidationError("The pending action has not been paid yet")
 
         action = next((item for item in ACTION_CATALOG if item['key'] == action_key), None)
         if not action:
@@ -4789,10 +5488,7 @@ class CombatService:
                 min(20, CombatService._coerce_int(inventory_use_action_discount, 0)),
             )
             reload_cost = max(0, reload_cost - use_discount) + retrieval_cost
-            if character.action_points_current < reload_cost:
-                raise ValidationError("Not enough action points")
-            character.action_points_current -= reload_cost
-            CombatService._clear_aim(character)
+            special_action_cost = reload_cost
             reload_details = {
                 'weapon_index': weapon_index,
                 'magazine_template_id': magazine_template.id,
@@ -5024,6 +5720,7 @@ class CombatService:
                 shots < 2 * volley_count or shots % volley_count != 0
             ):
                 raise ValidationError("Invalid machine gun burst size")
+            target_object = None
             if fire_mode == 'suppression':
                 target_object = LocationObject.query.filter_by(
                     id=target_object_id,
@@ -5054,7 +5751,12 @@ class CombatService:
                 ):
                     raise ValidationError("Area fire targets must fit inside a 5 by 5 area")
             elif not target_character_id:
-                raise ValidationError("Target character is required")
+                target_object = LocationObject.query.filter_by(
+                    id=target_object_id,
+                    location_id=location_id,
+                ).first()
+                if not target_object or not CombatService._is_cover_object(target_object):
+                    raise ValidationError("Target character or cover is required")
 
             magazine = weapon.get('installedMagazine') or {}
             ammo_stacks = magazine.get('ammo')
@@ -5080,7 +5782,13 @@ class CombatService:
                     abs(character.pos_y - range_target.pos_y),
                 )
                 if range_target
-                else None
+                else (
+                    max(
+                        abs(character.pos_x - target_object.tile_x),
+                        abs(character.pos_y - target_object.tile_y),
+                    )
+                    if target_object else None
+                )
             )
             weapon_range = CombatService._coerce_int(
                 weapon.get('range', (weapon.get('attributes') or {}).get('range')),
@@ -5101,6 +5809,7 @@ class CombatService:
                 'target_character_id': target_character_id,
                 'target_character_ids': target_character_ids,
                 'target_object_id': target_object_id,
+                'direct_cover_attack': bool(target_object and not target_character_id),
                 'area_center_x': area_center_x,
                 'area_center_y': area_center_y,
                 'posture': CombatService._posture_key(character),
@@ -5193,7 +5902,9 @@ class CombatService:
                     range_target,
                 )
                 if not cover_analysis['targetable']:
-                    raise ValidationError("Target is fully behind cover")
+                    cover_analysis['blind_fire'] = True
+                    cover_analysis['targetable'] = True
+                    attack_details['shooting_disadvantage'] = True
                 attack_details['cover'] = cover_analysis
                 hit_difficulty += cover_analysis.get('accuracy_penalty', 0)
                 if range_target.grapple_live_shield and range_target.grapple_target_id:
@@ -5220,6 +5931,8 @@ class CombatService:
                     attack_details['shooting_disadvantage'] = True
             if fire_mode == 'aimed':
                 hit_difficulty += CombatService._aimed_zone_difficulty_penalty(target_zone)
+            if target_object and not target_character_id:
+                attack_details['continuation_hit_difficulty'] = max(1, hit_difficulty)
             attack_details['hit_difficulty'] = max(1, hit_difficulty)
             attack_details['target_zone'] = target_zone if fire_mode == 'aimed' else None
 
@@ -5241,8 +5954,6 @@ class CombatService:
         elif action_key == 'stow_weapon':
             CombatService._set_active_weapon(character, None)
             CombatService._clear_aim(character)
-        elif action_key == 'reload_weapon':
-            pass
         else:
             action_point_cost = (
                 special_action_cost
@@ -5253,9 +5964,47 @@ class CombatService:
                     else action['action_points']
                 )
             )
-            if character.action_points_current < action_point_cost:
-                raise ValidationError("Not enough action points")
-            character.action_points_current -= action_point_cost
+            if not resumed_paid_action and character.action_points_current < action_point_cost:
+                if not pending_action_id:
+                    raise ValidationError("Not enough action points")
+                paid_action_points = max(0, character.action_points_current)
+                character.action_points_current = 0
+                combat_meta['pendingAction'] = {
+                    'id': str(pending_action_id),
+                    'label': str(action.get('label') or action_key),
+                    'total_action_points': action_point_cost,
+                    'remaining_action_points': action_point_cost - paid_action_points,
+                }
+                combat_meta.pop('completedPendingActionId', None)
+                character.character.data = data
+                flag_modified(character.character, 'data')
+                character.last_action = db.func.now()
+                db.session.commit()
+                ended_state = CombatService.end_turn(
+                    location_id,
+                    user_id,
+                    location_character_id=character.id,
+                )
+                return {
+                    'character': CombatService._serialize_character(
+                        character,
+                        current_turn_id=ended_state.get('current_location_character_id'),
+                    ),
+                    'state': ended_state,
+                    'action': action_key,
+                    'pending_action': True,
+                    'pending_action_id': str(pending_action_id),
+                    'attack': None,
+                    'aim': None,
+                    'posture_change': None,
+                    'draw_weapon': None,
+                    'reload_weapon': None,
+                    'cover': None,
+                    'brace_weapon': None,
+                    'melee_action': None,
+                }
+            if not resumed_paid_action:
+                character.action_points_current -= action_point_cost
             if action_key == 'attack' and attack_details and fire_mode == 'rapid':
                 character.rapid_fire_round = state.round_number
             if action_key == 'aim' and aim_details:
@@ -5342,7 +6091,16 @@ class CombatService:
                     flag_modified(target.character, 'data')
             elif fire_mode not in {'suppression'}:
                 targets = []
-                if fire_mode == 'area':
+                if attack_details.get('direct_cover_attack'):
+                    cover = db.session.get(
+                        LocationObject, attack_details.get('target_object_id')
+                    )
+                    if cover:
+                        for _ in range(max(1, attack_details.get('shot_count', 1))):
+                            resolved_hits.append(CombatService._resolve_cover_attack(
+                                location_id, cover, character, attack_details
+                            ))
+                elif fire_mode == 'area':
                     targets = [
                         LocationCharacter.query.filter_by(
                             location_id=location_id, character_id=target_id
@@ -5357,7 +6115,9 @@ class CombatService:
                     ).first()
                     if target:
                         targets = [target]
-                if fire_mode == 'area':
+                if attack_details.get('direct_cover_attack'):
+                    pass
+                elif fire_mode == 'area':
                     primary = targets[0] if targets else None
                     if primary:
                         first = CombatService._resolve_attack(
@@ -5400,6 +6160,10 @@ class CombatService:
                 flag_modified(character.character, 'data')
 
         CombatService._release_invalid_grapples(location_id)
+        if resumed_paid_action:
+            combat_meta.pop('completedPendingActionId', None)
+            character.character.data = data
+            flag_modified(character.character, 'data')
         character.last_action = db.func.now()
         db.session.commit()
         if action_key == 'recover_from_shock':
@@ -5572,9 +6336,8 @@ class CombatService:
             posture_profile = CombatService._validate_posture_movement(posture, movement_mode)
 
             current_round = max(1, state.round_number or 1)
-            if (
-                movement_mode in {'run', 'sprint'}
-                and (character.strenuous_movement_blocked_until_round or 0) >= current_round
+            if CombatService._strenuous_movement_is_blocked(
+                character, movement_mode, current_round
             ):
                 raise ValidationError("Running and sprinting are blocked by exhaustion")
             character_data = (
@@ -5598,6 +6361,9 @@ class CombatService:
             used_mode = character.movement_mode_this_turn
             if used_mode and used_mode != movement_mode:
                 raise ValidationError("Movement modes cannot be mixed in one turn")
+            selecting_mode = not used_mode
+            mode_action_points = mode['action_points'] if selecting_mode else 0
+            mode_free_actions = mode['free_actions'] if selecting_mode else 0
             if movement_mode == 'correction':
                 used_distance = character.correction_distance_this_turn or 0
             else:
@@ -5612,9 +6378,9 @@ class CombatService:
                 raise ValidationError(
                     f"{mode['label']} distance is limited to {max_distance} meters per turn"
                 )
-            if character.action_points_current < mode['action_points']:
+            if character.action_points_current < mode_action_points:
                 raise ValidationError("Not enough action points")
-            if character.free_actions_current < mode['free_actions']:
+            if character.free_actions_current < mode_free_actions:
                 raise ValidationError("Not enough free actions")
 
             if movement_cost <= character.movement_points_current:
@@ -5624,15 +6390,15 @@ class CombatService:
                 and character.movement_points_current >= movement_cost - route_cost['climb_cost']
             ):
                 ap_cost = 3 if route_cost['climb_cost'] >= 10 else 1
-                if character.action_points_current < mode['action_points'] + ap_cost:
+                if character.action_points_current < mode_action_points + ap_cost:
                     raise ValidationError("Not enough movement points")
                 character.movement_points_current -= movement_cost - route_cost['climb_cost']
                 character.action_points_current -= ap_cost
             else:
                 raise ValidationError("Not enough movement points")
 
-            character.action_points_current -= mode['action_points']
-            character.free_actions_current -= mode['free_actions']
+            character.action_points_current -= mode_action_points
+            character.free_actions_current -= mode_free_actions
             if movement_mode == 'correction':
                 character.movement_mode_this_turn = movement_mode
                 character.correction_distance_this_turn = used_distance + distance

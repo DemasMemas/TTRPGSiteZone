@@ -10,7 +10,7 @@ from .utils import get_user_from_token
 logger = logging.getLogger(__name__)
 
 sid_to_user = {}
-user_lobby = {}
+sid_to_lobby = {}
 pending_auth = {}
 AUTH_TIMEOUT = 10
 
@@ -37,9 +37,13 @@ def handle_disconnect():
         del pending_auth[request.sid]
 
     user_id = sid_to_user.pop(request.sid, None)
+    lobby_id = sid_to_lobby.pop(request.sid, None)
     if user_id:
-        lobby_id = user_lobby.pop(user_id, None)
-        if lobby_id:
+        still_online = any(
+            other_user_id == user_id and sid_to_lobby.get(sid) == lobby_id
+            for sid, other_user_id in sid_to_user.items()
+        )
+        if lobby_id and not still_online:
             emit('user_left', {'user_id': user_id}, room=f"lobby_{lobby_id}")
             logger.info(f"User {user_id} left lobby {lobby_id}")
     logger.info('Client disconnected')
@@ -75,7 +79,7 @@ def handle_authenticate(data):
 
     # Сохраняем информацию о подключении
     sid_to_user[request.sid] = user.id
-    user_lobby[user.id] = lobby_id
+    sid_to_lobby[request.sid] = lobby_id
 
     join_room(f"lobby_{lobby_id}")
     join_room(f"user_{user.id}")  # личная комната для кика
@@ -84,10 +88,18 @@ def handle_authenticate(data):
     logger.info(f"User {user.id} ({user.username}) authenticated in lobby {lobby_id}")
 
     # Оповещаем всех в комнате о новом участнике
-    emit('user_joined', {'user_id': user.id, 'username': user.username}, room=f"lobby_{lobby_id}")
+    emit('user_joined', {
+        'user_id': user.id,
+        'username': user.username,
+        'color': user.color,
+    }, room=f"lobby_{lobby_id}")
 
     # Отправляем новому участнику список текущих онлайн-пользователей
-    online_users = [uid for uid, lid in user_lobby.items() if lid == lobby_id]
+    online_users = sorted({
+        sid_to_user[sid]
+        for sid, connected_lobby_id in sid_to_lobby.items()
+        if connected_lobby_id == lobby_id and sid in sid_to_user
+    })
     emit('online_users', online_users, room=request.sid)
 
     # Загружаем историю чата

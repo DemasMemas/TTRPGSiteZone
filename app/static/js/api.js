@@ -23,6 +23,14 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}`);
     },
 
+    async updateLobbyTime(lobbyId, gameDay, gameTimeMinutes) {
+        return apiFetch(`/lobbies/${lobbyId}/time`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ game_day: gameDay, game_time_minutes: gameTimeMinutes }),
+        });
+    },
+
     async createLobby(name, mapType, chunksWidth, chunksHeight, importData = null) {
         // Для импорта используется FormData, для обычного — JSON
         if (mapType === 'imported' && importData) {

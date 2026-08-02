@@ -748,6 +748,7 @@ function startLocationPick() {
 }
 
 document.getElementById('create-location-btn')?.addEventListener('click', startLocationPick);
+document.getElementById('confirm-create-location')?.addEventListener('click', createLocationFromModal);
 document.getElementById('exit-location-btn')?.addEventListener('click', exitLocation);
 
 // ========== Обработчики сокетов для локации ==========

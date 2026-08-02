@@ -20,6 +20,8 @@ class LobbySchema(Schema):
     map_type = fields.Str()
     chunks_width = fields.Int()
     chunks_height = fields.Int()
+    game_day = fields.Int()
+    game_time_minutes = fields.Int()
 
 class LobbyResponseSchema(LobbySchema):
     participants_count = fields.Method("get_participants_count")
@@ -41,9 +43,13 @@ class LobbyDetailSchema(LobbyResponseSchema):
             for participant in obj.participants
             if not participant.is_banned
         ]
+        active.sort(key=lambda participant: (
+            participant.joined_at,
+            participant.user_id,
+        ))
         return ParticipantSchema(
             many=True,
-            only=('user_id', 'username'),
+            only=('user_id', 'username', 'color'),
         ).dump(active)
 
 class LobbyMySchema(Schema):

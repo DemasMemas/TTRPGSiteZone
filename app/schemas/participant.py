@@ -6,6 +6,7 @@ class ParticipantSchema(Schema):
     username = fields.Str(attribute='user.username')
     joined_at = fields.DateTime()
     is_banned = fields.Bool()
+    color = fields.Str(attribute='user.color', allow_none=True)
 
 class BannedUserSchema(Schema):
     user_id = fields.Int()

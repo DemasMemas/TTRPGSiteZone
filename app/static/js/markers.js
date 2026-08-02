@@ -157,7 +157,11 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
 
     socket.on('markers_list', (markersData) => {
         clearMarkers();
-        markersData.forEach(m => addMarkerToScene(m));
+        markersData.forEach(m => {
+            if (canSeeMarkerForCurrentUser(m)) {
+                addMarkerToScene(m);
+            }
+        });
         updateRouteDatalists();
 
         const uniqueRouteIds = new Set();
@@ -173,7 +177,9 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
     });
 
     socket.on('marker_added', (marker) => {
-        addMarkerToScene(marker);
+        if (canSeeMarkerForCurrentUser(marker)) {
+            addMarkerToScene(marker);
+        }
         updateRouteDatalists();
         if (marker.type === 'route_point' && marker.routeId) {
             updateRouteLines(marker.routeId);
@@ -183,21 +189,36 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
     socket.on('marker_updated', (data) => {
         const markerId = data.id;
         const updates = data.updates;
+        const markerData = data.marker || null;
         const entry = markers.get(markerId);
-        if (!entry) return;
-        Object.assign(entry.data, updates);
-        if (!canSeeMarkerForCurrentUser(entry.data)) {
+        if (!entry) {
+            if (markerData && canSeeMarkerForCurrentUser(markerData)) {
+                addMarkerToScene(markerData);
+                if (markerData.type === 'route_point' && markerData.routeId) {
+                    updateRouteLines(markerData.routeId);
+                }
+                updateRouteDatalists();
+            }
+            return;
+        }
+        const previousRouteId = entry.data.routeId;
+        const mergedData = markerData ? { ...entry.data, ...markerData } : { ...entry.data, ...updates };
+        Object.assign(entry.data, markerData || updates);
+
+        if (!canSeeMarkerForCurrentUser(mergedData)) {
             removeMarkerFromScene(markerId);
         } else {
-            if (updates.color || updates.type) {
+            if (updates.color || updates.type || updates.name || markerData?.color || markerData?.type || markerData?.name) {
                 const newTexture = createMarkerTexture(entry.data.type, entry.data.color, entry.data.name);
                 entry.sprite.material.map = newTexture;
                 entry.sprite.material.needsUpdate = true;
             }
-            if (updates.position) {
-                entry.sprite.position.set(updates.position.x, updates.position.y + 0.8, updates.position.z);
+            if (updates.position || markerData?.position) {
+                const position = markerData?.position || updates.position;
+                entry.sprite.position.set(position.x, position.y + 0.8, position.z);
             }
         }
+        if (previousRouteId && previousRouteId !== entry.data.routeId) updateRouteLines(previousRouteId);
         if (entry.data.routeId) updateRouteLines(entry.data.routeId);
         updateRouteDatalists();
     });
@@ -336,8 +357,10 @@ window.hideTooltip = hideTooltip;
 function canSeeMarkerForCurrentUser(marker) {
     const userId = parseInt(localStorage.getItem('user_id'));
     if (AppState.isGM) return true;
-    const visibleTo = marker.visibleTo || [];
-    return visibleTo.includes('all') || visibleTo.includes(userId);
+    const visibleTo = Array.isArray(marker.visibleTo)
+        ? marker.visibleTo
+        : (marker.visibleTo ? [marker.visibleTo] : []);
+    return visibleTo.includes('all') || visibleTo.map(value => Number(value)).includes(userId);
 }
 
 function updateRouteLines(routeId) {
@@ -742,7 +765,10 @@ function openMarkerEditModal(marker) {
     descField.value = marker.description || '';
     colorField.value = marker.color || '#ffaa00';
     typeField.value = marker.type || 'default';
-    visibleAllField.checked = marker.visibleTo && marker.visibleTo.includes('all');
+    const visibleTo = Array.isArray(marker.visibleTo)
+        ? marker.visibleTo
+        : (marker.visibleTo ? [marker.visibleTo] : []);
+    visibleAllField.checked = visibleTo.includes('all');
 
     posXField.value = marker.position.x.toFixed(2);
     posYField.value = marker.position.y.toFixed(2);

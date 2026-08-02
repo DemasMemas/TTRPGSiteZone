@@ -13,6 +13,24 @@ BASE_HEALTH_MAXIMUMS = {
         "rightLeg": 100,
     },
 }
+BASE_ORGAN_MAXIMUMS = {
+    "heart": 20,
+    "rightLung": 40,
+    "leftLung": 40,
+    "rightKidney": 25,
+    "leftKidney": 25,
+    "stomach": 25,
+    "liver": 20,
+    "rightEye": 15,
+    "leftEye": 15,
+    "nose": 20,
+    "jaw": 20,
+    "rightEar": 20,
+    "leftEar": 20,
+    "brain": 1,
+    "spine": 1,
+}
+NORMAL_BODY_TEMPERATURE = 36.0
 
 
 def has_mountain_background(character_data: Dict[str, Any]) -> bool:
@@ -43,6 +61,9 @@ def get_health_maximums(character_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def apply_health_maximums(character_data: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
     health = character_data.setdefault("health", {})
+    temperature = _number(health.get("temperature"))
+    if temperature is None or temperature <= 0:
+        health["temperature"] = NORMAL_BODY_TEMPERATURE
     profile = get_health_maximums(character_data)
     profile_changed = health.get("maximumProfile") != profile["profile"]
 
@@ -58,6 +79,16 @@ def apply_health_maximums(character_data: Dict[str, Any], force: bool = False) -
         if force or profile_changed or old_zone_max != new_max:
             zone["current"] = _scaled_current(zone.get("current"), old_zone_max, new_max)
             zone["max"] = new_max
+
+    organs = health.setdefault("organs", {})
+    for key, new_max in BASE_ORGAN_MAXIMUMS.items():
+        organ = organs.setdefault(key, {})
+        old_organ_max = _number(organ.get("max"))
+        if force or old_organ_max is None or old_organ_max <= 0:
+            organ["current"] = _scaled_current(
+                organ.get("current"), old_organ_max, new_max
+            )
+            organ["max"] = new_max
 
     health["maximumProfile"] = profile["profile"]
     return health

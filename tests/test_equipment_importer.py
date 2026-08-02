@@ -2,6 +2,8 @@ from app.services.equipment_importer import (
     _canonical_caliber,
     _finalize_weapon_magazine_attributes,
     _integrated_helmet_name,
+    _looks_like_grenade_ammo,
+    _helmet_protection_zones,
     _magazine_volume,
     _parse_exoskeleton_battery,
     _parse_burst_profile,
@@ -9,6 +11,10 @@ from app.services.equipment_importer import (
     _parse_melee_weapons,
     _parse_ranged_weapons,
 )
+
+
+def test_molotov_cocktail_is_not_imported_as_ammunition():
+    assert _looks_like_grenade_ammo({"L": "Коктейль Молотова"}) is True
 
 
 def test_dash_disables_all_automatic_fire_modes():
@@ -197,3 +203,9 @@ def test_helmet_import_removes_misc_prefix_and_skips_embedded_templates():
 
     assert [template["name"] for template in helmets] == ["Ушанка"]
     assert all(template["subcategory"] != "Встроенный" for template in helmets)
+
+
+def test_helmet_protection_zones_follow_rulebook_groups():
+    assert _helmet_protection_zones("Советский Котелок 68Г") == ["crown", "back"]
+    assert _helmet_protection_zones("Шлем Ударник-М") == ["crown", "back", "ears"]
+    assert _helmet_protection_zones("Шлем КыСа-2") == ["crown", "back", "ears", "face"]

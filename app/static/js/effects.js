@@ -18,6 +18,13 @@ const EFFECT_TYPE_META = {
     intoxication: { label: 'Опьянение', group: 'need' },
     infection: { label: 'Заражение', group: 'disease' },
     fracture: { label: 'Перелом', group: 'injury' },
+    fracture_fixed: { label: 'Зафиксированный перелом', group: 'injury' },
+    fracture_unfixed: { label: 'Незафиксированный перелом', group: 'injury' },
+    fracture_sequela: { label: 'Постоянный штраф после перелома', group: 'injury' },
+    mangled_limb: { label: 'Искореженная конечность', group: 'injury' },
+    temporary_limb_restoration: { label: 'Временное восстановление конечности', group: 'medical' },
+    delayed_limb_treatment: { label: 'Отложенное лечение конечности', group: 'medical' },
+    organ_failure: { label: 'Смертельное повреждение органа', group: 'critical' },
     shock: { label: 'Шок', group: 'injury' },
     unconsciousness: { label: 'Без сознания', group: 'critical' },
     critical_condition: { label: 'Критическое состояние', group: 'critical' },
@@ -46,6 +53,7 @@ const EFFECT_TYPE_META = {
 };
 
 const TYPE_ALIASES = {
+    organ_failure: 'organ_failure',
     heal: 'heal',
     healing: 'heal',
     лечение: 'heal',
@@ -77,6 +85,14 @@ const TYPE_ALIASES = {
     заражение: 'infection',
     fracture: 'fracture',
     перелом: 'fracture',
+    fracture_fixed: 'fracture_fixed',
+    fixed_fracture: 'fracture_fixed',
+    'зафиксированный перелом': 'fracture_fixed',
+    'фиксированный перелом': 'fracture_fixed',
+    fracture_unfixed: 'fracture_unfixed',
+    'незафиксированный перелом': 'fracture_unfixed',
+    fracture_sequela: 'fracture_sequela',
+    'последствие незафиксированного перелома': 'fracture_sequela',
     shock: 'shock',
     шок: 'shock',
     pain_shock: 'shock',
@@ -103,6 +119,8 @@ const TYPE_ALIASES = {
     регенерация: 'regeneration',
     amputation: 'amputation',
     ампутация: 'amputation',
+    mangled_limb: 'mangled_limb',
+    'искореженная конечность': 'mangled_limb',
     organloss: 'organ_loss',
     organ_loss: 'organ_loss',
     потеряоргана: 'organ_loss',
@@ -115,6 +133,8 @@ const TYPE_ALIASES = {
     'tourniquet', 'blood_loss_freeze', 'bleeding_prevention', 'infection_growth_block',
     'analgesia', 'stimulant_crash', 'radiation_filter', 'temperature_control',
     'limb_trauma_suppression',
+    'temporary_limb_restoration',
+    'delayed_limb_treatment',
     'pain_block',
 ].forEach(type => { TYPE_ALIASES[type] = type; });
 
@@ -126,6 +146,7 @@ const STATUS_EFFECT_TYPES = new Set([
     'intoxication',
     'infection',
     'fracture',
+    'fracture_fixed',
     'shock',
     'unconsciousness',
     'critical_condition',
@@ -134,7 +155,9 @@ const STATUS_EFFECT_TYPES = new Set([
     'deafness',
     'sleep',
     'amputation',
+    'mangled_limb',
     'organ_loss',
+    'organ_failure',
     'bleeding_external_light',
     'bleeding_external_medium',
     'bleeding_external_severe',
@@ -186,6 +209,7 @@ const EFFECT_IMPACT_RULES = {
     intoxication: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
     infection: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
     fracture: { areas: ['limb'], requiresMedicineCheck: true, treatment: 'medical' },
+    fracture_fixed: { areas: ['limb'], requiresMedicineCheck: true, treatment: 'medical' },
     shock: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
     unconsciousness: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
     critical_condition: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },
@@ -194,6 +218,7 @@ const EFFECT_IMPACT_RULES = {
     deafness: { areas: ['ears', 'hearing', 'head'], requiresMedicineCheck: true, treatment: 'medical' },
     sleep: { areas: ['whole_body', 'mind'], requiresMedicineCheck: false, treatment: 'rest' },
     amputation: { areas: ['missing_limb'], requiresMedicineCheck: true, treatment: 'medical' },
+    mangled_limb: { areas: ['limb'], requiresMedicineCheck: true, treatment: 'surgery' },
     organ_loss: { areas: ['missing_organ'], requiresMedicineCheck: true, treatment: 'medical' },
 };
 
@@ -236,6 +261,7 @@ function canonicalType(type, name = '') {
     if (raw.includes('истощ')) return 'exhaustion';
     if (raw.includes('стресс')) return 'stress';
     if (raw.includes('опьян')) return 'intoxication';
+    if (raw.includes('зафикс') || raw.includes('фиксир') || raw.includes('fixed fracture')) return 'fracture_fixed';
     if (raw.includes('перелом')) return 'fracture';
     if (raw.includes('боль')) return 'pain';
     if (raw.includes('шок')) return 'shock';
@@ -321,6 +347,21 @@ function getBleedingState(health = {}) {
 
 export function syncHealthDerivedStatuses(health = {}) {
     if (!health || typeof health !== 'object') return health;
+    const effects = normalizeEffectList(health.effects || []);
+    const fatalTotalHealth = Number(health.max) > 0 && Number(health.current) <= 0;
+    const fatalBrainHealth = health.organs?.brain && Number(health.organs.brain.current) <= 0;
+    const fatalSkullHealth = health.organs?.skull && Number(health.organs.skull.current) <= 0;
+    if ((fatalTotalHealth || fatalBrainHealth || fatalSkullHealth) && !effects.some(effect => effect.type === 'death')) {
+        effects.push(normalizeEffect({
+            type: 'death',
+            name: 'Смерть',
+            source: fatalBrainHealth
+                ? 'zero_brain_health'
+                : (fatalSkullHealth ? 'zero_skull_health' : 'zero_total_health'),
+            tick: 'manual',
+        }));
+    }
+    health.effects = effects;
     const bleeding = getBleedingState(health);
     health.bleeding = bleeding;
     health.bleedingSeverity = bleeding.totalSeverity;
@@ -397,7 +438,7 @@ export function normalizeEffectList(list) {
 export function createEffectDraft(type = 'generic', overrides = {}) {
     const effectType = canonicalType(type, overrides.name || '');
     const meta = getEffectMeta(effectType);
-    return {
+    const result = {
         id: overrides.id || `effect_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         type: effectType,
         name: overrides.name || meta.label,
@@ -412,6 +453,11 @@ export function createEffectDraft(type = 'generic', overrides = {}) {
         scope: overrides.scope || 'character',
         active: overrides.active !== false,
     };
+    if (effectType === 'organ_loss') {
+        result.treatment_window_seconds = overrides.treatment_window_seconds ?? 3600;
+        result.treatment_window_expired = overrides.treatment_window_expired ?? false;
+    }
+    return result;
 }
 
 function upsertStatusEffect(health, effect) {
@@ -449,27 +495,45 @@ function adjustHealthField(health, field, delta, min = 0, max = null) {
 
 function distributeZoneHealing(health, amount) {
     let remaining = Math.max(0, Math.floor(Number(amount) || 0));
-    const zones = Object.values(health.zones || {}).filter(zone => zone && typeof zone === 'object');
-    zones.forEach((zone) => {
-        const maximum = Math.max(0, Math.round(Number(zone.max || 0)));
+    const temporaryCaps = new Map(normalizeEffectList(health.effects || [])
+        .filter(effect => effect.type === 'temporary_limb_restoration'
+            && effect.health_cap != null
+            && effect.active !== false
+            && (effect.remaining == null || Number(effect.remaining) > 0))
+        .map(effect => [String(effect.area || ''), Math.max(1, Number(effect.health_cap || 1))]));
+    const zones = Object.entries(health.zones || {})
+        .filter(([, zone]) => zone && typeof zone === 'object');
+    zones.forEach(([area, zone]) => {
+        const maximum = Math.min(
+            Math.max(0, Math.round(Number(zone.max || 0))),
+            temporaryCaps.get(area) ?? Number.POSITIVE_INFINITY
+        );
         zone.current = Math.min(maximum, Math.max(0, Math.round(Number(zone.current || 0))));
     });
     while (remaining > 0) {
-        const damaged = zones.filter(zone => Number(zone.current || 0) < Number(zone.max || 0));
+        const damaged = zones.filter(([area, zone]) => Number(zone.current || 0) > 0
+            && Number(zone.current || 0) < Math.min(
+                Number(zone.max || 0),
+                temporaryCaps.get(area) ?? Number.POSITIVE_INFINITY
+            ));
         if (!damaged.length) break;
         const share = Math.floor(remaining / damaged.length);
         if (share === 0) {
-            damaged.slice(0, remaining).forEach((zone) => {
+            damaged.slice(0, remaining).forEach(([, zone]) => {
                 zone.current += 1;
             });
             break;
         }
         let applied = 0;
-        damaged.forEach((zone) => {
+        damaged.forEach(([area, zone]) => {
             const current = Number(zone.current || 0);
-            const maximum = Number(zone.max || 0);
+            const maximum = Math.min(
+                Number(zone.max || 0),
+                temporaryCaps.get(area) ?? Number.POSITIVE_INFINITY
+            );
             const healed = Math.min(share, maximum - current);
             zone.current = current + healed;
+            zone.destructionDamage = Math.max(0, maximum - zone.current);
             applied += healed;
         });
         if (applied <= 0) break;
@@ -542,7 +606,7 @@ export function applyEffectToHealth(healthInput = {}, rawEffect = {}) {
         return { health, effect, applied: true, summary: `infection:+${magnitude}` };
     }
 
-    if (effect.type === 'bleeding' || effect.type === 'fracture' || effect.type === 'shock' || effect.type === 'unconsciousness' || effect.type === 'critical_condition' || effect.type === 'death' || effect.type === 'blindness' || effect.type === 'deafness' || effect.type === 'bleeding_external_light' || effect.type === 'bleeding_external_medium' || effect.type === 'bleeding_external_severe' || effect.type === 'bleeding_external_extreme' || effect.type === 'bleeding_internal_light' || effect.type === 'bleeding_internal_medium' || effect.type === 'bleeding_internal_severe' || effect.type === 'bleeding_internal_extreme') {
+    if (effect.type === 'bleeding' || effect.type === 'fracture' || effect.type === 'fracture_fixed' || effect.type === 'shock' || effect.type === 'unconsciousness' || effect.type === 'critical_condition' || effect.type === 'death' || effect.type === 'blindness' || effect.type === 'deafness' || effect.type === 'bleeding_external_light' || effect.type === 'bleeding_external_medium' || effect.type === 'bleeding_external_severe' || effect.type === 'bleeding_external_extreme' || effect.type === 'bleeding_internal_light' || effect.type === 'bleeding_internal_medium' || effect.type === 'bleeding_internal_severe' || effect.type === 'bleeding_internal_extreme') {
         upsertStatusEffect(health, effect);
         syncHealthDerivedStatuses(health);
         return { health, effect, applied: true, summary: effect.type };
@@ -593,6 +657,7 @@ export function advanceTimedEffects(health = {}, effectsInput = [], elapsedSecon
     const unitSeconds = { second: 1, minute: 60, movement: 600, hour: 3600 };
     const survivors = [];
     const activated = [];
+    const curedFractureAreas = new Set();
     const adjust = (entry) => {
         if (!entry?.field) return;
         const min = entry.min ?? 0;
@@ -604,6 +669,40 @@ export function advanceTimedEffects(health = {}, effectsInput = [], elapsedSecon
     };
 
     normalizeEffectList(effectsInput).forEach(effect => {
+        if (effect.type === 'fracture') {
+            const regular = Math.max(0, Number(effect.regular_fixation_seconds ?? 1800) - Math.max(0, Number(elapsedSeconds) || 0));
+            const hinged = Math.max(0, Number(effect.hinged_fixation_seconds ?? 1800) - Math.max(0, Number(elapsedSeconds) || 0));
+            effect.regular_fixation_seconds = regular;
+            effect.hinged_fixation_seconds = hinged;
+            effect.regular_fixation_expired = regular <= 0;
+            if (hinged <= 0) {
+                const consequenceRoll = 1 + Math.floor(Math.random() * 100);
+                effect.type = 'fracture_unfixed';
+                effect.name = 'Незафиксированный перелом';
+                effect.tick = 'manual';
+                effect.fixation_consequence_roll = consequenceRoll;
+                effect.permanent_penalty = consequenceRoll <= 50;
+                if (effect.permanent_penalty) {
+                    activated.push({
+                        type: 'fracture_sequela',
+                        name: 'Постоянный штраф после перелома',
+                        area: effect.area,
+                        source: 'unfixed_fracture',
+                        tick: 'manual',
+                    });
+                }
+            }
+            survivors.push(effect);
+            return;
+        }
+        if (effect.treatment_window_seconds != null) {
+            const treatmentWindow = Math.max(
+                0,
+                Number(effect.treatment_window_seconds || 0) - Math.max(0, Number(elapsedSeconds) || 0)
+            );
+            effect.treatment_window_seconds = treatmentWindow;
+            effect.treatment_window_expired = treatmentWindow <= 0;
+        }
         let unit = String(effect.time_unit || '').toLowerCase();
         if (effect.remaining == null && Number(effect.max_hours || 0) > 0) {
             effect.remaining = Number(effect.max_hours);
@@ -639,6 +738,26 @@ export function advanceTimedEffects(health = {}, effectsInput = [], elapsedSecon
         if (['delayed_adjustment', 'delayed_treatment', 'deferred_adjustment'].includes(effect.type)) {
             (effect.adjustments || []).forEach(adjust);
         }
+        if (effect.type === 'temporary_limb_restoration' && effect.restore_on_expire !== false) {
+            const zone = health.zones?.[effect.area];
+            if (zone && typeof zone === 'object') {
+                zone.current = Math.min(
+                    Number(zone.current || 0),
+                    Number(effect.previous_health || 0)
+                );
+            }
+        }
+        if (effect.type === 'delayed_limb_treatment') {
+            const area = String(effect.area || '');
+            if (effect.cure_fracture && area) curedFractureAreas.add(area);
+            const zone = health.zones?.[area];
+            if (zone && typeof zone === 'object' && effect.restore_limb_health != null) {
+                zone.current = Math.min(
+                    Number(zone.max ?? effect.restore_limb_health),
+                    Math.max(0, Number(effect.restore_limb_health) || 0)
+                );
+            }
+        }
         activated.push(...(effect.activate_effects || effect.activateEffects || []).filter(
             entry => entry && typeof entry === 'object'
         ));
@@ -671,7 +790,12 @@ export function advanceTimedEffects(health = {}, effectsInput = [], elapsedSecon
             return true;
         });
     }
-    health.effects = survivors;
+    health.effects = curedFractureAreas.size
+        ? survivors.filter(effect => !(
+            ['fracture', 'fracture_fixed', 'fracture_unfixed', 'fracture_sequela'].includes(effect.type)
+            && curedFractureAreas.has(String(effect.area || ''))
+        ))
+        : survivors;
     activated.forEach(effect => applyEffectToHealth(health, effect));
     syncHealthDerivedStatuses(health);
     return normalizeEffectList(health.effects || []);

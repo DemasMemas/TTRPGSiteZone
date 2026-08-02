@@ -1,7 +1,7 @@
 // static/js/socketHandlers.js
 import { showNotification } from './utils.js';
 import { loadLobbyCharacters } from './characters.js';
-import { loadLobbyInfo, loadAllChunks } from './lobbyData.js';
+import { loadLobbyInfo, loadAllChunks, updateDisplayedLobbyTime } from './lobbyData.js';
 import { addMessage, updateParticipantsList, onlineUserIds, lobbyParticipants } from './ui.js';
 import { updateTileInChunk } from './lobby3d.js';
 import { applyWeather } from './weather.js';
@@ -53,27 +53,36 @@ export function initSocket(lobbyId, token) {
                 addMessage(msg.username, msg.message, msg.timestamp);
             }
         });
+        requestAnimationFrame(() => {
+            const chat = document.getElementById('chat');
+            if (chat) chat.scrollTop = chat.scrollHeight;
+        });
     });
 
     socket.on('online_users', (userIds) => {
         onlineUserIds.clear();
-        userIds.forEach(id => onlineUserIds.add(id));
+        userIds.forEach(id => onlineUserIds.add(Number(id)));
         updateParticipantsList();
     });
 
     socket.on('user_joined', (data) => {
         showNotification(`${data.username} присоединился к комнате`, 'system', 'bottom-left');
-        if (!lobbyParticipants.some(p => p.user_id === data.user_id)) {
-            lobbyParticipants.push({ user_id: data.user_id, username: data.username });
+        const userId = Number(data.user_id);
+        if (!lobbyParticipants.some(p => Number(p.user_id) === userId)) {
+            lobbyParticipants.push({
+                user_id: userId,
+                username: data.username,
+                color: data.color,
+            });
         }
-        onlineUserIds.add(data.user_id);
+        onlineUserIds.add(userId);
         updateParticipantsList();
         loadLobbyCharacters();
     });
 
     socket.on('user_left', (data) => {
         showNotification(`${data.username} покинул комнату`, 'system', 'bottom-left');
-        onlineUserIds.delete(data.user_id);
+        onlineUserIds.delete(Number(data.user_id));
         updateParticipantsList();
         loadLobbyCharacters();
     });
@@ -93,6 +102,10 @@ export function initSocket(lobbyId, token) {
         if (participant) participant.color = data.color;
         updateParticipantsList();
         refreshUserColor(userId);
+    });
+
+    socket.on('lobby_time_updated', (data) => {
+        updateDisplayedLobbyTime(data);
     });
 
     socket.on('kicked', () => {

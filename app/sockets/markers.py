@@ -37,6 +37,47 @@ def compact_route_points(markers, route_id, exclude_id=None):
             changed_ids.append(m['id'])
     return changed_ids
 
+def marker_recipient_ids(lobby_id):
+    lobby = db.session.get(Lobby, lobby_id)
+    recipient_ids = {
+        participant.user_id
+        for participant in LobbyParticipant.query.filter_by(lobby_id=lobby_id, is_banned=False).all()
+    }
+    if lobby:
+        recipient_ids.add(lobby.gm_id)
+    return recipient_ids
+
+
+def emit_marker_added(marker, lobby_id):
+    for user_id in marker_recipient_ids(lobby_id):
+        if can_see_marker(user_id, lobby_id, marker):
+            emit('marker_added', marker, room=f"user_{user_id}")
+
+
+def emit_marker_updated(marker, lobby_id, updates):
+    hidden_payload = {
+        'id': marker.get('id'),
+        'updates': {'visibleTo': marker.get('visibleTo', [])},
+    }
+    visible_payload = {
+        'id': marker.get('id'),
+        'updates': updates,
+        'marker': marker,
+    }
+    for user_id in marker_recipient_ids(lobby_id):
+        payload = visible_payload if can_see_marker(user_id, lobby_id, marker) else hidden_payload
+        emit('marker_updated', payload, room=f"user_{user_id}")
+
+
+def emit_route_point_updates(markers, lobby_id, marker_ids):
+    for marker_id in marker_ids:
+        updated_marker = next((m for m in markers if m.get('id') == marker_id), None)
+        if updated_marker:
+            emit_marker_updated(updated_marker, lobby_id, {
+                'routeId': updated_marker.get('routeId'),
+                'routeOrder': updated_marker.get('routeOrder'),
+            })
+
 def can_edit_marker(user_id, lobby_id, marker):
     lobby = Lobby.query.get(lobby_id)
     if not lobby:
@@ -44,17 +85,21 @@ def can_edit_marker(user_id, lobby_id, marker):
     if lobby.gm_id == user_id:
         return True
     created_by = marker.get('createdBy')
-    logger.debug(f"can_edit_marker: user_id={user_id}, createdBy={created_by}, result={created_by == user_id}")
-    return created_by == user_id
+    can_edit = str(created_by) == str(user_id)
+    logger.debug(f"can_edit_marker: user_id={user_id}, createdBy={created_by}, result={can_edit}")
+    return can_edit
 
 def can_see_marker(user_id, lobby_id, marker):
     lobby = Lobby.query.get(lobby_id)
     if lobby.gm_id == user_id:
         return True
     visible_to = marker.get('visibleTo', [])
-    if 'all' in visible_to:
+    if not isinstance(visible_to, list):
+        visible_to = [visible_to]
+    normalized_visible_to = {str(value) for value in visible_to}
+    if 'all' in normalized_visible_to:
         return True
-    return user_id in visible_to
+    return str(user_id) in normalized_visible_to
 
 def filter_markers_for_user(markers, user_id, lobby_id):
     return [m for m in markers if can_see_marker(user_id, lobby_id, m)]
@@ -153,7 +198,7 @@ def handle_add_marker(data):
         logger.info(f"Marker {new_id} added by {user.username} in lobby {lobby_id}")
 
         # Отправляем новый маркер
-        emit('marker_added', new_marker, room=f"lobby_{lobby_id}")
+        emit_marker_added(new_marker, lobby_id)
 
         # Отправляем обновления для затронутых маркеров
         for marker_id in changed_ids:
@@ -195,6 +240,9 @@ def handle_update_marker(data):
     if not marker:
         emit('error', {'message': 'Marker not found'}, room=request.sid)
         return
+    if not can_edit_marker(user.id, lobby_id, marker):
+        emit('error', {'message': 'You cannot edit this marker'}, room=request.sid)
+        return
 
     # Сохраняем старые значения для проверки изменений маршрута
     old_route_id = marker.get('routeId')
@@ -212,6 +260,7 @@ def handle_update_marker(data):
     new_order = marker.get('routeOrder')
 
     # Сначала удаляем старую точку из старого маршрута (если была)
+    changed_ids = []
     if old_type == 'route_point' and old_route_id:
         # Удаляем точку из старого маршрута (она всё ещё в markers, но мы её временно исключим из расчётов)
         # Сдвигаем точки с order > old_order на -1
@@ -221,24 +270,26 @@ def handle_update_marker(data):
                 m.get('id') != marker_id and
                 m.get('routeOrder', 0) > old_order):
                 m['routeOrder'] = m['routeOrder'] - 1
+                changed_ids.append(m['id'])
 
     # Если теперь это точка маршрута и есть новый routeId
     if new_type == 'route_point' and new_route_id:
         # Вставляем в новый маршрут с новым order
-        reorder_route_points(markers, new_route_id, new_order, exclude_id=marker_id)
+        changed_ids.extend(reorder_route_points(markers, new_route_id, new_order, exclude_id=marker_id))
 
     # Упорядочиваем оба маршрута (старый и новый, если они разные)
     if old_type == 'route_point' and old_route_id and old_route_id != new_route_id:
-        compact_route_points(markers, old_route_id)
+        changed_ids.extend(compact_route_points(markers, old_route_id))
     if new_type == 'route_point' and new_route_id:
-        compact_route_points(markers, new_route_id)
+        changed_ids.extend(compact_route_points(markers, new_route_id))
 
     try:
         game_state.map_data['markers'] = markers
         flag_modified(game_state, 'map_data')
         db.session.commit()
         logger.info(f"Marker {marker_id} updated by {user.username} in lobby {lobby_id}")
-        emit('marker_updated', {'id': marker_id, 'updates': updates}, room=f"lobby_{lobby_id}")
+        emit_marker_updated(marker, lobby_id, updates)
+        emit_route_point_updates(markers, lobby_id, list(dict.fromkeys(changed_ids)))
     except Exception as e:
         db.session.rollback()
         logger.exception("Failed to update marker")
@@ -270,6 +321,9 @@ def handle_move_marker(data):
     if not marker:
         emit('error', {'message': 'Marker not found'}, room=request.sid)
         return
+    if not can_edit_marker(user.id, lobby_id, marker):
+        emit('error', {'message': 'You cannot move this marker'}, room=request.sid)
+        return
 
     marker['position'] = new_position
 
@@ -278,7 +332,13 @@ def handle_move_marker(data):
         flag_modified(game_state, 'map_data')
         db.session.commit()
         logger.info(f"Marker {marker_id} moved by {user.username} in lobby {lobby_id} to {new_position}")
-        emit('marker_moved', {'id': marker_id, 'position': new_position}, room=f"lobby_{lobby_id}")
+        for recipient_id in marker_recipient_ids(lobby_id):
+            if can_see_marker(recipient_id, lobby_id, marker):
+                emit(
+                    'marker_moved',
+                    {'id': marker_id, 'position': new_position},
+                    room=f"user_{recipient_id}",
+                )
     except Exception as e:
         db.session.rollback()
         logger.exception("Failed to move marker")
@@ -308,6 +368,9 @@ def handle_delete_marker(data):
     marker = next((m for m in markers if m.get('id') == marker_id), None)
     if not marker:
         emit('error', {'message': 'Marker not found'}, room=request.sid)
+        return
+    if not can_edit_marker(user.id, lobby_id, marker):
+        emit('error', {'message': 'You cannot delete this marker'}, room=request.sid)
         return
 
     # Если удаляется точка маршрута, сдвигаем оставшиеся

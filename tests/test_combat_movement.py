@@ -95,6 +95,44 @@ def test_grapple_group_path_rejects_blocked_companion_destination(monkeypatch):
     assert result is None
 
 
+def test_diagonal_path_can_pass_single_blocked_corner(monkeypatch):
+    location = SimpleNamespace(grid_width=3, grid_height=3)
+    monkeypatch.setattr(
+        CombatService,
+        "_build_movement_map",
+        staticmethod(lambda *args, **kwargs: ({(1, 0)}, {})),
+    )
+
+    result = CombatService._find_movement_path(location, 0, 0, 1, 1, 10)
+
+    assert result is not None
+    assert result["path"] == [(0, 0), (1, 1)]
+
+
+def test_diagonal_path_only_requires_destination_to_be_free(monkeypatch):
+    location = SimpleNamespace(grid_width=3, grid_height=3)
+    monkeypatch.setattr(
+        CombatService,
+        "_build_movement_map",
+        staticmethod(lambda *args, **kwargs: ({(1, 0), (0, 1)}, {})),
+    )
+
+    result = CombatService._find_movement_path(location, 0, 0, 1, 1, 10)
+
+    assert result is not None
+    assert result["path"] == [(0, 0), (1, 1)]
+
+
+@pytest.mark.parametrize(
+    ("blocked_zones", "expected"),
+    [(0, "none"), (1, "half"), (3, "half"), (4, "three_quarters"), (6, "three_quarters"), (7, "full")],
+)
+def test_cover_grade_depends_on_blocked_body_zones(blocked_zones, expected):
+    grade, _, _, _ = CombatService._cover_grade(blocked_zones)
+
+    assert grade == expected
+
+
 def test_new_turn_resets_distance_but_keeps_run_and_sprint_exhaustion():
     character = LocationCharacter(
         initiative_bonus=0,
@@ -113,6 +151,57 @@ def test_new_turn_resets_distance_but_keeps_run_and_sprint_exhaustion():
     assert character.movement_distance_this_turn == 0
     assert character.correction_distance_this_turn == 0
     assert character.strenuous_movement_blocked_until_round == 5
+
+
+def test_breathlessness_does_not_interrupt_selected_run_in_same_turn():
+    character = LocationCharacter(
+        movement_mode_this_turn="run",
+        strenuous_movement_blocked_until_round=4,
+    )
+
+    assert CombatService._strenuous_movement_is_blocked(character, "run", 3) is False
+    assert CombatService._strenuous_movement_is_blocked(character, "sprint", 3) is True
+
+
+def test_breathlessness_blocks_new_run_on_later_turn():
+    character = LocationCharacter(
+        movement_mode_this_turn=None,
+        strenuous_movement_blocked_until_round=4,
+    )
+
+    assert CombatService._strenuous_movement_is_blocked(character, "run", 3) is True
+    assert CombatService._strenuous_movement_is_blocked(character, "run", 5) is False
+
+
+def test_pending_action_spends_future_turn_points_until_complete():
+    character = LocationCharacter(
+        initiative_bonus=0,
+        action_points_max=5,
+        free_actions_max=1,
+    )
+    character.character = LobbyCharacter(data={
+        "health": {
+            "combatMeta": {
+                "pendingAction": {
+                    "id": "splint-1",
+                    "label": "Splint",
+                    "total_action_points": 12,
+                    "remaining_action_points": 7,
+                },
+            },
+        },
+    })
+
+    CombatService._prepare_character_for_turn(character)
+    pending = character.character.data["health"]["combatMeta"]["pendingAction"]
+    assert character.action_points_current == 0
+    assert pending["remaining_action_points"] == 2
+
+    CombatService._prepare_character_for_turn(character)
+    meta = character.character.data["health"]["combatMeta"]
+    assert character.action_points_current == 3
+    assert "pendingAction" not in meta
+    assert meta["completedPendingActionId"] == "splint-1"
 
 
 def test_initiative_bonus_uses_tactics_bonus_and_explicit_modifier():
@@ -648,6 +737,60 @@ def test_damaged_cover_loses_physical_protection_proportionally():
     profile = CombatService._cover_profile(cover)
 
     assert profile["physical_protection"] == 10
+
+
+def test_bullet_damage_reduces_cover_hp_and_protection_without_deleting_cover(monkeypatch):
+    monkeypatch.setattr("app.services.combat.flag_modified", lambda *args: None)
+    cover = SimpleNamespace(properties={
+        "cover_class": "strong",
+        "cover_max_hp": 200,
+        "cover_hp": 200,
+        "cover_base_physical_protection": 40,
+        "cover_physical_protection": 40,
+    })
+
+    result = CombatService.apply_cover_damage(cover, 15, "bullet")
+
+    assert result["destroyed"] is False
+    assert result["hp"] == 185
+    assert result["physical_protection"] == 37
+    assert cover.properties["cover_hp"] == 185
+    assert cover.properties["cover_physical_protection"] == 37
+
+
+def test_bullet_damage_leaves_zero_hp_cover_on_map(monkeypatch):
+    monkeypatch.setattr("app.services.combat.flag_modified", lambda *args: None)
+    cover = SimpleNamespace(properties={
+        "cover_class": "flimsy",
+        "cover_max_hp": 50,
+        "cover_hp": 50,
+        "cover_base_physical_protection": 5,
+        "cover_physical_protection": 5,
+    })
+
+    result = CombatService.apply_cover_damage(cover, 100, "bullet")
+
+    assert result["destroyed"] is False
+    assert result["hp"] == 0
+    assert result["physical_protection"] == 0
+
+
+@pytest.mark.parametrize("damage_type", ["explosive", "crushing", "дробящий"])
+def test_explosive_and_crushing_damage_destroy_zero_hp_cover(app, monkeypatch, damage_type):
+    monkeypatch.setattr("app.services.combat.flag_modified", lambda *args: None)
+    monkeypatch.setattr("app.services.combat.db.session.delete", lambda *args: None)
+    cover = SimpleNamespace(id=7, properties={
+        "cover_class": "flimsy",
+        "cover_max_hp": 50,
+        "cover_hp": 50,
+        "cover_base_physical_protection": 5,
+        "cover_physical_protection": 5,
+    })
+
+    result = CombatService.apply_cover_damage(cover, 50, damage_type)
+
+    assert result["destroyed"] is True
+    assert result["hp"] == 0
 
 
 def test_object_between_shooter_and_target_intersects_fire_line():

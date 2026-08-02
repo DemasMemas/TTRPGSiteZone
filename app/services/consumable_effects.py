@@ -325,6 +325,14 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
     if uses_match:
         profile["direct"]["uses"] = _to_int(uses_match.group(1), 1)
 
+    action_points_match = re.search(r"время использования\s*[-–—:]\s*(\d+)\s*од", lower)
+    if action_points_match:
+        profile["direct"]["action_points_cost"] = _to_int(action_points_match.group(1), 1)
+
+    pain_increase_match = re.search(r"усиливает боль на\s*(\d+)\s*уров", lower)
+    if pain_increase_match:
+        profile["direct"]["pain_delta"] = _to_int(pain_increase_match.group(1), 0)
+
     # Visible summaries for direct-only effects so they are not empty in the UI
     direct = profile["direct"]
     if direct.get("hp") is not None:
@@ -518,7 +526,7 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
             profile["requirements"].append(fragment)
 
     if "бонус медикамента" in lower:
-        bonus_match = re.search(r"бонус медикамента\s*\+?(\d+)", lower)
+        bonus_match = re.search(r"бонус медикамента\s*([+-]?\d+)", lower)
         if bonus_match:
             profile["direct"]["med_bonus"] = _to_int(bonus_match.group(1), 0)
 
@@ -655,6 +663,9 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
         bleeding("medium", internal=True)
     if "глобулин" in lower or "контрикал" in lower:
         bleeding("severe", internal=True)
+    if 'гемостатик "шов"' in lower:
+        bleeding("severe", internal=True)
+        applications[-1]["internal_only"] = True
     if "соляного раствора" in lower:
         direct.update({"wound_treatment": True, "pain_delta": 1, "uses": 10, "action_points_cost": 1})
         direct.pop("not_consumed", None)
@@ -758,13 +769,18 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
                                   "tick": "hour_start", "time_unit": "hour"}])
     if "стимулятор варвар" in lower:
         direct["pain_delta"] = -3
-        effect("limb_trauma_suppression", 1, name="Подавление перелома и выбитой конечности",
-               remaining=10, tick="time_elapsed", time_unit="minute", remaining_seconds=600)
+        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
+                       "affects_all_limbs": True})
     if "стимулятор викинг" in lower:
         direct["pain_delta"] = -5
-        effect("limb_trauma_suppression", 1, name="Защита и подавление травм конечности",
-               remaining=10, tick="time_elapsed", time_unit="minute", remaining_seconds=600,
-               minimum_limb_health=1)
+        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
+                       "minimum_limb_health": 1, "affects_all_limbs": True})
+    if "ампула миколия" in lower:
+        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
+                       "affects_all_limbs": True})
+    if "препарат 02" in lower:
+        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
+                       "affects_all_limbs": True})
     if "научный стимпак" in lower:
         direct["radiation_delta"] = -5
     if "военный стимпак" in lower:
@@ -816,11 +832,30 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
     # Fractures, surgery and named limb restoratives require an explicit target.
     if "шина шарнирова" in lower:
         direct.update({"fracture_splint": True, "fracture_restore_health": 1,
-                       "fracture_duration_minutes": 10, "requires_injury": True})
+                       "temporary_limb_health_minutes": 10, "action_points_cost": 6,
+                       "requires_injury": True})
+    elif lower.strip().startswith("шина"):
+        direct.update({"fracture_splint": True, "fracture_restore_health": 1,
+                       "temporary_limb_health_turns": 4, "action_points_cost": 6,
+                       "requires_injury": True})
     if any(name in lower for name in ("шина.", '"химера"', '"вторая жизнь"', "хирургический набор",
                                       'кустарный набор "айболит"', "набор полного восстановления конечности")):
         direct["requires_injury"] = True
         direct["target_body_part"] = True
+    if 'кустарный набор "айболит"' in lower:
+        direct["surgical_kit"] = True
+    if "набор полного восстановления конечности" in lower:
+        direct.update({
+            "surgical_kit": True,
+            "catastrophic_limb_surgery": "full_restoration",
+            "restore_missing_part": True,
+            "restore_full_body_part": True,
+        })
+    if 'хирургический набор "хирург"' in lower:
+        direct.update({
+            "surgical_kit": True,
+            "catastrophic_limb_surgery": "surgeon",
+        })
     surgery_match = re.search(r"восстанавливает (?:часть тела|утерянный орган или искореженную конечность).*?она имеет\s+(\d+)\s+здоров", lower)
     if surgery_match:
         direct["restore_limb_health"] = _to_int(surgery_match.group(1), 1)
@@ -829,10 +864,12 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
         direct["restore_missing_part"] = True
     if '"химера"' in lower:
         direct.update({"cure_fracture": True, "close_area_bleeding": True, "delay": 1,
+                       "delayed_limb_treatment_minutes": 1, "special_limb_treatment": "chimera",
                        "invalid_limb_damage": -200, "head_lethal": True})
     if '"вторая жизнь"' in lower:
         direct.update({"cure_fracture": True, "restore_limb_health": 50, "close_area_bleeding": True,
-                       "pain_delta": 5, "delay": 1})
+                       "pain_delta": 5, "delay": 1, "delayed_limb_treatment_minutes": 1,
+                       "special_limb_treatment": "second_life"})
 
     visible_fields = {
         "radiation_delta": "Радиация", "intoxication_delta": "Опьянение",

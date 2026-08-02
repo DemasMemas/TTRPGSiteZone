@@ -127,6 +127,7 @@ def _looks_like_grenade_ammo(row: Dict[str, str]) -> bool:
         "рго",
         "ргн",
         "ог-",
+        "молотов",
         "m67",
         "m26",
     )
@@ -598,7 +599,7 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
                     "requires_filter": requires_filter,
                     "integrated_visor": integrated_visor,
                     "slots": slots,
-                    "protection_zones": ["crown", "back", "ears", "face"],
+                    "protection_zones": _helmet_protection_zones(name),
                     "raw_row": row,
                 },
                 "compatible_ids": [],
@@ -606,6 +607,21 @@ def _parse_helmets(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         )
 
     return templates
+
+
+def _helmet_protection_zones(name: str) -> List[str]:
+    normalized = _normalize_text(name).lower().replace("ё", "е")
+    crown_and_back = {"советский котелок 68г", "шлем ударник"}
+    crown_back_and_ears = {
+        "шлем витязь 4в76",
+        "шлем ударник-м",
+        "шлем первопроходец",
+    }
+    if normalized in crown_and_back:
+        return ["crown", "back"]
+    if normalized in crown_back_and_ears:
+        return ["crown", "back", "ears"]
+    return ["crown", "back", "ears", "face"]
 
 
 def _parse_exoskeleton_battery(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
@@ -798,6 +814,8 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
                 template["attributes"]["manual_cycle"] = "bolt"
             elif matches_pump:
                 template["attributes"]["manual_cycle"] = "pump"
+    for source_order, template in enumerate(templates):
+        template.setdefault("attributes", {})["source_order"] = source_order
     return templates
 
 

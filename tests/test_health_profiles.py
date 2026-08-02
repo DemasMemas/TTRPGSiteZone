@@ -1,4 +1,4 @@
-from app.services.health import apply_health_maximums, get_health_maximums
+from app.services.health import BASE_ORGAN_MAXIMUMS, apply_health_maximums, get_health_maximums
 
 
 def test_base_health_profile_uses_rules_values():
@@ -56,8 +56,18 @@ def test_missing_health_starts_full():
     health = apply_health_maximums({})
 
     assert health["current"] == 700
+    assert health["temperature"] == 36
     assert health["zones"]["head"] == {"current": 50, "max": 50}
     assert health["zones"]["chest"] == {"current": 150, "max": 150}
+    assert health["organs"]["heart"] == {"current": 20, "max": 20}
+    assert health["organs"]["brain"] == {"current": 1, "max": 1}
+    assert set(health["organs"]) == set(BASE_ORGAN_MAXIMUMS)
+
+
+def test_invalid_zero_temperature_is_repaired():
+    health = apply_health_maximums({"health": {"temperature": 0}})
+
+    assert health["temperature"] == 36
 
 
 def test_legacy_zone_maximums_are_repaired_even_with_profile_marker():

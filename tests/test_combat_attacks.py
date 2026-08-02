@@ -207,6 +207,39 @@ def test_attack_summary_lists_each_target_damage_bleeding_and_trauma():
     assert "Итого: попаданий 1/2, урон 42." in summary
 
 
+def test_cover_attack_summary_shows_protection_and_target_behind_cover():
+    summary = CombatService.format_attack_summary({
+        "character": {"name": "Стрелок"},
+        "attack": {
+            "results": [{
+                "target_name": "Стул",
+                "roll": 12,
+                "rolls": [12],
+                "difficulty": 5,
+                "hit": True,
+                "mode": "unaimed",
+                "cover_hit": True,
+                "cover_penetrated": True,
+                "cover_protection": 20,
+                "cover_damage": {
+                    "physical_protection": 0,
+                    "hp": 100,
+                    "max_hp": 100,
+                },
+                "target_behind_cover_name": "Цель",
+                "target_behind_cover_result": {
+                    "hit": True,
+                    "zone": "chest",
+                    "damage": 15,
+                },
+            }],
+        },
+    })
+
+    assert "защита 20% → 0%, ОЗ 100/100; пробитие: да" in summary
+    assert "За укрытием: Цель, грудь, урон 15" in summary
+
+
 @pytest.mark.parametrize(
     ("effects", "expected_state"),
     [
@@ -428,6 +461,232 @@ def test_duplet_reuses_one_hit_roll_for_sequential_impacts(monkeypatch):
     assert forced_rolls == [None, 14]
     assert len(results) == 2
     assert all(result["shared_hit_roll"] for result in results)
+
+
+def test_cover_continuation_only_accepts_three_cells_on_the_shot_line():
+    shooter = SimpleNamespace(pos_x=0, pos_y=0)
+    cover = SimpleNamespace(
+        tile_x=2,
+        tile_y=0,
+        type="crate",
+        properties={"dimensions": {"width": 1, "depth": 1}},
+    )
+
+    assert CombatService._cover_continuation_distance(
+        shooter, cover, SimpleNamespace(pos_x=3, pos_y=0)
+    ) == pytest.approx(0.5)
+    assert CombatService._cover_continuation_distance(
+        shooter, cover, SimpleNamespace(pos_x=5, pos_y=0)
+    ) == pytest.approx(2.5)
+    assert CombatService._cover_continuation_distance(
+        shooter, cover, SimpleNamespace(pos_x=6, pos_y=0)
+    ) is None
+    assert CombatService._cover_continuation_distance(
+        shooter, cover, SimpleNamespace(pos_x=3, pos_y=1)
+    ) is None
+
+
+def test_characters_behind_cover_include_second_and_third_cells(monkeypatch):
+    shooter = SimpleNamespace(id=1, pos_x=0, pos_y=0)
+    second_cell = SimpleNamespace(id=2, pos_x=4, pos_y=0)
+    third_cell = SimpleNamespace(id=3, pos_x=5, pos_y=0)
+    too_far = SimpleNamespace(id=4, pos_x=6, pos_y=0)
+    cover = SimpleNamespace(
+        tile_x=2,
+        tile_y=0,
+        type="crate",
+        properties={"dimensions": {"width": 1, "depth": 1}},
+    )
+
+    class FakeQuery:
+        def filter_by(self, **kwargs):
+            return self
+
+        def all(self):
+            return [shooter, third_cell, too_far, second_cell]
+
+    monkeypatch.setattr(
+        combat_module,
+        "LocationCharacter",
+        SimpleNamespace(query=FakeQuery()),
+    )
+
+    assert CombatService._characters_behind_cover(1, shooter, cover) == [
+        second_cell,
+        third_cell,
+    ]
+
+
+def test_cover_attack_summary_reports_secondary_miss_without_unknown_zone():
+    summary = CombatService.format_attack_summary({
+        "character": {"name": "Стрелок"},
+        "attack": {
+            "results": [{
+                "target_name": "Ящик",
+                "roll": 15,
+                "rolls": [15],
+                "difficulty": 5,
+                "hit": True,
+                "mode": "unaimed",
+                "cover_hit": True,
+                "cover_penetrated": True,
+                "cover_protection": 20,
+                "cover_damage": {"physical_protection": 0, "hp": 0, "max_hp": 50},
+                "target_behind_cover_name": "Цель",
+                "target_behind_cover_result": {
+                    "hit": False,
+                    "roll": 4,
+                    "rolls": [16, 4],
+                    "difficulty": 12,
+                    "damage": 0,
+                },
+            }],
+        },
+    })
+
+    assert "За укрытием: Цель, d20 16/4, СЛ 12 — промах." in summary
+    assert "неизвестная зона" not in summary
+
+
+def test_unaimed_blind_fire_miss_can_damage_cover(monkeypatch):
+    cover = SimpleNamespace(id=7, name="Ящик", type="crate")
+    attacker = SimpleNamespace(
+        character=SimpleNamespace(data={"weapons": [{}]}),
+    )
+    target = SimpleNamespace(
+        character_id=2,
+        character=SimpleNamespace(id=2, name="Цель", data={}),
+        grapple_live_shield=False,
+        grapple_target_id=None,
+    )
+    rolls = iter([3])
+    cover_damage_calls = []
+
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: next(rolls))
+    monkeypatch.setattr(
+        "app.services.combat.db.session.get",
+        lambda model, object_id: cover if object_id == cover.id else None,
+    )
+    monkeypatch.setattr(
+        CombatService,
+        "_cover_profile",
+        lambda obj: {"physical_protection": 20},
+    )
+
+    def apply_cover_damage(obj, damage, damage_type):
+        cover_damage_calls.append((obj, damage, damage_type))
+        return {
+            "hp": 50,
+            "max_hp": 100,
+            "physical_protection": 10,
+        }
+
+    monkeypatch.setattr(CombatService, "apply_cover_damage", apply_cover_damage)
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": 0,
+            "fire_mode": "unaimed",
+            "hit_difficulty": 12,
+            "shooting_disadvantage": False,
+            "cover": {
+                "blind_fire": True,
+                "zones": {"chest": {"object_id": cover.id}},
+            },
+        },
+        profile_override={
+            "damage": 50,
+            "armor_piercing": 30,
+            "damage_type": "bullet",
+        },
+        profile_adjusted=True,
+    )
+
+    assert result["hit"] is False
+    assert result["automatic_cover_hit"] is True
+    assert result["cover_hit"]["object_id"] == cover.id
+    assert result["cover_hit"]["penetrated"] is True
+    assert cover_damage_calls == [(cover, 50, "bullet")]
+
+    summary = CombatService.format_attack_summary({
+        "character": {"name": "Стрелок"},
+        "attack": {"results": [result]},
+    })
+    assert "Цель: d20 3, СЛ 12 — промах." in summary
+    assert "Пуля попала в Ящик: без проверки" in summary
+    assert "защита 20% → 10%, ОЗ 50/100" in summary
+
+
+def test_penetrated_cover_requires_disadvantaged_hit_roll_against_target(monkeypatch):
+    attacker = SimpleNamespace(
+        pos_x=0,
+        pos_y=0,
+        character=SimpleNamespace(data={"weapons": [{}]}),
+    )
+    target = SimpleNamespace(
+        character_id=2,
+        pos_x=3,
+        pos_y=0,
+        movement_mode_this_turn="run",
+        character=SimpleNamespace(name="Target", data={}),
+    )
+    cover = SimpleNamespace(id=7, name="Crate", type="crate")
+    resolved = {}
+
+    monkeypatch.setattr(
+        CombatService,
+        "_ranged_damage_profile",
+        lambda weapon: ({"damage": 50, "armor_piercing": 40}, None),
+    )
+    monkeypatch.setattr(
+        CombatService,
+        "_cover_profile",
+        lambda obj: {"physical_protection": 20},
+    )
+    monkeypatch.setattr(
+        CombatService,
+        "apply_cover_damage",
+        lambda *args: {"hp": 50, "max_hp": 100, "physical_protection": 10},
+    )
+    monkeypatch.setattr(
+        CombatService,
+        "_characters_behind_cover",
+        lambda *args: [target],
+    )
+
+    def resolve_attack(*args, **kwargs):
+        resolved["details"] = args[2]
+        resolved["kwargs"] = kwargs
+        return {"hit": False, "roll": 4, "rolls": [15, 4], "damage": 0}
+
+    monkeypatch.setattr(CombatService, "_resolve_attack", resolve_attack)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: 20)
+
+    result = CombatService._resolve_cover_attack(
+        1,
+        cover,
+        attacker,
+        {
+            "weapon_index": 0,
+            "fire_mode": "unaimed",
+            "hit_difficulty": 5,
+            "continuation_hit_difficulty": 11,
+            "shooting_disadvantage": False,
+            "target_distance": 2,
+            "weapon_range": 10,
+        },
+    )
+
+    assert resolved["details"]["shooting_disadvantage"] is True
+    assert resolved["details"]["hit_difficulty"] == 13
+    assert "forced_roll" not in resolved["kwargs"]
+    assert result["automatic_cover_hit"] is True
+    assert result["rolls"] == []
+    assert result["difficulty"] is None
+    assert result["target_behind_cover_result"]["hit"] is False
+    assert result["damage"] == 0
 
 
 def test_aimed_head_miss_hits_live_shield_head(monkeypatch):
@@ -954,6 +1213,55 @@ def test_damage_pain_uses_round_total_and_large_single_hit_thresholds():
     assert CombatService._damage_pain_requirement(201, 201) == 3
 
 
+def test_limb_damage_at_three_and_five_limits_creates_catastrophic_injuries(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: start)
+    character = SimpleNamespace(data={
+        "health": {
+            "current": 700,
+            "max": 700,
+            "zones": {"leftArm": {"current": 100, "max": 100}},
+            "effects": [],
+        },
+    })
+    target = SimpleNamespace(character=character, hp_zones={})
+
+    CombatService._apply_attack_damage(
+        target, 300, "left_arm", {}, allow_bleeding=False, round_number=1
+    )
+    effects = character.data["health"]["effects"]
+    assert any(effect["type"] == "mangled_limb" for effect in effects)
+    assert any(effect["type"] == "shock" for effect in effects)
+
+    CombatService._apply_attack_damage(
+        target, 200, "left_arm", {}, allow_bleeding=False, round_number=1
+    )
+    effects = character.data["health"]["effects"]
+    amputation = next(effect for effect in effects if effect["type"] == "amputation")
+    assert not any(effect["type"] == "mangled_limb" for effect in effects)
+    assert amputation["loss_roll"] == 1
+    assert amputation["loss_extent"] == "entire_limb"
+    assert character.data["health"]["zones"]["leftArm"]["destructionDamage"] == 500
+
+
+def test_mangled_and_missing_legs_have_increased_penalties():
+    mangled = {
+        "health": {
+            "zones": {"leftLeg": {"current": 0, "max": 100}},
+            "effects": [{"type": "mangled_limb", "area": "leftLeg"}],
+        },
+    }
+    missing = {
+        "health": {
+            "zones": {"leftLeg": {"current": 0, "max": 100}},
+            "effects": [{"type": "amputation", "area": "leftLeg"}],
+        },
+    }
+
+    assert CombatService._disabled_limb_penalties(mangled)["movement"] == 5
+    assert CombatService._disabled_limb_penalties(missing)["movement"] == 6
+
+
 def test_disabled_limbs_apply_combat_and_movement_penalties():
     data = {
         "health": {
@@ -975,6 +1283,54 @@ def test_disabled_limbs_apply_combat_and_movement_penalties():
     assert penalties["agility"] == 3
     assert penalties["movement"] == 3
     assert penalties["sprint_blocked"] is True
+
+
+def test_fixed_fracture_penalties_are_lower_for_arms_and_legs():
+    arm_data = {
+        "health": {
+            "effects": [
+                {"type": "fracture_fixed", "area": "leftArm", "active": True},
+            ],
+        },
+    }
+    leg_data = {
+        "health": {
+            "effects": [
+                {"type": "fracture_fixed", "area": "rightLeg", "active": True},
+            ],
+        },
+    }
+
+    assert CombatService._skill_modifier(arm_data, "skills.physical.shooting") == -1
+    assert CombatService._movement_penalty_breakdown(leg_data)["injuries"] == 2
+
+
+def test_systemic_limb_treatment_suppresses_regular_and_fixed_fracture_penalties():
+    data = {
+        "health": {
+            "effects": [
+                {"type": "fracture", "area": "leftArm", "active": True},
+                {"type": "fracture_fixed", "area": "rightLeg", "active": True},
+                {
+                    "type": "temporary_limb_restoration",
+                    "area": "leftArm",
+                    "suppress_fracture": True,
+                    "remaining": 10,
+                    "active": True,
+                },
+                {
+                    "type": "temporary_limb_restoration",
+                    "area": "rightLeg",
+                    "suppress_fracture": True,
+                    "remaining": 10,
+                    "active": True,
+                },
+            ],
+        },
+    }
+
+    assert CombatService._skill_modifier(data, "skills.physical.shooting") == 0
+    assert CombatService._movement_penalty_breakdown(data)["injuries"] == 0
 
 
 def test_aimed_head_shot_adds_five_difficulty():
@@ -1100,3 +1456,130 @@ def test_disabling_arm_adds_zone_pain_only_once(monkeypatch):
     )
 
     assert character.data["health"]["painLevel"] == 4
+
+
+@pytest.mark.parametrize("zone", ["head", "chest"])
+def test_hitting_disabled_vital_zone_kills_character(monkeypatch, zone):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: 1)
+    zone_max = 50 if zone == "head" else 150
+    character = SimpleNamespace(data={
+        "health": {
+            "current": 500,
+            "max": 700,
+            "zones": {zone: {"current": 0, "max": zone_max}},
+            "effects": [],
+        }
+    })
+    target = SimpleNamespace(
+        character=character,
+        hp_zones={},
+        posture="standing",
+        cover_object_id=None,
+        weapon_braced=False,
+        braced_weapon_index=None,
+    )
+
+    health = CombatService._apply_attack_damage(
+        target, 0, zone, {"bleeding": ""}, round_number=1
+    )
+
+    death = next(effect for effect in health["effects"] if effect["type"] == "death")
+    assert death["source"] == "hit_disabled_vital_zone"
+    assert death["area"] == zone
+    assert health["_attackOutcome"]["death"] is True
+    assert target.posture == "prone"
+
+
+@pytest.mark.parametrize("zone", ["head", "chest"])
+def test_disabling_vital_zone_makes_character_critical_and_prone(monkeypatch, zone):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: 1)
+    zone_max = 50 if zone == "head" else 150
+    character = SimpleNamespace(data={
+        "health": {
+            "current": 500,
+            "max": 700,
+            "zones": {zone: {"current": 1, "max": zone_max}},
+            "effects": [],
+        }
+    })
+    target = SimpleNamespace(
+        character=character,
+        hp_zones={},
+        posture="standing",
+        cover_object_id=42,
+        weapon_braced=True,
+        braced_weapon_index=0,
+    )
+
+    health = CombatService._apply_attack_damage(
+        target, 1, zone, {"bleeding": ""}, round_number=1
+    )
+
+    assert CombatService._character_condition(character.data)["state"] == "critical"
+    assert not any(effect["type"] == "death" for effect in health["effects"])
+    assert target.posture == "prone"
+    assert target.cover_object_id is None
+    assert target.weapon_braced is False
+
+
+def test_disabled_chest_is_critical_and_cannot_recover_from_shock():
+    condition = CombatService._character_condition({
+        "health": {
+            "current": 500,
+            "zones": {"chest": {"current": 0, "max": 150}},
+            "effects": [{"type": "shock", "active": True}],
+        }
+    })
+
+    assert condition["state"] == "critical"
+    assert condition["can_recover"] is False
+
+
+def test_disabled_head_is_critical_but_not_dead_without_brain_or_skull_damage():
+    condition = CombatService._character_condition({
+        "health": {
+            "current": 500,
+            "zones": {"head": {"current": 0, "max": 50}},
+            "organs": {
+                "brain": {"current": 1, "max": 1},
+                "skull": {"current": 1, "max": 1},
+            },
+            "effects": [],
+        }
+    })
+
+    assert condition["state"] == "critical"
+    assert condition["can_recover"] is False
+
+
+def test_destroyed_lung_gets_own_health_bleeding_and_pain():
+    health = {"effects": [], "painLevel": 0}
+
+    result = CombatService._apply_organ_damage(
+        health, "rightLung", 50, "chest"
+    )
+
+    assert result["disabled"] is True
+    assert health["organs"]["rightLung"]["current"] == 0
+    assert health["painLevel"] == 5
+    assert any(
+        effect["type"] == "bleeding_internal_severe"
+        and effect["area"] == "chest"
+        for effect in health["effects"]
+    )
+
+
+def test_destroyed_heart_starts_one_minute_death_timer():
+    health = {"effects": [], "painLevel": 0}
+
+    result = CombatService._apply_organ_damage(health, "heart", 20, "chest")
+
+    failure = next(
+        effect for effect in health["effects"]
+        if effect["type"] == "organ_failure"
+    )
+    assert result["death_in_seconds"] == 60
+    assert failure["remaining_seconds"] == 60
+    assert failure["death_on_expire"] is True
