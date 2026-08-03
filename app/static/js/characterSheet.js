@@ -4738,6 +4738,7 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
             <span class="close" onclick="document.getElementById('magazine-select-modal').remove()">&times;</span>
             <h3>Выберите магазин</h3>
             <select id="magazine-select" class="form-control"></select>
+            <div id="magazine-reload-preview" style="margin-top:12px; padding:10px 12px; border:1px solid var(--border-color, #45483e); border-radius:6px; background:rgba(0,0,0,.18);"></div>
             <div class="form-actions">
                 <button class="btn btn-primary" id="confirm-magazine-btn">Установить</button>
                 <button class="btn btn-secondary" onclick="document.getElementById('magazine-select-modal').remove()">Отмена</button>
@@ -4753,6 +4754,37 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
         opt.textContent = `${entry.item.name} (${entry.item.ammo?.reduce((s,a)=>s+a.quantity,0) || 0} патр.)`;
         select.appendChild(opt);
     });
+
+    const preview = modal.querySelector('#magazine-reload-preview');
+    let previewVersion = 0;
+    const updatePreview = async () => {
+        const version = ++previewVersion;
+        const selected = inventoryMagazines[select.value];
+        if (!selected) {
+            renderReloadPreview(preview, null, []);
+            return;
+        }
+        const paymentRows = [];
+        if (window.locationCombatState?.status === 'active') {
+            const access = await calculateInventoryAccess(selected.item, selected.path);
+            if (version !== previewVersion || !modal.isConnected) return;
+            const profile = getCombatWeaponErgonomics(weaponIndex);
+            const selectedMagazineErgonomics = Number(selected.item.attributes?.ergonomics || 0);
+            const effectiveErgonomics = profile
+                ? Number(profile.value || 0) - Number(profile.magazine_modifier || 0) + selectedMagazineErgonomics
+                : selectedMagazineErgonomics;
+            const baseCost = Math.max(0, Number(selected.item.attributes?.reload_time_od || 0));
+            const useCost = Math.max(
+                0,
+                baseCost + reloadErgonomicsModifier(effectiveErgonomics) - Number(access.useActionDiscount || 0),
+            );
+            const totalCost = useCost + Number(access.retrievalActionPoints || 0);
+            paymentRows.push({ label: 'Смена магазина', payment: `${totalCost} ОД` });
+        }
+        renderReloadPreview(preview, selected.item, paymentRows);
+    };
+    select.addEventListener('change', updatePreview);
+    await updatePreview();
 
     // Кнопка подтверждения использует актуальный weaponIndex и список
     modal.querySelector('#confirm-magazine-btn').onclick = async () => {
@@ -5025,6 +5057,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
                 <h4>Патроны</h4>
                 <select id="fixed-ammo-select" class="form-control" size="5"></select>
             </div>
+            <div id="fixed-reload-preview" style="margin-top:12px; padding:10px 12px; border:1px solid var(--border-color, #45483e); border-radius:6px; background:rgba(0,0,0,.18);"></div>
             <div class="form-actions" style="margin-top:15px;">
                 <button class="btn btn-primary" id="confirm-fixed-reload-btn">Зарядить</button>
                 ${window.locationCombatState?.status !== 'active' ? '<button class="btn btn-success" id="reload-fixed-full-btn">Зарядить до полного</button>' : ''}
@@ -5058,13 +5091,58 @@ window.reloadFixedMagazine = async function(weaponIndex) {
         opt.textContent = `${entry.item.name} (${ammoSourceCount(entry.item)} патр.)`;
         ammoSelect.appendChild(opt);
     });
+    const preview = modal.querySelector('#fixed-reload-preview');
+    let previewVersion = 0;
+    const selectedReloadSource = () => {
+        const loaderIndex = loaderSelect.value;
+        const ammoIndex = ammoSelect.value;
+        if (loaderIndex !== '' && loaderItems.length > 0) return loaderItems[loaderIndex];
+        if (ammoIndex !== '' && ammoItems.length > 0) return ammoItems[ammoIndex];
+        return null;
+    };
+    const updateReloadPreview = async () => {
+        const version = ++previewVersion;
+        const selected = selectedReloadSource();
+        if (!selected) {
+            renderReloadPreview(preview, null, []);
+            return;
+        }
+        const paymentRows = [];
+        if (window.locationCombatState?.status === 'active') {
+            const state = currentCharacterData.combatMagazineLoading || {};
+            const prepared = state.targetType === 'fixed' && Number(state.weaponIndex) === Number(weaponIndex);
+            const sourceKey = selected.item.id || selected.path.join('.');
+            const sameSource = prepared && state.sourceId === sourceKey;
+            const plans = fixedMagazineLoadingPlans(weaponTemplate, selected.item, needed, prepared);
+            const sourcePayments = sameSource
+                ? null
+                : await inventoryItemPreparationPayments(selected.item, selected.path, 'ammo');
+            if (version !== previewVersion || !modal.isConnected) return;
+            plans.forEach(plan => {
+                const groups = [];
+                if (!prepared && !plan.includesStart) {
+                    groups.push([{ actionPoints: 1, freeActions: 0 }]);
+                }
+                if (sourcePayments) groups.push(sourcePayments);
+                groups.push(plan.payments);
+                paymentRows.push({
+                    label: plan.label,
+                    payment: formatCombatPaymentVariants(combineCombatPayments(groups)),
+                });
+            });
+        }
+        renderReloadPreview(preview, selected.item, paymentRows);
+    };
     loaderSelect.addEventListener('change', () => {
         if (loaderSelect.value !== '') ammoSelect.selectedIndex = -1;
+        updateReloadPreview();
     });
     ammoSelect.addEventListener('change', () => {
         if (ammoSelect.value !== '') loaderSelect.selectedIndex = -1;
+        updateReloadPreview();
     });
     if (loaderItems.length && ammoItems.length) ammoSelect.selectedIndex = -1;
+    await updateReloadPreview();
 
     const fullReloadButton = modal.querySelector('#reload-fixed-full-btn');
     if (fullReloadButton) {
@@ -5564,6 +5642,7 @@ window.reloadMagazineFromInventory = async function(pathStr) {
                 <span class="close" onclick="document.getElementById('ammo-select-modal').style.display='none'">&times;</span>
                 <h3>Выберите патроны</h3>
                 <select id="ammo-select" class="form-control" size="5"></select>
+                <div id="inventory-magazine-reload-preview" style="margin-top:12px; padding:10px 12px; border:1px solid var(--border-color, #45483e); border-radius:6px; background:rgba(0,0,0,.18);"></div>
                 <div class="form-actions" style="margin-top:15px;">
                     <button class="btn btn-primary" onclick="confirmReloadMagazine('${pathStr}')">Зарядить</button>
                     <button class="btn btn-success" id="reload-inventory-full-btn">Зарядить до полного</button>
@@ -5583,6 +5662,63 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     });
     modal._ammoList = ammoItems;
     modal._magPath = pathStr;
+    const reloadPreview = modal.querySelector('#inventory-magazine-reload-preview');
+    let previewVersion = 0;
+    const updateReloadPreview = async () => {
+        const version = ++previewVersion;
+        const selected = ammoItems[select.value];
+        if (!selected) {
+            renderReloadPreview(reloadPreview, null, []);
+            return;
+        }
+        const paymentRows = [];
+        if (window.locationCombatState?.status === 'active') {
+            const state = currentCharacterData.combatMagazineLoading || {};
+            const targetKey = mag.id || path.join('.');
+            const sourceKey = selected.item.id || selected.path.join('.');
+            const sameMagazine = state.targetType === 'inventory' && state.targetId === targetKey;
+            const sameSource = sameMagazine && state.sourceId === sourceKey;
+            const feederTools = collectInventoryEntries(currentCharacterData, item => isAmmoFeederTool(item));
+            const plans = magazineLoadingPlans(selected.item, needed, mag, feederTools.length > 0);
+            const targetPayments = sameMagazine
+                ? null
+                : await inventoryItemPreparationPayments(mag, path, 'magazine');
+            const sourcePayments = sameSource
+                ? null
+                : await inventoryItemPreparationPayments(selected.item, selected.path, 'ammo');
+            if (version !== previewVersion || !modal.isConnected) return;
+
+            for (const plan of plans) {
+                const baseGroups = [];
+                if (targetPayments) baseGroups.push(targetPayments);
+                if (sourcePayments) baseGroups.push(sourcePayments);
+                const variants = [];
+                if (plan.usesFeeder && feederTools.length) {
+                    for (const feeder of feederTools) {
+                        const feederKey = feeder.item.id || feeder.path.join('.');
+                        const sameFeeder = sameMagazine && state.feederId === feederKey;
+                        const feederPayments = sameFeeder
+                            ? null
+                            : await inventoryItemPreparationPayments(feeder.item, feeder.path, 'ammo');
+                        if (version !== previewVersion || !modal.isConnected) return;
+                        const groups = [...baseGroups];
+                        if (feederPayments) groups.push(feederPayments);
+                        groups.push(plan.payments);
+                        variants.push(...combineCombatPayments(groups));
+                    }
+                } else {
+                    variants.push(...combineCombatPayments([...baseGroups, plan.payments]));
+                }
+                paymentRows.push({
+                    label: plan.label,
+                    payment: formatCombatPaymentVariants(variants),
+                });
+            }
+        }
+        renderReloadPreview(reloadPreview, selected.item, paymentRows);
+    };
+    select.onchange = updateReloadPreview;
+    await updateReloadPreview();
     const fullReloadButton = modal.querySelector('#reload-inventory-full-btn');
     if (fullReloadButton) {
         fullReloadButton.style.display = window.locationCombatState?.status === 'active' ? 'none' : '';
@@ -8351,6 +8487,61 @@ function isAmmoClip(item) {
 function ammoSourceCount(item) {
     if (ammoLoadingKind(item) === 'loose') return Math.max(0, Number(item.quantity || 0));
     return (item.ammo || []).reduce((sum, stack) => sum + Math.max(0, Number(stack.quantity || 0)), 0);
+}
+
+function formatReloadAmmoComposition(item) {
+    if (!item) return 'Пусто';
+    if (ammoLoadingKind(item) === 'loose') {
+        const quantity = ammoSourceCount(item);
+        return quantity > 0 ? `${escapeHtml(formatAmmoStackLabel(item))} - ${quantity} шт.` : 'Пусто';
+    }
+    const stacks = Array.isArray(item.ammo)
+        ? item.ammo.filter(stack => Number(stack?.quantity || 0) > 0)
+        : [];
+    if (!stacks.length) {
+        const legacyCount = Math.max(0, Number(item.currentAmmo || 0));
+        return legacyCount > 0 ? `Тип не указан - ${legacyCount} шт.` : 'Пусто';
+    }
+    return stacks
+        .map(stack => `${escapeHtml(formatAmmoStackLabel(stack))} - ${Number(stack.quantity || 0)} шт.`)
+        .join('<br>');
+}
+
+function formatCombatPaymentVariants(payments) {
+    const unique = (payments || []).filter((payment, index, all) =>
+        all.findIndex(candidate =>
+            Number(candidate.actionPoints || 0) === Number(payment.actionPoints || 0)
+            && Number(candidate.freeActions || 0) === Number(payment.freeActions || 0)
+        ) === index
+    );
+    return unique.map(payment => [
+        Number(payment.actionPoints || 0) ? `${Number(payment.actionPoints)} ОД` : '',
+        Number(payment.freeActions || 0) ? `${Number(payment.freeActions)} СД` : '',
+    ].filter(Boolean).join(' + ') || '0 ОД').join(' или ');
+}
+
+function reloadErgonomicsModifier(value) {
+    const ergonomics = Math.max(0, Number(value || 0));
+    if (ergonomics <= 20) return 2;
+    if (ergonomics <= 50) return 1;
+    if (ergonomics <= 90) return 0;
+    if (ergonomics <= 99) return -1;
+    return -2;
+}
+
+function renderReloadPreview(element, item, paymentRows) {
+    if (!element) return;
+    const rows = Array.isArray(paymentRows) ? paymentRows : [];
+    element.innerHTML = `
+        <div style="font-weight:700; margin-bottom:6px;">${escapeHtml(item?.name || 'Источник не выбран')}</div>
+        <div style="display:grid; grid-template-columns:max-content 1fr; gap:5px 10px; align-items:start;">
+            <strong>Боеприпасы:</strong>
+            <div>${formatReloadAmmoComposition(item)}</div>
+            <strong>Трата:</strong>
+            <div>${rows.length
+                ? rows.map(row => `${escapeHtml(row.label)}: ${escapeHtml(row.payment)}`).join('<br>')
+                : 'ОД не тратятся'}</div>
+        </div>`;
 }
 
 function magazineLoadingPlans(source, needed, targetMagazine = null, hasFeeder = false) {
