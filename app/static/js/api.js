@@ -389,6 +389,30 @@ export const Server = {
         );
     },
 
+    async createCharacterInteraction(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/character-interactions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async respondCharacterInteraction(lobbyId, requestId, decision) {
+        return apiFetch(`/lobbies/${lobbyId}/character-interactions/${requestId}/response`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision }),
+        });
+    },
+
+    async startCharacterTreatment(lobbyId, requestId, pendingActionId = null) {
+        return apiFetch(`/lobbies/${lobbyId}/character-interactions/${requestId}/progress`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pending_action_id: pendingActionId }),
+        });
+    },
+
     async createLocationObject(lobbyId, locationId, objectData) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/objects`, {
             method: 'POST',

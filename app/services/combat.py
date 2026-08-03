@@ -4711,13 +4711,29 @@ class CombatService:
         actor_location_character_id,
         target_character_id,
         health,
+        treatment_request_id=None,
     ):
-        actor, target, _ = CombatService._validate_incapacitated_interaction(
-            location_id,
-            user_id,
-            actor_location_character_id,
-            target_character_id,
-        )
+        if treatment_request_id:
+            from app.services.character_interaction import CharacterInteractionService
+
+            _, actor, target = CharacterInteractionService._pair(
+                location_id,
+                user_id,
+                actor_location_character_id,
+                target_character_id,
+            )
+            CharacterInteractionService.validate_treatment(
+                treatment_request_id,
+                actor,
+                target,
+            )
+        else:
+            actor, target, _ = CombatService._validate_incapacitated_interaction(
+                location_id,
+                user_id,
+                actor_location_character_id,
+                target_character_id,
+            )
         if not isinstance(health, dict):
             raise ValidationError("Health data is required")
         target_data = (
@@ -6651,6 +6667,10 @@ class CombatService:
         ).first()
         if not character:
             raise NotFoundError("Character not in location")
+
+        from app.services.character_interaction import CharacterInteractionService
+        if CharacterInteractionService.movement_locked(character.id):
+            raise ValidationError("Character cannot move while treatment is in progress")
 
         if not is_gm and character.controlled_by not in (None, user_id):
             raise PermissionDenied("Permission denied")

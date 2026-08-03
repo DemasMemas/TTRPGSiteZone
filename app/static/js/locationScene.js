@@ -106,6 +106,8 @@ let containerInteractionDragState = null;
 let medicalConsumableMenu = null;
 let medicalConsumableMenuState = null;
 let medicalConsumableDragState = null;
+let characterTradeModal = null;
+const pendingCharacterInteractionResolvers = new Map();
 let armedMoveCharacterId = null;
 let armedMovementType = null;
 let movementTypeMenu = null;
@@ -1107,6 +1109,29 @@ function ensureMedicalConsumableMenu() {
     document.addEventListener('pointercancel', stopMedicalMenuDrag);
 }
 
+async function requestTreatmentConsent(actorLocationCharacterId, targetCharacterId, procedure) {
+    const requestData = await Server.createCharacterInteraction(
+        window.currentLobbyId,
+        getCurrentLocationId(),
+        {
+            actor_location_character_id: actorLocationCharacterId,
+            target_character_id: targetCharacterId,
+            kind: 'treatment',
+            payload: { procedure },
+        },
+    );
+    if (['accepted', 'forced'].includes(requestData.status)) {
+        return { allowed: true, requestId: requestData.id, status: requestData.status };
+    }
+    if (requestData.status !== 'pending') {
+        return { allowed: false, requestId: requestData.id, status: requestData.status };
+    }
+    showNotification('Ожидаем согласия персонажа на лечение', 'system');
+    return new Promise((resolve) => {
+        pendingCharacterInteractionResolvers.set(requestData.id, resolve);
+    });
+}
+
 async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = null, actorLocationCharacterIdHint = null) {
     ensureMedicalConsumableMenu();
     medicalConsumableMenuState = { characterId };
@@ -1201,6 +1226,21 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
                             itemId: item.id,
                             targetCharacterId: forcedTargetCharacterId || undefined,
                             targetData: interactionTarget?.target_data,
+                            requestTreatmentConsent: forcedTargetCharacterId
+                                && getLocationCharacterCondition(forcedTargetCharacterId).state === 'active'
+                                ? (procedure) => requestTreatmentConsent(
+                                    actorLocationCharacterId,
+                                    forcedTargetCharacterId,
+                                    procedure,
+                                )
+                                : undefined,
+                            onTreatmentDeferred: forcedTargetCharacterId
+                                ? (requestId, pendingActionId) => Server.startCharacterTreatment(
+                                    window.currentLobbyId,
+                                    requestId,
+                                    pendingActionId,
+                                )
+                                : undefined,
                             interactionContext: forcedTargetCharacterId ? {
                                 lobbyId: window.currentLobbyId,
                                 locationId: getCurrentLocationId(),
@@ -4256,7 +4296,7 @@ function beginStructureInteractionMode(characterId) {
     }
     pendingStructureAction = {
         actorCharacterId: characterId,
-        actorLocationCharacterId: combatState?.current_character?.location_character_id || null,
+        actorLocationCharacterId: findCombatCharacterByCharacterId(characterId)?.location_character_id || null,
         createdAt: Date.now(),
     };
     pendingCombatAction = null;
@@ -4265,20 +4305,24 @@ function beginStructureInteractionMode(characterId) {
     clearMovementPreview();
     clearStructureActionMenu();
     clearStructureMovePreview();
-    showNotification('Наведи на структуру или недееспособного персонажа и выбери действие', 'system');
+    showNotification('Наведи на структуру или соседнего персонажа и выбери действие', 'system');
     renderCombatHud();
     return true;
 }
 
-function canInteractWithIncapacitatedCharacter(actorCharacterId, targetCharacterId) {
+function canInteractWithCharacter(actorCharacterId, targetCharacterId, requireIncapacitated = false) {
     if (!actorCharacterId || !targetCharacterId || Number(actorCharacterId) === Number(targetCharacterId)) {
         return false;
     }
     const actor = getLocationCharacterById(actorCharacterId);
     const target = getLocationCharacterById(targetCharacterId);
-    if (!actor || !target || getLocationCharacterCondition(targetCharacterId).state === 'active') {
+    if (!actor || !target) {
         return false;
     }
+    if (requireIncapacitated && getLocationCharacterCondition(targetCharacterId).state === 'active') {
+        return false;
+    }
+    if (combatState?.status !== 'active') return true;
     return Math.max(
         Math.abs(Number(actor.posX) - Number(target.posX)),
         Math.abs(Number(actor.posY) - Number(target.posY))
@@ -4310,6 +4354,271 @@ async function inspectIncapacitatedCharacter(actorLocationCharacterId, targetCha
         'system'
     );
     return snapshot;
+}
+
+function ensureCharacterTradeModal() {
+    if (characterTradeModal) return characterTradeModal;
+    characterTradeModal = document.createElement('div');
+    characterTradeModal.className = 'modal';
+    characterTradeModal.style.zIndex = '1320';
+    document.body.appendChild(characterTradeModal);
+    return characterTradeModal;
+}
+
+function addTradeOfferEntry(offer, entry, amount) {
+    const item = entry.item || {};
+    const safeAmount = Math.max(1, Math.min(Number(amount || 1), getTransferItemQuantity(item)));
+    const key = item.id != null ? `id:${item.id}` : `path:${entry.path.join('.')}`;
+    const existing = offer.find(candidate => candidate.key === key);
+    if (existing) {
+        existing.amount = Math.min(existing.available, existing.amount + safeAmount);
+        return;
+    }
+    offer.push({
+        key,
+        item_id: item.id ?? null,
+        path: [...entry.path],
+        name: item.name || 'Предмет',
+        amount: safeAmount,
+        available: getTransferItemQuantity(item),
+    });
+}
+
+function renderTradeInventoryList(container, entries, direction, onAdd = null) {
+    container.innerHTML = '';
+    if (!entries.length) {
+        container.innerHTML = '<div style="padding:10px;opacity:.7;">Инвентарь пуст</div>';
+        return;
+    }
+    entries.forEach(entry => {
+        if (onAdd) {
+            container.appendChild(buildTransferRow(entry, direction, amount => onAdd(entry, amount)));
+            return;
+        }
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:8px 2px;border-bottom:1px solid rgba(255,255,255,.06);';
+        row.innerHTML = `<strong>${escapeHtml(entry.item?.name || 'Предмет')}</strong><div style="font-size:12px;opacity:.7;">${escapeHtml(entry.rootLabel)} · x${getTransferItemQuantity(entry.item)}</div>`;
+        container.appendChild(row);
+    });
+}
+
+function renderTradeOfferList(container, title, offer, direction, onRemove = null) {
+    container.innerHTML = `<div style="font-weight:700;margin-bottom:6px;">${escapeHtml(title)}</div>`;
+    if (!offer.length) {
+        container.insertAdjacentHTML('beforeend', '<div style="padding:8px 0;opacity:.65;">Ничего</div>');
+        return;
+    }
+    offer.forEach((entry, index) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;justify-content:space-between;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06);';
+        row.innerHTML = `<span>${escapeHtml(entry.name)} ×${Number(entry.amount || 1)} <b>${direction}</b></span>`;
+        if (onRemove) {
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'btn btn-sm btn-secondary';
+            remove.textContent = '×';
+            remove.onclick = () => onRemove(index);
+            row.appendChild(remove);
+        }
+        container.appendChild(row);
+    });
+}
+
+async function showCharacterTradeMenu(actorLocationCharacterId, actorCharacterId, targetCharacterId) {
+    const [actorCharacter, snapshot] = await Promise.all([
+        Server.getCharacter(actorCharacterId),
+        Server.inspectLocationCharacter(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            targetCharacterId,
+            actorLocationCharacterId,
+        ),
+    ]);
+    const actorEntries = getCharacterTransferEntries(actorCharacter?.data || {});
+    const targetEntries = getCharacterTransferEntries(snapshot?.target_data || {});
+    const actorOffer = [];
+    const targetOffer = [];
+    const modal = ensureCharacterTradeModal();
+    modal.innerHTML = `
+        <div class="modal-content" style="width:min(1120px,calc(100vw - 24px));max-width:1120px;max-height:88vh;overflow:hidden;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,.08);">
+                <div><h3 style="margin:0;">Обмен</h3><div style="font-size:12px;opacity:.7;">Стоимость в бою: 2 ОД после согласия</div></div>
+                <button type="button" class="btn btn-secondary trade-decline">Отказаться</button>
+            </div>
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,.8fr) minmax(0,1fr);gap:12px;overflow:auto;max-height:calc(88vh - 130px);padding:12px 0;">
+                <section class="trade-panel"><h4>${escapeHtml(actorCharacter?.name || 'Ваш персонаж')}</h4><div class="trade-actor-inventory"></div></section>
+                <section style="background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px;">
+                    <div class="trade-actor-offer"></div>
+                    <div class="trade-target-offer" style="margin-top:16px;"></div>
+                </section>
+                <section class="trade-panel"><h4>${escapeHtml(snapshot.target_name || 'Другой персонаж')}</h4><div class="trade-target-inventory"></div></section>
+            </div>
+            <div class="form-actions"><button type="button" class="btn btn-primary trade-confirm">Подтвердить предложение</button><button type="button" class="btn btn-secondary trade-decline">Отказаться</button></div>
+        </div>`;
+    const render = () => {
+        renderTradeInventoryList(
+            modal.querySelector('.trade-actor-inventory'),
+            actorEntries,
+            '→',
+            (entry, amount) => { addTradeOfferEntry(actorOffer, entry, amount); render(); },
+        );
+        renderTradeInventoryList(
+            modal.querySelector('.trade-target-inventory'),
+            targetEntries,
+            '←',
+            (entry, amount) => { addTradeOfferEntry(targetOffer, entry, amount); render(); },
+        );
+        renderTradeOfferList(
+            modal.querySelector('.trade-actor-offer'),
+            `${actorCharacter?.name || 'Вы'} отдаёт`,
+            actorOffer,
+            '→',
+            index => { actorOffer.splice(index, 1); render(); },
+        );
+        renderTradeOfferList(
+            modal.querySelector('.trade-target-offer'),
+            `${snapshot.target_name || 'Персонаж'} отдаёт`,
+            targetOffer,
+            '←',
+            index => { targetOffer.splice(index, 1); render(); },
+        );
+    };
+    render();
+    modal.querySelectorAll('.trade-decline').forEach(button => {
+        button.onclick = () => { modal.style.display = 'none'; };
+    });
+    modal.querySelector('.trade-confirm').onclick = async () => {
+        try {
+            const result = await Server.createCharacterInteraction(
+                window.currentLobbyId,
+                getCurrentLocationId(),
+                {
+                    actor_location_character_id: actorLocationCharacterId,
+                    target_character_id: targetCharacterId,
+                    kind: 'trade',
+                    payload: {
+                        actor_offer: actorOffer.map(({ available, key, ...entry }) => entry),
+                        target_offer: targetOffer.map(({ available, key, ...entry }) => entry),
+                    },
+                },
+            );
+            modal.style.display = 'none';
+            showNotification(
+                result.status === 'completed' ? 'Обмен завершён' : 'Предложение обмена отправлено',
+                result.status === 'completed' ? 'success' : 'system',
+            );
+        } catch (error) {
+            showNotification(error.message || 'Не удалось предложить обмен', 'system');
+        }
+    };
+    modal.style.display = 'flex';
+}
+
+async function showIncomingCharacterInteraction(requestData) {
+    const modal = ensureCharacterTradeModal();
+    const procedure = requestData.payload?.procedure || {};
+    if (requestData.kind === 'treatment') {
+        modal.innerHTML = `
+            <div class="modal-content" style="width:min(520px,calc(100vw - 24px));">
+                <h3>Согласие на лечение</h3>
+                <p><strong>${escapeHtml(requestData.actor_name)}</strong> собирается провести процедуру персонажу <strong>${escapeHtml(requestData.target_name)}</strong>.</p>
+                <div style="padding:10px 12px;border:1px solid rgba(255,255,255,.1);border-radius:10px;background:rgba(255,255,255,.035);">
+                    <div style="font-weight:700;">${escapeHtml(procedure.item_name || 'Медицинская процедура')}</div>
+                    <div style="margin-top:4px;opacity:.8;">${escapeHtml(procedure.application || '')}</div>
+                    <div style="margin-top:4px;font-size:12px;opacity:.65;">Заявленная стоимость: ${Number(procedure.action_points || 0)} ОД без учёта доставания</div>
+                </div>
+                <p style="font-size:13px;opacity:.75;">При отказе врач и пациент совершат встречные проверки Силы.</p>
+                <div class="form-actions"><button class="btn btn-primary interaction-accept">Согласиться</button><button class="btn btn-secondary interaction-decline">Отказаться</button></div>
+            </div>`;
+    } else {
+        modal.innerHTML = `
+            <div class="modal-content" style="width:min(1120px,calc(100vw - 24px));max-width:1120px;max-height:88vh;overflow:hidden;">
+                <h3>Предложение обмена</h3>
+                <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,.8fr) minmax(0,1fr);gap:12px;overflow:auto;max-height:calc(88vh - 150px);">
+                    <section><h4>${escapeHtml(requestData.actor_name)}</h4><div class="trade-actor-inventory"></div></section>
+                    <section style="background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px;"><div class="trade-actor-offer"></div><div class="trade-target-offer" style="margin-top:16px;"></div></section>
+                    <section><h4>${escapeHtml(requestData.target_name)}</h4><div class="trade-target-inventory"></div></section>
+                </div>
+                <div class="form-actions"><button class="btn btn-primary interaction-accept">Подтвердить обмен</button><button class="btn btn-secondary interaction-decline">Отказаться</button></div>
+            </div>`;
+        renderTradeInventoryList(
+            modal.querySelector('.trade-actor-inventory'),
+            getCharacterTransferEntries(requestData.actor_data || {}),
+            '',
+        );
+        renderTradeInventoryList(
+            modal.querySelector('.trade-target-inventory'),
+            getCharacterTransferEntries(requestData.target_data || {}),
+            '',
+        );
+        renderTradeOfferList(
+            modal.querySelector('.trade-actor-offer'),
+            `${requestData.actor_name} отдаёт`,
+            requestData.payload?.actor_offer || [],
+            '→',
+        );
+        renderTradeOfferList(
+            modal.querySelector('.trade-target-offer'),
+            `${requestData.target_name} отдаёт`,
+            requestData.payload?.target_offer || [],
+            '←',
+        );
+    }
+    const respond = async decision => {
+        modal.querySelectorAll('button').forEach(button => { button.disabled = true; });
+        try {
+            const result = await Server.respondCharacterInteraction(
+                window.currentLobbyId,
+                requestData.id,
+                decision,
+            );
+            modal.style.display = 'none';
+            if (requestData.kind === 'treatment' && decision === 'decline') {
+                const contest = result.result || {};
+                showNotification(
+                    contest.forced
+                        ? `Отказ не удался: ${result.actor_name} победил во встречной проверке Силы (${contest.actor_strength.total} против ${contest.target_strength.total})`
+                        : `Лечение отклонено. Сила: ${contest.actor_strength?.total ?? '?'} против ${contest.target_strength?.total ?? '?'}`,
+                    contest.forced ? 'system' : 'success',
+                );
+            } else {
+                showNotification(
+                    result.status === 'completed' ? 'Обмен завершён' : 'Ответ отправлен',
+                    result.status === 'completed' ? 'success' : 'system',
+                );
+            }
+        } catch (error) {
+            modal.querySelectorAll('button').forEach(button => { button.disabled = false; });
+            showNotification(error.message || 'Не удалось отправить ответ', 'system');
+        }
+    };
+    modal.querySelector('.interaction-accept').onclick = () => respond('accept');
+    modal.querySelector('.interaction-decline').onclick = () => respond('decline');
+    modal.style.display = 'flex';
+}
+
+export function handleCharacterInteractionRequest(requestData) {
+    if (Number(requestData.location_id) !== Number(getCurrentLocationId())) return;
+    showIncomingCharacterInteraction(requestData).catch(error => {
+        showNotification(error.message || 'Не удалось открыть запрос взаимодействия', 'system');
+    });
+}
+
+export function handleCharacterInteractionResolved(requestData) {
+    const resolve = pendingCharacterInteractionResolvers.get(requestData.id);
+    if (resolve) {
+        pendingCharacterInteractionResolvers.delete(requestData.id);
+        resolve({
+            allowed: ['accepted', 'forced', 'in_progress', 'completed'].includes(requestData.status),
+            requestId: requestData.id,
+            status: requestData.status,
+            result: requestData.result || {},
+        });
+    }
+    if (requestData.kind === 'trade') {
+        if (requestData.status === 'completed') showNotification('Обмен завершён', 'success');
+        if (requestData.status === 'rejected') showNotification('Предложение обмена отклонено', 'system');
+    }
 }
 
 async function showCharacterLootMenu(actorLocationCharacterId, targetCharacterId) {
@@ -4377,7 +4686,7 @@ async function showCharacterLootMenu(actorLocationCharacterId, targetCharacterId
 function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
     const actorCharacterId = pendingStructureAction?.actorCharacterId;
     const actorLocationCharacterId = pendingStructureAction?.actorLocationCharacterId;
-    if (!canInteractWithIncapacitatedCharacter(actorCharacterId, targetCharacterId)) {
+    if (!canInteractWithCharacter(actorCharacterId, targetCharacterId)) {
         clearStructureActionMenu();
         return;
     }
@@ -4393,23 +4702,36 @@ function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
             ${escapeHtml(target?.name || 'Персонаж')} · ${escapeHtml(condition.label)}
         </div>
     `;
-    const actions = [
-        {
-            icon: '◉',
-            label: 'Осмотреть',
-            run: () => inspectIncapacitatedCharacter(actorLocationCharacterId, targetCharacterId),
-        },
-        {
-            icon: '⌕',
-            label: 'Обыскать',
-            run: () => showCharacterLootMenu(actorLocationCharacterId, targetCharacterId),
-        },
-        {
-            icon: '✚',
-            label: 'Попытаться лечить',
-            run: () => showMedicalConsumableMenu(actorCharacterId, targetCharacterId, actorLocationCharacterId),
-        },
-    ];
+    const actions = condition.state === 'active'
+        ? [
+            {
+                icon: '✚',
+                label: 'Лечить',
+                run: () => showMedicalConsumableMenu(actorCharacterId, targetCharacterId, actorLocationCharacterId),
+            },
+            {
+                icon: '⇄',
+                label: 'Обмен',
+                run: () => showCharacterTradeMenu(actorLocationCharacterId, actorCharacterId, targetCharacterId),
+            },
+        ]
+        : [
+            {
+                icon: '◉',
+                label: 'Осмотреть',
+                run: () => inspectIncapacitatedCharacter(actorLocationCharacterId, targetCharacterId),
+            },
+            {
+                icon: '⌕',
+                label: 'Обыскать',
+                run: () => showCharacterLootMenu(actorLocationCharacterId, targetCharacterId),
+            },
+            {
+                icon: '✚',
+                label: 'Попытаться лечить',
+                run: () => showMedicalConsumableMenu(actorCharacterId, targetCharacterId, actorLocationCharacterId),
+            },
+        ];
     actions.forEach(action => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -5802,7 +6124,7 @@ function setupCharacterDragging() {
             const targetCharacterId = targetCharacterObject?.userData?.characterId;
             if (
                 targetCharacterId
-                && canInteractWithIncapacitatedCharacter(
+                && canInteractWithCharacter(
                     pendingStructureAction.actorCharacterId,
                     targetCharacterId
                 )
@@ -5905,10 +6227,10 @@ function setupCharacterDragging() {
         if (pendingStructureAction) {
             e.preventDefault();
             e.stopPropagation();
-            if (canInteractWithIncapacitatedCharacter(pendingStructureAction.actorCharacterId, charId)) {
+            if (canInteractWithCharacter(pendingStructureAction.actorCharacterId, charId)) {
                 showCharacterInteractionMenu(e.clientX, e.clientY, charId);
             } else {
-                showNotification('Взаимодействовать можно с соседним недееспособным персонажем', 'system');
+                showNotification('Взаимодействовать можно с соседним персонажем', 'system');
             }
             return;
         }

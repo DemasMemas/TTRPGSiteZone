@@ -855,6 +855,12 @@ if (socket) {
 
     socket.on('combat_state', syncCombatState);
     socket.on('combat_state_updated', syncCombatState);
+    socket.on('character_interaction_requested', (data) => {
+        import('./locationScene.js').then(module => module.handleCharacterInteractionRequest(data));
+    });
+    socket.on('character_interaction_resolved', (data) => {
+        import('./locationScene.js').then(module => module.handleCharacterInteractionResolved(data));
+    });
 }
 
 // ========== Глобальные функции из других модулей ==========

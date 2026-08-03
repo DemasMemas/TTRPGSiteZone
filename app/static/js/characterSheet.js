@@ -9186,10 +9186,39 @@ async function useConsumable(item, itemPath, options = {}) {
         }
     }
 
+    if (options.requestTreatmentConsent && !options.treatmentConsentGranted) {
+        let consent;
+        try {
+            consent = await options.requestTreatmentConsent({
+                item_name: item.name || 'Медицинская процедура',
+                application: application.label || application.kind || 'Применение препарата',
+                action_points: Number(application.actionPoints || 0),
+            });
+        } catch (error) {
+            showNotification(error.message || 'Не удалось запросить согласие на лечение');
+            return false;
+        }
+        if (!consent?.allowed) {
+            const contest = consent?.result;
+            showNotification(
+                contest?.actor_strength
+                    ? `Пациент отказался. Сила врача: ${contest.actor_strength.total}, пациента: ${contest.target_strength.total}`
+                    : 'Пациент отказался от процедуры',
+                'system',
+            );
+            return false;
+        }
+        options.treatmentConsentGranted = true;
+        options.treatmentRequestId = consent.requestId;
+    }
+
     if (isCombatActive && !options.skipCombatPayment) {
         try {
             const payment = await spendInventoryAccessForCombat(item, itemPath, application.actionPoints);
             if (payment.payment?.payment_complete === false) {
+                if (options.treatmentRequestId && options.onTreatmentDeferred) {
+                    await options.onTreatmentDeferred(options.treatmentRequestId, payment.pendingActionId);
+                }
                 pendingConsumableActions.set(payment.pendingActionId, {
                     characterId: currentCharacterId,
                     itemId: item.id,
@@ -9889,7 +9918,8 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
             throw new Error('Предмет не найден');
         }
 
-    const applied = await useItem(item, resolvedPath, { ...options, targetData, render: false, save: false });
+    const useOptions = { ...options, targetData, render: false, save: false };
+    const applied = await useItem(item, resolvedPath, useOptions);
     if (applied === false) return false;
     await Server.updateCharacter(characterId, { data: currentCharacterData });
     if (targetCharacterId !== Number(characterId)) {
@@ -9901,6 +9931,7 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
                 {
                     actor_location_character_id: options.interactionContext.actorLocationCharacterId,
                     health: targetData.health || {},
+                    interaction_request_id: useOptions.treatmentRequestId,
                 }
             );
         } else {
@@ -14383,8 +14414,9 @@ window.addEventListener('combat-state-updated', async (event) => {
         showNotification('Длительное действие завершено, но предмет больше не найден в инвентаре');
         return;
     }
-    await useConsumable(item, itemPath, {
+    await useCharacterInventoryItem(pending.characterId, itemPath, {
         ...pending.options,
+        itemId: pending.itemId,
         preselectedApplication: pending.application,
         skipCombatPayment: true,
     });

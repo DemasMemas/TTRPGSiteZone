@@ -15,6 +15,7 @@ from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
 from app.services.combat import CombatService
+from app.services.character_interaction import CharacterInteractionService
 from app.services.health import apply_health_maximums
 from app.services.effects import (
     advance_timed_effects,
@@ -1832,7 +1833,7 @@ def inspect_incapacitated_location_character(
     actor_location_character_id = request.args.get('actor_location_character_id', type=int)
     if not actor_location_character_id:
         return jsonify({'error': 'actor_location_character_id is required'}), 400
-    result = CombatService.inspect_incapacitated_character(
+    result = CharacterInteractionService.interaction_snapshot(
         location_id,
         participant.user_id,
         actor_location_character_id,
@@ -1912,7 +1913,18 @@ def treat_incapacitated_location_character(
         actor_location_character_id,
         character_id,
         data.get('health'),
+        data.get('interaction_request_id'),
     )
+    if data.get('interaction_request_id'):
+        interaction_result = CharacterInteractionService.complete_treatment(
+            data.get('interaction_request_id'),
+            participant.user_id,
+        )
+        socketio.emit(
+            'character_interaction_resolved',
+            interaction_result,
+            room=f"user_{interaction_result['target_user_id']}",
+        )
     socketio.emit(
         'character_data_updated',
         {
@@ -1921,6 +1933,117 @@ def treat_incapacitated_location_character(
             'updated_by': participant.user_id,
         },
         room=f"character_{character_id}",
+    )
+    return jsonify(result), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/character-interactions',
+    methods=['POST'],
+)
+@jwt_required()
+@requires_participant
+def create_character_interaction(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    result = CharacterInteractionService.create_request(
+        location_id,
+        participant.user_id,
+        data.get('actor_location_character_id'),
+        data.get('target_character_id'),
+        data.get('kind'),
+        data.get('payload'),
+    )
+    if result['status'] == 'pending':
+        socketio.emit(
+            'character_interaction_requested',
+            result,
+            room=f"user_{result['target_user_id']}",
+        )
+    else:
+        socketio.emit(
+            'character_interaction_resolved',
+            result,
+            room=f"user_{result['actor_user_id']}",
+        )
+    if result['kind'] == 'trade' and result['status'] == 'completed':
+        for location_character_id in (
+            result['actor_location_character_id'],
+            result['target_location_character_id'],
+        ):
+            location_character = db.session.get(LocationCharacter, location_character_id)
+            if location_character and location_character.character:
+                socketio.emit(
+                    'character_data_updated',
+                    {
+                        'character_id': location_character.character_id,
+                        'updates': {'data': location_character.character.data},
+                        'updated_by': participant.user_id,
+                    },
+                    room=f"character_{location_character.character_id}",
+                )
+        state = CombatService.get_state(location_id, participant.user_id)
+        socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(result), 201
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/character-interactions/<int:request_id>/response',
+    methods=['POST'],
+)
+@jwt_required()
+@requires_participant
+def respond_character_interaction(lobby_id, request_id, lobby, participant):
+    data = request.get_json() or {}
+    result = CharacterInteractionService.respond(
+        request_id,
+        participant.user_id,
+        data.get('decision'),
+    )
+    socketio.emit(
+        'character_interaction_resolved',
+        result,
+        room=f"user_{result['actor_user_id']}",
+    )
+    socketio.emit(
+        'character_interaction_resolved',
+        result,
+        room=f"user_{result['target_user_id']}",
+    )
+    if result['kind'] == 'trade' and result['status'] == 'completed':
+        actor = db.session.get(LocationCharacter, result['actor_location_character_id'])
+        target = db.session.get(LocationCharacter, result['target_location_character_id'])
+        for location_character in (actor, target):
+            if location_character and location_character.character:
+                socketio.emit(
+                    'character_data_updated',
+                    {
+                        'character_id': location_character.character_id,
+                        'updates': {'data': location_character.character.data},
+                        'updated_by': participant.user_id,
+                    },
+                    room=f"character_{location_character.character_id}",
+                )
+        state = CombatService.get_state(result['location_id'], participant.user_id)
+        socketio.emit('combat_state_updated', state, room=f"location_{result['location_id']}")
+    return jsonify(result), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/character-interactions/<int:request_id>/progress',
+    methods=['PATCH'],
+)
+@jwt_required()
+@requires_participant
+def start_character_treatment(lobby_id, request_id, lobby, participant):
+    result = CharacterInteractionService.mark_treatment_in_progress(
+        request_id,
+        participant.user_id,
+        (request.get_json(silent=True) or {}).get('pending_action_id'),
+    )
+    socketio.emit(
+        'character_interaction_resolved',
+        result,
+        room=f"user_{result['target_user_id']}",
     )
     return jsonify(result), 200
 
