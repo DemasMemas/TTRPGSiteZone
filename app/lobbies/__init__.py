@@ -5,6 +5,7 @@ import io
 import random
 from copy import deepcopy
 from datetime import datetime, timezone
+from sqlalchemy import or_
 from sqlalchemy.orm.attributes import flag_modified
 from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -104,6 +105,10 @@ def _serialize_world_group(group):
     }
     maximum_penalty = max(member_penalties.values(), default=0)
     movement_distance, speed_label = _world_group_speed(maximum_penalty)
+    turn_submitted = bool(
+        group.turn_submitted_day == (group.lobby.game_day or 1)
+        and group.turn_submitted_minutes == (group.lobby.game_time_minutes or 0)
+    )
     return {
         'id': group.id,
         'name': group.name,
@@ -122,6 +127,8 @@ def _serialize_world_group(group):
         'movement_penalty': maximum_penalty,
         'movement_distance': movement_distance,
         'movement_speed_label': speed_label,
+        'turn_active': bool(group.turn_active),
+        'turn_submitted': turn_submitted,
     }
 
 
@@ -184,11 +191,21 @@ def _advance_world_time(lobby, minutes):
         + minutes
     )
     lobby.game_day, lobby.game_time_minutes = divmod(absolute_minutes, 1440)
+    group_member_ids = {
+        int(character_id)
+        for group in WorldGroup.query.filter_by(lobby_id=lobby.id).all()
+        for character_id in (group.member_character_ids or [])
+        if str(character_id).isdigit()
+    }
+    character_query = LobbyCharacter.query.filter(
+        LobbyCharacter.lobby_id == lobby.id,
+        or_(
+            LobbyCharacter.time_active.is_(True),
+            LobbyCharacter.id.in_(group_member_ids) if group_member_ids else False,
+        ),
+    )
     updated_characters = []
-    for character in LobbyCharacter.query.filter_by(
-        lobby_id=lobby.id,
-        time_active=True,
-    ).all():
+    for character in character_query.all():
         character_data = dict(character.data or {})
         health = character_data.get('health')
         if not isinstance(health, dict):
@@ -202,6 +219,49 @@ def _advance_world_time(lobby, minutes):
         flag_modified(character, 'data')
         updated_characters.append(character)
     return updated_characters
+
+
+def _world_group_submitted_for_current_turn(group, lobby):
+    return bool(
+        group.turn_submitted_day == (lobby.game_day or 1)
+        and group.turn_submitted_minutes == (lobby.game_time_minutes or 0)
+    )
+
+
+def _submit_world_group_turn(group, lobby):
+    group.turn_submitted_day = lobby.game_day or 1
+    group.turn_submitted_minutes = lobby.game_time_minutes or 0
+
+
+def _complete_world_turn_if_ready(lobby):
+    active_groups = WorldGroup.query.filter_by(
+        lobby_id=lobby.id,
+        turn_active=True,
+    ).all()
+    if not active_groups or not all(
+        _world_group_submitted_for_current_turn(group, lobby)
+        for group in active_groups
+    ):
+        return False, []
+    return True, _advance_world_time(lobby, 10)
+
+
+def _serialize_world_turn(lobby):
+    active_groups = WorldGroup.query.filter_by(
+        lobby_id=lobby.id,
+        turn_active=True,
+    ).order_by(WorldGroup.id).all()
+    submitted_ids = [
+        group.id for group in active_groups
+        if _world_group_submitted_for_current_turn(group, lobby)
+    ]
+    return {
+        'active_group_ids': [group.id for group in active_groups],
+        'submitted_group_ids': submitted_ids,
+        'waiting_group_ids': [
+            group.id for group in active_groups if group.id not in submitted_ids
+        ],
+    }
 
 
 def _emit_world_time_updates(lobby, characters):
@@ -251,6 +311,7 @@ def list_world_groups(lobby_id, lobby, participant):
         ]
     return jsonify({
         'groups': [_serialize_world_group(group) for group in groups],
+        'world_turn': _serialize_world_turn(lobby),
         'available_characters': available_characters,
         'map_events': map_events,
         'pending_events': [
@@ -365,6 +426,66 @@ def update_world_group_members(lobby_id, group_id, lobby):
     return jsonify(payload), 200
 
 
+@lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>/turn-active', methods=['PATCH'])
+@jwt_required()
+@requires_gm
+def update_world_group_turn_activity(lobby_id, group_id, lobby):
+    group = WorldGroup.query.filter_by(id=group_id, lobby_id=lobby_id).first()
+    if not group:
+        return jsonify({'error': 'World group not found'}), 404
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get('active'), bool):
+        return jsonify({'error': 'active must be a boolean'}), 400
+    group.turn_active = data['active']
+    group.turn_submitted_day = None
+    group.turn_submitted_minutes = None
+    time_advanced, updated_characters = _complete_world_turn_if_ready(lobby)
+    db.session.commit()
+    payload = _serialize_world_group(group)
+    socketio.emit('world_group_updated', payload, room=f"lobby_{lobby_id}")
+    time_payload = (
+        _emit_world_time_updates(lobby, updated_characters)
+        if time_advanced else None
+    )
+    return jsonify({
+        'group': payload,
+        'world_turn': _serialize_world_turn(lobby),
+        'time_advanced': time_advanced,
+        'time': time_payload,
+    }), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>/wait', methods=['POST'])
+@jwt_required()
+@requires_participant
+def wait_world_group(lobby_id, group_id, lobby, participant):
+    group = WorldGroup.query.filter_by(id=group_id, lobby_id=lobby_id).first()
+    if not group:
+        return jsonify({'error': 'World group not found'}), 404
+    if not group.turn_active:
+        return jsonify({'error': 'This group is not active in the current world turn'}), 409
+    if _world_group_submitted_for_current_turn(group, lobby):
+        return jsonify({'error': 'This group has already acted in the current world turn'}), 409
+    pending = WorldTravelEvent.query.filter_by(group_id=group.id, status='pending').first()
+    if pending:
+        return jsonify({'error': 'The GM must resolve the pending travel event first'}), 409
+    _submit_world_group_turn(group, lobby)
+    time_advanced, updated_characters = _complete_world_turn_if_ready(lobby)
+    db.session.commit()
+    group_payload = _serialize_world_group(group)
+    socketio.emit('world_group_updated', group_payload, room=f"lobby_{lobby_id}")
+    time_payload = (
+        _emit_world_time_updates(lobby, updated_characters)
+        if time_advanced else None
+    )
+    return jsonify({
+        'group': group_payload,
+        'world_turn': _serialize_world_turn(lobby),
+        'time_advanced': time_advanced,
+        'time': time_payload,
+    }), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>', methods=['DELETE'])
 @jwt_required()
 @requires_gm
@@ -385,6 +506,10 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     group = WorldGroup.query.filter_by(id=group_id, lobby_id=lobby_id).first()
     if not group:
         return jsonify({'error': 'World group not found'}), 404
+    if not group.turn_active:
+        return jsonify({'error': 'This group is not active in the current world turn'}), 409
+    if _world_group_submitted_for_current_turn(group, lobby):
+        return jsonify({'error': 'This group has already acted in the current world turn'}), 409
     pending = WorldTravelEvent.query.filter_by(group_id=group.id, status='pending').first()
     if pending:
         return jsonify({'error': 'The GM must resolve the pending travel event first'}), 409
@@ -423,7 +548,7 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     actual_tile_x = placed_event.tile_x if placed_event else tile_x
     actual_tile_y = placed_event.tile_y if placed_event else tile_y
     group.tile_x, group.tile_y = actual_tile_x, actual_tile_y
-    updated_characters = _advance_world_time(lobby, 10)
+    _submit_world_group_turn(group, lobby)
     event = None
     if placed_event:
         event = WorldTravelEvent(
@@ -450,10 +575,14 @@ def move_world_group(lobby_id, group_id, lobby, participant):
             to_tile_y=actual_tile_y,
         )
         db.session.add(event)
+    time_advanced, updated_characters = _complete_world_turn_if_ready(lobby)
     db.session.commit()
 
     group_payload = _serialize_world_group(group)
-    time_payload = _emit_world_time_updates(lobby, updated_characters)
+    time_payload = (
+        _emit_world_time_updates(lobby, updated_characters)
+        if time_advanced else None
+    )
     socketio.emit('world_group_moved', group_payload, room=f"lobby_{lobby_id}")
     if event:
         socketio.emit(
@@ -469,6 +598,8 @@ def move_world_group(lobby_id, group_id, lobby, participant):
         )
     return jsonify({
         'group': group_payload,
+        'world_turn': _serialize_world_turn(lobby),
+        'time_advanced': time_advanced,
         'time': time_payload,
         'event_pending': event is not None,
         'placed_event_triggered': placed_event is not None,
@@ -1976,6 +2107,17 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
+    actor = db.session.get(LobbyCharacter, result['character'].get('character_id'))
+    if actor:
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': actor.id,
+                'updates': {'data': actor.data},
+                'source': 'combat',
+            },
+            room=f"character_{actor.id}",
+        )
     attack_summary = CombatService.format_attack_summary(result)
     if attack_summary:
         _emit_lobby_chat_message(

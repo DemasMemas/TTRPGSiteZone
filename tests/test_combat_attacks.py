@@ -1583,3 +1583,118 @@ def test_destroyed_heart_starts_one_minute_death_timer():
     assert result["death_in_seconds"] == 60
     assert failure["remaining_seconds"] == 60
     assert failure["death_on_expire"] is True
+
+
+@pytest.mark.parametrize(
+    ("durability", "chance", "die", "bonus"),
+    [
+        (100, 0, 0, 0),
+        (90, 1, 4, 0),
+        (75, 2, 6, 0),
+        (60, 4, 8, 0),
+        (45, 7, 10, 0),
+        (30, 10, 12, 0),
+        (10, 15, 12, 2),
+        (0, 20, 12, 6),
+    ],
+)
+def test_weapon_jam_thresholds_follow_equipment_rules(
+    durability, chance, die, bonus
+):
+    assert CombatService._weapon_jam_profile(durability) == (chance, die, bonus)
+
+
+def test_weapon_jam_is_saved_and_applies_its_durability_loss(monkeypatch):
+    rolls = iter([1, 4])
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    weapon = {"durability": 90, "maxDurability": 100}
+
+    result = CombatService._roll_weapon_jam(weapon)
+
+    assert result["triggered"] is True
+    assert result["result"] == 4
+    assert weapon["jam"]["accuracy_penalty"] == 2
+    assert weapon["durability"] == 87
+
+
+def test_weapon_wear_is_once_per_combat_plus_each_duplet():
+    weapon = {
+        "durability": 100,
+        "maxDurability": 100,
+        "subcategory": "Пистолеты",
+    }
+
+    first = CombatService._weapon_use_wear(weapon, fire_mode="unaimed")
+    second = CombatService._weapon_use_wear(weapon, fire_mode="unaimed")
+    duplet = CombatService._weapon_use_wear(
+        weapon, fire_mode="unaimed", shot_count=2
+    )
+
+    assert first["loss"] == 2
+    assert second["loss"] == 0
+    assert duplet["loss"] == 2
+    assert weapon["durability"] == 96
+
+
+def test_nonstandard_ammunition_doubles_weapon_wear_again():
+    weapon = {"durability": 100, "maxDurability": 100}
+
+    wear = CombatService._weapon_use_wear(
+        weapon,
+        fire_mode="burst",
+        volley_count=1,
+        ammo_profile={"ammo_variant": "bp"},
+    )
+
+    assert wear["loss"] == 4
+    assert weapon["durability"] == 96
+
+
+def test_weapon_ammo_is_consumed_from_next_stack_on_server():
+    weapon = {
+        "installedMagazine": {
+            "ammo": [
+                {"name": "9x19", "quantity": 2},
+                {"name": "9x19 БП", "quantity": 3},
+            ]
+        }
+    }
+
+    CombatService._consume_weapon_ammo(weapon, 4)
+
+    assert weapon["installedMagazine"]["ammo"] == [
+        {"name": "9x19", "quantity": 1}
+    ]
+    assert weapon["ammo"] == 1
+
+
+def test_repair_clears_catastrophic_jam_only_at_required_durability():
+    weapon = {
+        "durability": 99,
+        "maxDurability": 100,
+        "jam": {"result": 12, "repair_required": "full"},
+    }
+    CombatService._weapon_durability(weapon)
+    assert "jam" in weapon
+
+    weapon["durability"] = 100
+    CombatService._weapon_durability(weapon)
+    assert "jam" not in weapon
+
+
+def test_barrel_rupture_clears_after_at_least_one_point_is_repaired():
+    weapon = {
+        "durability": 20,
+        "maxDurability": 100,
+        "jam": {
+            "result": 11,
+            "repair_required": "increase",
+            "durability_after": 20,
+        },
+    }
+    CombatService._weapon_durability(weapon)
+    assert "jam" in weapon
+
+    weapon["durability"] = 21
+    CombatService._weapon_durability(weapon)
+    assert "jam" not in weapon

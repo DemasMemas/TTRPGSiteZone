@@ -33,6 +33,7 @@ let autoSaveTimer = null;
 const AUTO_SAVE_DELAY = 500;
 const pendingConsumableActions = new Map();
 const pendingReloadActions = new Map();
+const pendingWeaponJamActions = new Map();
 
 // ========== DRAG-AND-DROP ==========
 let draggedItem = null;
@@ -3955,6 +3956,44 @@ window.cycleWeaponFromEquipment = async function(weaponIndex) {
     showNotification(cycleType === 'pump' ? 'Патрон дослан в патронник' : 'Затвор передёрнут', 'success');
 };
 
+window.clearWeaponJam = async function(weaponIndex, options = {}) {
+    const weapon = currentCharacterData?.weapons?.[weaponIndex];
+    const jamLabel = weapon?.jam?.label || 'оружие снова готово';
+    const combatState = window.locationCombatState;
+    const actor = combatState?.current_character;
+    if (!weapon?.jam || combatState?.status !== 'active' || !actor) return;
+    if (actor.character_id !== currentCharacterId) {
+        showNotification('Устранить клин можно только в свой ход', 'system');
+        return;
+    }
+    const actionId = options.actionId
+        || `clear-jam-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const payload = {
+        location_character_id: actor.location_character_id,
+        action_key: 'clear_weapon_jam',
+        weapon_index: weaponIndex,
+        ...(options.resume ? { resume_pending_action_id: actionId } : { pending_action_id: actionId }),
+    };
+    try {
+        const result = await Server.performLocationCombatAction(
+            window.currentLobbyId,
+            window.currentLocationId,
+            payload,
+        );
+        if (result?.pending_action) {
+            pendingWeaponJamActions.set(result.pending_action_id, {
+                characterId: currentCharacterId,
+                weaponIndex,
+            });
+            showNotification('Устранение клина начато. Оставшиеся ОД спишутся в следующих ходах.', 'system');
+            return;
+        }
+        showNotification(`Клин устранён: ${jamLabel}`, 'success');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось устранить клин', 'system');
+    }
+};
+
 window.chooseMachineGunBurst = function(weaponIndex, fireMode, actionPoints = 3, volleyCount = 1) {
     const weapon = currentCharacterData?.weapons?.[weaponIndex];
     if (!weapon) return;
@@ -4006,6 +4045,8 @@ window.aimWeaponFromEquipment = function(weaponIndex) {
 function renderRangedAttackButtons(weapon, template, index, disabled) {
     const profile = getWeaponFireProfile(weapon, template);
     const disabledAttr = disabled ? 'disabled' : '';
+    const jamBlocksFire = Boolean(weapon?.jam?.blocks_fire);
+    const firingDisabledAttr = disabled || jamBlocksFire ? 'disabled' : '';
     const buttons = [];
     const ergonomics = getCombatWeaponErgonomics(index);
     const aimedActionPoints = ergonomics?.aimed_shot_action_points ?? 4;
@@ -4058,14 +4099,14 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     const isPistol = String(template?.subcategory || '').trim().toLowerCase() === 'пистолеты';
     const unaimedActionPoints = isPistol ? 1 : 2;
 
-    buttons.push(`<button type="button" class="btn btn-sm btn-aim-action" ${disabledAttr} onclick="aimWeaponFromEquipment(${index})">Прицеливание · 1 ОД</button>`);
+    buttons.push(`<button type="button" class="btn btn-sm btn-aim-action" ${firingDisabledAttr} onclick="aimWeaponFromEquipment(${index})">Прицеливание · 1 ОД</button>`);
     singleOptions.forEach((shots) => {
         const modeName = shots === 1
             ? ''
             : (shots === 2 ? 'Дуплет: ' : (shots === 4 ? 'Двойной дуплет: ' : `${shots} выстрела: `));
-        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'unaimed', ${shots}, ${unaimedActionPoints})">${modeName}Неприцельный · ${unaimedActionPoints} ОД</button>`);
-        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'rapid', ${shots}, 1)">${modeName}Беглый · 1 ОД</button>`);
-        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${disabledAttr} onclick="useWeaponFromEquipment(${index}, 'aimed', ${shots}, ${aimedActionPoints})">${modeName}Прицельный · ${aimedActionPoints} ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${firingDisabledAttr} onclick="useWeaponFromEquipment(${index}, 'unaimed', ${shots}, ${unaimedActionPoints})">${modeName}Неприцельный · ${unaimedActionPoints} ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${firingDisabledAttr} onclick="useWeaponFromEquipment(${index}, 'rapid', ${shots}, 1)">${modeName}Беглый · 1 ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-success" ${firingDisabledAttr} onclick="useWeaponFromEquipment(${index}, 'aimed', ${shots}, ${aimedActionPoints})">${modeName}Прицельный · ${aimedActionPoints} ОД</button>`);
     });
 
     if (profile.supports_burst) {
@@ -4075,14 +4116,14 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
             ? `chooseMachineGunBurst(${index}, '${mode}', ${actionPoints}, ${volleyCount})`
             : `useWeaponFromEquipment(${index}, '${mode}', ${burstShots * volleyCount}, ${actionPoints}, ${volleyCount})`;
         const burstLabel = machineGun ? 'Пулемётная очередь' : `Очередь x${burstShots}`;
-        buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('burst')}">${burstLabel} · 3 ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('burst')}">${burstLabel} · 3 ОД</button>`);
         if (profile.supports_suppression) {
-            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('suppression', 3, 1)}">Подавление (1 очередь) · 3 ОД</button>`);
-            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('suppression', 5, 2)}">Подавление (2 очереди) · 5 ОД</button>`);
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('suppression', 3, 1)}">Подавление (1 очередь) · 3 ОД</button>`);
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('suppression', 5, 2)}">Подавление (2 очереди) · 5 ОД</button>`);
         }
         if (profile.supports_area_fire) {
-            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('area', 5, 1)}">По области (1 очередь) · 5 ОД</button>`);
-            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${disabledAttr} onclick="${action('area', 5, 2)}">По области (2 очереди) · 5 ОД</button>`);
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('area', 5, 1)}">По области (1 очередь) · 5 ОД</button>`);
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('area', 5, 2)}">По области (2 очереди) · 5 ОД</button>`);
         }
     }
     return buttons.join('');
@@ -4329,6 +4370,28 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         );
         const combatActionDisabled = isCombatActive && !isCurrentTurn;
 
+        let jamHtml = '';
+        if (!isMelee && weapon.jam) {
+            const jam = weapon.jam;
+            const shooting = getSkillEffectiveValue(currentCharacterData, 'physical.shooting');
+            const reduction = shooting >= 20 ? 2 : (shooting >= 15 ? 1 : 0);
+            const clearCost = Math.max(0, Number(jam.fix_ap || 0) - reduction);
+            const repairText = jam.repair_required === 'full'
+                ? 'Нужен ремонт до максимальной прочности'
+                : (jam.repair_required === 'increase'
+                    ? 'Нужно восстановить хотя бы 1 прочность'
+                    : `Устранение: ${clearCost} ОД`);
+            const clearButton = !jam.repair_required && isCombatActive
+                ? `<button type="button" class="btn btn-sm btn-warning" ${combatActionDisabled ? 'disabled' : ''} onclick="clearWeaponJam(${index})">Устранить клин · ${clearCost} ОД</button>`
+                : '';
+            jamHtml = `
+                <div style="margin:8px 0; padding:8px 10px; border:1px solid #8d5d2d; background:rgba(126,70,25,.18); border-radius:4px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                    <strong>Клин ${Number(jam.result) || ''}: ${escapeHtml(jam.label || 'Неисправность')}</strong>
+                    <span>${repairText}</span>
+                    ${clearButton}
+                </div>`;
+        }
+
         let attackButtonsHtml = '';
         if (isMelee) {
             const allowedAttacks = template?.attributes?.allowed_attacks || [];
@@ -4390,6 +4453,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 ${fieldsHtml}
                 ${slotsHtml}
                 ${magazineHtml}
+                ${jamHtml}
                 <div style="margin-top:10px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
                     ${attackButtonsHtml}
                     ${grenadeLauncherHtml}
@@ -6410,14 +6474,17 @@ window.equipWeaponFromInventory = async function(itemPath) {
         burst: item.burst || template.attributes?.burst || '',
         fireModes: item.fireModes || item.attributes?.fire_modes || template.attributes?.fire_modes || null,
         damage: item.damage || template.attributes?.damage || 0,
-        durability: item.durability || template.attributes?.durability || 100,
-        maxDurability: item.maxDurability || template.attributes?.max_durability || 100,
+        durability: item.durability ?? template.attributes?.durability ?? template.attributes?.max_durability ?? 100,
+        maxDurability: item.maxDurability ?? template.attributes?.max_durability ?? 100,
         fireRate: item.fireRate || template.attributes?.fire_rate || 0,
         caliber: item.caliber || template.attributes?.caliber,
         modifications: item.modifications || [],
         installedModules: installedModulesCopy,
         installedMagazine: item.installedMagazine || null,
-        ammo: item.ammo || 0
+        fixedAmmo: Array.isArray(item.fixedAmmo) ? item.fixedAmmo.map(stack => ({ ...stack })) : [],
+        ammo: item.ammo || 0,
+        jam: item.jam ? { ...item.jam } : null,
+        requiresManualCycle: Boolean(item.requiresManualCycle)
     };
 
     if (!removeItemByPath(itemPath)) {
@@ -7383,12 +7450,17 @@ window.unequipWeapon = async function(weaponIndex) {
 
     const restoredItem = createItemFromTemplate(template);
     // Копируем текущие характеристики
-    restoredItem.durability = weapon.durability || template.attributes?.durability || 100;
-    restoredItem.maxDurability = weapon.maxDurability || template.attributes?.max_durability || 100;
+    restoredItem.durability = weapon.durability ?? template.attributes?.durability ?? template.attributes?.max_durability ?? 100;
+    restoredItem.maxDurability = weapon.maxDurability ?? template.attributes?.max_durability ?? 100;
 
     if (category === 'weapon') {
         restoredItem.ammo = weapon.ammo;
         restoredItem.installedMagazine = weapon.installedMagazine ? { ...weapon.installedMagazine } : null;
+        restoredItem.fixedAmmo = Array.isArray(weapon.fixedAmmo)
+            ? weapon.fixedAmmo.map(stack => ({ ...stack }))
+            : [];
+        restoredItem.jam = weapon.jam ? { ...weapon.jam } : null;
+        restoredItem.requiresManualCycle = Boolean(weapon.requiresManualCycle);
     } else {
         // Для ближнего боя дополнительно копируем специфичные поля (если они менялись)
         restoredItem.damage = weapon.damage;
@@ -7633,7 +7705,6 @@ window.useWeaponFromEquipment = function(
                 ? 'structure'
                 : (fireMode === 'area' ? 'multi_character' : 'character'),
             source: 'sheet',
-            onResolve: spendAmmo,
         });
     });
 };
@@ -11296,6 +11367,16 @@ window.dropBackpackItemAtPath = async function(pathStr) {
         ? window.getLocationCharacterPosition(locationCharacterId)
         : null;
 
+    if (
+        window.isLocationActive
+        && ['weapon', 'melee_weapon'].includes(String(itemClone.category || ''))
+    ) {
+        const maximum = Number(itemClone.maxDurability ?? itemClone.attributes?.max_durability ?? 100) || 100;
+        const current = Number(itemClone.durability ?? maximum);
+        itemClone.maxDurability = maximum;
+        itemClone.durability = Math.max(0, current - 3);
+    }
+
     if (window.isLocationActive && window.currentLocationId && locationPosition) {
         try {
             const existingGroundItem = typeof window.getGroundItemObjectAtPosition === 'function'
@@ -14047,6 +14128,15 @@ window.getAllItemTemplates = getAllItemTemplates;
 window.addEventListener('combat-state-updated', async (event) => {
     const current = event.detail?.current_character;
     const actionId = current?.completed_pending_action_id;
+    const pendingJam = actionId ? pendingWeaponJamActions.get(actionId) : null;
+    if (pendingJam && pendingJam.characterId === currentCharacterId) {
+        pendingWeaponJamActions.delete(actionId);
+        await window.clearWeaponJam(pendingJam.weaponIndex, {
+            actionId,
+            resume: true,
+        });
+        return;
+    }
     const pendingReload = actionId ? pendingReloadActions.get(actionId) : null;
     if (pendingReload && pendingReload.characterId === currentCharacterId) {
         pendingReloadActions.delete(actionId);

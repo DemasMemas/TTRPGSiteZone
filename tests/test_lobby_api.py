@@ -250,6 +250,86 @@ def test_world_movement_takes_ten_minutes_and_respects_group_distance(
     assert (group.tile_x, group.tile_y) == (13, 13)
 
 
+def test_parallel_world_groups_advance_time_only_after_every_active_group_acts(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("parallel-world-gm")
+    player = create_user("parallel-world-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    first = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "First", "tile_x": 2, "tile_y": 2},
+    ).get_json()
+    second = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Second", "tile_x": 8, "tile_y": 8},
+    ).get_json()
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+
+    first_move = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{first['id']}/move",
+        headers=auth_headers(player),
+        json={"tile_x": 3, "tile_y": 2},
+    )
+    repeated = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{first['id']}/move",
+        headers=auth_headers(player),
+        json={"tile_x": 4, "tile_y": 2},
+    )
+    second_wait = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{second['id']}/wait",
+        headers=auth_headers(player),
+    )
+
+    assert first_move.status_code == 200
+    assert first_move.get_json()["time_advanced"] is False
+    assert first_move.get_json()["time"] is None
+    assert repeated.status_code == 409
+    assert second_wait.status_code == 200
+    assert second_wait.get_json()["time_advanced"] is True
+    assert second_wait.get_json()["time"] == {
+        "game_day": 1,
+        "game_time_minutes": 490,
+    }
+
+
+def test_gm_can_exclude_world_group_from_required_turns(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("inactive-world-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    first = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Travellers", "tile_x": 2, "tile_y": 2},
+    ).get_json()
+    second = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Camp", "tile_x": 8, "tile_y": 8},
+    ).get_json()
+    disabled = client.patch(
+        f"/lobbies/{lobby['id']}/world-groups/{second['id']}/turn-active",
+        headers=auth_headers(gm),
+        json={"active": False},
+    )
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+
+    moved = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{first['id']}/move",
+        headers=auth_headers(gm),
+        json={"tile_x": 3, "tile_y": 2},
+    )
+
+    assert disabled.status_code == 200
+    assert disabled.get_json()["group"]["turn_active"] is False
+    assert moved.status_code == 200
+    assert moved.get_json()["time_advanced"] is True
+
+
 def test_gm_configures_persisted_world_group_members(
     client, create_user, auth_headers
 ):

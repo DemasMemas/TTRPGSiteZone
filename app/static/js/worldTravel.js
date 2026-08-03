@@ -21,6 +21,7 @@ let groups = [];
 let pendingEvents = [];
 let mapEvents = [];
 let availableCharacters = [];
+let worldTurn = { active_group_ids: [], submitted_group_ids: [], waiting_group_ids: [] };
 let selectionMode = null;
 let contextMenu = null;
 let editingMembersGroupId = null;
@@ -141,7 +142,13 @@ function renderModels() {
         }
         model.position.set(group.tile_x + 0.5, tileHeight(group.tile_x, group.tile_y), group.tile_y + 0.5);
         const ring = model.children.find(child => child.geometry?.type === 'RingGeometry');
-        if (ring?.material?.color) ring.material.color.set(group.has_pending_event ? 0xb64a35 : 0xc39b4a);
+        if (ring?.material?.color) {
+            ring.material.color.set(
+                group.has_pending_event
+                    ? 0xb64a35
+                    : (!group.turn_active ? 0x666b62 : (group.turn_submitted ? 0x70834d : 0xc39b4a))
+            );
+        }
     });
     const eventIds = new Set(mapEvents.map(event => Number(event.id)));
     eventModels.forEach((model, id) => {
@@ -242,7 +249,8 @@ function showGroupContextMenu(group, clientX, clientY) {
     contextMenu.innerHTML = `
         <div class="world-group-context-title">${escapeHtml(group.name)}</div>
         <div class="world-group-context-speed">${escapeHtml(group.movement_speed_label)} · ${group.movement_distance} кл. / 10 мин.</div>
-        <button type="button" data-context-move ${group.has_pending_event || group.movement_distance <= 0 ? 'disabled' : ''}>Переместить</button>
+        <button type="button" data-context-move ${group.has_pending_event || !group.turn_active || group.turn_submitted || group.movement_distance <= 0 ? 'disabled' : ''}>Переместить</button>
+        <button type="button" data-context-wait ${group.has_pending_event || !group.turn_active || group.turn_submitted ? 'disabled' : ''}>Ждать 10 минут</button>
         ${window.isGM && group.has_pending_event ? '<button type="button" data-context-event>Ожидающее событие</button>' : ''}
         ${window.isGM ? '<button type="button" data-context-delete>Удалить с карты</button>' : ''}
     `;
@@ -253,6 +261,21 @@ function showGroupContextMenu(group, clientX, clientY) {
     contextMenu.querySelector('[data-context-move]')?.addEventListener('click', () => {
         hideContextMenu();
         beginWorldGroupMove(group.id);
+    });
+    contextMenu.querySelector('[data-context-wait]')?.addEventListener('click', async () => {
+        hideContextMenu();
+        try {
+            const result = await Server.waitWorldGroup(lobbyId, group.id);
+            showNotification(
+                result.time_advanced
+                    ? 'Все активные группы завершили ход. Прошло 10 минут.'
+                    : 'Группа ждёт. Мировой ход завершится после остальных активных групп.',
+                'success',
+            );
+            await refreshWorldTravel();
+        } catch (error) {
+            showNotification(error.message, 'error');
+        }
     });
     contextMenu.querySelector('[data-context-event]')?.addEventListener('click', () => {
         hideContextMenu();
@@ -325,8 +348,11 @@ function renderModal() {
                 <small>Клетка ${group.tile_x}, ${group.tile_y}${group.has_pending_event ? ' · ожидает решения ГМа' : ''}</small>
                 <small>Состав: ${group.members?.length ? group.members.map(member => escapeHtml(member.name)).join(', ') : 'не задан'}</small>
                 <small>Скорость: ${escapeHtml(group.movement_speed_label)} · штраф ${group.movement_penalty} · ${group.movement_distance} кл. за 10 минут</small>
+                <small>${!group.turn_active ? 'Не участвует в ожидании мирового хода' : (group.turn_submitted ? 'Ход сделан · ожидает остальные группы' : 'Ожидается действие в текущем мировом ходе')}</small>
             </div>
             <div class="world-group-actions">
+                ${window.isGM ? `<label class="world-group-member-option"><input type="checkbox" data-world-turn-active="${group.id}" ${group.turn_active ? 'checked' : ''}><span>Активная</span></label>` : ''}
+                ${group.turn_active && !group.turn_submitted ? `<button class="btn btn-sm btn-secondary" data-world-wait="${group.id}" ${group.has_pending_event ? 'disabled' : ''}>Ждать</button>` : ''}
                 ${window.isGM ? `<button class="btn btn-sm btn-secondary" data-world-members="${group.id}">Состав</button>` : ''}
                 ${window.isGM ? `<button class="btn btn-sm btn-danger" data-world-delete="${group.id}">Удалить</button>` : ''}
             </div>
@@ -405,6 +431,7 @@ export async function refreshWorldTravel() {
     try {
         const data = await Server.getWorldGroups(lobbyId);
         groups = data.groups || [];
+        worldTurn = data.world_turn || { active_group_ids: [], submitted_group_ids: [], waiting_group_ids: [] };
         pendingEvents = data.pending_events || [];
         mapEvents = data.map_events || [];
         availableCharacters = data.available_characters || [];
@@ -453,7 +480,7 @@ export function beginWorldMapEventCreation() {
 
 export function beginWorldGroupMove(groupId) {
     const group = groups.find(item => Number(item.id) === Number(groupId));
-    if (!group || group.has_pending_event) return;
+    if (!group || group.has_pending_event || !group.turn_active || group.turn_submitted) return;
     if (Number(group.movement_distance || 0) <= 0) {
         showNotification('Группа не может идти: максимальный штраф перемещения 10 или выше', 'error');
         return;
@@ -506,7 +533,9 @@ async function handleTileSelection({ tile }) {
             showNotification(
                 result.event_pending
                     ? 'Группа перемещена. Событие ожидает решения ГМа.'
-                    : 'Группа перемещена. Прошло 10 минут.',
+                    : (result.time_advanced
+                        ? 'Все активные группы завершили ход. Прошло 10 минут.'
+                        : 'Группа перемещена и ожидает остальные активные группы.'),
                 result.event_pending ? 'system' : 'success'
             );
         }
@@ -518,6 +547,40 @@ async function handleTileSelection({ tile }) {
 }
 
 async function handleModalClick(event) {
+    const activity = event.target.closest('[data-world-turn-active]');
+    if (activity) {
+        try {
+            const result = await Server.updateWorldGroupTurnActivity(
+                lobbyId,
+                activity.dataset.worldTurnActive,
+                activity.checked,
+            );
+            if (result.time_advanced) {
+                showNotification('Оставшиеся активные группы уже завершили ход. Прошло 10 минут.', 'success');
+            }
+            await refreshWorldTravel();
+        } catch (error) {
+            activity.checked = !activity.checked;
+            showNotification(error.message, 'error');
+        }
+        return;
+    }
+    const wait = event.target.closest('[data-world-wait]');
+    if (wait) {
+        try {
+            const result = await Server.waitWorldGroup(lobbyId, wait.dataset.worldWait);
+            showNotification(
+                result.time_advanced
+                    ? 'Все активные группы завершили ход. Прошло 10 минут.'
+                    : 'Группа ждёт остальные активные группы.',
+                'success',
+            );
+            await refreshWorldTravel();
+        } catch (error) {
+            showNotification(error.message, 'error');
+        }
+        return;
+    }
     const mapEventDelete = event.target.closest('[data-world-map-event-delete]');
     if (mapEventDelete) {
         try {

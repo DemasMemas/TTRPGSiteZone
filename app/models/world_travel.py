@@ -12,6 +12,9 @@ class WorldGroup(db.Model):
     tile_x = db.Column(db.Integer, nullable=False)
     tile_y = db.Column(db.Integer, nullable=False)
     member_character_ids = db.Column(db.JSON, nullable=False, default=list)
+    turn_active = db.Column(db.Boolean, nullable=False, default=True)
+    turn_submitted_day = db.Column(db.Integer)
+    turn_submitted_minutes = db.Column(db.Integer)
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = db.Column(

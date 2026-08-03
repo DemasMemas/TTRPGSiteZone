@@ -123,6 +123,7 @@ ACTION_CATALOG = [
     {'key': 'draw_weapon', 'label': 'Достать оружие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'stow_weapon', 'label': 'Освободить руки', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'reload_weapon', 'label': 'Сменить магазин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'clear_weapon_jam', 'label': 'Устранить клин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'change_posture', 'label': 'Смена положения', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'defend', 'label': 'Защита', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
     {'key': 'use_item', 'label': 'Использовать предмет', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
@@ -147,6 +148,21 @@ ACTION_CATALOG = [
 
 
 class CombatService:
+    WEAPON_JAM_RESULTS = {
+        1: {'label': 'Гильза осталась в затворе', 'fix_ap': 1, 'durability_loss': 0, 'blocks_fire': True},
+        2: {'label': 'Печная труба', 'fix_ap': 2, 'durability_loss': 1, 'blocks_fire': True},
+        3: {'label': 'Смятый патрон сместил затвор', 'fix_ap': 4, 'durability_loss': 3, 'blocks_fire': True},
+        4: {'label': 'Сбит прицел', 'fix_ap': 4, 'durability_loss': 3, 'accuracy_penalty': 2},
+        5: {'label': 'Искривлён приклад', 'fix_ap': 4, 'durability_loss': 4, 'shooting_disadvantage': True},
+        6: {'label': 'Натяжение пружины', 'fix_ap': 4, 'durability_loss': 4, 'extra_wear_per_shot': 1},
+        7: {'label': 'Взрыв патрона в оружии', 'fix_ap': 4, 'durability_loss': 5, 'accuracy_penalty': 4},
+        8: {'label': 'Двойная подача заклинила затвор', 'fix_ap': 5, 'durability_loss': 5, 'blocks_fire': True},
+        9: {'label': 'Искривлён спусковой механизм', 'fix_ap': 5, 'durability_loss': 6, 'blocks_fire': True},
+        10: {'label': 'Повреждены курок, затвор и рама', 'fix_ap': 8, 'durability_loss': 10, 'blocks_fire': True},
+        11: {'label': 'Разрыв ствола', 'durability_loss': 10, 'accuracy_penalty': 5, 'repair_required': 'increase'},
+        12: {'label': 'Разрушены боёк и затвор', 'durability_loss': 15, 'blocks_fire': True, 'repair_required': 'full'},
+    }
+
     @staticmethod
     def _coerce_int(value, default=0):
         try:
@@ -1332,6 +1348,167 @@ class CombatService:
                 merged.update(attributes)
                 return merged
         return attributes
+
+    @staticmethod
+    def _weapon_template(item):
+        template_id = CombatService._coerce_int(
+            item.get('templateId'), 0
+        ) if isinstance(item, dict) else 0
+        return db.session.get(ItemTemplate, template_id) if template_id else None
+
+    @staticmethod
+    def _manual_cycle_type(weapon):
+        attributes = CombatService._template_attributes(weapon)
+        explicit = weapon.get('manualCycle') or attributes.get('manual_cycle')
+        if explicit:
+            return str(explicit)
+        name = str(weapon.get('name') or '').strip().lower().replace('ё', 'е')
+        if any(value in name for value in (
+            'суслик', 'малинова', 'мачеха 51', 'свет-99', 'пылесос'
+        )) or re.search(r'(?:^|\s)ау(?:\s|$)', name):
+            return 'bolt'
+        if any(value in name for value in (
+            'гора б88', 'гора 580б2', 'ремень 787', 'спаситель 70', 'д-2', 'д2'
+        )):
+            return 'pump'
+        return None
+
+    @staticmethod
+    def _weapon_durability(weapon):
+        weapon = weapon if isinstance(weapon, dict) else {}
+        attributes = CombatService._template_attributes(weapon)
+        maximum = max(1, CombatService._coerce_int(
+            weapon.get('maxDurability', weapon.get('max_durability', attributes.get('max_durability', 100))),
+            100,
+        ))
+        current = max(0, min(maximum, CombatService._coerce_int(
+            weapon.get('durability', maximum), maximum
+        )))
+        weapon['maxDurability'] = maximum
+        weapon['durability'] = current
+        jam = weapon.get('jam')
+        if isinstance(jam, dict):
+            requirement = jam.get('repair_required')
+            if requirement == 'increase' and current > CombatService._coerce_int(
+                jam.get('durability_after'), current
+            ):
+                weapon.pop('jam', None)
+            elif requirement == 'full' and current >= maximum:
+                weapon.pop('jam', None)
+        return current, maximum
+
+    @staticmethod
+    def _weapon_wear_multiplier(weapon, ammo_profile=None):
+        template = CombatService._weapon_template(weapon)
+        subcategory = str(
+            (template.subcategory if template else None)
+            or weapon.get('subcategory')
+            or ''
+        ).strip().lower().replace('ё', 'е')
+        multiplier = 2 if subcategory in {
+            'пистолеты', 'снайперские винтовки', 'пулеметы'
+        } else 1
+        variant = str((ammo_profile or {}).get('ammo_variant') or '').strip().lower()
+        if variant and variant not in {'base', 'standard', 'обычный', 'обычная'}:
+            multiplier *= 2
+        return multiplier
+
+    @staticmethod
+    def _apply_weapon_wear(weapon, amount):
+        current, maximum = CombatService._weapon_durability(weapon)
+        loss = max(0, CombatService._coerce_int(amount, 0))
+        weapon['durability'] = max(0, current - loss)
+        return {'before': current, 'after': weapon['durability'], 'maximum': maximum, 'loss': loss}
+
+    @staticmethod
+    def _weapon_jam_profile(durability):
+        value = max(0, CombatService._coerce_int(durability, 0))
+        if value <= 0:
+            return 20, 12, 6
+        if value <= 10:
+            return 15, 12, 2
+        if value <= 30:
+            return 10, 12, 0
+        if value <= 45:
+            return 7, 10, 0
+        if value <= 60:
+            return 4, 8, 0
+        if value <= 75:
+            return 2, 6, 0
+        if value <= 90:
+            return 1, 4, 0
+        return 0, 0, 0
+
+    @staticmethod
+    def _roll_weapon_jam(weapon):
+        if isinstance(weapon.get('jam'), dict):
+            return None
+        current, _ = CombatService._weapon_durability(weapon)
+        chance, die, bonus = CombatService._weapon_jam_profile(current)
+        if chance <= 0:
+            return {'triggered': False, 'check_roll': None, 'chance': 0}
+        check_roll = random.randint(1, 20)
+        if check_roll > chance:
+            return {'triggered': False, 'check_roll': check_roll, 'chance': chance}
+        strength_roll = random.randint(1, die) + bonus
+        result_number = min(12, strength_roll)
+        jam = {
+            'result': result_number,
+            'check_roll': check_roll,
+            'chance': chance,
+            'strength_roll': strength_roll,
+            **CombatService.WEAPON_JAM_RESULTS[result_number],
+        }
+        wear = CombatService._apply_weapon_wear(weapon, jam.get('durability_loss', 0))
+        jam['durability_after'] = wear['after']
+        weapon['jam'] = jam
+        return {'triggered': True, **jam}
+
+    @staticmethod
+    def _consume_weapon_ammo(weapon, shots):
+        remaining = max(0, CombatService._coerce_int(shots, 0))
+        magazine = weapon.get('installedMagazine')
+        stacks = magazine.get('ammo') if isinstance(magazine, dict) else None
+        if not isinstance(stacks, list):
+            stacks = weapon.get('fixedAmmo') if isinstance(weapon.get('fixedAmmo'), list) else None
+        if isinstance(stacks, list):
+            while remaining > 0 and stacks:
+                stack = stacks[-1]
+                quantity = max(0, CombatService._coerce_int(stack.get('quantity'), 0))
+                consumed = min(remaining, quantity)
+                stack['quantity'] = quantity - consumed
+                remaining -= consumed
+                if stack['quantity'] <= 0:
+                    stacks.pop()
+            weapon['ammo'] = sum(
+                max(0, CombatService._coerce_int(stack.get('quantity'), 0))
+                for stack in stacks if isinstance(stack, dict)
+            )
+            if isinstance(magazine, dict):
+                magazine['weight'] = CombatService._coerce_float(
+                    magazine.get('loadedWeight'), 0.25
+                ) if weapon['ammo'] > 0 else CombatService._coerce_float(
+                    magazine.get('emptyWeight'), 0
+                )
+        else:
+            weapon['ammo'] = max(0, CombatService._coerce_int(weapon.get('ammo'), 0) - remaining)
+
+    @staticmethod
+    def _weapon_use_wear(weapon, *, fire_mode=None, shot_count=1, volley_count=1, ammo_profile=None, butt=False):
+        multiplier = CombatService._weapon_wear_multiplier(weapon, ammo_profile)
+        units = 0
+        if not weapon.get('_usedInCurrentCombat'):
+            weapon['_usedInCurrentCombat'] = True
+            units += 1
+        if butt:
+            units += 1
+        elif fire_mode == 'burst':
+            units += max(1, CombatService._coerce_int(volley_count, 1))
+        elif fire_mode in {'suppression', 'area'}:
+            units += max(1, CombatService._coerce_int(volley_count, 1))
+        elif CombatService._coerce_int(shot_count, 1) > 1:
+            units += max(1, CombatService._coerce_int(shot_count, 1) // 2)
+        return CombatService._apply_weapon_wear(weapon, units * multiplier)
 
     @staticmethod
     def _is_pistol_weapon(item):
@@ -3343,6 +3520,18 @@ class CombatService:
                 f"Итого: попаданий {attack.get('hits', 0)}/{len(results)}, "
                 f"урон {round(CombatService._coerce_float(attack.get('damage_total'), 0))}."
             )
+        wear = attack.get('weapon_wear')
+        if isinstance(wear, dict) and wear.get('loss'):
+            lines.append(
+                f"Прочность оружия: {wear.get('before')} -> {wear.get('after')} "
+                f"(-{wear.get('loss')})."
+            )
+        jam = attack.get('weapon_jam')
+        if isinstance(jam, dict) and jam.get('triggered'):
+            lines.append(
+                f"Клин: d20 {jam.get('check_roll')} (порог {jam.get('chance')}), "
+                f"результат {jam.get('strength_roll')} - {jam.get('label')}."
+            )
         return '\n'.join(lines)
 
     @staticmethod
@@ -4565,6 +4754,19 @@ class CombatService:
 
         selected_location_ids = {item.id for item in loc_chars}
         for loc_char in available_characters:
+            character_data = (
+                loc_char.character.data
+                if loc_char.character and isinstance(loc_char.character.data, dict)
+                else {}
+            )
+            weapons = character_data.get('weapons') if isinstance(character_data.get('weapons'), list) else []
+            changed_weapons = False
+            for weapon in weapons:
+                if isinstance(weapon, dict) and weapon.pop('_usedInCurrentCombat', None) is not None:
+                    changed_weapons = True
+            if changed_weapons:
+                loc_char.character.data = character_data
+                flag_modified(loc_char.character, 'data')
             profile = CombatService._combat_profile(loc_char)
             loc_char.initiative_bonus = profile['initiative_bonus']
             if loc_char.id not in selected_location_ids:
@@ -4886,6 +5088,7 @@ class CombatService:
         posture_details = None
         draw_details = None
         reload_details = None
+        clear_jam_details = None
         cover_details = None
         brace_details = None
         melee_action_details = None
@@ -5499,6 +5702,33 @@ class CombatService:
                 'action_points': reload_cost,
             }
 
+        if action_key == 'clear_weapon_jam':
+            weapons = (character.character.data or {}).get('weapons') or []
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            if weapon_index < 0 or weapon_index >= len(weapons):
+                raise ValidationError("Weapon not found")
+            if character.drawn_weapon_index != weapon_index:
+                raise ValidationError("Draw this weapon first")
+            weapon = weapons[weapon_index] or {}
+            CombatService._weapon_durability(weapon)
+            jam = weapon.get('jam')
+            if not isinstance(jam, dict):
+                raise ValidationError("Weapon is not jammed")
+            if jam.get('repair_required'):
+                raise ValidationError("This malfunction requires weapon repair")
+            shooting = CombatService._skill_value(data, 'skills.physical.shooting')
+            reduction = 2 if shooting >= 20 else (1 if shooting >= 15 else 0)
+            clear_cost = max(0, CombatService._coerce_int(jam.get('fix_ap'), 0) - reduction)
+            special_action_cost = clear_cost
+            clear_jam_details = {
+                'weapon_index': weapon_index,
+                'result': jam.get('result'),
+                'label': jam.get('label'),
+                'base_action_points': CombatService._coerce_int(jam.get('fix_ap'), 0),
+                'skill_reduction': reduction,
+                'action_points': clear_cost,
+            }
+
         if action_key == 'aim':
             weapons = (character.character.data or {}).get('weapons') or []
             weapon_index = CombatService._coerce_int(weapon_index, -1)
@@ -5656,6 +5886,10 @@ class CombatService:
             if character.drawn_weapon_index != weapon_index:
                 raise ValidationError("Draw this weapon first")
             weapon = weapons[weapon_index] or {}
+            CombatService._weapon_durability(weapon)
+            active_jam = weapon.get('jam') if isinstance(weapon.get('jam'), dict) else None
+            if active_jam and active_jam.get('blocks_fire'):
+                raise ValidationError("Clear the weapon jam before firing")
             if weapon.get('requiresManualCycle'):
                 raise ValidationError("Cycle the weapon action before firing")
             profile = weapon.get('fireModes') or (weapon.get('attributes') or {}).get('fire_modes')
@@ -5832,6 +6066,12 @@ class CombatService:
                 'shooting_disadvantage': CombatService._has_roll_disadvantage(
                     data,
                     'skills.physical.shooting',
+                ) or bool(active_jam and active_jam.get('shooting_disadvantage')),
+                'weapon_jam_before_shot': deepcopy(active_jam),
+                'weapon_jam_accuracy_penalty': max(
+                    0, CombatService._coerce_int(
+                        active_jam.get('accuracy_penalty') if active_jam else 0, 0
+                    )
                 ),
                 'aim_accuracy_bonus': CombatService._aim_bonus_for_target(
                     character,
@@ -5882,6 +6122,7 @@ class CombatService:
             hit_difficulty = 12 - shooting_bonus - weapon_accuracy
             hit_difficulty += CombatService._equipment_accuracy_penalty(data)
             hit_difficulty += strength_profile['accuracy_penalty']
+            hit_difficulty += attack_details['weapon_jam_accuracy_penalty']
             hit_difficulty -= attack_details['ergonomics_accuracy_applied']
             hit_difficulty -= attack_details['posture_shooting_bonus']
             hit_difficulty += CombatService._coerce_int(
@@ -5999,12 +6240,19 @@ class CombatService:
                     'posture_change': None,
                     'draw_weapon': None,
                     'reload_weapon': None,
+                    'clear_weapon_jam': None,
                     'cover': None,
                     'brace_weapon': None,
                     'melee_action': None,
                 }
             if not resumed_paid_action:
                 character.action_points_current -= action_point_cost
+            if action_key == 'clear_weapon_jam' and clear_jam_details:
+                weapons = data.get('weapons') or []
+                cleared_weapon = weapons[clear_jam_details['weapon_index']]
+                cleared_weapon.pop('jam', None)
+                character.character.data = data
+                flag_modified(character.character, 'data')
             if action_key == 'attack' and attack_details and fire_mode == 'rapid':
                 character.rapid_fire_round = state.round_number
             if action_key == 'aim' and aim_details:
@@ -6159,6 +6407,47 @@ class CombatService:
                 character.character.data = data
                 flag_modified(character.character, 'data')
 
+            weapon_index_for_wear = CombatService._coerce_int(
+                attack_details.get('weapon_index'), -1
+            )
+            weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+            if 0 <= weapon_index_for_wear < len(weapons):
+                used_weapon = weapons[weapon_index_for_wear]
+                if attack_details.get('melee'):
+                    if str(attack_details.get('attack_type') or '').strip().lower() == 'firearm_butt':
+                        attack_details['weapon_wear'] = CombatService._weapon_use_wear(
+                            used_weapon, butt=True
+                        )
+                else:
+                    ammo_profile, _ = CombatService._ranged_damage_profile(used_weapon)
+                    previous_jam = used_weapon.get('jam') if isinstance(used_weapon.get('jam'), dict) else None
+                    CombatService._consume_weapon_ammo(
+                        used_weapon, attack_details.get('shot_count', 1)
+                    )
+                    attack_details['weapon_wear'] = CombatService._weapon_use_wear(
+                        used_weapon,
+                        fire_mode=attack_details.get('fire_mode'),
+                        shot_count=attack_details.get('shot_count', 1),
+                        volley_count=attack_details.get('volley_count', 1),
+                        ammo_profile=ammo_profile,
+                    )
+                    if previous_jam and previous_jam.get('extra_wear_per_shot'):
+                        extra_loss = (
+                            CombatService._coerce_int(previous_jam.get('extra_wear_per_shot'), 0)
+                            * CombatService._coerce_int(attack_details.get('shot_count'), 1)
+                        )
+                        attack_details['spring_wear'] = CombatService._apply_weapon_wear(
+                            used_weapon, extra_loss
+                        )
+                    attack_details['weapon_jam'] = CombatService._roll_weapon_jam(used_weapon)
+                    if CombatService._manual_cycle_type(used_weapon):
+                        used_weapon['requiresManualCycle'] = True
+                    attack_details['ammo_remaining'] = CombatService._coerce_int(
+                        used_weapon.get('ammo'), 0
+                    )
+                character.character.data = data
+                flag_modified(character.character, 'data')
+
         CombatService._release_invalid_grapples(location_id)
         if resumed_paid_action:
             combat_meta.pop('completedPendingActionId', None)
@@ -6184,6 +6473,7 @@ class CombatService:
                 'posture_change': None,
                 'draw_weapon': None,
                 'reload_weapon': None,
+                'clear_weapon_jam': None,
                 'cover': None,
                 'brace_weapon': None,
                 'melee_action': melee_action_details,
@@ -6197,6 +6487,7 @@ class CombatService:
             'posture_change': posture_details,
             'draw_weapon': draw_details,
             'reload_weapon': reload_details,
+            'clear_weapon_jam': clear_jam_details,
             'cover': cover_details,
             'brace_weapon': brace_details,
             'melee_action': melee_action_details,
@@ -6488,6 +6779,9 @@ class CombatService:
             character = getattr(loc_char, 'character', None)
             if character and isinstance(character.data, dict):
                 data = character.data
+                for weapon in data.get('weapons') or []:
+                    if isinstance(weapon, dict):
+                        weapon.pop('_usedInCurrentCombat', None)
                 health = data.get('health') if isinstance(data.get('health'), dict) else {}
                 meta = health.setdefault('combatMeta', {})
                 for key in ('consumableModifiers', 'bleedingModifiers'):

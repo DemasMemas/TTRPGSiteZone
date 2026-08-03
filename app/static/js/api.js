@@ -67,6 +67,20 @@ export const Server = {
         });
     },
 
+    async waitWorldGroup(lobbyId, groupId) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}/wait`, {
+            method: 'POST',
+        });
+    },
+
+    async updateWorldGroupTurnActivity(lobbyId, groupId, active) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}/turn-active`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ active }),
+        });
+    },
+
     async updateWorldGroupMembers(lobbyId, groupId, characterIds) {
         return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}/members`, {
             method: 'PATCH',
