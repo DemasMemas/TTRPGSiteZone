@@ -1,4 +1,7 @@
+import pytest
+
 from app.extensions import db
+from app.lobbies import _world_group_speed
 from app.models import (
     ChatMessage,
     Lobby,
@@ -7,6 +10,8 @@ from app.models import (
     LocationCombatState,
     Location,
     LocationCharacter,
+    WorldGroup,
+    WorldTravelEvent,
 )
 from app.models.templates import ItemTemplate
 
@@ -42,6 +47,24 @@ def create_character(client, lobby, user, auth_headers, data=None):
     )
     assert response.status_code == 201
     return response.get_json()
+
+
+@pytest.mark.parametrize(
+    ("penalty", "distance", "label"),
+    [
+        (0, 3, "Без изменений"),
+        (3, 3, "Без изменений"),
+        (4, 2, "На треть медленнее"),
+        (5, 2, "На треть медленнее"),
+        (6, 2, "На треть медленнее"),
+        (7, 1, "Вдвое медленнее"),
+        (8, 1, "Втрое медленнее"),
+        (9, 1, "Втрое медленнее"),
+        (10, 0, "Группа не может идти"),
+    ],
+)
+def test_world_group_speed_thresholds(penalty, distance, label):
+    assert _world_group_speed(penalty) == (distance, label)
 
 
 def test_lobby_creation_assigns_gm_and_membership(
@@ -158,6 +181,312 @@ def test_only_gm_can_update_persisted_lobby_time(
         user_id=player["id"],
     ).count()
     assert count == 1
+
+
+def test_world_group_creation_is_gm_only_and_validates_map_bounds(
+    client, create_user, auth_headers
+):
+    gm = create_user("world-group-gm")
+    player = create_user("world-group-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    endpoint = f"/lobbies/{lobby['id']}/world-groups"
+
+    forbidden = client.post(
+        endpoint,
+        headers=auth_headers(player),
+        json={"name": "Player party", "tile_x": 2, "tile_y": 3},
+    )
+    outside = client.post(
+        endpoint,
+        headers=auth_headers(gm),
+        json={"name": "Outside", "tile_x": 128, "tile_y": 0},
+    )
+    created = client.post(
+        endpoint,
+        headers=auth_headers(gm),
+        json={"name": "Rookies", "tile_x": 2, "tile_y": 3},
+    )
+
+    assert forbidden.status_code == 403
+    assert outside.status_code == 400
+    assert created.status_code == 201
+    assert created.get_json()["name"] == "Rookies"
+    assert WorldGroup.query.filter_by(lobby_id=lobby["id"]).count() == 1
+
+
+def test_world_movement_takes_ten_minutes_and_respects_group_distance(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("world-move-gm")
+    player = create_user("world-move-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    created = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Road party", "tile_x": 10, "tile_y": 10},
+    ).get_json()
+    endpoint = f"/lobbies/{lobby['id']}/world-groups/{created['id']}/move"
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+
+    too_far = client.post(
+        endpoint,
+        headers=auth_headers(player),
+        json={"tile_x": 14, "tile_y": 10},
+    )
+    moved = client.post(
+        endpoint,
+        headers=auth_headers(player),
+        json={"tile_x": 13, "tile_y": 13},
+    )
+
+    assert too_far.status_code == 400
+    assert moved.status_code == 200
+    assert moved.get_json()["event_pending"] is False
+    assert moved.get_json()["time"] == {"game_day": 1, "game_time_minutes": 490}
+    group = db.session.get(WorldGroup, created["id"])
+    assert (group.tile_x, group.tile_y) == (13, 13)
+
+
+def test_gm_configures_persisted_world_group_members(
+    client, create_user, auth_headers
+):
+    gm = create_user("world-members-gm")
+    player = create_user("world-members-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    gm_character = create_character(
+        client,
+        lobby,
+        gm,
+        auth_headers,
+        data={"equipment": {"armor": {"movementPenalty": 5}}},
+    )
+    player_character = create_character(client, lobby, player, auth_headers)
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Mixed party", "tile_x": 3, "tile_y": 3},
+    ).get_json()
+    endpoint = f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members"
+
+    forbidden = client.patch(
+        endpoint,
+        headers=auth_headers(player),
+        json={"character_ids": [player_character["id"]]},
+    )
+    invalid = client.patch(
+        endpoint,
+        headers=auth_headers(gm),
+        json={"character_ids": [999999]},
+    )
+    updated = client.patch(
+        endpoint,
+        headers=auth_headers(gm),
+        json={"character_ids": [gm_character["id"], player_character["id"]]},
+    )
+    player_view = client.get(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(player),
+    ).get_json()
+
+    assert forbidden.status_code == 403
+    assert invalid.status_code == 400
+    assert updated.status_code == 200
+    assert [member["id"] for member in updated.get_json()["members"]] == [
+        gm_character["id"],
+        player_character["id"],
+    ]
+    assert updated.get_json()["movement_penalty"] == 5
+    assert updated.get_json()["movement_distance"] == 2
+    assert updated.get_json()["movement_speed_label"] == "На треть медленнее"
+    assert player_view["available_characters"] == []
+    assert len(player_view["groups"][0]["members"]) == 2
+    assert db.session.get(WorldGroup, group["id"]).member_character_ids == [
+        gm_character["id"],
+        player_character["id"],
+    ]
+
+
+def test_random_world_event_blocks_travel_until_gm_resolves_it(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("world-event-gm")
+    player = create_user("world-event-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    created = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Event party", "tile_x": 5, "tile_y": 5},
+    ).get_json()
+    move_endpoint = f"/lobbies/{lobby['id']}/world-groups/{created['id']}/move"
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 0.0)
+    monkeypatch.setattr(
+        "app.lobbies.random.choice",
+        lambda values: "Test world encounter",
+    )
+
+    moved = client.post(
+        move_endpoint,
+        headers=auth_headers(player),
+        json={"tile_x": 6, "tile_y": 5},
+    )
+    blocked = client.post(
+        move_endpoint,
+        headers=auth_headers(player),
+        json={"tile_x": 7, "tile_y": 5},
+    )
+    event = WorldTravelEvent.query.filter_by(group_id=created["id"]).one()
+    hidden_list = client.get(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(player),
+    ).get_json()
+    visible_list = client.get(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+    ).get_json()
+    forbidden = client.patch(
+        f"/lobbies/{lobby['id']}/world-events/{event.id}",
+        headers=auth_headers(player),
+        json={"decision": "approve"},
+    )
+    approved = client.patch(
+        f"/lobbies/{lobby['id']}/world-events/{event.id}",
+        headers=auth_headers(gm),
+        json={"decision": "approve"},
+    )
+
+    assert moved.status_code == 200
+    assert moved.get_json()["event_pending"] is True
+    assert blocked.status_code == 409
+    assert hidden_list["pending_events"][0]["description"] is None
+    assert visible_list["pending_events"][0]["description"] == "Test world encounter"
+    assert forbidden.status_code == 403
+    assert approved.status_code == 200
+    assert approved.get_json()["status"] == "approved"
+    assert ChatMessage.query.filter_by(
+        lobby_id=lobby["id"],
+        username="Событие",
+    ).one().message == "Event party: Test world encounter"
+
+
+def test_gm_rest_event_advances_lobby_time_for_selected_characters(
+    client, create_user, auth_headers
+):
+    gm = create_user("rest-event-gm")
+    player = create_user("rest-event-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    sleeper = create_character(
+        client,
+        lobby,
+        player,
+        auth_headers,
+        data={
+            "health": {
+                "current": 100,
+                "max": 700,
+                "zones": {},
+                "effects": [],
+                "exhaustion": 1,
+                "intoxication": 90,
+                "needs": {
+                    "day": 1,
+                    "mealsToday": 1,
+                    "drinksToday": 3,
+                    "sleptToday": False,
+                },
+            },
+        },
+    )
+    observer = create_character(
+        client,
+        lobby,
+        gm,
+        auth_headers,
+        data={
+            "health": {
+                "current": 200,
+                "max": 700,
+                "zones": {},
+                "stress": 5,
+                "effects": [{
+                    "type": "delayed_adjustment",
+                    "remaining": 10,
+                    "remaining_seconds": 600,
+                    "time_unit": "minute",
+                    "tick": "time_elapsed",
+                    "adjustments": [{"field": "stress", "delta": -2, "min": 0}],
+                }],
+                "needs": {"day": 1, "mealsToday": 0, "drinksToday": 0},
+            },
+        },
+    )
+    inactive_npc = create_character(
+        client,
+        lobby,
+        gm,
+        auth_headers,
+        data={
+            "health": {
+                "current": 300,
+                "max": 700,
+                "zones": {},
+                "stress": 5,
+                "effects": [{
+                    "type": "delayed_adjustment",
+                    "remaining": 10,
+                    "remaining_seconds": 600,
+                    "time_unit": "minute",
+                    "tick": "time_elapsed",
+                    "adjustments": [{"field": "stress", "delta": -2, "min": 0}],
+                }],
+                "needs": {"day": 1, "mealsToday": 0, "drinksToday": 0},
+            },
+        },
+    )
+    endpoint = f"/lobbies/{lobby['id']}/rest"
+
+    activity = client.patch(
+        f"/lobbies/{lobby['id']}/characters/time-active",
+        headers=auth_headers(gm),
+        json={"character_ids": [sleeper["id"], observer["id"]]},
+    )
+
+    forbidden = client.post(
+        endpoint,
+        headers=auth_headers(player),
+        json={"type": "sleep", "character_ids": [sleeper["id"]]},
+    )
+    completed = client.post(
+        endpoint,
+        headers=auth_headers(gm),
+        json={"type": "sleep", "character_ids": [sleeper["id"]]},
+    )
+
+    assert activity.status_code == 200
+    assert forbidden.status_code == 403
+    assert completed.status_code == 200
+    assert completed.get_json()["game_day"] == 1
+    assert completed.get_json()["game_time_minutes"] == 16 * 60
+
+    sleeper_health = db.session.get(LobbyCharacter, sleeper["id"]).data["health"]
+    observer_health = db.session.get(LobbyCharacter, observer["id"]).data["health"]
+    inactive_health = db.session.get(LobbyCharacter, inactive_npc["id"]).data["health"]
+    assert sleeper_health["current"] == 450
+    assert sleeper_health["intoxication"] == 15
+    assert sleeper_health["exhaustion"] == 1.5
+    assert sleeper_health["needs"]["day"] == 2
+    assert sleeper_health["needs"]["lastDay"]["missed"] == ["еда"]
+    assert observer_health["current"] == 200
+    assert observer_health["needs"]["day"] == 1
+    assert observer_health["stress"] == 3
+    assert observer_health["effects"] == []
+    assert inactive_health["stress"] == 5
+    assert inactive_health["effects"][0]["remaining_seconds"] == 600
+    assert db.session.get(LobbyCharacter, inactive_npc["id"]).time_active is False
 
 
 def test_banned_user_is_kept_only_in_banned_list(

@@ -2,7 +2,9 @@
 import json
 import gzip
 import io
+import random
 from copy import deepcopy
+from datetime import datetime, timezone
 from sqlalchemy.orm.attributes import flag_modified
 from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -13,7 +15,12 @@ from app.services.map import MapService
 from app.services.character import CharacterService
 from app.services.combat import CombatService
 from app.services.health import apply_health_maximums
-from app.services.effects import advance_timed_effects
+from app.services.effects import (
+    advance_timed_effects,
+    apply_effect_to_health,
+    normalize_effect_list,
+    sync_health_derived_statuses,
+)
 from app.schemas.lobby import LobbyCreateSchema, LobbyDetailSchema, LobbyMySchema, LobbySchema
 from app.schemas.participant import BannedUserSchema
 from app.schemas.character import CharacterSchema, CharacterCreateSchema
@@ -26,6 +33,8 @@ from app.models import (
     LobbyParticipant,
     LocationCombatState,
     User,
+    WorldGroup,
+    WorldTravelEvent,
 )
 from app.utils.decorators import requires_participant, requires_gm
 from app.models.location import Location
@@ -58,6 +67,330 @@ from app.models.lobby_templates import LobbyItemTemplate
 from app.schemas.lobby_templates import LobbyItemTemplateSchema
 
 lobbies_bp = Blueprint('lobbies', __name__)
+
+WORLD_EVENT_CHANCE = 0.25
+WORLD_EVENT_DESCRIPTIONS = (
+    'На пути обнаружены свежие следы неизвестной группы.',
+    'Вдалеке слышны выстрелы. Источник звука находится неподалёку от маршрута.',
+    'Детекторы фиксируют нестабильную аномальную активность впереди.',
+    'Группа замечает заброшенный тайник у дороги.',
+    'Путь пересекает след недавно прошедших мутантов.',
+)
+
+
+def _serialize_world_group(group):
+    pending_event = next(
+        (event for event in group.travel_events if event.status == 'pending'),
+        None,
+    )
+    member_ids = [
+        int(value) for value in (group.member_character_ids or [])
+        if str(value).isdigit()
+    ]
+    characters_by_id = {
+        character.id: character
+        for character in LobbyCharacter.query.filter(
+            LobbyCharacter.lobby_id == group.lobby_id,
+            LobbyCharacter.id.in_(member_ids),
+        ).all()
+    } if member_ids else {}
+    member_penalties = {
+        character_id: CombatService._movement_penalty_breakdown(
+            characters_by_id[character_id].data or {}
+        )['total']
+        for character_id in member_ids
+        if character_id in characters_by_id
+    }
+    maximum_penalty = max(member_penalties.values(), default=0)
+    movement_distance, speed_label = _world_group_speed(maximum_penalty)
+    return {
+        'id': group.id,
+        'name': group.name,
+        'tile_x': group.tile_x,
+        'tile_y': group.tile_y,
+        'has_pending_event': pending_event is not None,
+        'members': [
+            {
+                'id': character_id,
+                'name': characters_by_id[character_id].name,
+                'movement_penalty': member_penalties[character_id],
+            }
+            for character_id in member_ids
+            if character_id in characters_by_id
+        ],
+        'movement_penalty': maximum_penalty,
+        'movement_distance': movement_distance,
+        'movement_speed_label': speed_label,
+    }
+
+
+def _world_group_speed(maximum_penalty):
+    if maximum_penalty >= 10:
+        return 0, 'Группа не может идти'
+    if maximum_penalty <= 3:
+        return 3, 'Без изменений'
+    if maximum_penalty <= 6:
+        return 2, 'На треть медленнее'
+    if maximum_penalty <= 7:
+        return 1, 'Вдвое медленнее'
+    return 1, 'Втрое медленнее'
+
+
+def _serialize_world_event(event, *, reveal_description):
+    return {
+        'id': event.id,
+        'group_id': event.group_id,
+        'group_name': event.group.name,
+        'description': event.description if reveal_description else None,
+        'status': event.status,
+        'from_tile_x': event.from_tile_x,
+        'from_tile_y': event.from_tile_y,
+        'to_tile_x': event.to_tile_x,
+        'to_tile_y': event.to_tile_y,
+        'created_at': event.created_at.isoformat(),
+    }
+
+
+def _advance_world_time(lobby, minutes):
+    absolute_minutes = (
+        (lobby.game_day or 1) * 1440
+        + (lobby.game_time_minutes or 0)
+        + minutes
+    )
+    lobby.game_day, lobby.game_time_minutes = divmod(absolute_minutes, 1440)
+    updated_characters = []
+    for character in LobbyCharacter.query.filter_by(
+        lobby_id=lobby.id,
+        time_active=True,
+    ).all():
+        character_data = dict(character.data or {})
+        health = character_data.get('health')
+        if not isinstance(health, dict):
+            continue
+        health['effects'] = advance_timed_effects(
+            health,
+            health.get('effects') or [],
+            minutes * 60,
+        )
+        character.data = character_data
+        flag_modified(character, 'data')
+        updated_characters.append(character)
+    return updated_characters
+
+
+def _emit_world_time_updates(lobby, characters):
+    payload = {
+        'game_day': lobby.game_day,
+        'game_time_minutes': lobby.game_time_minutes,
+    }
+    socketio.emit('lobby_time_updated', payload, room=f"lobby_{lobby.id}")
+    for character in characters:
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': character.id,
+                'updates': {'data': character.data},
+                'updated_by': lobby.gm_id,
+            },
+            room=f"character_{character.id}",
+        )
+    return payload
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-groups', methods=['GET'])
+@jwt_required()
+@requires_participant
+def list_world_groups(lobby_id, lobby, participant):
+    groups = WorldGroup.query.filter_by(lobby_id=lobby_id).order_by(WorldGroup.id).all()
+    events = WorldTravelEvent.query.filter_by(
+        lobby_id=lobby_id,
+        status='pending',
+    ).order_by(WorldTravelEvent.created_at).all()
+    is_gm = participant.user_id == lobby.gm_id
+    available_characters = []
+    if is_gm:
+        available_characters = [
+            {'id': character.id, 'name': character.name}
+            for character in LobbyCharacter.query.filter_by(lobby_id=lobby_id)
+            .order_by(LobbyCharacter.name, LobbyCharacter.id).all()
+        ]
+    return jsonify({
+        'groups': [_serialize_world_group(group) for group in groups],
+        'available_characters': available_characters,
+        'pending_events': [
+            _serialize_world_event(event, reveal_description=is_gm)
+            for event in events
+        ],
+    }), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-groups', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_world_group(lobby_id, lobby):
+    data = request.get_json(silent=True) or {}
+    name = str(data.get('name') or '').strip()
+    if not name or len(name) > 100:
+        return jsonify({'error': 'Group name must contain from 1 to 100 characters'}), 400
+    try:
+        tile_x = int(data.get('tile_x'))
+        tile_y = int(data.get('tile_y'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'tile_x and tile_y must be integers'}), 400
+    if not (0 <= tile_x < lobby.chunks_width * 32 and 0 <= tile_y < lobby.chunks_height * 32):
+        return jsonify({'error': 'World tile is outside the map'}), 400
+
+    group = WorldGroup(
+        lobby_id=lobby_id,
+        name=name,
+        tile_x=tile_x,
+        tile_y=tile_y,
+        member_character_ids=[],
+        created_by=lobby.gm_id,
+    )
+    db.session.add(group)
+    db.session.commit()
+    payload = _serialize_world_group(group)
+    socketio.emit('world_group_created', payload, room=f"lobby_{lobby_id}")
+    return jsonify(payload), 201
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>/members', methods=['PATCH'])
+@jwt_required()
+@requires_gm
+def update_world_group_members(lobby_id, group_id, lobby):
+    group = WorldGroup.query.filter_by(id=group_id, lobby_id=lobby_id).first()
+    if not group:
+        return jsonify({'error': 'World group not found'}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        member_ids = list(dict.fromkeys(int(value) for value in (data.get('character_ids') or [])))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'character_ids must contain integers'}), 400
+    existing_ids = {
+        character_id for (character_id,) in db.session.query(LobbyCharacter.id).filter(
+            LobbyCharacter.lobby_id == lobby_id,
+            LobbyCharacter.id.in_(member_ids),
+        ).all()
+    } if member_ids else set()
+    if set(member_ids) != existing_ids:
+        return jsonify({'error': 'Character does not belong to this lobby'}), 400
+    group.member_character_ids = member_ids
+    db.session.commit()
+    payload = _serialize_world_group(group)
+    socketio.emit('world_group_updated', payload, room=f"lobby_{lobby_id}")
+    return jsonify(payload), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_world_group(lobby_id, group_id, lobby):
+    group = WorldGroup.query.filter_by(id=group_id, lobby_id=lobby_id).first()
+    if not group:
+        return jsonify({'error': 'World group not found'}), 404
+    db.session.delete(group)
+    db.session.commit()
+    socketio.emit('world_group_deleted', {'id': group_id}, room=f"lobby_{lobby_id}")
+    return '', 204
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>/move', methods=['POST'])
+@jwt_required()
+@requires_participant
+def move_world_group(lobby_id, group_id, lobby, participant):
+    group = WorldGroup.query.filter_by(id=group_id, lobby_id=lobby_id).first()
+    if not group:
+        return jsonify({'error': 'World group not found'}), 404
+    pending = WorldTravelEvent.query.filter_by(group_id=group.id, status='pending').first()
+    if pending:
+        return jsonify({'error': 'The GM must resolve the pending travel event first'}), 409
+
+    data = request.get_json(silent=True) or {}
+    try:
+        tile_x = int(data.get('tile_x'))
+        tile_y = int(data.get('tile_y'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'tile_x and tile_y must be integers'}), 400
+    if not (0 <= tile_x < lobby.chunks_width * 32 and 0 <= tile_y < lobby.chunks_height * 32):
+        return jsonify({'error': 'World tile is outside the map'}), 400
+    movement_profile = _serialize_world_group(group)
+    movement_distance = movement_profile['movement_distance']
+    requested_distance = max(abs(tile_x - group.tile_x), abs(tile_y - group.tile_y))
+    if movement_distance <= 0:
+        return jsonify({'error': 'The group cannot move with its current movement penalty'}), 400
+    if requested_distance < 1 or requested_distance > movement_distance:
+        return jsonify({
+            'error': f'A world movement can reach no more than {movement_distance} tiles',
+        }), 400
+
+    from_x, from_y = group.tile_x, group.tile_y
+    group.tile_x, group.tile_y = tile_x, tile_y
+    updated_characters = _advance_world_time(lobby, 10)
+    event = None
+    if random.random() < WORLD_EVENT_CHANCE:
+        event = WorldTravelEvent(
+            lobby_id=lobby_id,
+            group_id=group.id,
+            description=random.choice(WORLD_EVENT_DESCRIPTIONS),
+            from_tile_x=from_x,
+            from_tile_y=from_y,
+            to_tile_x=tile_x,
+            to_tile_y=tile_y,
+        )
+        db.session.add(event)
+    db.session.commit()
+
+    group_payload = _serialize_world_group(group)
+    time_payload = _emit_world_time_updates(lobby, updated_characters)
+    socketio.emit('world_group_moved', group_payload, room=f"lobby_{lobby_id}")
+    if event:
+        socketio.emit(
+            'world_travel_event_pending',
+            _serialize_world_event(event, reveal_description=False),
+            room=f"lobby_{lobby_id}",
+        )
+    return jsonify({
+        'group': group_payload,
+        'time': time_payload,
+        'event_pending': event is not None,
+    }), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-events/<int:event_id>', methods=['PATCH'])
+@jwt_required()
+@requires_gm
+def resolve_world_travel_event(lobby_id, event_id, lobby):
+    event = WorldTravelEvent.query.filter_by(
+        id=event_id,
+        lobby_id=lobby_id,
+        status='pending',
+    ).first()
+    if not event:
+        return jsonify({'error': 'Pending world event not found'}), 404
+    decision = str((request.get_json(silent=True) or {}).get('decision') or '').strip().lower()
+    if decision not in {'approve', 'reject'}:
+        return jsonify({'error': 'decision must be approve or reject'}), 400
+
+    event.status = 'approved' if decision == 'approve' else 'rejected'
+    event.resolved_at = datetime.now(timezone.utc)
+    event.resolved_by = lobby.gm_id
+    if decision == 'approve':
+        _emit_lobby_chat_message(
+            lobby_id,
+            lobby.gm_id,
+            f"{event.group.name}: {event.description}",
+            username='Событие',
+        )
+    else:
+        db.session.commit()
+    payload = {
+        'id': event.id,
+        'group_id': event.group_id,
+        'status': event.status,
+    }
+    socketio.emit('world_travel_event_resolved', payload, room=f"lobby_{lobby_id}")
+    return jsonify(payload), 200
 
 @lobbies_bp.route('/', methods=['POST'])
 @jwt_required()
@@ -140,7 +473,10 @@ def update_lobby_time(lobby_id, lobby):
     lobby.game_time_minutes = game_time_minutes
     updated_characters = []
     if elapsed_seconds > 0:
-        for character in LobbyCharacter.query.filter_by(lobby_id=lobby_id).all():
+        for character in LobbyCharacter.query.filter_by(
+            lobby_id=lobby_id,
+            time_active=True,
+        ).all():
             character_data = dict(character.data or {})
             health = character_data.get('health')
             if not isinstance(health, dict):
@@ -167,6 +503,218 @@ def update_lobby_time(lobby_id, lobby):
             room=f"character_{character.id}",
         )
     return jsonify(payload), 200
+
+
+def _normalize_character_needs(health):
+    needs = health.get('needs') if isinstance(health.get('needs'), dict) else {}
+    return {
+        'day': max(1, int(needs.get('day') or 1)),
+        'mealsToday': max(0, min(3, int(needs.get('mealsToday') or 0))),
+        'drinksToday': max(0, min(3, int(needs.get('drinksToday') or 0))),
+        'sleptToday': needs.get('sleptToday') is True,
+        'lastDay': needs.get('lastDay') if isinstance(needs.get('lastDay'), dict) else None,
+    }
+
+
+def _resolve_character_day(health, effects, *, slept):
+    needs = _normalize_character_needs(health)
+    missed = []
+    if needs['mealsToday'] < 3:
+        missed.append('еда')
+    if needs['drinksToday'] < 3:
+        missed.append('вода')
+    if not slept and not needs['sleptToday']:
+        missed.append('сон')
+    health['exhaustion'] = max(
+        0,
+        min(10, float(health.get('exhaustion') or 0) + len(missed) - (0.5 if slept else 0)),
+    )
+    infection_blocked = any(
+        effect.get('type') == 'infection_growth_block' and effect.get('active', True)
+        for effect in effects
+    )
+    if not infection_blocked:
+        health['infection'] = min(
+            100,
+            float(health.get('infection') or 0)
+            + float(health.get('infectionGrowthPerDay') or 0),
+        )
+
+    survivors = []
+    for effect in effects:
+        if effect.get('tick') not in {'day_start', 'rest'}:
+            survivors.append(effect)
+            continue
+        for adjustment in effect.get('adjustments') or []:
+            if not isinstance(adjustment, dict) or not adjustment.get('field'):
+                continue
+            field = str(adjustment['field'])
+            value = float(health.get(field) or 0) + float(adjustment.get('delta') or 0)
+            if adjustment.get('min') is not None:
+                value = max(float(adjustment['min']), value)
+            if adjustment.get('max') is not None:
+                value = min(float(adjustment['max']), value)
+            health[field] = value
+        if effect.get('remaining') is not None:
+            effect['remaining'] = max(0, int(effect.get('remaining') or 0) - 1)
+            if effect['remaining'] <= 0:
+                continue
+        survivors.append(effect)
+
+    health['needs'] = {
+        'day': needs['day'] + 1,
+        'mealsToday': 0,
+        'drinksToday': 0,
+        'sleptToday': False,
+        'lastDay': {
+            'day': needs['day'],
+            'meals': needs['mealsToday'],
+            'drinks': needs['drinksToday'],
+            'slept': slept or needs['sleptToday'],
+            'missed': missed,
+        },
+    }
+    return survivors
+
+
+def _advance_exoskeleton_battery_day(character_data):
+    armor = ((character_data.get('equipment') or {}).get('armor') or {})
+    if str(armor.get('name') or '').strip().lower() != 'экзоскелет':
+        return
+    battery = next((
+        module for module in armor.get('installedModules') or []
+        if isinstance(module, dict) and module.get('slotType') == 'exoskeleton_battery'
+    ), None)
+    if not battery:
+        armor['powered'] = False
+        return
+    attributes = battery.setdefault('attributes', {})
+    attributes['remaining_days'] = max(0, float(attributes.get('remaining_days') or 0) - 1)
+    armor['powered'] = attributes['remaining_days'] > 0
+
+
+@lobbies_bp.route('/<int:lobby_id>/characters/time-active', methods=['PATCH'])
+@jwt_required()
+@requires_gm
+def update_time_active_characters(lobby_id, lobby):
+    data = request.get_json(silent=True) or {}
+    try:
+        active_ids = {int(value) for value in (data.get('character_ids') or [])}
+    except (TypeError, ValueError):
+        return jsonify({'error': 'character_ids must contain integers'}), 400
+    characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).all()
+    existing_ids = {character.id for character in characters}
+    if not active_ids.issubset(existing_ids):
+        return jsonify({'error': 'Character does not belong to this lobby'}), 400
+    for character in characters:
+        character.time_active = character.id in active_ids
+    db.session.commit()
+    socketio.emit(
+        'character_time_activity_updated',
+        {'character_ids': sorted(active_ids)},
+        room=f"lobby_{lobby_id}",
+    )
+    return jsonify({'character_ids': sorted(active_ids)}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/rest', methods=['POST'])
+@jwt_required()
+@requires_gm
+def start_lobby_rest(lobby_id, lobby):
+    data = request.get_json(silent=True) or {}
+    rest_type = str(data.get('type') or '').strip().lower()
+    hours = {'rest': 1, 'sleep': 8}.get(rest_type)
+    if hours is None:
+        return jsonify({'error': 'type must be rest or sleep'}), 400
+    try:
+        selected_ids = {int(value) for value in (data.get('character_ids') or [])}
+    except (TypeError, ValueError):
+        return jsonify({'error': 'character_ids must contain integers'}), 400
+    if not selected_ids:
+        return jsonify({'error': 'Select at least one character'}), 400
+
+    all_characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).all()
+    characters = [character for character in all_characters if character.time_active]
+    existing_ids = {character.id for character in characters}
+    if not selected_ids.issubset(existing_ids):
+        return jsonify({'error': 'Rest participants must be active characters'}), 400
+
+    elapsed_seconds = hours * 3600
+    absolute_minutes = (
+        (lobby.game_day or 1) * 1440
+        + (lobby.game_time_minutes or 0)
+        + hours * 60
+    )
+    lobby.game_day, lobby.game_time_minutes = divmod(absolute_minutes, 1440)
+    summaries = []
+    for character in characters:
+        character_data = dict(character.data or {})
+        health = character_data.get('health')
+        if not isinstance(health, dict):
+            continue
+        selected = character.id in selected_ids
+        effects = advance_timed_effects(
+            health,
+            health.get('effects') or [],
+            elapsed_seconds,
+            include_turn_effects=selected,
+        )
+        healed = 0
+        if selected:
+            rest_bonus = next((
+                effect for effect in effects if effect.get('type') == 'next_rest_healing'
+            ), None)
+            modifiers = ((health.get('combatMeta') or {}).get('consumableModifiers') or [])
+            rest_modifier = next((
+                modifier for modifier in modifiers
+                if isinstance(modifier, dict) and modifier.get('stat') == 'rest_heal_multiplier'
+            ), None)
+            multiplier = max(
+                1,
+                float((rest_bonus or {}).get('value') or (rest_modifier or {}).get('value') or 1),
+            )
+            maximum = float(health.get('max') or 700)
+            healed = maximum * (0.5 if rest_type == 'sleep' else 0.05) * multiplier
+            apply_effect_to_health(health, {'type': 'heal', 'value': healed})
+            effects = [effect for effect in effects if effect.get('type') != 'next_rest_healing']
+            if isinstance(health.get('combatMeta'), dict):
+                health['combatMeta']['consumableModifiers'] = [
+                    modifier for modifier in modifiers
+                    if not isinstance(modifier, dict) or modifier.get('stat') != 'rest_heal_multiplier'
+                ]
+            if rest_type == 'sleep':
+                health['intoxication'] = max(0, float(health.get('intoxication') or 0) - 75)
+                effects = _resolve_character_day(health, effects, slept=True)
+                _advance_exoskeleton_battery_day(character_data)
+        health['effects'] = normalize_effect_list(effects)
+        sync_health_derived_statuses(health)
+        character.data = character_data
+        flag_modified(character, 'data')
+        if selected:
+            summaries.append({'character_id': character.id, 'name': character.name, 'healed': round(healed)})
+
+    db.session.commit()
+    time_payload = {
+        'game_day': lobby.game_day,
+        'game_time_minutes': lobby.game_time_minutes,
+    }
+    socketio.emit('lobby_time_updated', time_payload, room=f"lobby_{lobby_id}")
+    for character in characters:
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': character.id,
+                'updates': {'data': character.data},
+                'updated_by': lobby.gm_id,
+            },
+            room=f"character_{character.id}",
+        )
+    return jsonify({
+        **time_payload,
+        'type': rest_type,
+        'hours': hours,
+        'characters': summaries,
+    }), 200
 
 @lobbies_bp.route('/<int:lobby_id>/join', methods=['POST'])
 @jwt_required()

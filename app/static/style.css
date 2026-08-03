@@ -776,6 +776,210 @@ input[type="number"] {
   padding: 8px !important;
   margin-bottom: 10px !important;
 }
+.lobby-rest-content {
+  width: min(520px, 92vw);
+  max-height: 80vh;
+  overflow: auto;
+}
+.lobby-rest-note {
+  margin: 4px 0 12px;
+  color: var(--text-muted, #a9aa9f);
+  font-size: 0.9rem;
+}
+.lobby-rest-tools {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.lobby-rest-character-list {
+  display: grid;
+  gap: 6px;
+  max-height: 45vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.lobby-rest-character {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.lobby-rest-character input {
+  margin: 0;
+}
+.lobby-rest-character.time-inactive {
+  opacity: 0.55;
+}
+
+.world-travel-content {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(78vh, 760px);
+  overflow-y: auto;
+}
+
+.world-travel-note {
+  margin: 0 0 14px;
+  color: var(--text-muted, #aaa58f);
+  line-height: 1.4;
+}
+
+.world-group-create {
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.world-group-create .form-control {
+  flex: 1;
+  margin: 0;
+}
+
+.world-group-list,
+.world-event-list {
+  display: grid;
+  gap: 8px;
+}
+
+.world-group-row,
+.world-event-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(184, 154, 85, 0.28);
+  background: rgba(13, 17, 12, 0.72);
+}
+
+.world-event-row.world-event-focus {
+  border-color: #d8b25b;
+  box-shadow: 0 0 0 2px rgba(216, 178, 91, 0.25);
+}
+
+.world-group-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted, #aaa58f);
+}
+
+.world-event-row {
+  display: block;
+  border-left: 3px solid #a64b38;
+}
+
+.world-event-row p {
+  margin: 6px 0 10px;
+}
+
+.world-group-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.world-travel-empty {
+  margin: 0;
+  padding: 10px 0;
+  color: var(--text-muted, #aaa58f);
+}
+
+.world-group-members-editor {
+  margin: 12px 0 18px;
+  padding: 12px;
+  border: 1px solid rgba(184, 154, 85, 0.35);
+  background: rgba(8, 11, 8, 0.65);
+}
+
+.world-group-members-editor h4 {
+  margin: 0 0 10px;
+}
+
+.world-group-members-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px;
+  max-height: 240px;
+  margin-bottom: 12px;
+  overflow-y: auto;
+}
+
+.world-group-member-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+}
+
+.world-group-context-menu {
+  position: fixed;
+  z-index: 130;
+  min-width: 180px;
+  padding: 6px;
+  gap: 4px;
+  border: 1px solid rgba(184, 154, 85, 0.5);
+  border-radius: 7px;
+  background: rgba(13, 16, 12, 0.97);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+}
+
+.world-group-context-title {
+  padding: 7px 9px;
+  color: #d9c58f;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(184, 154, 85, 0.25);
+}
+
+.world-group-context-speed {
+  padding: 6px 9px;
+  color: var(--text-muted, #aaa58f);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.world-group-context-menu button {
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-color);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.world-group-context-menu button:hover:not(:disabled) {
+  background: rgba(184, 154, 85, 0.18);
+}
+
+.world-group-context-menu button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 620px) {
+  .world-group-create,
+  .world-group-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+.lobby-rest-participant,
+.lobby-time-active-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+.lobby-time-active-toggle {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  color: var(--text-muted, #a9aa9f);
+}
 .equipment-row {
   display: flex !important;
   flex-wrap: wrap !important;

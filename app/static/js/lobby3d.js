@@ -1192,6 +1192,9 @@ export function setEditMode(enabled) {
     }
 }
 export function setTileClickCallback(callback) { window.tileClickCallback = callback; }
+export function setWorldTravelTileClickCallback(callback) {
+    window.worldTravelTileClickCallback = callback;
+}
 
 function performRaycast(clientX, clientY) {
     if (window.isLocationActive) return;
@@ -1313,6 +1316,19 @@ renderer.domElement.addEventListener('mousedown', canvasMouseDownHandler, { capt
 window.addEventListener('click', (event) => {
     if (window.isLocationActive) return;
     if (event.target.closest('.ui-overlay')) return;
+    if (hoveredTile && window.worldTravelTileClickCallback) {
+        const consumed = window.worldTravelTileClickCallback({
+            tile: {
+                chunkX: hoveredTile.chunk.chunkX,
+                chunkY: hoveredTile.chunk.chunkY,
+                tileX: hoveredTile.tileX,
+                tileY: hoveredTile.tileY,
+                tileData: hoveredTile.tileData
+            },
+            event
+        });
+        if (consumed) return;
+    }
     if (editMode && hoveredTile && window.tileClickCallback) {
         window.tileClickCallback({
             tile: {

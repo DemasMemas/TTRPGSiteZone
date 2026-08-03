@@ -31,6 +31,64 @@ export const Server = {
         });
     },
 
+    async startLobbyRest(lobbyId, type, characterIds) {
+        return apiFetch(`/lobbies/${lobbyId}/rest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, character_ids: characterIds }),
+        });
+    },
+
+    async updateTimeActiveCharacters(lobbyId, characterIds) {
+        return apiFetch(`/lobbies/${lobbyId}/characters/time-active`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ character_ids: characterIds }),
+        });
+    },
+
+    async getWorldGroups(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups`);
+    },
+
+    async createWorldGroup(lobbyId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async moveWorldGroup(lobbyId, groupId, tileX, tileY) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}/move`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tile_x: tileX, tile_y: tileY }),
+        });
+    },
+
+    async updateWorldGroupMembers(lobbyId, groupId, characterIds) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}/members`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ character_ids: characterIds }),
+        });
+    },
+
+    async deleteWorldGroup(lobbyId, groupId) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}`, {
+            method: 'DELETE',
+        });
+    },
+
+    async resolveWorldTravelEvent(lobbyId, eventId, decision) {
+        return apiFetch(`/lobbies/${lobbyId}/world-events/${eventId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision }),
+        });
+    },
+
     async createLobby(name, mapType, chunksWidth, chunksHeight, importData = null) {
         // Для импорта используется FormData, для обычного — JSON
         if (mapType === 'imported' && importData) {

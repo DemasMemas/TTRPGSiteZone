@@ -13,6 +13,7 @@ class CharacterSchema(Schema):
     data = fields.Dict()
     visible_to = fields.List(fields.Int())
     editable_to = fields.List(fields.Int())
+    time_active = fields.Bool()
     created_at = fields.DateTime()
     updated_at = fields.DateTime()
 

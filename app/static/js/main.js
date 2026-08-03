@@ -31,6 +31,13 @@ import {
         setLocationStructureRotation
 } from './locationScene.js';
 import { getUserColorHex, updateMyColor } from './colors.js';
+import { openLobbyRestModal, closeLobbyRestModal, saveLobbyTimeActivity, startLobbyRest } from './rest.js';
+import {
+    beginWorldGroupCreation,
+    closeWorldTravelModal,
+    initWorldTravel,
+    openWorldTravelModal,
+} from './worldTravel.js';
 import * as THREE from 'three';
 
 initWeather();
@@ -909,6 +916,13 @@ window.exportCharacter = exportCharacter;
 window.importCharacter = importCharacter;
 
 window.showCreateCharacterForm = showCreateCharacterForm;
+window.openLobbyRestModal = openLobbyRestModal;
+window.closeLobbyRestModal = closeLobbyRestModal;
+window.saveLobbyTimeActivity = saveLobbyTimeActivity;
+window.startLobbyRest = startLobbyRest;
+window.openWorldTravelModal = openWorldTravelModal;
+window.closeWorldTravelModal = closeWorldTravelModal;
+window.beginWorldGroupCreation = beginWorldGroupCreation;
 
 // Маркеры
 window.closeMarkerEditModal = closeMarkerEditModal;
@@ -1041,6 +1055,7 @@ function escapeHtml(unsafe) {
     await loadLobbyInfo();
     await loadLobbyCharacters();
     await loadAllChunks();
+    await initWorldTravel(currentLobbyId, socket);
     initHotkeys();
 
     // ===== Настройка кнопки выбора цвета =====

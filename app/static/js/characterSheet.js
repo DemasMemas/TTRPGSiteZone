@@ -23,7 +23,7 @@ import { Server } from './api.js';
 import { showNotification } from './utils.js';
 import { lobbyParticipants } from './ui.js';
 import { getSocket } from './socketHandlers.js';
-import { advanceTimedEffects, applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
+import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
 
 // ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
 let currentCharacterId = null;
@@ -2555,11 +2555,6 @@ function renderHealthTab(data, container = null) {
             <div class="health-needs-panel">
                 <div class="health-need-field"><label>Еда сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.mealsToday" value="${needs.mealsToday}"><small>${needs.mealsToday}/3</small></div>
                 <div class="health-need-field"><label>Вода сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.drinksToday" value="${needs.drinksToday}"><small>${needs.drinksToday}/3</small></div>
-                <div class="health-needs-actions">
-                    <button type="button" class="btn btn-secondary" onclick="performCharacterRest(1)">Отдых 1 час</button>
-                    <button type="button" class="btn btn-primary" onclick="performCharacterRest(8)">Поспать 8 часов</button>
-                    <button type="button" class="btn btn-secondary" onclick="advanceCharacterDayWithoutSleep()" title="Закрывает текущие сутки без отдыха: проверяет еду, воду и сон, начисляет истощение и запускает суточные эффекты.">Следующие сутки без сна</button>
-                </div>
             </div>
             <hr>
             <h4>Зоны тела</h4>
@@ -5760,136 +5755,6 @@ window.unloadMagazineToInventory = async function(pathStr) {
 function updateMagazineWeight(mag) {
     const totalAmmo = mag.ammo ? mag.ammo.reduce((sum, a) => sum + a.quantity, 0) : 0;
     mag.weight = (totalAmmo > 0) ? (mag.loadedWeight || 0.25) : (mag.emptyWeight || 0);
-};
-
-function resolveCharacterDay(health, effects, didSleep) {
-    const needs = normalizeDailyNeeds(health.needs);
-    const sleepSatisfied = didSleep || needs.sleptToday;
-    const missed = [];
-    if (needs.mealsToday < 3) missed.push('еда');
-    if (needs.drinksToday < 3) missed.push('вода');
-    if (!sleepSatisfied) missed.push('сон');
-
-    health.exhaustion = Math.max(0, Math.min(10,
-        Number(health.exhaustion || 0) + missed.length - (didSleep ? 0.5 : 0)
-    ));
-
-    const infectionBlocked = effects.some(effect => effect.type === 'infection_growth_block' && effect.active !== false);
-    if (!infectionBlocked) {
-        health.infection = Math.min(100, Number(health.infection || 0) + Number(health.infectionGrowthPerDay || 0));
-    }
-
-    const updated = [];
-    effects.forEach(effect => {
-        if (!['day_start', 'rest'].includes(effect.tick)) {
-            updated.push(effect);
-            return;
-        }
-        (effect.adjustments || []).forEach(adjustment => {
-            const field = adjustment.field;
-            if (!field) return;
-            const min = adjustment.min ?? 0;
-            const max = adjustment.max ?? null;
-            let value = Number(health[field] || 0) + Number(adjustment.delta || 0);
-            if (min !== null) value = Math.max(min, value);
-            if (max !== null) value = Math.min(max, value);
-            health[field] = value;
-        });
-        if (effect.remaining != null) {
-            effect.remaining = Math.max(0, Number(effect.remaining || 0) - 1);
-            if (effect.remaining <= 0) return;
-        }
-        updated.push(effect);
-    });
-
-    health.needs = {
-        day: needs.day + 1,
-        mealsToday: 0,
-        drinksToday: 0,
-        sleptToday: false,
-        lastDay: {
-            day: needs.day,
-            meals: needs.mealsToday,
-            drinks: needs.drinksToday,
-            slept: sleepSatisfied,
-            missed,
-        },
-    };
-    return updated;
-}
-
-function advanceExoskeletonBatteryDay(data) {
-    const armor = data?.equipment?.armor;
-    if (!armor || String(armor.name || '').trim().toLowerCase() !== 'экзоскелет') return;
-    const battery = (armor.installedModules || []).find(
-        module => module?.slotType === 'exoskeleton_battery'
-    );
-    if (!battery) {
-        armor.powered = false;
-        return;
-    }
-    battery.attributes = battery.attributes || {};
-    battery.attributes.remaining_days = Math.max(
-        0,
-        (Number(battery.attributes.remaining_days) || 0) - 1,
-    );
-    armor.powered = battery.attributes.remaining_days > 0;
-}
-
-window.advanceCharacterDayWithoutSleep = function() {
-    updateDataFromFields();
-    const health = ensureHealthMaximums(currentCharacterData);
-    const elapsedEffects = advanceTimedEffects(
-        health,
-        normalizeEffectList(health.effects || []),
-        24 * 3600,
-        true
-    );
-    health.effects = resolveCharacterDay(health, elapsedEffects, false);
-    advanceExoskeletonBatteryDay(currentCharacterData);
-    syncHealthDerivedStatuses(health);
-    refreshHealthPanel();
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification('Начались следующие сутки', 'success');
-};
-
-window.performCharacterRest = function(hours = 8) {
-    updateDataFromFields();
-    const health = ensureHealthMaximums(currentCharacterData);
-    health.needs = normalizeDailyNeeds(health.needs);
-    let effects = normalizeEffectList(health.effects || []);
-    effects = advanceTimedEffects(
-        health,
-        effects,
-        Math.max(0, Number(hours) || 0) * 3600,
-        true
-    );
-    const restBonus = effects.find(effect => effect.type === 'next_rest_healing');
-    const restModifier = (health.combatMeta?.consumableModifiers || []).find(modifier => modifier?.stat === 'rest_heal_multiplier');
-    const multiplier = Math.max(1, Number(restBonus?.value || restModifier?.value || 1));
-    const maxHealth = Number(health.max || 700);
-    health.max = maxHealth;
-    const fraction = Number(hours) >= 8 ? 0.5 : 0.05;
-    const recovery = maxHealth * fraction * multiplier;
-    applyEffectToHealth(health, { type: 'heal', value: recovery });
-    effects = effects.filter(effect => effect.type !== 'next_rest_healing');
-    if (health.combatMeta?.consumableModifiers) {
-        health.combatMeta.consumableModifiers = health.combatMeta.consumableModifiers.filter(
-            modifier => modifier?.stat !== 'rest_heal_multiplier'
-        );
-    }
-    if (Number(hours) >= 8) {
-        health.intoxication = Math.max(0, Number(health.intoxication || 0) - 75);
-        effects = resolveCharacterDay(health, effects, true);
-        advanceExoskeletonBatteryDay(currentCharacterData);
-    }
-    health.effects = effects;
-    syncHealthDerivedStatuses(health);
-    refreshHealthPanel();
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification(`Отдых завершён. Восстановлено ${Math.round(recovery)} здоровья`, 'success');
 };
 
 function getMagazineAmmoCount(mag) {

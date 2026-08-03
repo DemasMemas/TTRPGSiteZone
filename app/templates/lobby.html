@@ -56,6 +56,8 @@
             <div class="menu-item invite-code" id="gm-invite-code" style="display:none;">Код: <span id="invite-code-value"></span></div>
             <button class="menu-item theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Переключить тему">🌓</button>
             <button class="menu-item edit-toggle" id="edit-toggle" style="display:none;" onclick="toggleEditMode()" title="Режим редактирования карты">✏️</button>
+            <button class="menu-item" id="lobby-rest-btn" style="display:none;" onclick="openLobbyRestModal()" title="Отдых и сон персонажей">Отдых</button>
+            <button class="menu-item" id="world-travel-btn" onclick="openWorldTravelModal()" title="Группы и перемещение по миру">Путь</button>
             <button class="menu-item settings-btn" id="settings-btn" style="display:none;" onclick="toggleSettings()" title="Настройки комнаты">⚙️</button>
             <button class="menu-item" id="templates-manager-btn" style="display:none;" onclick="openTemplatesManager()" title="Управление шаблонами">📁</button>
             <button class="menu-item exit-btn" onclick="leaveLobby()" title="Покинуть комнату">✕</button>
@@ -472,6 +474,49 @@
             <div id="templates-manager-actions" style="margin-top: 12px; display:flex; gap:8px; flex-wrap:wrap;"></div>
             <div id="templates-list" style="margin-top: 15px;"></div>
         </div>
+    </div>
+
+    <div id="lobby-rest-modal" class="modal" style="display:none;">
+            <div class="modal-content lobby-rest-content">
+                <span class="close" onclick="closeLobbyRestModal()">&times;</span>
+                <h3>Отдых группы</h3>
+                <p class="lobby-rest-note">Течение глобального времени влияет только на активных персонажей. Левый флажок выбирает участников текущего отдыха.</p>
+                <div class="lobby-rest-tools">
+                    <button type="button" class="btn btn-sm btn-secondary" id="lobby-rest-select-all">Выбрать всех</button>
+                    <button type="button" class="btn btn-sm btn-secondary" id="lobby-rest-clear">Снять выбор</button>
+                    <button type="button" class="btn btn-sm btn-primary" onclick="saveLobbyTimeActivity()">Сохранить активных</button>
+                </div>
+                <div id="lobby-rest-character-list" class="lobby-rest-character-list"></div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="startLobbyRest('rest')">Отдых 1 час</button>
+                    <button type="button" class="btn btn-primary" onclick="startLobbyRest('sleep')">Сон 8 часов</button>
+                    <button type="button" class="btn btn-danger" onclick="closeLobbyRestModal()">Отмена</button>
+                </div>
+            </div>
+        </div>
+
+    <div id="world-travel-modal" class="modal" style="display:none;">
+            <div class="modal-content world-travel-content">
+                <span class="close" onclick="closeWorldTravelModal()">&times;</span>
+                <h3>Перемещение по миру</h3>
+                <p class="world-travel-note">Один шаг на соседнюю клетку занимает 10 минут. После случайной встречи движение продолжится, когда ГМ примет решение.</p>
+                <div id="world-group-create" class="world-group-create" style="display:none;">
+                    <input id="world-group-name" class="form-control" maxlength="100" placeholder="Название группы">
+                    <button type="button" class="btn btn-primary" onclick="beginWorldGroupCreation()">Создать на карте</button>
+                </div>
+                <h4>Группы</h4>
+                <div id="world-group-list" class="world-group-list"></div>
+                <div id="world-group-members-editor" class="world-group-members-editor" style="display:none;">
+                    <h4 id="world-group-members-title">Состав группы</h4>
+                    <div id="world-group-members-list" class="world-group-members-list"></div>
+                    <div class="world-group-actions">
+                        <button type="button" class="btn btn-sm btn-primary" data-world-members-save>Сохранить</button>
+                        <button type="button" class="btn btn-sm btn-secondary" data-world-members-cancel>Отмена</button>
+                    </div>
+                </div>
+                <h4>Ожидающие события</h4>
+                <div id="world-event-list" class="world-event-list"></div>
+            </div>
     </div>
 
     <!-- Информация о тайле -->
