@@ -838,14 +838,39 @@ input[type="number"] {
   margin: 0;
 }
 
+.world-map-event-create {
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 12px;
+  border: 1px solid rgba(184, 154, 85, 0.28);
+  background: rgba(8, 11, 8, 0.52);
+}
+
+.world-map-event-create h4 {
+  margin: 0 0 2px;
+}
+
+.world-map-event-create textarea {
+  resize: vertical;
+}
+
+.world-map-event-repeatable {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
 .world-group-list,
-.world-event-list {
+.world-event-list,
+.world-map-event-list {
   display: grid;
   gap: 8px;
 }
 
 .world-group-row,
-.world-event-row {
+.world-event-row,
+.world-map-event-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -853,6 +878,20 @@ input[type="number"] {
   padding: 10px 12px;
   border: 1px solid rgba(184, 154, 85, 0.28);
   background: rgba(13, 17, 12, 0.72);
+}
+
+.world-map-event-row {
+  display: flex;
+}
+
+.world-map-event-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted, #aaa58f);
+}
+
+.world-map-event-heading {
+  margin-top: 18px;
 }
 
 .world-event-row.world-event-focus {
@@ -940,6 +979,15 @@ input[type="number"] {
   color: var(--text-muted, #aaa58f);
   font-size: 0.78rem;
   white-space: nowrap;
+}
+
+.world-map-event-context-description {
+  max-width: 300px;
+  padding: 6px 9px 9px;
+  color: var(--text-color);
+  font-size: 0.86rem;
+  line-height: 1.35;
+  white-space: normal;
 }
 
 .world-group-context-menu button {

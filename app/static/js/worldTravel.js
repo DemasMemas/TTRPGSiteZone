@@ -12,12 +12,14 @@ import { showNotification } from './utils.js';
 
 const CHUNK_SIZE = 32;
 const models = new Map();
+const eventModels = new Map();
 const movementHighlights = [];
 const contextRaycaster = new THREE.Raycaster();
 const contextPointer = new THREE.Vector2();
 let lobbyId = null;
 let groups = [];
 let pendingEvents = [];
+let mapEvents = [];
 let availableCharacters = [];
 let selectionMode = null;
 let contextMenu = null;
@@ -85,6 +87,34 @@ function createGroupModel(group) {
     return root;
 }
 
+function createMapEventModel(event) {
+    const root = new THREE.Group();
+    const hitArea = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.55, 0.55, 1.5, 12),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
+    );
+    hitArea.position.y = 0.72;
+    root.add(hitArea);
+    const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.035, 0.035, 0.8, 8),
+        new THREE.MeshStandardMaterial({ color: 0x685c43, roughness: 0.9 })
+    );
+    pole.position.y = 0.43;
+    root.add(pole);
+    const marker = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.24),
+        new THREE.MeshStandardMaterial({ color: event.repeatable ? 0xc99236 : 0xa94132, roughness: 0.65 })
+    );
+    marker.position.y = 0.96;
+    root.add(marker);
+    const label = makeLabel(event.name);
+    label.scale.set(2, 0.5, 1);
+    label.position.y = 1.48;
+    root.add(label);
+    root.userData = { type: 'world-map-event', eventId: event.id };
+    return root;
+}
+
 function disposeModel(model) {
     scene.remove(model);
     model.traverse(object => {
@@ -112,6 +142,22 @@ function renderModels() {
         model.position.set(group.tile_x + 0.5, tileHeight(group.tile_x, group.tile_y), group.tile_y + 0.5);
         const ring = model.children.find(child => child.geometry?.type === 'RingGeometry');
         if (ring?.material?.color) ring.material.color.set(group.has_pending_event ? 0xb64a35 : 0xc39b4a);
+    });
+    const eventIds = new Set(mapEvents.map(event => Number(event.id)));
+    eventModels.forEach((model, id) => {
+        if (!eventIds.has(id)) {
+            disposeModel(model);
+            eventModels.delete(id);
+        }
+    });
+    mapEvents.forEach(event => {
+        let model = eventModels.get(Number(event.id));
+        if (!model) {
+            model = createMapEventModel(event);
+            eventModels.set(Number(event.id), model);
+            scene.add(model);
+        }
+        model.position.set(event.tile_x + 0.5, tileHeight(event.tile_x, event.tile_y), event.tile_y + 0.5);
     });
 }
 
@@ -162,16 +208,33 @@ function hideContextMenu() {
     if (contextMenu) contextMenu.style.display = 'none';
 }
 
-function groupFromPointer(event) {
+function worldObjectFromPointer(event) {
     const rect = renderer.domElement.getBoundingClientRect();
     contextPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     contextPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     contextRaycaster.setFromCamera(contextPointer, camera);
-    const hits = contextRaycaster.intersectObjects([...models.values()], true);
+    const hits = contextRaycaster.intersectObjects(
+        [...models.values(), ...eventModels.values()],
+        true
+    );
     if (!hits.length) return null;
     let object = hits[0].object;
-    while (object && object.userData?.type !== 'world-group') object = object.parent;
-    return groups.find(group => Number(group.id) === Number(object?.userData?.groupId)) || null;
+    while (object && !['world-group', 'world-map-event'].includes(object.userData?.type)) {
+        object = object.parent;
+    }
+    if (object?.userData?.type === 'world-group') {
+        return {
+            type: 'group',
+            data: groups.find(group => Number(group.id) === Number(object.userData.groupId)),
+        };
+    }
+    if (object?.userData?.type === 'world-map-event') {
+        return {
+            type: 'event',
+            data: mapEvents.find(eventData => Number(eventData.id) === Number(object.userData.eventId)),
+        };
+    }
+    return null;
 }
 
 function showGroupContextMenu(group, clientX, clientY) {
@@ -214,6 +277,29 @@ function showGroupContextMenu(group, clientX, clientY) {
     });
 }
 
+function showMapEventContextMenu(event, clientX, clientY) {
+    if (!contextMenu || !window.isGM) return;
+    contextMenu.innerHTML = `
+        <div class="world-group-context-title">${escapeHtml(event.name)}</div>
+        <div class="world-group-context-speed">${event.repeatable ? 'Повторяемое событие' : 'Одноразовое событие'} · клетка ${event.tile_x}, ${event.tile_y}</div>
+        <div class="world-map-event-context-description">${escapeHtml(event.description)}</div>
+        <button type="button" data-context-delete-event>Удалить событие</button>
+    `;
+    contextMenu.style.display = 'grid';
+    const rect = contextMenu.getBoundingClientRect();
+    contextMenu.style.left = `${Math.min(clientX, window.innerWidth - rect.width - 8)}px`;
+    contextMenu.style.top = `${Math.min(clientY, window.innerHeight - rect.height - 8)}px`;
+    contextMenu.querySelector('[data-context-delete-event]')?.addEventListener('click', async () => {
+        hideContextMenu();
+        try {
+            await Server.deleteWorldMapEvent(lobbyId, event.id);
+            await refreshWorldTravel();
+        } catch (error) {
+            showNotification(error.message, 'error');
+        }
+    });
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -227,8 +313,11 @@ function renderModal() {
     const list = document.getElementById('world-group-list');
     const events = document.getElementById('world-event-list');
     const create = document.getElementById('world-group-create');
-    if (!list || !events || !create) return;
+    const mapEventCreate = document.getElementById('world-map-event-create');
+    const mapEventList = document.getElementById('world-map-event-list');
+    if (!list || !events || !create || !mapEventCreate || !mapEventList) return;
     create.style.display = window.isGM ? 'flex' : 'none';
+    mapEventCreate.style.display = window.isGM ? 'grid' : 'none';
     list.innerHTML = groups.length ? groups.map(group => `
         <div class="world-group-row">
             <div>
@@ -254,6 +343,17 @@ function renderModal() {
             </div>` : ''}
         </div>
     `).join('') : '<p class="world-travel-empty">Ожидающих событий нет.</p>';
+    mapEventList.innerHTML = window.isGM && mapEvents.length
+        ? mapEvents.map(event => `
+            <div class="world-map-event-row">
+                <div>
+                    <strong>${escapeHtml(event.name)}</strong>
+                    <small>Клетка ${event.tile_x}, ${event.tile_y} · ${event.repeatable ? 'повторяемое' : 'одноразовое'}</small>
+                </div>
+                <button class="btn btn-sm btn-danger" data-world-map-event-delete="${event.id}">Удалить</button>
+            </div>
+        `).join('')
+        : '<p class="world-travel-empty">Расставленных событий нет.</p>';
     renderMembersEditor();
 }
 
@@ -306,6 +406,7 @@ export async function refreshWorldTravel() {
         const data = await Server.getWorldGroups(lobbyId);
         groups = data.groups || [];
         pendingEvents = data.pending_events || [];
+        mapEvents = data.map_events || [];
         availableCharacters = data.available_characters || [];
         renderModels();
         renderModal();
@@ -334,6 +435,20 @@ export function beginWorldGroupCreation() {
     selectionMode = { type: 'create', name };
     closeWorldTravelModal();
     showNotification('Выберите клетку для группы. Esc отменяет выбор.', 'system');
+}
+
+export function beginWorldMapEventCreation() {
+    if (!window.isGM) return;
+    const name = document.getElementById('world-map-event-name')?.value.trim();
+    const description = document.getElementById('world-map-event-description')?.value.trim();
+    const repeatable = document.getElementById('world-map-event-repeatable')?.checked === true;
+    if (!name || !description) {
+        showNotification('Укажите название и описание события', 'error');
+        return;
+    }
+    selectionMode = { type: 'event-create', name, description, repeatable };
+    closeWorldTravelModal();
+    showNotification('Выберите клетку для события. Esc отменяет выбор.', 'system');
 }
 
 export function beginWorldGroupMove(groupId) {
@@ -374,6 +489,18 @@ async function handleTileSelection({ tile }) {
             const input = document.getElementById('world-group-name');
             if (input) input.value = '';
             showNotification('Группа создана', 'success');
+        } else if (mode.type === 'event-create') {
+            await Server.createWorldMapEvent(lobbyId, {
+                name: mode.name,
+                description: mode.description,
+                repeatable: mode.repeatable,
+                tile_x: tileX,
+                tile_y: tileY,
+            });
+            document.getElementById('world-map-event-name').value = '';
+            document.getElementById('world-map-event-description').value = '';
+            document.getElementById('world-map-event-repeatable').checked = false;
+            showNotification('Событие размещено на карте', 'success');
         } else {
             const result = await Server.moveWorldGroup(lobbyId, mode.groupId, tileX, tileY);
             showNotification(
@@ -391,6 +518,16 @@ async function handleTileSelection({ tile }) {
 }
 
 async function handleModalClick(event) {
+    const mapEventDelete = event.target.closest('[data-world-map-event-delete]');
+    if (mapEventDelete) {
+        try {
+            await Server.deleteWorldMapEvent(lobbyId, mapEventDelete.dataset.worldMapEventDelete);
+            await refreshWorldTravel();
+        } catch (error) {
+            showNotification(error.message, 'error');
+        }
+        return;
+    }
     const members = event.target.closest('[data-world-members]');
     if (members) return openMembersEditor(members.dataset.worldMembers);
     if (event.target.closest('[data-world-members-save]')) return saveMembersEditor();
@@ -437,14 +574,18 @@ export function initWorldTravel(currentLobbyId, socket) {
     document.querySelector('.ui-overlay')?.appendChild(contextMenu);
     renderer.domElement.addEventListener('contextmenu', event => {
         if (window.isLocationActive) return;
-        const group = groupFromPointer(event);
-        if (!group) {
+        const worldObject = worldObjectFromPointer(event);
+        if (!worldObject?.data) {
             hideContextMenu();
             return;
         }
         event.preventDefault();
         event.stopPropagation();
-        showGroupContextMenu(group, event.clientX, event.clientY);
+        if (worldObject.type === 'group') {
+            showGroupContextMenu(worldObject.data, event.clientX, event.clientY);
+        } else if (window.isGM) {
+            showMapEventContextMenu(worldObject.data, event.clientX, event.clientY);
+        }
     });
     document.addEventListener('pointerdown', event => {
         if (contextMenu && !contextMenu.contains(event.target)) hideContextMenu();
@@ -460,6 +601,7 @@ export function initWorldTravel(currentLobbyId, socket) {
         showNotification('Выбор клетки отменён', 'system');
     }, true);
     ['world_group_created', 'world_group_updated', 'world_group_moved', 'world_group_deleted',
+        'world_map_event_created', 'world_map_event_deleted', 'world_map_event_triggered',
         'world_travel_event_pending', 'world_travel_event_resolved'].forEach(eventName => {
         socket.on(eventName, refreshWorldTravel);
     });

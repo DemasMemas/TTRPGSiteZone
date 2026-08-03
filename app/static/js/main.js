@@ -34,6 +34,7 @@ import { getUserColorHex, updateMyColor } from './colors.js';
 import { openLobbyRestModal, closeLobbyRestModal, saveLobbyTimeActivity, startLobbyRest } from './rest.js';
 import {
     beginWorldGroupCreation,
+    beginWorldMapEventCreation,
     closeWorldTravelModal,
     initWorldTravel,
     openWorldTravelModal,
@@ -923,6 +924,7 @@ window.startLobbyRest = startLobbyRest;
 window.openWorldTravelModal = openWorldTravelModal;
 window.closeWorldTravelModal = closeWorldTravelModal;
 window.beginWorldGroupCreation = beginWorldGroupCreation;
+window.beginWorldMapEventCreation = beginWorldMapEventCreation;
 
 // Маркеры
 window.closeMarkerEditModal = closeMarkerEditModal;

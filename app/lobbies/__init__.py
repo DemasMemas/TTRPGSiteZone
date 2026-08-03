@@ -34,6 +34,7 @@ from app.models import (
     LocationCombatState,
     User,
     WorldGroup,
+    WorldMapEvent,
     WorldTravelEvent,
 )
 from app.utils.decorators import requires_participant, requires_gm
@@ -148,7 +149,32 @@ def _serialize_world_event(event, *, reveal_description):
         'to_tile_x': event.to_tile_x,
         'to_tile_y': event.to_tile_y,
         'created_at': event.created_at.isoformat(),
+        'world_map_event_id': event.world_map_event_id,
     }
+
+
+def _serialize_world_map_event(event):
+    return {
+        'id': event.id,
+        'name': event.name,
+        'description': event.description,
+        'tile_x': event.tile_x,
+        'tile_y': event.tile_y,
+        'repeatable': event.repeatable,
+    }
+
+
+def _world_route_tiles(from_x, from_y, to_x, to_y):
+    steps = max(abs(to_x - from_x), abs(to_y - from_y))
+    if steps <= 0:
+        return []
+    return [
+        (
+            round(from_x + (to_x - from_x) * step / steps),
+            round(from_y + (to_y - from_y) * step / steps),
+        )
+        for step in range(1, steps + 1)
+    ]
 
 
 def _advance_world_time(lobby, minutes):
@@ -214,14 +240,71 @@ def list_world_groups(lobby_id, lobby, participant):
             for character in LobbyCharacter.query.filter_by(lobby_id=lobby_id)
             .order_by(LobbyCharacter.name, LobbyCharacter.id).all()
         ]
+    map_events = []
+    if is_gm:
+        map_events = [
+            _serialize_world_map_event(event)
+            for event in WorldMapEvent.query.filter_by(
+                lobby_id=lobby_id,
+                is_active=True,
+            ).order_by(WorldMapEvent.id).all()
+        ]
     return jsonify({
         'groups': [_serialize_world_group(group) for group in groups],
         'available_characters': available_characters,
+        'map_events': map_events,
         'pending_events': [
             _serialize_world_event(event, reveal_description=is_gm)
             for event in events
         ],
     }), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-map-events', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_world_map_event(lobby_id, lobby):
+    data = request.get_json(silent=True) or {}
+    name = str(data.get('name') or '').strip()
+    description = str(data.get('description') or '').strip()
+    if not name or len(name) > 100:
+        return jsonify({'error': 'Event name must contain from 1 to 100 characters'}), 400
+    if not description:
+        return jsonify({'error': 'Event description is required'}), 400
+    try:
+        tile_x = int(data.get('tile_x'))
+        tile_y = int(data.get('tile_y'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'tile_x and tile_y must be integers'}), 400
+    if not (0 <= tile_x < lobby.chunks_width * 32 and 0 <= tile_y < lobby.chunks_height * 32):
+        return jsonify({'error': 'World tile is outside the map'}), 400
+    event = WorldMapEvent(
+        lobby_id=lobby_id,
+        name=name,
+        description=description,
+        tile_x=tile_x,
+        tile_y=tile_y,
+        repeatable=data.get('repeatable') is True,
+        created_by=lobby.gm_id,
+    )
+    db.session.add(event)
+    db.session.commit()
+    payload = _serialize_world_map_event(event)
+    socketio.emit('world_map_event_created', {'id': event.id}, room=f"user_{lobby.gm_id}")
+    return jsonify(payload), 201
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-map-events/<int:map_event_id>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def delete_world_map_event(lobby_id, map_event_id, lobby):
+    event = WorldMapEvent.query.filter_by(id=map_event_id, lobby_id=lobby_id).first()
+    if not event:
+        return jsonify({'error': 'World map event not found'}), 404
+    db.session.delete(event)
+    db.session.commit()
+    socketio.emit('world_map_event_deleted', {'id': map_event_id}, room=f"user_{lobby.gm_id}")
+    return '', 204
 
 
 @lobbies_bp.route('/<int:lobby_id>/world-groups', methods=['POST'])
@@ -325,18 +408,46 @@ def move_world_group(lobby_id, group_id, lobby, participant):
         }), 400
 
     from_x, from_y = group.tile_x, group.tile_y
-    group.tile_x, group.tile_y = tile_x, tile_y
+    route_tiles = _world_route_tiles(from_x, from_y, tile_x, tile_y)
+    route_index = {position: index for index, position in enumerate(route_tiles)}
+    placed_event = next(iter(sorted(
+        (
+            map_event for map_event in WorldMapEvent.query.filter_by(
+                lobby_id=lobby_id,
+                is_active=True,
+            ).all()
+            if (map_event.tile_x, map_event.tile_y) in route_index
+        ),
+        key=lambda map_event: route_index[(map_event.tile_x, map_event.tile_y)],
+    )), None)
+    actual_tile_x = placed_event.tile_x if placed_event else tile_x
+    actual_tile_y = placed_event.tile_y if placed_event else tile_y
+    group.tile_x, group.tile_y = actual_tile_x, actual_tile_y
     updated_characters = _advance_world_time(lobby, 10)
     event = None
-    if random.random() < WORLD_EVENT_CHANCE:
+    if placed_event:
+        event = WorldTravelEvent(
+            lobby_id=lobby_id,
+            group_id=group.id,
+            world_map_event_id=placed_event.id,
+            description=f'{placed_event.name}: {placed_event.description}',
+            from_tile_x=from_x,
+            from_tile_y=from_y,
+            to_tile_x=actual_tile_x,
+            to_tile_y=actual_tile_y,
+        )
+        if not placed_event.repeatable:
+            placed_event.is_active = False
+        db.session.add(event)
+    elif random.random() < WORLD_EVENT_CHANCE:
         event = WorldTravelEvent(
             lobby_id=lobby_id,
             group_id=group.id,
             description=random.choice(WORLD_EVENT_DESCRIPTIONS),
             from_tile_x=from_x,
             from_tile_y=from_y,
-            to_tile_x=tile_x,
-            to_tile_y=tile_y,
+            to_tile_x=actual_tile_x,
+            to_tile_y=actual_tile_y,
         )
         db.session.add(event)
     db.session.commit()
@@ -350,10 +461,17 @@ def move_world_group(lobby_id, group_id, lobby, participant):
             _serialize_world_event(event, reveal_description=False),
             room=f"lobby_{lobby_id}",
         )
+    if placed_event:
+        socketio.emit(
+            'world_map_event_triggered',
+            {'id': placed_event.id, 'active': placed_event.is_active},
+            room=f"user_{lobby.gm_id}",
+        )
     return jsonify({
         'group': group_payload,
         'time': time_payload,
         'event_pending': event is not None,
+        'placed_event_triggered': placed_event is not None,
     }), 200
 
 

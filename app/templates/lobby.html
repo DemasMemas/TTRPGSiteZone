@@ -504,6 +504,16 @@
                     <input id="world-group-name" class="form-control" maxlength="100" placeholder="Название группы">
                     <button type="button" class="btn btn-primary" onclick="beginWorldGroupCreation()">Создать на карте</button>
                 </div>
+                <div id="world-map-event-create" class="world-map-event-create" style="display:none;">
+                    <h4>Новое событие на карте</h4>
+                    <input id="world-map-event-name" class="form-control" maxlength="100" placeholder="Название события">
+                    <textarea id="world-map-event-description" class="form-control" rows="3" placeholder="Что произойдёт после одобрения ГМа"></textarea>
+                    <label class="world-map-event-repeatable">
+                        <input id="world-map-event-repeatable" type="checkbox">
+                        Повторяемое событие
+                    </label>
+                    <button type="button" class="btn btn-secondary" onclick="beginWorldMapEventCreation()">Разместить маркер</button>
+                </div>
                 <h4>Группы</h4>
                 <div id="world-group-list" class="world-group-list"></div>
                 <div id="world-group-members-editor" class="world-group-members-editor" style="display:none;">
@@ -514,6 +524,8 @@
                         <button type="button" class="btn btn-sm btn-secondary" data-world-members-cancel>Отмена</button>
                     </div>
                 </div>
+                <h4 class="world-map-event-heading">События на карте</h4>
+                <div id="world-map-event-list" class="world-map-event-list"></div>
                 <h4>Ожидающие события</h4>
                 <div id="world-event-list" class="world-event-list"></div>
             </div>

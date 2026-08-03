@@ -75,6 +75,20 @@ export const Server = {
         });
     },
 
+    async createWorldMapEvent(lobbyId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/world-map-events`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async deleteWorldMapEvent(lobbyId, eventId) {
+        return apiFetch(`/lobbies/${lobbyId}/world-map-events/${eventId}`, {
+            method: 'DELETE',
+        });
+    },
+
     async deleteWorldGroup(lobbyId, groupId) {
         return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}`, {
             method: 'DELETE',

@@ -11,6 +11,7 @@ from app.models import (
     Location,
     LocationCharacter,
     WorldGroup,
+    WorldMapEvent,
     WorldTravelEvent,
 )
 from app.models.templates import ItemTemplate
@@ -370,6 +371,100 @@ def test_random_world_event_blocks_travel_until_gm_resolves_it(
         lobby_id=lobby["id"],
         username="Событие",
     ).one().message == "Event party: Test world encounter"
+
+
+def test_placed_world_event_is_hidden_and_stops_group_on_route(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("placed-event-gm")
+    player = create_user("placed-event-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Route party", "tile_x": 10, "tile_y": 10},
+    ).get_json()
+    event_endpoint = f"/lobbies/{lobby['id']}/world-map-events"
+
+    forbidden = client.post(
+        event_endpoint,
+        headers=auth_headers(player),
+        json={
+            "name": "Ambush",
+            "description": "Bandits open fire",
+            "tile_x": 12,
+            "tile_y": 10,
+        },
+    )
+    created = client.post(
+        event_endpoint,
+        headers=auth_headers(gm),
+        json={
+            "name": "Ambush",
+            "description": "Bandits open fire",
+            "tile_x": 12,
+            "tile_y": 10,
+            "repeatable": False,
+        },
+    )
+    player_view = client.get(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(player),
+    ).get_json()
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+    moved = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/move",
+        headers=auth_headers(player),
+        json={"tile_x": 13, "tile_y": 10},
+    )
+
+    assert forbidden.status_code == 403
+    assert created.status_code == 201
+    assert player_view["map_events"] == []
+    assert moved.status_code == 200
+    assert moved.get_json()["placed_event_triggered"] is True
+    assert moved.get_json()["event_pending"] is True
+    assert (moved.get_json()["group"]["tile_x"], moved.get_json()["group"]["tile_y"]) == (12, 10)
+    map_event = db.session.get(WorldMapEvent, created.get_json()["id"])
+    assert map_event.is_active is False
+    pending = WorldTravelEvent.query.filter_by(group_id=group["id"], status="pending").one()
+    assert pending.world_map_event_id == map_event.id
+    assert pending.description == "Ambush: Bandits open fire"
+
+
+def test_repeatable_world_event_remains_on_map_after_trigger(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("repeat-event-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Repeat party", "tile_x": 4, "tile_y": 4},
+    ).get_json()
+    event = client.post(
+        f"/lobbies/{lobby['id']}/world-map-events",
+        headers=auth_headers(gm),
+        json={
+            "name": "Radiation field",
+            "description": "The dosimeter crackles",
+            "tile_x": 5,
+            "tile_y": 5,
+            "repeatable": True,
+        },
+    ).get_json()
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+
+    moved = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/move",
+        headers=auth_headers(gm),
+        json={"tile_x": 6, "tile_y": 6},
+    )
+
+    assert moved.status_code == 200
+    assert moved.get_json()["group"]["tile_x"] == 5
+    assert db.session.get(WorldMapEvent, event["id"]).is_active is True
 
 
 def test_gm_rest_event_advances_lobby_time_for_selected_characters(

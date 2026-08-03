@@ -23,4 +23,4 @@ from .location import Location
 from .location_character import LocationCharacter
 from .location_object import LocationObject
 from .location_combat import LocationCombatState
-from .world_travel import WorldGroup, WorldTravelEvent
+from .world_travel import WorldGroup, WorldMapEvent, WorldTravelEvent

@@ -35,6 +35,11 @@ class WorldTravelEvent(db.Model):
         nullable=False,
         index=True,
     )
+    world_map_event_id = db.Column(
+        db.Integer,
+        db.ForeignKey("world_map_events.id", ondelete="SET NULL"),
+        index=True,
+    )
     description = db.Column(db.Text, nullable=False)
     status = db.Column(db.String(20), nullable=False, default="pending", index=True)
     from_tile_x = db.Column(db.Integer, nullable=False)
@@ -49,3 +54,24 @@ class WorldTravelEvent(db.Model):
         "WorldGroup",
         backref=db.backref("travel_events", cascade="all, delete-orphan"),
     )
+
+
+class WorldMapEvent(db.Model):
+    __tablename__ = "world_map_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    lobby_id = db.Column(db.Integer, db.ForeignKey("lobbies.id"), nullable=False, index=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    tile_x = db.Column(db.Integer, nullable=False)
+    tile_y = db.Column(db.Integer, nullable=False)
+    repeatable = db.Column(db.Boolean, nullable=False, default=False)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    lobby = db.relationship(
+        "Lobby",
+        backref=db.backref("world_map_events", cascade="all, delete-orphan"),
+    )
+    travel_events = db.relationship("WorldTravelEvent", backref="world_map_event")
