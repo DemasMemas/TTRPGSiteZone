@@ -2104,6 +2104,9 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         attribute_choice=data.get('attribute_choice'),
         pending_action_id=data.get('pending_action_id'),
         resume_pending_action_id=data.get('resume_pending_action_id'),
+        narrative_action_name=data.get('narrative_action_name'),
+        narrative_skill_path=data.get('narrative_skill_path'),
+        narrative_roll_required=data.get('narrative_roll_required') is True,
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
@@ -2124,6 +2127,14 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             lobby_id,
             participant.user_id,
             attack_summary,
+        )
+    narrative_summary = CombatService.format_narrative_action_summary(result)
+    if narrative_summary:
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            narrative_summary,
+            username='Действие',
         )
     affected_character_ids = {
         character_id

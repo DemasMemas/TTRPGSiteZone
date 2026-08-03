@@ -22,6 +22,26 @@ function escapeHtml(value) {
     })[character]);
 }
 
+const NARRATIVE_SKILLS = [
+    ['skills.physical.strength', 'Сила'],
+    ['skills.physical.agility', 'Ловкость'],
+    ['skills.physical.will', 'Воля'],
+    ['skills.physical.throwing', 'Метание'],
+    ['skills.physical.awareness', 'Внимательность'],
+    ['skills.physical.melee', 'Ближний бой'],
+    ['skills.physical.shooting', 'Стрельба'],
+    ['skills.social.charisma', 'Харизма'],
+    ['skills.social.barter', 'Бартер'],
+    ['skills.social.persuasion', 'Убеждение'],
+    ['skills.social.deception', 'Обман'],
+    ['skills.social.intimidation', 'Устрашение'],
+    ['skills.other.medicine', 'Медицина'],
+    ['skills.other.engineering', 'Инженерия'],
+    ['skills.other.stealth', 'Скрытность'],
+    ['skills.other.tactics', 'Тактика'],
+    ['skills.other.survival', 'Выживание'],
+];
+
 // ========== Глобальные переменные ==========
 let scene, camera, renderer, labelRenderer, controls;
 let currentLocationId = null;
@@ -1215,6 +1235,112 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
     medicalConsumableMenu.style.visibility = 'visible';
 }
 
+function closeNarrativeActionModal() {
+    document.getElementById('narrative-action-modal')?.remove();
+}
+
+function showNarrativeActionModal(characterId) {
+    const actor = findCombatCharacterByCharacterId(characterId);
+    if (!actor?.location_character_id || !isCurrentCombatTurnForCharacter(characterId)) {
+        showNotification('Другое действие можно совершить только в свой ход', 'system');
+        return;
+    }
+    closeNarrativeActionModal();
+    const modal = document.createElement('div');
+    modal.id = 'narrative-action-modal';
+    modal.style.cssText = `
+        position:fixed; inset:0; z-index:10060; display:flex; align-items:center;
+        justify-content:center; padding:16px; background:rgba(0,0,0,.58);
+    `;
+    modal.innerHTML = `
+        <form style="width:min(460px, 100%); background:#171b16; color:#e7e0cb; border:1px solid #625b42; border-radius:8px; padding:18px; box-shadow:0 18px 55px rgba(0,0,0,.58);">
+            <h3 style="margin:0 0 14px;">Другое действие</h3>
+            <label style="display:grid; gap:5px; margin-bottom:12px;">
+                <span>Что делает персонаж</span>
+                <input name="action_name" class="form-control" maxlength="200" required placeholder="Например: выбиваю дверь плечом">
+            </label>
+            <label style="display:grid; gap:5px; margin-bottom:12px; max-width:150px;">
+                <span>Стоимость, ОД</span>
+                <input name="action_points" class="form-control number-input" type="number" min="0" max="30" value="1" required>
+            </label>
+            <label style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+                <input name="roll_required" type="checkbox">
+                <span>Требуется проверка навыка</span>
+            </label>
+            <label data-narrative-skill-row style="display:grid; gap:5px; margin-bottom:16px; opacity:.45;">
+                <span>Навык</span>
+                <select name="skill_path" class="form-control" disabled>
+                    ${NARRATIVE_SKILLS.map(([path, label]) => `<option value="${path}">${label}</option>`).join('')}
+                </select>
+            </label>
+            <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button type="button" class="btn btn-secondary" data-narrative-cancel>Отмена</button>
+                <button type="submit" class="btn btn-primary">Выполнить</button>
+            </div>
+        </form>`;
+    document.body.appendChild(modal);
+    const form = modal.querySelector('form');
+    const rollInput = form.elements.roll_required;
+    const skillInput = form.elements.skill_path;
+    const skillRow = modal.querySelector('[data-narrative-skill-row]');
+    rollInput.addEventListener('change', () => {
+        skillInput.disabled = !rollInput.checked;
+        skillRow.style.opacity = rollInput.checked ? '1' : '.45';
+    });
+    modal.querySelector('[data-narrative-cancel]').onclick = closeNarrativeActionModal;
+    modal.addEventListener('pointerdown', event => {
+        if (event.target === modal) closeNarrativeActionModal();
+    });
+    modal.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeNarrativeActionModal();
+        }
+    });
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const actionName = form.elements.action_name.value.trim();
+        const actionPoints = Number.parseInt(form.elements.action_points.value, 10);
+        if (!actionName || !Number.isInteger(actionPoints) || actionPoints < 0 || actionPoints > 30) {
+            showNotification('Укажите название и стоимость от 0 до 30 ОД', 'system');
+            return;
+        }
+        const actionId = `narrative-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const payload = {
+            location_character_id: actor.location_character_id,
+            action_key: 'narrative_action',
+            action_points: actionPoints,
+            narrative_action_name: actionName,
+            narrative_roll_required: rollInput.checked,
+            narrative_skill_path: rollInput.checked ? skillInput.value : null,
+            pending_action_id: actionId,
+        };
+        try {
+            const result = await Server.performLocationCombatAction(
+                window.currentLobbyId,
+                getCurrentLocationId(),
+                payload,
+            );
+            closeNarrativeActionModal();
+            if (result?.pending_action) {
+                deferredCombatActions.set(result.pending_action_id, payload);
+                showNotification('Действие начато и завершится после полной оплаты ОД.', 'system');
+                return;
+            }
+            const check = result?.narrative_action?.check;
+            showNotification(
+                check
+                    ? `${actionName}: d20 ${check.roll}, итог ${check.total}`
+                    : `${actionName}: затрачено ${actionPoints} ОД`,
+                'success',
+            );
+        } catch (error) {
+            showNotification(error.message || 'Не удалось выполнить действие', 'system');
+        }
+    });
+    form.elements.action_name.focus();
+}
+
 function showCombatActionMenu(clientX, clientY, characterId) {
     ensureCombatActionMenu();
     combatActionMenuCharacterId = characterId;
@@ -1326,6 +1452,15 @@ function showCombatActionMenu(clientX, clientY, characterId) {
 
     if (condition.state === 'active') {
         menuItems.push({
+            label: 'Другое',
+            icon: '…',
+            title: 'Описать произвольное действие, списать ОД и при необходимости бросить навык',
+            angle: -10,
+            ringRadius: 165,
+            requiresCombat: true,
+            action: () => showNarrativeActionModal(characterId),
+        });
+        menuItems.push({
             label: 'Ближний бой',
             icon: '⚔',
             title: 'Замах, блок, толкание, захват и другие действия ближнего боя',
@@ -1355,8 +1490,8 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         });
     }
 
-    combatActionMenu.style.width = window.isGM ? '410px' : '280px';
-    combatActionMenu.style.height = window.isGM ? '410px' : '280px';
+    combatActionMenu.style.width = '410px';
+    combatActionMenu.style.height = '410px';
 
     combatActionMenu.innerHTML = `
         <div class="combat-menu-core" style="
@@ -6511,6 +6646,7 @@ export function setEditButtonVisible(visible) {
 }
 
 export function destroyLocationScene() {
+    closeNarrativeActionModal();
     locationActive = false;
     closeAimedZoneMenu();
 

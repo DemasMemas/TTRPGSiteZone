@@ -1698,3 +1698,43 @@ def test_barrel_rupture_clears_after_at_least_one_point_is_repaired():
     weapon["durability"] = 21
     CombatService._weapon_durability(weapon)
     assert "jam" not in weapon
+
+
+def test_narrative_skill_check_uses_conditions_and_disadvantage(monkeypatch):
+    rolls = iter([18, 4])
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    character_data = {
+        "skills": {"physical": {"shooting": {"base": 10, "bonus": 0}}},
+        "health": {"painLevel": 2, "exhaustion": 0, "psyState": 30, "effects": []},
+    }
+
+    check = CombatService._narrative_skill_check(
+        character_data, "skills.physical.shooting"
+    )
+
+    assert check["rolls"] == [18, 4]
+    assert check["roll"] == 4
+    assert check["disadvantage"] is True
+    assert check["status_modifier"] == -2
+    assert check["total"] == 2
+
+
+def test_narrative_social_check_adds_charisma_modifier(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 10)
+    character_data = {
+        "skills": {
+            "social": {
+                "persuasion": {"base": 12, "bonus": 0},
+                "charisma": {"base": 14, "bonus": 0},
+            }
+        },
+        "health": {"effects": []},
+    }
+
+    check = CombatService._narrative_skill_check(
+        character_data, "skills.social.persuasion"
+    )
+
+    assert check["skill_modifier"] == 1
+    assert check["related_modifier"] == 2
+    assert check["total"] == 13

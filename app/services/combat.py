@@ -124,6 +124,7 @@ ACTION_CATALOG = [
     {'key': 'stow_weapon', 'label': 'Освободить руки', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'reload_weapon', 'label': 'Сменить магазин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'clear_weapon_jam', 'label': 'Устранить клин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'narrative_action', 'label': 'Другое действие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'change_posture', 'label': 'Смена положения', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'defend', 'label': 'Защита', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
     {'key': 'use_item', 'label': 'Использовать предмет', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
@@ -148,6 +149,25 @@ ACTION_CATALOG = [
 
 
 class CombatService:
+    NARRATIVE_SKILLS = {
+        'skills.physical.strength': 'Сила',
+        'skills.physical.agility': 'Ловкость',
+        'skills.physical.will': 'Воля',
+        'skills.physical.throwing': 'Метание',
+        'skills.physical.awareness': 'Внимательность',
+        'skills.physical.melee': 'Ближний бой',
+        'skills.physical.shooting': 'Стрельба',
+        'skills.social.charisma': 'Харизма',
+        'skills.social.barter': 'Бартер',
+        'skills.social.persuasion': 'Убеждение',
+        'skills.social.deception': 'Обман',
+        'skills.social.intimidation': 'Устрашение',
+        'skills.other.medicine': 'Медицина',
+        'skills.other.engineering': 'Инженерия',
+        'skills.other.stealth': 'Скрытность',
+        'skills.other.tactics': 'Тактика',
+        'skills.other.survival': 'Выживание',
+    }
     WEAPON_JAM_RESULTS = {
         1: {'label': 'Гильза осталась в затворе', 'fix_ap': 1, 'durability_loss': 0, 'blocks_fire': True},
         2: {'label': 'Печная труба', 'fix_ap': 2, 'durability_loss': 1, 'blocks_fire': True},
@@ -1329,6 +1349,59 @@ class CombatService:
         ) or (
             skill_path == 'skills.physical.will' and psy_state >= 40
         )
+
+    @staticmethod
+    def _narrative_skill_check(character_data, skill_path):
+        if skill_path not in CombatService.NARRATIVE_SKILLS:
+            raise ValidationError("Unknown skill")
+        effective_value = CombatService._skill_value(character_data, skill_path)
+        skill_modifier = CombatService._base_skill_modifier(character_data, skill_path)
+        status_modifier = CombatService._health_roll_modifier(character_data, skill_path)
+        related_modifier = 0
+        if skill_path.startswith('skills.social.') and skill_path != 'skills.social.charisma':
+            related_modifier = CombatService._base_skill_modifier(
+                character_data, 'skills.social.charisma'
+            )
+        equipment_modifier = 0
+        equipment = character_data.get('equipment') if isinstance(character_data, dict) else {}
+        equipment = equipment if isinstance(equipment, dict) else {}
+        if skill_path == 'skills.social.charisma':
+            for key in (
+                'glasses', 'gloves', 'ring', 'necklace', 'earrings',
+                'bracelet1', 'bracelet2', 'helmet', 'gasMask',
+            ):
+                item = equipment.get(key)
+                if isinstance(item, dict):
+                    equipment_modifier += CombatService._coerce_int(
+                        item.get('charismaBonus', item.get('charisma_bonus')), 0
+                    )
+        elif skill_path == 'skills.physical.awareness':
+            headphones = equipment.get('headphones')
+            detector = equipment.get('detector')
+            if isinstance(headphones, dict):
+                equipment_modifier += CombatService._coerce_int(
+                    headphones.get('awarenessBonus', headphones.get('awareness_bonus')), 0
+                )
+            if isinstance(detector, dict):
+                equipment_modifier += CombatService._coerce_int(detector.get('bonus'), 0)
+        disadvantage = CombatService._has_roll_disadvantage(character_data, skill_path)
+        rolls = [random.randint(1, 20) for _ in range(2 if disadvantage else 1)]
+        roll = min(rolls) if disadvantage else rolls[0]
+        modifier = skill_modifier + related_modifier + equipment_modifier + status_modifier
+        return {
+            'skill_path': skill_path,
+            'skill_label': CombatService.NARRATIVE_SKILLS[skill_path],
+            'effective_value': effective_value,
+            'rolls': rolls,
+            'roll': roll,
+            'disadvantage': disadvantage,
+            'skill_modifier': skill_modifier,
+            'related_modifier': related_modifier,
+            'equipment_modifier': equipment_modifier,
+            'status_modifier': status_modifier,
+            'modifier': modifier,
+            'total': roll + modifier,
+        }
 
     @staticmethod
     def _item_attributes(item):
@@ -3535,6 +3608,30 @@ class CombatService:
         return '\n'.join(lines)
 
     @staticmethod
+    def format_narrative_action_summary(result):
+        details = result.get('narrative_action') if isinstance(result, dict) else None
+        if not isinstance(details, dict):
+            return None
+        actor = (result.get('character') or {}).get('name') or 'Персонаж'
+        lines = [
+            f"{actor}: {details.get('name')}. Затрачено ОД: {details.get('action_points', 0)}."
+        ]
+        check = details.get('check')
+        if isinstance(check, dict):
+            rolls = check.get('rolls') or [check.get('roll')]
+            roll_text = '/'.join(str(value) for value in rolls if value is not None) or '—'
+            disadvantage = ' с Помехой' if check.get('disadvantage') else ''
+            modifier = CombatService._coerce_int(check.get('modifier'), 0)
+            lines.append(
+                f"Проверка «{check.get('skill_label')}»{disadvantage}: "
+                f"d20 {roll_text} -> {check.get('roll')}, "
+                f"модификатор {modifier:+d}, итог {check.get('total')}."
+            )
+        else:
+            lines.append("Проверка не требуется.")
+        return '\n'.join(lines)
+
+    @staticmethod
     def _coerce_float(value, default=0.0):
         try:
             return float(value)
@@ -5045,6 +5142,9 @@ class CombatService:
         attribute_choice=None,
         pending_action_id=None,
         resume_pending_action_id=None,
+        narrative_action_name=None,
+        narrative_skill_path=None,
+        narrative_roll_required=False,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -5089,12 +5189,33 @@ class CombatService:
         draw_details = None
         reload_details = None
         clear_jam_details = None
+        narrative_action_details = None
         cover_details = None
         brace_details = None
         melee_action_details = None
         special_action_cost = None
         resolved_hits = []
         current_round = max(1, state.round_number or 1)
+        if action_key == 'narrative_action':
+            action_name = ' '.join(str(narrative_action_name or '').split())
+            if not action_name or len(action_name) > 200:
+                raise ValidationError("Action name must contain from 1 to 200 characters")
+            narrative_cost = CombatService._coerce_int(action_points, -1)
+            if not 0 <= narrative_cost <= 30:
+                raise ValidationError("Action point cost must be between 0 and 30")
+            roll_required = narrative_roll_required is True
+            skill_path = str(narrative_skill_path or '').strip()
+            if roll_required and skill_path not in CombatService.NARRATIVE_SKILLS:
+                raise ValidationError("Choose a valid skill")
+            special_action_cost = narrative_cost
+            narrative_action_details = {
+                'name': action_name,
+                'action_points': narrative_cost,
+                'roll_required': roll_required,
+                'skill_path': skill_path if roll_required else None,
+                'skill_label': CombatService.NARRATIVE_SKILLS.get(skill_path) if roll_required else None,
+                'check': None,
+            }
         if action_key == 'recover_from_shock':
             health = data.setdefault('health', {})
             pain_level = max(0, CombatService._coerce_int(health.get('painLevel'), 0))
@@ -6212,7 +6333,11 @@ class CombatService:
                 character.action_points_current = 0
                 combat_meta['pendingAction'] = {
                     'id': str(pending_action_id),
-                    'label': str(action.get('label') or action_key),
+                    'label': str(
+                        narrative_action_details.get('name')
+                        if action_key == 'narrative_action' and narrative_action_details
+                        else (action.get('label') or action_key)
+                    ),
                     'total_action_points': action_point_cost,
                     'remaining_action_points': action_point_cost - paid_action_points,
                 }
@@ -6241,6 +6366,7 @@ class CombatService:
                     'draw_weapon': None,
                     'reload_weapon': None,
                     'clear_weapon_jam': None,
+                    'narrative_action': None,
                     'cover': None,
                     'brace_weapon': None,
                     'melee_action': None,
@@ -6253,6 +6379,11 @@ class CombatService:
                 cleared_weapon.pop('jam', None)
                 character.character.data = data
                 flag_modified(character.character, 'data')
+            if action_key == 'narrative_action' and narrative_action_details:
+                if narrative_action_details['roll_required']:
+                    narrative_action_details['check'] = CombatService._narrative_skill_check(
+                        data, narrative_action_details['skill_path']
+                    )
             if action_key == 'attack' and attack_details and fire_mode == 'rapid':
                 character.rapid_fire_round = state.round_number
             if action_key == 'aim' and aim_details:
@@ -6474,6 +6605,7 @@ class CombatService:
                 'draw_weapon': None,
                 'reload_weapon': None,
                 'clear_weapon_jam': None,
+                'narrative_action': None,
                 'cover': None,
                 'brace_weapon': None,
                 'melee_action': melee_action_details,
@@ -6488,6 +6620,7 @@ class CombatService:
             'draw_weapon': draw_details,
             'reload_weapon': reload_details,
             'clear_weapon_jam': clear_jam_details,
+            'narrative_action': narrative_action_details,
             'cover': cover_details,
             'brace_weapon': brace_details,
             'melee_action': melee_action_details,

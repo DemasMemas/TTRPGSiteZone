@@ -1239,6 +1239,72 @@ def test_reload_can_be_paid_across_combat_turns(
     assert "completedPendingActionId" not in actor_loc_char.character.data["health"]["combatMeta"]
 
 
+def test_narrative_combat_action_spends_ap_rolls_and_writes_chat(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("narrative-action-gm")
+    actor = create_user("narrative-action-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, actor, auth_headers)
+    character = create_character(client, lobby, actor, auth_headers, data={
+        "skills": {"other": {"engineering": {"base": 12, "bonus": 0}}},
+        "health": {"effects": [], "painLevel": 0, "exhaustion": 0},
+    })
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Narrative arena",
+        world_tile_x=0,
+        world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    actor_loc_char = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        controlled_by=actor["id"],
+        action_points_current=5,
+        action_points_max=5,
+    )
+    db.session.add(actor_loc_char)
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[actor_loc_char.id],
+        current_location_character_id=actor_loc_char.id,
+    ))
+    db.session.commit()
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 15)
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(actor),
+        json={
+            "location_character_id": actor_loc_char.id,
+            "action_key": "narrative_action",
+            "action_points": 2,
+            "narrative_action_name": "Перенаправляю питание терминала",
+            "narrative_roll_required": True,
+            "narrative_skill_path": "skills.other.engineering",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()["narrative_action"]
+    assert payload["name"] == "Перенаправляю питание терминала"
+    assert payload["check"]["roll"] == 15
+    assert payload["check"]["total"] == 16
+    db.session.refresh(actor_loc_char)
+    assert actor_loc_char.action_points_current == 3
+    message = ChatMessage.query.filter_by(
+        lobby_id=lobby["id"], username="Действие"
+    ).one()
+    assert "Затрачено ОД: 2" in message.message
+    assert "Инженерия" in message.message
+
+
 def test_player_may_move_and_add_marked_player_item(
     client,
     create_user,
