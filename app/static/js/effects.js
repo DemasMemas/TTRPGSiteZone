@@ -1,5 +1,7 @@
 const EFFECT_TYPE_META = {
-    generic: { label: 'Общий', group: 'status' },
+    // `generic` is a legacy/fallback record. New manual entries use `custom`.
+    generic: { label: 'Неопределённый эффект', group: 'technical' },
+    custom: { label: 'Пользовательский эффект', group: 'status' },
     heal: { label: 'Лечение', group: 'medical' },
     regeneration: { label: 'Регенерация', group: 'medical' },
     radiation: { label: 'Радиация', group: 'medical' },
@@ -53,6 +55,8 @@ const EFFECT_TYPE_META = {
 };
 
 const TYPE_ALIASES = {
+    custom: 'custom',
+    'пользовательский эффект': 'custom',
     organ_failure: 'organ_failure',
     heal: 'heal',
     healing: 'heal',
@@ -191,6 +195,7 @@ const BLEEDING_EFFECT_RULES = {
 
 const EFFECT_IMPACT_RULES = {
     generic: { areas: [], requiresMedicineCheck: false, treatment: 'manual' },
+    custom: { areas: [], requiresMedicineCheck: false, treatment: 'manual' },
     heal: { areas: ['whole_body'], requiresMedicineCheck: false, treatment: 'oral_or_medical' },
     regeneration: { areas: ['whole_body'], requiresMedicineCheck: false, treatment: 'medical' },
     radiation: { areas: ['whole_body'], requiresMedicineCheck: true, treatment: 'medical' },

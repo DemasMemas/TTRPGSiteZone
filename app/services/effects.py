@@ -6,7 +6,10 @@ import random
 from typing import Any, Dict, Iterable, List, Optional
 
 EFFECT_TYPE_META = {
-    "generic": {"label": "Общий", "group": "status"},
+    # `generic` is retained only for legacy or malformed records. New effects
+    # created by a GM use `custom`, which makes their manual nature explicit.
+    "generic": {"label": "Неопределённый эффект", "group": "technical"},
+    "custom": {"label": "Пользовательский эффект", "group": "status"},
     "heal": {"label": "Лечение", "group": "medical"},
     "regeneration": {"label": "Регенерация", "group": "medical"},
     "radiation": {"label": "Радиация", "group": "medical"},
@@ -60,6 +63,8 @@ EFFECT_TYPE_META = {
 }
 
 TYPE_ALIASES = {
+    "custom": "custom",
+    "пользовательский эффект": "custom",
     "organ_failure": "organ_failure",
     "heal": "heal",
     "healing": "heal",
@@ -156,6 +161,7 @@ STATUS_EFFECT_TYPES = {
 
 EFFECT_IMPACT_RULES = {
     "generic": {"areas": [], "requiresMedicineCheck": False, "treatment": "manual"},
+    "custom": {"areas": [], "requiresMedicineCheck": False, "treatment": "manual"},
     "heal": {"areas": ["whole_body"], "requiresMedicineCheck": False, "treatment": "oral_or_medical"},
     "regeneration": {"areas": ["whole_body"], "requiresMedicineCheck": False, "treatment": "medical"},
     "radiation": {"areas": ["whole_body"], "requiresMedicineCheck": True, "treatment": "medical"},
@@ -607,6 +613,24 @@ def _heal_health_and_zones(health: Dict[str, Any], amount: float) -> None:
     _distribute_zone_healing(health, amount)
 
 
+def _restore_limb_health_and_pool(health: Dict[str, Any], area: str, restored_health: Any) -> None:
+    """Set a treated limb's health and add only the recovered amount to the pool."""
+    zone = (health.get("zones") or {}).get(area)
+    if not isinstance(zone, dict) or restored_health is None:
+        return
+    maximum = _to_float(zone.get("max"), _to_float(restored_health, 0))
+    before = max(0, _to_float(zone.get("current"), 0))
+    after = min(maximum, max(0, _to_float(restored_health, 0)))
+    zone["current"] = after
+    zone["destructionDamage"] = max(0, maximum - after)
+    recovered = max(0, after - before)
+    if recovered <= 0:
+        return
+    pool_max = health.get("max")
+    maximum_pool = None if pool_max in (None, "") else _to_float(pool_max, None)
+    health["current"] = _clamp(_to_float(health.get("current"), 0) + recovered, 0, maximum_pool)
+
+
 def apply_effect_to_health(health: Dict[str, Any], raw_effect: Any) -> Dict[str, Any]:
     effect = normalize_effect(raw_effect)
     signed_value = _to_float(effect.get("value", 0), 0)
@@ -857,10 +881,7 @@ def apply_expired_effects_to_health(health: Dict[str, Any], effects: Iterable[An
             area = str(effect.get("area") or "")
             if effect.get("cure_fracture") and area:
                 cured_fracture_areas.add(area)
-            zone = (health.get("zones") or {}).get(area)
-            if isinstance(zone, dict) and effect.get("restore_limb_health") is not None:
-                maximum = _to_float(zone.get("max"), effect.get("restore_limb_health"))
-                zone["current"] = min(maximum, max(0, _to_float(effect.get("restore_limb_health"), 0)))
+            _restore_limb_health_and_pool(health, area, effect.get("restore_limb_health"))
     for activated_effect in activated:
         apply_effect_to_health(health, activated_effect)
     if cured_fracture_areas:
@@ -1006,10 +1027,7 @@ def advance_timed_effects(
             area = str(effect.get("area") or "")
             if effect.get("cure_fracture") and area:
                 cured_fracture_areas.add(area)
-            zone = (health.get("zones") or {}).get(area)
-            if isinstance(zone, dict) and effect.get("restore_limb_health") is not None:
-                maximum = _to_float(zone.get("max"), effect.get("restore_limb_health"))
-                zone["current"] = min(maximum, max(0, _to_float(effect.get("restore_limb_health"), 0)))
+            _restore_limb_health_and_pool(health, area, effect.get("restore_limb_health"))
 
     combat_meta = health.get("combatMeta")
     if isinstance(combat_meta, dict):

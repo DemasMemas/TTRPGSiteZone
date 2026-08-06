@@ -1832,6 +1832,30 @@ class CombatService:
         return facing_x * relative_x + facing_y * relative_y < 0
 
     @staticmethod
+    def _shooting_movement_modifiers(shooter_mode=None, target_mode=None):
+        """Return the shared hit penalty and disadvantage from combat movement."""
+        shooter_mode = str(shooter_mode or '').lower()
+        target_mode = str(target_mode or '').lower()
+        difficulty_penalty = 0
+        disadvantage = False
+
+        if shooter_mode == 'walk':
+            difficulty_penalty += 2
+        elif shooter_mode in {'run', 'sprint'}:
+            difficulty_penalty += 2
+            disadvantage = True
+
+        if target_mode and target_mode != 'correction':
+            difficulty_penalty += 2
+        if target_mode in {'run', 'sprint'}:
+            disadvantage = True
+
+        return {
+            'difficulty_penalty': difficulty_penalty,
+            'disadvantage': disadvantage,
+        }
+
+    @staticmethod
     def _opposed_roll(character_data, skill_path, attribute_paths=(), disadvantage=False):
         skill = CombatService._skill_modifier(character_data, skill_path)
         attribute = max(
@@ -6170,6 +6194,15 @@ class CombatService:
                 and weapon_range > 0
                 and target_distance <= weapon_range
             )
+            target_movement_mode = (
+                range_target.movement_mode_this_turn if range_target else None
+            )
+            if fire_mode == 'aimed' and target_movement_mode == 'sprint':
+                raise ValidationError('An aimed shot cannot target a sprinting character')
+            movement_modifiers = CombatService._shooting_movement_modifiers(
+                character.movement_mode_this_turn,
+                target_movement_mode,
+            )
             attack_details = {
                 'weapon_index': weapon_index,
                 'fire_mode': fire_mode,
@@ -6187,6 +6220,8 @@ class CombatService:
                 'posture_shooting_bonus': POSTURES[CombatService._posture_key(character)]['shooting_bonus'],
                 'posture_ergonomics_bonus': POSTURES[CombatService._posture_key(character)]['ergonomics_bonus'],
                 'shooter_movement_mode': character.movement_mode_this_turn,
+                'target_movement_mode': target_movement_mode,
+                'movement_accuracy_penalty': movement_modifiers['difficulty_penalty'],
                 'ergonomics': ergonomics_profile,
                 'strength_requirement': strength_profile,
                 'target_distance': target_distance,
@@ -6203,7 +6238,8 @@ class CombatService:
                 'shooting_disadvantage': CombatService._has_roll_disadvantage(
                     data,
                     'skills.physical.shooting',
-                ) or bool(active_jam and active_jam.get('shooting_disadvantage')),
+                ) or bool(active_jam and active_jam.get('shooting_disadvantage'))
+                or movement_modifiers['disadvantage'],
                 'weapon_jam_before_shot': deepcopy(active_jam),
                 'weapon_jam_accuracy_penalty': max(
                     0, CombatService._coerce_int(
@@ -6265,12 +6301,7 @@ class CombatService:
             hit_difficulty += CombatService._coerce_int(
                 attack_details['aim_accuracy_bonus'] * -1, 0
             )
-            if attack_details['shooter_movement_mode'] in {'run', 'sprint'}:
-                hit_difficulty += 2
-            elif attack_details['shooter_movement_mode'] == 'walk':
-                hit_difficulty += 0
-            if range_target and range_target.movement_mode_this_turn in {'run', 'sprint'}:
-                hit_difficulty += 2
+            hit_difficulty += movement_modifiers['difficulty_penalty']
             if target_distance is not None and weapon_range and target_distance > weapon_range:
                 hit_difficulty += 2
             if range_target:

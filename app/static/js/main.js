@@ -872,23 +872,10 @@ window.sendMessage = () => {
     input.value = '';
 };
 
-window.leaveLobby = async () => {
-    if (!confirm('Покинуть комнату?')) return;
-    try {
-        const response = await fetch(`/lobbies/${currentLobbyId}/leave`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (response.ok) {
-            socket.disconnect();
-            window.location.href = '/';
-        } else {
-            const err = await response.json();
-            showNotification(getErrorMessage(err));
-        }
-    } catch (error) {
-        showNotification('Ошибка сети');
-    }
+window.exitLobbyToList = () => {
+    if (!confirm('Выйти из комнаты в список комнат?')) return;
+    socket.disconnect();
+    window.location.href = '/';
 };
 
 window.toggleParticipants = toggleParticipants;

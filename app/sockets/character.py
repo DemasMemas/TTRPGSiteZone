@@ -111,6 +111,7 @@ def handle_update_character_data(data):
             if hasattr(character, key):
                 setattr(character, key, value)
 
+    posture_updates = []
     if isinstance(character.data, dict):
         character_data = deepcopy(character.data)
         health = apply_health_maximums(character_data)
@@ -123,12 +124,51 @@ def handle_update_character_data(data):
             if isinstance(health, dict):
                 loc_char.effects = list(health.get('effects') or [])
                 loc_char.hp_zones = health_zones_to_location(health)
+                effect_types = {
+                    str(effect.get('type') or '')
+                    for effect in loc_char.effects
+                    if isinstance(effect, dict) and effect.get('active', True)
+                }
+                zones = health.get('zones') if isinstance(health.get('zones'), dict) else {}
+                head = zones.get('head') if isinstance(zones.get('head'), dict) else {}
+                chest = zones.get('chest') if isinstance(zones.get('chest'), dict) else {}
+                current_health = health.get('current')
+                total_health_zero = current_health is not None and float(current_health) <= 0
+                head_zero = float(head.get('max') or 0) > 0 and float(head.get('current') or 0) <= 0
+                chest_zero = float(chest.get('max') or 0) > 0 and float(chest.get('current') or 0) <= 0
+                incapacitated = bool(
+                    effect_types.intersection({'shock', 'unconsciousness', 'critical_condition', 'death'})
+                    or total_health_zero
+                    or head_zero
+                    or chest_zero
+                )
+                if incapacitated and loc_char.posture != 'prone':
+                    loc_char.posture = 'prone'
+                    loc_char.cover_object_id = None
+                    loc_char.weapon_braced = False
+                    loc_char.braced_weapon_index = None
+                    posture_updates.append({
+                        'location_id': loc_char.location_id,
+                        'character_id': character.id,
+                        'posture': 'prone',
+                    })
                 flag_modified(loc_char, 'effects')
             else:
                 loc_char.effects = []
                 flag_modified(loc_char, 'effects')
 
     db.session.commit()
+
+    for posture_update in posture_updates:
+        socketio.emit(
+            'location_character_posture_updated',
+            {
+                'location_id': posture_update['location_id'],
+                'character_id': posture_update['character_id'],
+                'posture': posture_update['posture'],
+            },
+            room=f"location_{posture_update['location_id']}",
+        )
 
     emit('character_data_updated', {
         'character_id': character_id,

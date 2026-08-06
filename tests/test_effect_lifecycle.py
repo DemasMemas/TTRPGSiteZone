@@ -17,7 +17,18 @@ from app.services.effects import (
 def test_effect_aliases_are_canonicalized():
     assert canonical_type("heal") == "heal"
     assert canonical_type("bleeding_internal_extreme") == "bleeding_internal_extreme"
+    assert canonical_type("Пользовательский эффект") == "custom"
     assert canonical_type("") == "generic"
+
+
+def test_custom_effect_is_distinct_from_legacy_generic_effect():
+    manual = create_effect_draft("custom", {"name": "Осмотр аномалии"})
+    legacy = normalize_effect({"type": "unknown_legacy_effect", "name": "Старый статус"})
+
+    assert manual["type"] == "custom"
+    assert manual["name"] == "Осмотр аномалии"
+    assert legacy["type"] == "generic"
+    assert legacy["name"] == "Старый статус"
 
 
 def test_normalization_preserves_executable_metadata():
@@ -264,6 +275,8 @@ def test_temporary_limb_restoration_caps_healing_and_returns_limb_to_zero():
 
 def test_delayed_limb_treatment_cures_fractures_and_sets_zone_health_after_minute():
     health = {
+        "current": 500,
+        "max": 700,
         "zones": {"leftArm": {"current": 0, "max": 90}},
         "effects": [
             {"type": "fracture", "area": "leftArm", "active": True},
@@ -287,6 +300,7 @@ def test_delayed_limb_treatment_cures_fractures_and_sets_zone_health_after_minut
 
     effects = advance_timed_effects(health, effects, 1)
     assert health["zones"]["leftArm"]["current"] == 50
+    assert health["current"] == 550
     assert not any(effect["type"] in {"fracture", "fracture_fixed"} for effect in effects)
 
 

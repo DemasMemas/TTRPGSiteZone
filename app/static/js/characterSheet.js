@@ -2447,6 +2447,9 @@ function renderHealthTab(data, container = null) {
         { key: 'infection', label: 'Заражение', value: health.infection, color: '#86d48f' },
     ].filter(item => Number.isFinite(Number(item.value)) && Number(item.value) !== 0);
     const storedEffects = Array.isArray(health.effects) ? normalizeEffectList(health.effects) : [];
+    const disabledZoneChips = Object.entries(zones)
+        .filter(([, zone]) => Number(zone?.max || 0) > 0 && Number(zone?.current) <= 0)
+        .map(([area]) => `Выбита зона: ${getEffectAreaLabel(area)}`);
     const needs = normalizeDailyNeeds(health.needs);
     health.needs = needs;
     const storedEffectChips = storedEffects.map((effect) => {
@@ -2478,6 +2481,7 @@ function renderHealthTab(data, container = null) {
             return `${item.label}: ${value >= 0 ? '+' : ''}${value}`;
         }),
         ...storedEffectChips,
+        ...disabledZoneChips,
         ...modifierChips,
     ];
 
@@ -2645,6 +2649,66 @@ function renderHealthTab(data, container = null) {
 
     const effects = normalizeEffectList(Array.isArray(health.effects) ? health.effects : []);
     const effectTypeOptions = getEffectTypeOptions();
+    const effectSourceLabels = {
+        combat_damage: 'получение урона',
+        disabled_body_zone: 'ОЗ части тела опустились до 0',
+        disabled_organ: 'ОЗ органа опустились до 0',
+        catastrophic_limb_damage: 'критическое повреждение конечности',
+        zero_total_health: 'общий пул ОЗ опустился до 0',
+        zero_brain_health: 'ОЗ мозга опустились до 0',
+        zero_skull_health: 'ОЗ черепа опустились до 0',
+        hit_disabled_vital_zone: 'повторное попадание в выбитую жизненно важную зону',
+        maximum_pain: 'уровень боли достиг 10',
+        fracture: 'перелом',
+        direct: 'служебное описание действия предмета',
+    };
+    const effectRuleDescriptions = {
+        shock: 'Блокирует все действия, кроме попытки очнуться один раз за раунд.',
+        unconsciousness: 'Персонаж без сознания и не может действовать.',
+        critical_condition: 'Персонаж в критическом состоянии и не может действовать.',
+        death: 'Персонаж погиб и не может действовать.',
+        fracture: 'Даёт штрафы перелома до фиксации или лечения.',
+        fracture_fixed: 'Перелом зафиксирован: остаётся до завершения лечения, но штрафы снижены.',
+        fracture_unfixed: 'Перелом не был зафиксирован вовремя и оставил последствия.',
+        fracture_sequela: 'Постоянное последствие незафиксированного перелома.',
+        mangled_limb: 'Конечность нельзя использовать; восстановление требует хирургического вмешательства.',
+        amputation: 'Конечность утрачена и даёт соответствующие штрафы.',
+        organ_loss: 'Орган повреждён или утрачен; для восстановления действует ограниченное окно лечения.',
+        organ_failure: 'Смертельное повреждение органа: без лечения наступит смерть.',
+        temporary_limb_restoration: 'Временно возвращает работоспособность части тела до окончания срока.',
+        delayed_limb_treatment: 'Лечение части тела будет применено после истечения указанного срока.',
+        bleeding_prevention: 'Не позволяет появляться новым кровотечениям, пока действует.',
+        blood_loss_freeze: 'Отключает проверки кровопотери на время действия.',
+        infection_growth_block: 'Останавливает ежедневное нарастание заражения крови на время действия.',
+        pain_block: 'Не даёт получать новые уровни боли; последствия применятся после окончания эффекта.',
+        analgesia: 'Обезболивающее действует до окончания срока.',
+        radiation_filter: 'Снижает входящую радиацию на время действия.',
+        temperature_control: 'Временно меняет или удерживает температуру тела.',
+        limb_trauma_suppression: 'Временно подавляет штрафы травм конечностей.',
+        next_rest_healing: 'Усилит лечение во время следующего отдыха и затем исчезнет.',
+        untreated_wound: 'Рана остановлена, но не обработана: после боя может привести к заражению.',
+        tourniquet: 'Жгут останавливает кровотечения конечности, но накладывает её штрафы.',
+    };
+    const describeEffect = (effect) => {
+        const source = effectSourceLabels[effect.source] || effect.source;
+        const details = [];
+        if (effect.type === 'generic') {
+            details.push('Логика не определена: это старая, повреждённая или служебная запись. Она сама по себе ничего не изменяет.');
+        } else if (effect.type === 'custom') {
+            details.push('Ручной эффект ГМа. Его последствия определяются описанием и решением ведущего.');
+        } else if (effect.note) {
+            details.push(effect.note);
+        } else if (effectRuleDescriptions[effect.type]) {
+            details.push(effectRuleDescriptions[effect.type]);
+        } else if (effect.tick && effect.tick !== 'manual') {
+            details.push(`Срабатывает: ${effect.tick === 'turn_end' ? 'в конце хода' : effect.tick}.`);
+        } else {
+            details.push('Правила применяются системой автоматически, если это предусмотрено типом эффекта.');
+        }
+        if (source) details.push(`Источник: ${source}.`);
+        if (effect.area) details.push(`Область: ${getEffectAreaLabel(effect.area)}.`);
+        return details.join(' ');
+    };
     let effectsHtml = '';
     effects.forEach((effect, index) => {
         const value = effect.value || 0;
@@ -2653,6 +2717,8 @@ function renderHealthTab(data, container = null) {
         const remaining = effect.remaining ?? '';
         const selectedType = effect.type || 'generic';
         const fractureStatus = getFractureStatusText(effect, effects);
+        const isCustomOrUnknown = ['custom', 'generic'].includes(selectedType);
+        const visibleName = effect.name || effectTypeOptions.find(option => option.value === selectedType)?.label || selectedType;
         effectsHtml += `
             <div style="display: grid; grid-template-columns: 1.1fr 0.85fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
                 <select class="form-control" name="health.effects.${index}.type" style="width:100%;">
@@ -2673,6 +2739,8 @@ function renderHealthTab(data, container = null) {
                 ${hasRemaining ? `<input type="text" class="form-control number-input" name="health.effects.${index}.remaining" value="${escapeHtml(remaining)}" placeholder="Остаток" data-nullable-number="true" style="width:90px;">` : '<div></div>'}
                 ${selectedType === 'fracture_unfixed' ? `<button type="button" class="btn btn-sm btn-warning" onclick="rebreakUnfixedFracture(${index})" title="Сломать повторно и лечить как обычный перелом">↻</button>` : ''}
                 <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">×</button>
+                ${isCustomOrUnknown ? `<input class="form-control" name="health.effects.${index}.name" value="${escapeHtml(visibleName)}" placeholder="Название эффекта" style="grid-column:1/-1;">` : ''}
+                <div class="text-muted" style="grid-column:1/-1;font-size:12px;line-height:1.35;">${escapeHtml(describeEffect(effect))}</div>
                 ${fractureStatus ? `<div class="text-muted" style="grid-column:1/-1;font-size:12px;">${escapeHtml(fractureStatus)}</div>` : ''}
             </div>
         `;
@@ -2706,7 +2774,7 @@ window.addEffect = function() {
     if (!Array.isArray(currentCharacterData.health.effects)) {
         currentCharacterData.health.effects = [];
     }
-    currentCharacterData.health.effects.push(createEffectDraft('generic'));
+    currentCharacterData.health.effects.push(createEffectDraft('custom'));
     refreshHealthPanel();
     scheduleAutoSave();
 };
@@ -8320,7 +8388,7 @@ async function calculateInventoryAccess(item, itemPath) {
     };
 }
 
-async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints = 0) {
+async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints = 0, pendingActionId = null) {
     const combatState = window.locationCombatState;
     if (!combatState || combatState.status !== 'active') {
         return { totalActionPoints: 0, access: null };
@@ -8335,15 +8403,16 @@ async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints
         Number(baseUseActionPoints || 0) - access.useActionDiscount
     );
     const totalActionPoints = access.retrievalActionPoints + useActionPoints;
-    const pendingActionId = `inventory-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const resolvedPendingActionId = pendingActionId
+        || `inventory-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const payment = await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
         location_character_id: actor.location_character_id,
         action_points: totalActionPoints,
         allow_deferred: true,
-        pending_action_id: pendingActionId,
+        pending_action_id: resolvedPendingActionId,
         pending_action_label: `Использование: ${item?.name || 'предмет'}`,
     });
-    return { totalActionPoints, useActionPoints, access, payment, pendingActionId };
+    return { totalActionPoints, useActionPoints, access, payment, pendingActionId: resolvedPendingActionId };
 }
 
 function combineCombatPayments(groups) {
@@ -9213,26 +9282,36 @@ async function useConsumable(item, itemPath, options = {}) {
     }
 
     if (isCombatActive && !options.skipCombatPayment) {
+        let pendingActionId = null;
         try {
-            const payment = await spendInventoryAccessForCombat(item, itemPath, application.actionPoints);
+            // Register before the request: a deferred payment advances combat on
+            // the server and can emit its completion socket event immediately.
+            pendingActionId = `inventory-${combatState.current_character.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            pendingConsumableActions.set(pendingActionId, {
+                characterId: currentCharacterId,
+                itemId: item.id,
+                itemPath: [...itemPath],
+                application,
+                options: { ...options, targetData },
+            });
+            const payment = await spendInventoryAccessForCombat(
+                item, itemPath, application.actionPoints, pendingActionId
+            );
             if (payment.payment?.payment_complete === false) {
                 if (options.treatmentRequestId && options.onTreatmentDeferred) {
                     await options.onTreatmentDeferred(options.treatmentRequestId, payment.pendingActionId);
                 }
-                pendingConsumableActions.set(payment.pendingActionId, {
-                    characterId: currentCharacterId,
-                    itemId: item.id,
-                    itemPath: [...itemPath],
-                    application,
-                    options: { ...options, targetData },
-                });
                 showNotification(
                     `Начато длительное действие «${item.name}». Остаток ОД будет списан в следующих ходах.`,
                     'system'
                 );
                 return false;
             }
+            pendingConsumableActions.delete(pendingActionId);
         } catch (error) {
+            // The action was never accepted by the server, so it must not be
+            // resumed from a stale client-side pending entry.
+            if (pendingActionId) pendingConsumableActions.delete(pendingActionId);
             showNotification(error.message || 'Не хватает ОД');
             return false;
         }
@@ -9502,7 +9581,7 @@ async function useConsumable(item, itemPath, options = {}) {
             );
             zone.destructionDamage = Math.max(0, Number(zone.max || 0) - zone.current);
         }
-        if (direct.close_area_bleeding) {
+        if (direct.close_area_bleeding || ['second_life', 'chimera'].includes(direct.special_limb_treatment)) {
             health.effects = (health.effects || []).filter(effect => !(getBleedingInfo(effect) && effect.area === targetArea));
         }
         hasChanges = true;
@@ -13658,7 +13737,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
             socket.emit('join_character', { token: localStorage.getItem('access_token'), character_id: characterId });
             socket.off('character_data_updated');
             socket.on('character_data_updated', (data) => {
-                if (data.character_id === currentCharacterId) {
+                if (Number(data.character_id) === Number(currentCharacterId)) {
                     currentCharacterData = data.updates.data || currentCharacterData;
                     normalizeCharacterEffects(currentCharacterData);
 

@@ -20,6 +20,32 @@ def test_aimed_shot_can_override_hit_zone():
     assert CombatService._random_hit_zone(1, "head") == "head"
 
 
+@pytest.mark.parametrize(
+    ("shooter_mode", "target_mode", "penalty", "disadvantage"),
+    [
+        (None, None, 0, False),
+        ("walk", None, 2, False),
+        ("run", None, 2, True),
+        ("sprint", None, 2, True),
+        (None, "correction", 0, False),
+        (None, "walk", 2, False),
+        (None, "run", 2, True),
+        (None, "sprint", 2, True),
+        ("walk", "run", 4, True),
+    ],
+)
+def test_shooting_movement_modifiers_follow_combat_rules(
+    shooter_mode,
+    target_mode,
+    penalty,
+    disadvantage,
+):
+    result = CombatService._shooting_movement_modifiers(shooter_mode, target_mode)
+
+    assert result["difficulty_penalty"] == penalty
+    assert result["disadvantage"] is disadvantage
+
+
 def test_melee_attack_variants_change_damage_and_penetration():
     weapon = {
         "damage": 100,
