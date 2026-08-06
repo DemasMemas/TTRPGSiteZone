@@ -48,6 +48,11 @@
 
         <!-- Правая верхняя панель: меню комнаты -->
         <div class="lobby-menu">
+            <div id="network-status" class="network-status is-connecting" role="status" title="Проверка соединения с сервером">
+                <span class="network-status-dot" aria-hidden="true"></span>
+                <span id="network-status-label">Сеть</span>
+                <strong id="network-status-ping">...</strong>
+            </div>
             <div class="menu-item lobby-name">Комната: <span id="lobby-name">Загрузка...</span></div>
             <div class="menu-item lobby-time" title="Глобальное время комнаты">
                 <label>Сутки <input id="lobby-game-day" type="number" min="1" value="1" style="width:52px;"></label>

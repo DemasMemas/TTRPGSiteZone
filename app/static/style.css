@@ -470,6 +470,14 @@ body {
   box-shadow: var(--panel-shadow);
   border: 1px solid rgba(184, 164, 110, 0.12);
 }
+.network-status { display:inline-flex; align-items:center; gap:6px; min-width:94px; padding:5px 8px; border:1px solid rgba(184,164,110,.15); border-radius:999px; color:var(--text-secondary); background:rgba(0,0,0,.12); font-size:12px; line-height:1; cursor:help; user-select:none; }
+.network-status strong { margin-left:auto; color:var(--text-color); font-weight:650; font-variant-numeric:tabular-nums; }
+.network-status-dot { width:7px; height:7px; border-radius:50%; background:#b9a66a; box-shadow:0 0 0 3px rgba(185,166,106,.12); }
+.network-status.is-online .network-status-dot { background:#89ab62; box-shadow:0 0 0 3px rgba(137,171,98,.12); }
+.network-status.is-slow .network-status-dot { background:#d19d58; box-shadow:0 0 0 3px rgba(209,157,88,.14); }
+.network-status.is-offline .network-status-dot { background:#c66c5a; box-shadow:0 0 0 3px rgba(198,108,90,.14); }
+.network-status.is-connecting .network-status-dot { animation:network-status-pulse 1.2s ease-in-out infinite; }
+@keyframes network-status-pulse { 50% { opacity:.35; transform:scale(.8); } }
 .settings-header {
   display: flex;
   justify-content: space-between;

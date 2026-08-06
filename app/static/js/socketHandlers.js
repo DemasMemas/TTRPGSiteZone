@@ -10,14 +10,74 @@ import { refreshUserColor } from './locationScene.js';
 
 let socket;
 let currentLobbyId;
+let networkMonitorTimer = null;
+let pingInFlight = false;
+
+function updateNetworkStatus(state, ping = null) {
+    const root = document.getElementById('network-status');
+    const label = document.getElementById('network-status-label');
+    const value = document.getElementById('network-status-ping');
+    if (!root || !label || !value) return;
+    root.classList.remove('is-online', 'is-slow', 'is-offline', 'is-connecting');
+    root.classList.add(`is-${state}`);
+    if (state === 'offline') {
+        label.textContent = navigator.onLine ? 'Нет связи' : 'Нет сети';
+        value.textContent = '—';
+        root.title = navigator.onLine ? 'Связь с игровым сервером потеряна. Выполняется переподключение.' : 'Устройство не подключено к интернету.';
+        return;
+    }
+    if (state === 'connecting') {
+        label.textContent = 'Связь';
+        value.textContent = '...';
+        root.title = 'Подключение к игровому серверу.';
+        return;
+    }
+    const milliseconds = Math.max(0, Math.round(Number(ping) || 0));
+    label.textContent = state === 'slow' ? 'Задержка' : 'Сеть';
+    value.textContent = `${milliseconds} мс`;
+    root.title = state === 'slow' ? `Высокая задержка до сервера: ${milliseconds} мс.` : `Соединение с сервером активно. Пинг: ${milliseconds} мс.`;
+}
+
+function measureServerPing() {
+    if (!socket?.connected || pingInFlight) return;
+    pingInFlight = true;
+    const startedAt = performance.now();
+    let completed = false;
+    const timeout = window.setTimeout(() => {
+        if (completed) return;
+        completed = true;
+        pingInFlight = false;
+        updateNetworkStatus('offline');
+    }, 5000);
+    socket.emit('network_ping', {}, () => {
+        if (completed) return;
+        completed = true;
+        window.clearTimeout(timeout);
+        pingInFlight = false;
+        const ping = performance.now() - startedAt;
+        updateNetworkStatus(ping >= 250 ? 'slow' : 'online', ping);
+    });
+}
+
+function startNetworkMonitor() {
+    if (networkMonitorTimer) window.clearInterval(networkMonitorTimer);
+    measureServerPing();
+    networkMonitorTimer = window.setInterval(measureServerPing, 5000);
+}
 
 export function initSocket(lobbyId, token) {
     currentLobbyId = lobbyId;
     socket = io();
 
     socket.on('connect', () => {
+        updateNetworkStatus('connecting');
         socket.emit('authenticate', { token, lobby_id: lobbyId });
+        startNetworkMonitor();
     });
+    socket.on('disconnect', () => updateNetworkStatus('offline'));
+    socket.on('connect_error', () => updateNetworkStatus('offline'));
+    socket.io.on('reconnect_attempt', () => updateNetworkStatus('connecting'));
+    socket.io.on('reconnect_failed', () => updateNetworkStatus('offline'));
 
     socket.on('authenticated', (data) => {
         showNotification(`Вы вошли как ${data.username}`, 'system', 'bottom-left');
