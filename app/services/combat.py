@@ -4480,6 +4480,8 @@ class CombatService:
             'owner_id': character.owner_id if character else None,
             'owner_username': character.owner.username if character and character.owner else None,
             'controlled_by': loc_char.controlled_by,
+            'team_name': loc_char.team_name,
+            'team_color': loc_char.team_color,
             'x': loc_char.pos_x,
             'y': loc_char.pos_y,
             'status': loc_char.status,

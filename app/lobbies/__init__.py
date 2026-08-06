@@ -3,6 +3,7 @@ import json
 import gzip
 import io
 import random
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from sqlalchemy import or_
@@ -1548,6 +1549,40 @@ def update_location_object(lobby_id, object_id, lobby, participant):
         'object': payload
     }, room=f"location_{location.id}")
     return jsonify(payload), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/teams', methods=['GET', 'PUT'])
+@jwt_required()
+def manage_location_teams(lobby_id, location_id):
+    user_id = int(get_jwt_identity())
+    location = Location.query.get(location_id)
+    lobby = Lobby.query.get(lobby_id)
+    if not location or not lobby or location.lobby_id != lobby_id:
+        return jsonify({'error': 'Location not found'}), 404
+    participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
+    if not participant:
+        return jsonify({'error': 'Access denied'}), 403
+    characters = LocationCharacter.query.filter_by(location_id=location_id).all()
+    if request.method == 'PUT':
+        if lobby.gm_id != user_id:
+            return jsonify({'error': 'Only GM can manage teams'}), 403
+        payload = request.get_json() or {}
+        assignments = payload.get('assignments') or []
+        by_id = {item.id: item for item in characters}
+        for assignment in assignments:
+            target = by_id.get(assignment.get('location_character_id'))
+            if not target:
+                continue
+            team_name = str(assignment.get('team_name') or '').strip()[:80]
+            team_color = str(assignment.get('team_color') or '').strip()
+            # A team marker is presentation data too, but only accept a CSS hex color.
+            if not re.fullmatch(r'#[0-9a-fA-F]{6}', team_color):
+                team_color = ''
+            target.team_name = team_name or None
+            target.team_color = team_color or None
+        db.session.commit()
+        socketio.emit('location_teams_updated', {'location_id': location_id}, room=f"location_{location_id}")
+    return jsonify({'characters': [{'location_character_id': item.id, 'character_id': item.character_id, 'name': item.character.name if item.character else '', 'team_name': item.team_name, 'team_color': item.team_color} for item in characters]})
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/spawn_character', methods=['POST'])

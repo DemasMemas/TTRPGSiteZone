@@ -113,6 +113,7 @@ let armedMovementType = null;
 let movementTypeMenu = null;
 let postureMenu = null;
 let combatParticipantMenu = null;
+let teamManagementModal = null;
 let aimedZoneMenu = null;
 let aimedZoneMenuResolve = null;
 let movementPreviewGhost = null;
@@ -2697,7 +2698,30 @@ function createCharacterModel(userId) {
 }
 
 // ========== Добавление персонажа ==========
-export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy) {
+function normalizeTeamColor(value) {
+    const color = String(value || '').trim();
+    return /^#[0-9a-f]{6}$/i.test(color) ? color : null;
+}
+
+function updateCharacterTeamVisual(characterId, teamName, teamColor) {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry) return;
+    entry.teamName = String(teamName || '').trim() || null;
+    entry.teamColor = normalizeTeamColor(teamColor);
+    const badge = entry.teamBadge;
+    if (!badge) return;
+    if (!entry.teamName) {
+        badge.style.display = 'none';
+        badge.textContent = '';
+        return;
+    }
+    badge.textContent = entry.teamName;
+    badge.style.display = 'block';
+    badge.style.backgroundColor = entry.teamColor || '#56616a';
+    badge.style.borderColor = entry.teamColor || '#8b98a3';
+}
+
+export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null) {
     if (characterModels.has(characterId)) {
         const old = characterModels.get(characterId);
         scene.remove(old.model);
@@ -2732,7 +2756,20 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         line-height:1.2;
         white-space:nowrap;
     `;
-    div.append(nameLine, grappleBadge);
+    const teamBadge = document.createElement('div');
+    teamBadge.style.cssText = `
+        display:none;
+        margin-top:3px;
+        padding:2px 6px;
+        border:1px solid transparent;
+        border-radius:7px;
+        color:#fff;
+        font-size:10px;
+        font-weight:800;
+        line-height:1.2;
+        white-space:nowrap;
+    `;
+    div.append(nameLine, teamBadge, grappleBadge);
     div.style.color = 'white';
     div.style.fontSize = '14px';
     div.style.fontWeight = 'bold';
@@ -2759,13 +2796,210 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         posture: 'standing',
         controlledBy: resolvedControlledBy ?? fallbackOwnerId,
         grappleBadge,
+        teamBadge,
+        teamName: null,
+        teamColor: null,
     });
+    updateCharacterTeamVisual(characterId, teamName, teamColor);
     const combatCharacter = findCombatCharacterByCharacterId(characterId);
     if (combatCharacter?.posture) {
         applyCharacterPostureVisual(characterId, combatCharacter.posture);
     }
     applyCharacterGrappleVisual(characterId, combatCharacter);
     invalidateMovementMapCache();
+}
+
+export async function refreshLocationTeams() {
+    const locationId = getCurrentLocationId();
+    if (!locationId || !window.currentLobbyId) return;
+    try {
+        const result = await Server.getLocationTeams(window.currentLobbyId, locationId);
+        (result.characters || []).forEach((character) => {
+            updateCharacterTeamVisual(
+                character.character_id,
+                character.team_name,
+                character.team_color,
+            );
+            const combatCharacter = findCombatCharacterByCharacterId(character.character_id);
+            if (combatCharacter) {
+                combatCharacter.team_name = character.team_name;
+                combatCharacter.team_color = character.team_color;
+            }
+        });
+        renderCombatHud();
+    } catch (error) {
+        console.warn('Unable to refresh location teams', error);
+    }
+}
+
+function closeTeamManagementModal() {
+    if (teamManagementModal) teamManagementModal.remove();
+    teamManagementModal = null;
+}
+
+async function showTeamManagementModal() {
+    if (!window.isGM || !window.currentLobbyId || !getCurrentLocationId()) return;
+    let characters;
+    try {
+        const result = await Server.getLocationTeams(window.currentLobbyId, getCurrentLocationId());
+        characters = Array.isArray(result.characters) ? result.characters : [];
+    } catch (error) {
+        showNotification(error.message || '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b', 'error');
+        return;
+    }
+    closeTeamManagementModal();
+    const assignments = new Map(characters.map((character) => [
+        Number(character.location_character_id),
+        String(character.team_name || '').trim(),
+    ]));
+    const teams = [];
+    characters.forEach((character) => {
+        const name = String(character.team_name || '').trim();
+        if (!name || teams.some((team) => team.name.toLocaleLowerCase() === name.toLocaleLowerCase())) return;
+        teams.push({
+            name,
+            color: normalizeTeamColor(character.team_color) || '#64748b',
+        });
+    });
+
+    teamManagementModal = document.createElement('div');
+    teamManagementModal.className = 'modal team-management-modal';
+    teamManagementModal.style.cssText = `
+        position:fixed; inset:0; z-index:1265; display:flex; align-items:center;
+        justify-content:center; padding:16px; background:rgba(4,7,10,.68);
+    `;
+    const content = document.createElement('div');
+    content.className = 'modal-content';
+    content.style.cssText = `
+        width:min(700px, calc(100vw - 32px)); max-height:calc(100vh - 32px);
+        display:flex; flex-direction:column; gap:12px; padding:18px; overflow:hidden;
+    `;
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:12px;';
+    const heading = document.createElement('div');
+    heading.innerHTML = '<h3 style="margin:0;">\u041a\u043e\u043c\u0430\u043d\u0434\u044b \u043f\u043e\u0434\u043b\u043e\u043a\u0430\u0446\u0438\u0438</h3><div style="margin-top:4px;font-size:12px;opacity:.72;">\u041a\u043e\u043c\u0430\u043d\u0434\u044b \u0432\u0438\u0434\u043d\u044b \u0432 \u043f\u043e\u0440\u044f\u0434\u043a\u0435 \u0445\u043e\u0434\u0430 \u0438 \u043d\u0430\u0434 \u043c\u043e\u0434\u0435\u043b\u044f\u043c\u0438.</div>';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'btn btn-sm btn-secondary';
+    closeButton.textContent = '\u00d7';
+    closeButton.onclick = closeTeamManagementModal;
+    header.append(heading, closeButton);
+
+    const addRow = document.createElement('div');
+    addRow.style.cssText = 'display:grid; grid-template-columns:minmax(0,1fr) 56px auto; gap:8px; align-items:end;';
+    const newName = document.createElement('input');
+    newName.type = 'text';
+    newName.maxLength = 80;
+    newName.placeholder = '\u041d\u043e\u0432\u0430\u044f \u043a\u043e\u043c\u0430\u043d\u0434\u0430';
+    const newColor = document.createElement('input');
+    newColor.type = 'color';
+    newColor.value = '#64748b';
+    const addButton = document.createElement('button');
+    addButton.type = 'button';
+    addButton.className = 'btn btn-secondary';
+    addButton.textContent = '\u0421\u043e\u0437\u0434\u0430\u0442\u044c';
+    addRow.append(newName, newColor, addButton);
+
+    const teamList = document.createElement('div');
+    const characterList = document.createElement('div');
+    characterList.style.cssText = 'display:grid; gap:7px; overflow-y:auto; min-height:0; padding-right:4px;';
+    const renderLists = () => {
+        teamList.replaceChildren();
+        if (teams.length) {
+            teams.forEach((team, index) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:grid; grid-template-columns:28px minmax(0,1fr) 42px; align-items:center; gap:8px;';
+                const dot = document.createElement('span');
+                dot.style.cssText = `width:16px;height:16px;border-radius:50%;background:${team.color};border:1px solid rgba(255,255,255,.4);`;
+                const name = document.createElement('strong');
+                name.textContent = team.name;
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.className = 'btn btn-sm btn-secondary';
+                remove.textContent = '\u00d7';
+                remove.title = '\u0420\u0430\u0441\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u0443';
+                remove.onclick = () => {
+                    const removed = teams.splice(index, 1)[0];
+                    assignments.forEach((value, key) => {
+                        if (value === removed.name) assignments.set(key, '');
+                    });
+                    renderLists();
+                };
+                row.append(dot, name, remove);
+                teamList.append(row);
+            });
+        }
+        characterList.replaceChildren();
+        characters.forEach((character) => {
+            const row = document.createElement('label');
+            row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr) minmax(170px,.65fr);gap:12px;align-items:center;padding:9px 10px;border:1px solid rgba(255,255,255,.11);border-radius:9px;background:rgba(255,255,255,.035);';
+            const name = document.createElement('strong');
+            name.textContent = character.name || `#${character.character_id}`;
+            const select = document.createElement('select');
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = '\u0411\u0435\u0437 \u043a\u043e\u043c\u0430\u043d\u0434\u044b';
+            select.appendChild(none);
+            teams.forEach((team) => {
+                const option = document.createElement('option');
+                option.value = team.name;
+                option.textContent = team.name;
+                select.appendChild(option);
+            });
+            select.value = assignments.get(Number(character.location_character_id)) || '';
+            select.onchange = () => assignments.set(Number(character.location_character_id), select.value);
+            row.append(name, select);
+            characterList.append(row);
+        });
+    };
+    addButton.onclick = () => {
+        const name = newName.value.trim();
+        if (!name) return;
+        if (teams.some((team) => team.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+            showNotification('\u041a\u043e\u043c\u0430\u043d\u0434\u0430 \u0441 \u0442\u0430\u043a\u0438\u043c \u0438\u043c\u0435\u043d\u0435\u043c \u0443\u0436\u0435 \u0435\u0441\u0442\u044c', 'system');
+            return;
+        }
+        teams.push({ name, color: normalizeTeamColor(newColor.value) || '#64748b' });
+        newName.value = '';
+        renderLists();
+    };
+    renderLists();
+
+    const footer = document.createElement('div');
+    footer.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.className = 'btn btn-secondary'; cancel.textContent = '\u041e\u0442\u043c\u0435\u043d\u0430'; cancel.onclick = closeTeamManagementModal;
+    const save = document.createElement('button');
+    save.type = 'button'; save.className = 'btn btn-primary'; save.textContent = '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c';
+    save.onclick = async () => {
+        const teamByName = new Map(teams.map((team) => [team.name, team]));
+        const payload = characters.map((character) => {
+            const name = assignments.get(Number(character.location_character_id)) || '';
+            const team = teamByName.get(name);
+            return {
+                location_character_id: Number(character.location_character_id),
+                team_name: team?.name || '',
+                team_color: team?.color || '',
+            };
+        });
+        save.disabled = true;
+        try {
+            const result = await Server.updateLocationTeams(window.currentLobbyId, getCurrentLocationId(), payload);
+            (result.characters || []).forEach((character) => updateCharacterTeamVisual(character.character_id, character.team_name, character.team_color));
+            closeTeamManagementModal();
+            await refreshLocationTeams();
+        } catch (error) {
+            save.disabled = false;
+            showNotification(error.message || '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b', 'error');
+        }
+    };
+    footer.append(cancel, save);
+    content.append(header, addRow, teamList, characterList, footer);
+    teamManagementModal.appendChild(content);
+    teamManagementModal.addEventListener('pointerdown', (event) => {
+        if (event.target === teamManagementModal) closeTeamManagementModal();
+    });
+    document.body.appendChild(teamManagementModal);
 }
 
 export function refreshUserColor(userId) {
@@ -3138,12 +3372,16 @@ function renderCombatHud() {
         .map((id) => {
             const character = charactersByLocationId.get(id);
             if (!character) return `#${id}`;
-            return character.name;
+            const teamColor = normalizeTeamColor(character.team_color);
+            const marker = teamColor
+                ? `<span title="${escapeHtml(character.team_name || '\u041a\u043e\u043c\u0430\u043d\u0434\u0430')}" style="display:inline-block;width:8px;height:8px;margin-right:4px;border-radius:50%;background:${teamColor};"></span>`
+                : '';
+            return `${marker}${escapeHtml(character.name || `#${id}`)}`;
         })
         .filter(Boolean);
     const visibleOrderLabels = orderLabels.length
         ? orderLabels
-        : Array.from(new Set((combatState.characters || []).map((char) => char.name || 'Unknown')));
+        : Array.from(new Set((combatState.characters || []).map((char) => escapeHtml(char.name || 'Unknown'))));
     const aimedTarget = (combatState.characters || []).find(
         char => char.character_id === combatState.current_character?.aimed_target_character_id
     );
@@ -3227,6 +3465,15 @@ function renderCombatHud() {
         </div>
     `;
     ensureCombatHudDragging();
+    if (window.isGM) {
+        const teamButton = document.createElement('button');
+        teamButton.type = 'button';
+        teamButton.className = 'btn btn-sm btn-secondary combat-team-manage-btn';
+        teamButton.textContent = '\u041a\u043e\u043c\u0430\u043d\u0434\u044b';
+        teamButton.style.cssText = 'margin-left:auto; flex:0 0 auto;';
+        teamButton.onclick = showTeamManagementModal;
+        combatHud.querySelector('.combat-hud-header')?.appendChild(teamButton);
+    }
     const collapseBtn = combatHud.querySelector('.combat-hud-collapse-btn');
     if (collapseBtn) {
         collapseBtn.onclick = (event) => {
@@ -3288,6 +3535,7 @@ export function setCombatState(state) {
     combatState = state || null;
     window.locationCombatState = combatState;
     (combatState?.characters || []).forEach((character) => {
+        updateCharacterTeamVisual(character.character_id, character.team_name, character.team_color);
         applyCharacterPostureVisual(character.character_id, character.posture);
         applyCharacterFacingVisual(
             character.character_id,

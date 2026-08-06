@@ -50,6 +50,53 @@ def create_character(client, lobby, user, auth_headers, data=None):
     return response.get_json()
 
 
+def test_gm_can_assign_location_teams_and_players_cannot_edit_them(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("teams-gm")
+    player = create_user("teams-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, player, auth_headers)
+    location = Location(lobby_id=lobby["id"], name="Team test", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    location_character = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        controlled_by=player["id"],
+    )
+    db.session.add(location_character)
+    db.session.commit()
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/teams"
+    denied = client.put(
+        url,
+        headers=auth_headers(player),
+        json={"assignments": [{"location_character_id": location_character.id, "team_name": "North", "team_color": "#457b9d"}]},
+    )
+    assert denied.status_code == 403
+
+    updated = client.put(
+        url,
+        headers=auth_headers(gm),
+        json={"assignments": [{"location_character_id": location_character.id, "team_name": "North", "team_color": "#457b9d"}]},
+    )
+    assert updated.status_code == 200
+    assert updated.get_json()["characters"][0]["team_name"] == "North"
+    assert updated.get_json()["characters"][0]["team_color"] == "#457b9d"
+
+    invalid_color = client.put(
+        url,
+        headers=auth_headers(gm),
+        json={"assignments": [{"location_character_id": location_character.id, "team_name": "North", "team_color": "red; background:black"}]},
+    )
+    assert invalid_color.status_code == 200
+    assert invalid_color.get_json()["characters"][0]["team_color"] is None
+
+
 @pytest.mark.parametrize(
     ("penalty", "distance", "label"),
     [

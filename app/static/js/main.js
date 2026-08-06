@@ -781,7 +781,9 @@ if (socket) {
                     s.y,
                     s.hp_zones,
                     s.effects,
-                    Number(s.controlled_by)
+                    Number(s.controlled_by),
+                    s.team_name,
+                    s.team_color,
                 );
             });
         });
@@ -830,7 +832,9 @@ if (socket) {
                 data.character.pos_y,
                 data.character.hp_zones,
                 data.character.effects,
-                Number(data.character.controlled_by)
+                Number(data.character.controlled_by),
+                data.character.team_name,
+                data.character.team_color,
             );
         });
     });
@@ -845,6 +849,10 @@ if (socket) {
         import('./locationScene.js').then(module => {
             module.applyCharacterPostureVisual(data.character_id, data.posture);
         });
+    });
+    socket.on('location_teams_updated', (data) => {
+        if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
+        import('./locationScene.js').then(module => module.refreshLocationTeams());
     });
 
     const syncCombatState = (state) => {

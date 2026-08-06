@@ -14,6 +14,8 @@ class LocationCharacter(db.Model):
     last_action = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     controlled_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     controller = db.relationship('User', foreign_keys=[controlled_by])
+    team_name = db.Column(db.String(80), nullable=True)
+    team_color = db.Column(db.String(16), nullable=True)
 
     initiative_bonus = db.Column(db.Integer, nullable=False, default=0)
     initiative_roll = db.Column(db.Integer, nullable=True)

@@ -439,6 +439,18 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat`);
     },
 
+    async getLocationTeams(lobbyId, locationId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/teams`);
+    },
+
+    async updateLocationTeams(lobbyId, locationId, assignments) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/teams`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ assignments }),
+        });
+    },
+
     async startLocationCombat(lobbyId, locationId, locationCharacterIds = null) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start`, {
             method: 'POST',
