@@ -41,6 +41,7 @@ class LocationCharacter(db.Model):
     braced_weapon_index = db.Column(db.Integer, nullable=True)
     facing_x = db.Column(db.Integer, nullable=False, default=0)
     facing_y = db.Column(db.Integer, nullable=False, default=1)
+    facing_changed_round = db.Column(db.Integer, nullable=True)
     melee_swing_round = db.Column(db.Integer, nullable=True)
     melee_block_round = db.Column(db.Integer, nullable=True)
     melee_block_effectiveness = db.Column(db.Integer, nullable=False, default=0)

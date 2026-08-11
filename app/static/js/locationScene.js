@@ -48,6 +48,15 @@ let currentLocationId = null;
 let currentLocationData = null;
 let tileCubes = [];
 let locationTileMesh = null;
+let fogMeshes = [];
+let fogGeometry = null;
+let fogMaterial = null;
+let fogTexture = null;
+let fogMemoryKey = null;
+let fogMemory = new Map();
+let fogMemoryGhosts = new Map();
+let fogMemoryDecorationTemplates = new Map();
+let gmVisionCharacterId = null;
 const tileInstanceTransform = new THREE.Object3D();
 let objectMeshes = [];
 let anomalyEffectMeshes = [];
@@ -83,6 +92,8 @@ let processedTilesForObjects = new Set();
 let lastHighlightCoords = null;
 window.locationEditMode = false;
 let animationFrameId = null;
+const FOG_VIEW_RADIUS = 25;
+const FOG_VIEW_HALF_ANGLE = Math.PI / 3;
 let combatState = null;
 let combatHud = null;
 let combatHudDragState = null;
@@ -112,6 +123,8 @@ let armedMoveCharacterId = null;
 let armedMovementType = null;
 let movementTypeMenu = null;
 let postureMenu = null;
+let facingMenu = null;
+let pendingFacingSelection = null;
 let combatParticipantMenu = null;
 let teamManagementModal = null;
 let aimedZoneMenu = null;
@@ -842,7 +855,7 @@ function getCharacterAtScreen(clientX, clientY) {
     raycaster.setFromCamera(mouse, camera);
     const models = [];
     characterModels.forEach((entry) => {
-        models.push(entry.model);
+        if (entry.model.visible) models.push(entry.model);
     });
     const intersects = raycaster.intersectObjects(models, true);
     if (intersects.length > 0) {
@@ -910,6 +923,7 @@ function closeCombatMenus() {
     combatActionMenuCharacterId = null;
     closeMovementTypeMenu();
     closePostureMenu();
+    closeFacingMenu();
 }
 
 function updateCombatHudPosition(left, top) {
@@ -1447,6 +1461,17 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         },
     ];
 
+    if (condition.state === 'active') {
+        menuItems.push({
+            label: '\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442',
+            icon: '\u21bb',
+            title: '\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0432\u0437\u0433\u043b\u044f\u0434\u0430 \u0438 \u043e\u0431\u0437\u043e\u0440\u0430',
+            angle: 18,
+            ringRadius: 165,
+            action: () => showFacingMenu(characterId),
+        });
+    }
+
     if (condition.state === 'pain_shock') {
         menuItems = condition.can_recover === false ? [{
             label: 'Боль 10',
@@ -1519,6 +1544,17 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         });
     }
     if (window.isGM) {
+        menuItems.push({
+            label: gmVisionCharacterId === characterId ? 'Обзор ГМа' : 'Взгляд',
+            icon: gmVisionCharacterId === characterId ? '◉' : '◌',
+            title: gmVisionCharacterId === characterId
+                ? 'Вернуться к полному обзору ГМа'
+                : 'Показать поле зрения этого персонажа',
+            angle: 70,
+            ringRadius: 165,
+            allowAlways: true,
+            action: () => toggleGmVision(characterId),
+        });
         menuItems.push({
             label: 'Убрать',
             icon: '×',
@@ -2052,6 +2088,274 @@ function showPostureMenu(characterId) {
 
     menu.querySelector('.posture-close').onclick = closePostureMenu;
     menu.style.display = 'flex';
+}
+
+function closeFacingMenu() {
+    if (facingMenu) facingMenu.remove();
+    facingMenu = null;
+    pendingFacingSelection = null;
+}
+
+function getFacingChangeOptions(character, targetX, targetY) {
+    const fromX = Number(character.facing_x ?? character.facingX) || 0;
+    const fromY = Number(character.facing_y ?? character.facingY) || 1;
+    const dot = fromX * targetX + fromY * targetY;
+    const lengths = Math.hypot(fromX, fromY) * Math.hypot(targetX, targetY);
+    const degrees = Math.round(Math.acos(Math.max(-1, Math.min(1, dot / lengths))) * 180 / Math.PI);
+    const prone = character.posture === 'prone';
+    const movement = Math.max(0, (degrees <= 45 ? 3 : 5) - (Number(character.agility_bonus) || 0) + (prone ? 3 : 0));
+    const actionExtra = prone ? 1 : 0;
+    return {
+        degrees,
+        options: degrees <= 45
+            ? [
+                { payment: 'free', action: actionExtra, free: 1, movement: 0 },
+                { payment: 'action', action: 1 + actionExtra, free: 0, movement: 0 },
+                { payment: 'movement', action: 0, free: 0, movement },
+            ]
+            : [
+                { payment: 'mixed', action: 1 + actionExtra, free: 1, movement: 0 },
+                { payment: 'action', action: 2 + actionExtra, free: 0, movement: 0 },
+                { payment: 'movement', action: 0, free: 0, movement },
+            ],
+    };
+}
+
+function facingPaymentLabel(option) {
+    const parts = [];
+    if (option.action) parts.push(`${option.action} \u041e\u0414`);
+    if (option.free) parts.push(`${option.free} \u0421\u0414`);
+    if (option.movement || (!option.action && !option.free)) parts.push(`${option.movement} \u041e\u041f`);
+    return parts.join(' + ');
+}
+
+function showFacingMenuLegacy(characterId) {
+    const isCombatActive = combatState?.status === 'active';
+    const character = isCombatActive
+        ? findCombatCharacterByCharacterId(characterId)
+        : getCharacterModelEntry(characterId);
+    if (!character || (isCombatActive && !canActWithCombatCharacter(character)) || (!isCombatActive && !canControlCharacter(characterId))) return;
+    if (isCombatActive && Number(character.facing_changed_round) === Number(combatState?.round_number)) {
+        showNotification('\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442 \u0443\u0436\u0435 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d \u0432 \u044d\u0442\u043e\u043c \u0440\u0430\u0443\u043d\u0434\u0435', 'system');
+        return;
+    }
+    closeFacingMenu();
+    facingMenu = document.createElement('div');
+    facingMenu.style.cssText = 'position:fixed;inset:0;z-index:1240;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(4,7,10,.62);';
+    const panel = document.createElement('div');
+    panel.style.cssText = 'width:min(430px,calc(100vw - 32px));padding:18px;border:1px solid rgba(255,255,255,.16);border-radius:16px;background:rgba(14,18,26,.98);color:#fff;box-shadow:0 24px 60px rgba(0,0,0,.48);';
+    const title = document.createElement('div');
+    title.innerHTML = '<div style="font-size:19px;font-weight:800;">\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442</div><div style="margin-top:3px;font-size:12px;opacity:.72;">\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435. \u041d\u0435 \u0431\u043e\u043b\u0435\u0435 \u043e\u0434\u043d\u043e\u0433\u043e \u0440\u0430\u0437\u0430 \u0437\u0430 \u0440\u0430\u0443\u043d\u0434.</div>';
+    const directionGrid = document.createElement('div');
+    directionGrid.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:16px;';
+    const paymentArea = document.createElement('div');
+    paymentArea.style.cssText = 'display:grid;gap:8px;margin-top:14px;';
+    const directions = [
+        [-1, -1, '\u2196'], [0, -1, '\u2191'], [1, -1, '\u2197'],
+        [-1, 0, '\u2190'], [0, 0, ''], [1, 0, '\u2192'],
+        [-1, 1, '\u2199'], [0, 1, '\u2193'], [1, 1, '\u2198'],
+    ];
+    directions.forEach(([x, y, icon]) => {
+        if (x === 0 && y === 0) {
+            const spacer = document.createElement('div');
+            directionGrid.appendChild(spacer);
+            return;
+        }
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = icon;
+        button.style.cssText = 'height:48px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.07);color:#fff;font-size:24px;cursor:pointer;';
+        button.onclick = () => {
+            const details = getFacingChangeOptions(character, x, y);
+            if (!details.degrees) return;
+            paymentArea.replaceChildren();
+            const hint = document.createElement('div');
+            hint.style.cssText = 'font-size:13px;opacity:.82;';
+            hint.textContent = `\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442 \u043d\u0430 ${details.degrees}\u00b0. \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u0440\u0430\u0442\u0443:`;
+            paymentArea.appendChild(hint);
+            const options = isCombatActive
+                ? details.options
+                : [{ payment: 'outside_combat', action: 0, free: 0, movement: 0 }];
+            options.forEach((option) => {
+                const affordable = !isCombatActive || (Number(character.action_points_current) >= option.action
+                    && Number(character.free_actions_current) >= option.free
+                    && Number(character.movement_points_current) >= option.movement);
+                const pay = document.createElement('button');
+                pay.type = 'button';
+                pay.className = 'btn btn-secondary';
+                pay.textContent = isCombatActive ? facingPaymentLabel(option) : '\u041f\u043e\u0432\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f';
+                pay.disabled = !affordable;
+                pay.onclick = async () => {
+                    panel.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+                    try {
+                        const result = isCombatActive
+                            ? await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                                location_character_id: character.location_character_id,
+                                action_key: 'change_facing',
+                                facing_x: x,
+                                facing_y: y,
+                                payment: option.payment,
+                            })
+                            : await fetch(
+                                `/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/characters/${characterId}/facing`,
+                                {
+                                    method: 'PATCH',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        Authorization: `Bearer ${localStorage.getItem('access_token')}`,
+                                    },
+                                    body: JSON.stringify({ facing_x: x, facing_y: y }),
+                                },
+                            ).then(async (response) => {
+                                const payload = await response.json().catch(() => ({}));
+                                if (!response.ok) throw new Error(payload.error || 'Unable to turn');
+                                return payload;
+                            });
+                        closeFacingMenu();
+                        if (result?.state) setCombatState(result.state);
+                        else applyCharacterFacingVisual(characterId, x, y);
+                    } catch (error) {
+                        showNotification(error.message || '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0437\u0432\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f', 'system');
+                        showFacingMenu(characterId);
+                    }
+                };
+                paymentArea.appendChild(pay);
+            });
+        };
+        directionGrid.appendChild(button);
+    });
+    const close = document.createElement('button');
+    close.type = 'button'; close.className = 'btn btn-secondary'; close.textContent = '\u041e\u0442\u043c\u0435\u043d\u0430'; close.style.marginTop = '14px'; close.onclick = closeFacingMenu;
+    panel.append(title, directionGrid, paymentArea, close);
+    facingMenu.appendChild(panel);
+    facingMenu.addEventListener('pointerdown', (event) => {
+        if (event.target === facingMenu) closeFacingMenu();
+    });
+    document.body.appendChild(facingMenu);
+}
+
+function getLocationTileAtScreen(clientX, clientY) {
+    if (!renderer || !camera) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const hit = raycaster.intersectObjects(tileCubes)[0];
+    const coords = hit?.object?.userData?.tileByInstance?.[hit.instanceId];
+    return coords ? { x: coords.x, y: coords.z } : null;
+}
+
+function showFacingPaymentSelection(characterId, targetX, targetY, isCombatActive) {
+    const character = isCombatActive
+        ? findCombatCharacterByCharacterId(characterId)
+        : getCharacterModelEntry(characterId);
+    if (!character) return;
+    const details = getFacingChangeOptions(character, targetX, targetY);
+    if (!details.degrees) return;
+    facingMenu = document.createElement('div');
+    facingMenu.style.cssText = 'position:fixed;inset:0;z-index:1240;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(4,7,10,.48);';
+    const panel = document.createElement('div');
+    panel.style.cssText = 'width:min(360px,calc(100vw - 32px));padding:18px;border:1px solid rgba(255,255,255,.16);border-radius:16px;background:rgba(14,18,26,.98);color:#fff;box-shadow:0 24px 60px rgba(0,0,0,.48);';
+    const heading = document.createElement('div');
+    heading.innerHTML = `<strong style="font-size:18px;">\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442 \u043d\u0430 ${details.degrees}\u00b0</strong><div style="margin-top:4px;font-size:12px;opacity:.72;">${isCombatActive ? '\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u0440\u0430\u0442\u0443.' : '\u0412\u043d\u0435 \u0431\u043e\u044f \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e.'}</div>`;
+    panel.appendChild(heading);
+    const options = isCombatActive
+        ? details.options
+        : [{ payment: 'outside_combat', action: 0, free: 0, movement: 0 }];
+    options.forEach((option) => {
+        const affordable = !isCombatActive || (
+            Number(character.action_points_current) >= option.action
+            && Number(character.free_actions_current) >= option.free
+            && Number(character.movement_points_current) >= option.movement
+        );
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-secondary';
+        button.disabled = !affordable;
+        button.textContent = isCombatActive ? facingPaymentLabel(option) : '\u041f\u043e\u0432\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f';
+        button.style.cssText = 'display:block;width:100%;margin-top:10px;';
+        button.onclick = async () => {
+            panel.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+            try {
+                const result = isCombatActive
+                    ? await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                        location_character_id: character.location_character_id,
+                        action_key: 'change_facing',
+                        facing_x: targetX,
+                        facing_y: targetY,
+                        payment: option.payment,
+                    })
+                    : await fetch(`/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/characters/${characterId}/facing`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            Authorization: `Bearer ${localStorage.getItem('access_token')}`,
+                        },
+                        body: JSON.stringify({ facing_x: targetX, facing_y: targetY }),
+                    }).then(async (response) => {
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) throw new Error(payload.error || 'Unable to turn');
+                        return payload;
+                    });
+                closeFacingMenu();
+                if (result?.state) setCombatState(result.state);
+                else applyCharacterFacingVisual(characterId, targetX, targetY);
+            } catch (error) {
+                showNotification(error.message || '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0437\u0432\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f', 'system');
+                closeFacingMenu();
+            }
+        };
+        panel.appendChild(button);
+    });
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.className = 'btn btn-secondary'; cancel.textContent = '\u041e\u0442\u043c\u0435\u043d\u0430'; cancel.style.cssText = 'display:block;width:100%;margin-top:10px;'; cancel.onclick = closeFacingMenu;
+    panel.appendChild(cancel);
+    facingMenu.appendChild(panel);
+    facingMenu.addEventListener('pointerdown', (event) => {
+        if (event.target === facingMenu) closeFacingMenu();
+    });
+    document.body.appendChild(facingMenu);
+}
+
+function resolveFacingCell(clientX, clientY) {
+    const pending = pendingFacingSelection;
+    if (!pending) return;
+    const tile = getLocationTileAtScreen(clientX, clientY);
+    if (!tile) return;
+    const character = pending.isCombatActive
+        ? findCombatCharacterByCharacterId(pending.characterId)
+        : getCharacterModelEntry(pending.characterId);
+    if (!character) {
+        closeFacingMenu();
+        return;
+    }
+    const sourceX = Number(character.x ?? character.posX);
+    const sourceY = Number(character.y ?? character.posY);
+    const targetX = Math.sign(tile.x - sourceX);
+    const targetY = Math.sign(tile.y - sourceY);
+    if (!targetX && !targetY) {
+        showNotification('\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u0443\u044e \u043a\u043b\u0435\u0442\u043a\u0443', 'system');
+        return;
+    }
+    pendingFacingSelection = null;
+    renderer.domElement.style.cursor = 'default';
+    showFacingPaymentSelection(pending.characterId, targetX, targetY, pending.isCombatActive);
+}
+
+function showFacingMenu(characterId) {
+    const isCombatActive = combatState?.status === 'active';
+    const character = isCombatActive
+        ? findCombatCharacterByCharacterId(characterId)
+        : getCharacterModelEntry(characterId);
+    if (!character || (isCombatActive && !canActWithCombatCharacter(character)) || (!isCombatActive && !canControlCharacter(characterId))) return;
+    if (isCombatActive && Number(character.facing_changed_round) === Number(combatState?.round_number)) {
+        showNotification('\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442 \u0443\u0436\u0435 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d \u0432 \u044d\u0442\u043e\u043c \u0440\u0430\u0443\u043d\u0434\u0435', 'system');
+        return;
+    }
+    closeFacingMenu();
+    pendingFacingSelection = { characterId, isCombatActive };
+    renderer?.domElement && (renderer.domElement.style.cursor = 'crosshair');
+    showNotification('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043a\u043b\u0435\u0442\u043a\u0443, \u0432 \u0441\u0442\u043e\u0440\u043e\u043d\u0443 \u043a\u043e\u0442\u043e\u0440\u043e\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436 \u0434\u043e\u043b\u0436\u0435\u043d \u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c. Esc \u2014 \u043e\u0442\u043c\u0435\u043d\u0430.', 'system');
 }
 
 function showBracePaymentMenu(characterId) {
@@ -2721,7 +3025,7 @@ function updateCharacterTeamVisual(characterId, teamName, teamColor) {
     badge.style.borderColor = entry.teamColor || '#8b98a3';
 }
 
-export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null) {
+export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1) {
     if (characterModels.has(characterId)) {
         const old = characterModels.get(characterId);
         scene.remove(old.model);
@@ -2780,7 +3084,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     div.style.borderRadius = '10px';
     div.style.pointerEvents = 'none';
     const label = new CSS2DObject(div);
-    label.position.set(posX + 0.5, tileHeight + 1.2, posY + 0.5);
+    label.position.set(posX + 0.5, tileHeight + 1.55, posY + 0.5);
     scene.add(label);
 
     characterModels.set(characterId, {
@@ -2788,6 +3092,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         label,
         name,
         ownerId: colorUserId,
+        characterOwnerId: fallbackOwnerId,
         ownerName,
         hpZones,
         effects,
@@ -2801,12 +3106,14 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         teamColor: null,
     });
     updateCharacterTeamVisual(characterId, teamName, teamColor);
+    applyCharacterFacingVisual(characterId, facingX, facingY);
     const combatCharacter = findCombatCharacterByCharacterId(characterId);
     if (combatCharacter?.posture) {
         applyCharacterPostureVisual(characterId, combatCharacter.posture);
     }
     applyCharacterGrappleVisual(characterId, combatCharacter);
     invalidateMovementMapCache();
+    applyFogOfWar();
 }
 
 export async function refreshLocationTeams() {
@@ -2826,10 +3133,499 @@ export async function refreshLocationTeams() {
                 combatCharacter.team_color = character.team_color;
             }
         });
+        applyFogOfWar();
         renderCombatHud();
     } catch (error) {
         console.warn('Unable to refresh location teams', error);
     }
+}
+
+function fogIsActive() {
+    return Boolean(
+        currentLocationData
+        && Number(localStorage.getItem('user_id'))
+        && (!window.isGM || gmVisionCharacterId !== null),
+    );
+}
+
+function toggleGmVision(characterId = null) {
+    if (!window.isGM) return;
+    const nextCharacterId = Number(characterId);
+    gmVisionCharacterId = Number.isFinite(nextCharacterId) && nextCharacterId > 0
+        && gmVisionCharacterId !== nextCharacterId
+        ? nextCharacterId
+        : null;
+    applyFogOfWar();
+    renderCombatHud();
+    const entry = gmVisionCharacterId === null ? null : getCharacterModelEntry(gmVisionCharacterId);
+    showNotification(
+        entry
+            ? `Режим обзора: ${entry.name}`
+            : 'Полный обзор ГМа восстановлен',
+        'system',
+    );
+}
+
+function clearFogMeshes() {
+    fogMeshes.forEach((mesh) => {
+        scene?.remove(mesh);
+        mesh.userData.memoryMaterial?.dispose();
+    });
+    fogMeshes = [];
+    fogGeometry?.dispose();
+    fogMaterial?.dispose();
+    fogTexture?.dispose();
+    fogGeometry = null;
+    fogMaterial = null;
+    fogTexture = null;
+    fogMemoryGhosts.forEach((ghost) => {
+        scene?.remove(ghost);
+        disposeObject(ghost);
+    });
+    fogMemoryGhosts = new Map();
+    fogMemoryDecorationTemplates.forEach((template) => disposeObject(template));
+    fogMemoryDecorationTemplates = new Map();
+}
+
+function getFogMemoryStorageKey() {
+    const userId = Number(localStorage.getItem('user_id'));
+    const lobbyId = Number(window.currentLobbyId);
+    const locationId = Number(getCurrentLocationId());
+    return userId && lobbyId && locationId
+        ? `ttrpg:fog-memory:${userId}:${lobbyId}:${locationId}`
+        : null;
+}
+
+function loadFogMemory() {
+    const storageKey = getFogMemoryStorageKey();
+    if (storageKey === fogMemoryKey) return;
+    fogMemoryKey = storageKey;
+    fogMemory = new Map();
+    if (!storageKey) return;
+    try {
+        const stored = JSON.parse(localStorage.getItem(storageKey) || '{}');
+        Object.entries(stored).forEach(([key, value]) => {
+            if (value && typeof value === 'object') fogMemory.set(key, value);
+        });
+    } catch (error) {
+        console.warn('Unable to load fog memory', error);
+    }
+}
+
+function saveFogMemory() {
+    if (!fogMemoryKey) return;
+    try {
+        localStorage.setItem(fogMemoryKey, JSON.stringify(Object.fromEntries(fogMemory)));
+    } catch (error) {
+        console.warn('Unable to save fog memory', error);
+    }
+}
+
+function rememberFogTile(x, y) {
+    const key = `${x}:${y}`;
+    const tile = currentLocationData?.tiles_data?.[y]?.[x] || {};
+    const next = {
+        terrain: String(tile.terrain || 'grass'),
+        height: Number(tile.height) || 1,
+    };
+    const previous = fogMemory.get(key);
+    if (previous?.terrain === next.terrain && previous?.height === next.height) {
+        return { memory: previous, changed: false };
+    }
+    fogMemory.set(key, next);
+    return { memory: next, changed: true };
+}
+
+function cloneFogSnapshot(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
+function setFogGhostAppearance(root) {
+    root.traverse((child) => {
+        child.raycast = () => {};
+        if (!child.isMesh) return;
+        if (child.geometry) child.geometry = child.geometry.clone();
+        const isMaterialArray = Array.isArray(child.material);
+        const materials = isMaterialArray ? child.material : [child.material];
+        const ghostMaterials = materials.map((material) => {
+            const ghostMaterial = material.clone();
+            if (ghostMaterial.color) ghostMaterial.color.multiplyScalar(0.42);
+            ghostMaterial.transparent = true;
+            ghostMaterial.opacity = Math.min(Number(ghostMaterial.opacity ?? 1), 0.48);
+            ghostMaterial.depthWrite = false;
+            return ghostMaterial;
+        });
+        child.material = isMaterialArray ? ghostMaterials : ghostMaterials[0];
+    });
+    root.userData.fogMemoryGhost = true;
+    return root;
+}
+
+function cloneFogGhost(root) {
+    const ghost = root.clone(true);
+    ghost.traverse((child) => {
+        child.raycast = () => {};
+        if (!child.isMesh) return;
+        if (child.geometry) child.geometry = child.geometry.clone();
+        const isMaterialArray = Array.isArray(child.material);
+        const materials = isMaterialArray ? child.material : [child.material];
+        const clonedMaterials = materials.map((material) => material.clone());
+        child.material = isMaterialArray ? clonedMaterials : clonedMaterials[0];
+    });
+    ghost.userData.fogMemoryGhost = true;
+    return ghost;
+}
+
+function applyFogGhostPosture(model, posture) {
+    const normalized = COMBAT_POSTURES[posture] ? posture : 'standing';
+    const body = model.children.find((child) => child.userData?.posturePart === 'body');
+    const head = model.children.find((child) => child.userData?.posturePart === 'head');
+    if (!body || !head) return;
+    body.rotation.z = normalized === 'prone' ? Math.PI / 2 : 0;
+    body.scale.set(1, normalized === 'sitting' ? 0.68 : 1, 1);
+    body.position.set(0, normalized === 'prone' ? 0.25 : normalized === 'sitting' ? 0.25 : 0.35, 0);
+    head.position.set(
+        normalized === 'prone' ? 0.48 : 0,
+        normalized === 'prone' ? 0.22 : normalized === 'sitting' ? 0.58 : 0.8,
+        0,
+    );
+}
+
+function rememberFogContents(x, y) {
+    const key = `${x}:${y}`;
+    const memory = fogMemory.get(key);
+    if (!memory) return false;
+    const characters = Array.from(characterModels.entries())
+        .filter(([, entry]) => Number(entry.posX) === x && Number(entry.posY) === y)
+        .map(([characterId, entry]) => ({
+            characterId: Number(characterId),
+            ownerId: Number(entry.ownerId) || 0,
+            posX: x,
+            posY: y,
+            posture: entry.posture || 'standing',
+            facingX: Number(entry.facingX) || 0,
+            facingY: Number(entry.facingY) || 1,
+        }));
+    const structures = locationObjectMeshes
+        .filter((mesh) => {
+            const position = getObjectGridPosition(mesh.userData?.locationObject || {});
+            return Number(position.x) === x && Number(position.y) === y;
+        })
+        .map((mesh) => cloneFogSnapshot(mesh.userData.locationObject));
+    const decorations = objectMeshes
+        .filter((mesh) => Number(mesh.userData?.tileX) === x && Number(mesh.userData?.tileZ) === y);
+    const nextSignature = JSON.stringify({ characters, structures, decorations: decorations.map((mesh) => mesh.userData?.objType) });
+    const previousSignature = JSON.stringify({
+        characters: memory.characters || [],
+        structures: memory.structures || [],
+        decorations: memory.decorations || [],
+    });
+    decorations.forEach((mesh, index) => {
+        const decorationKey = `${key}:${index}:${mesh.userData?.objType || 'object'}`;
+        const current = fogMemoryDecorationTemplates.get(decorationKey);
+        if (current) disposeObject(current);
+        fogMemoryDecorationTemplates.set(decorationKey, setFogGhostAppearance(mesh.clone(true)));
+    });
+    memory.characters = characters;
+    memory.structures = structures;
+    memory.decorations = decorations.map((mesh) => mesh.userData?.objType || 'object');
+    return nextSignature !== previousSignature;
+}
+
+function getFogGhost(key, createGhost) {
+    let ghost = fogMemoryGhosts.get(key);
+    if (!ghost) {
+        ghost = createGhost();
+        if (!ghost) return null;
+        fogMemoryGhosts.set(key, ghost);
+        scene.add(ghost);
+    }
+    return ghost;
+}
+
+function createCharacterFogGhost(snapshot) {
+    const ghost = setFogGhostAppearance(createCharacterModel(snapshot.ownerId));
+    ghost.position.set(snapshot.posX + 0.5, Number(snapshot.height) || 1, snapshot.posY + 0.5);
+    ghost.rotation.y = Math.atan2(Number(snapshot.facingX) || 0, Number(snapshot.facingY) || 1);
+    applyFogGhostPosture(ghost, snapshot.posture);
+    return ghost;
+}
+
+function createStructureFogGhost(snapshot, height) {
+    const ghost = setFogGhostAppearance(createLocationObjectMesh(snapshot));
+    ghost.position.y = Number(height) || 1;
+    return ghost;
+}
+
+function syncFogMemoryGhosts(active, sources) {
+    const desired = new Map();
+    if (active) {
+        fogMemory.forEach((memory, tileKey) => {
+            (memory.characters || []).forEach((snapshot) => {
+                const current = characterModels.get(snapshot.characterId);
+                if (current && isTileVisibleToPlayer(current.posX, current.posY, sources)) return;
+                desired.set(`character:${snapshot.characterId}`, {
+                    create: () => createCharacterFogGhost({ ...snapshot, height: memory.height }),
+                });
+            });
+            (memory.structures || []).forEach((snapshot) => {
+                const position = getObjectGridPosition(snapshot || {});
+                if (isTileVisibleToPlayer(position.x ?? 0, position.y ?? 0, sources)) return;
+                desired.set(`structure:${snapshot.id}`, {
+                    create: () => createStructureFogGhost(snapshot, memory.height),
+                });
+            });
+            (memory.decorations || []).forEach((type, index) => {
+                const template = fogMemoryDecorationTemplates.get(`${tileKey}:${index}:${type}`);
+                if (!template) return;
+                const [x, y] = tileKey.split(':').map(Number);
+                if (isTileVisibleToPlayer(x, y, sources)) return;
+                desired.set(`decoration:${tileKey}:${index}:${type}`, {
+                    create: () => cloneFogGhost(template),
+                });
+            });
+        });
+    }
+    fogMemoryGhosts.forEach((ghost, key) => {
+        if (desired.has(key)) return;
+        scene.remove(ghost);
+        disposeObject(ghost);
+        fogMemoryGhosts.delete(key);
+    });
+    desired.forEach((definition, key) => {
+        const ghost = getFogGhost(key, definition.create);
+        if (ghost) ghost.visible = true;
+    });
+}
+
+function getFogMemoryMaterial(mesh, memory) {
+    const terrainColor = terrainColors[memory.terrain] || 0x3a5f0b;
+    const current = mesh.userData.memoryMaterial;
+    if (current?.userData?.terrainColor === terrainColor) return current;
+    current?.dispose();
+    const color = new THREE.Color(terrainColor).multiplyScalar(0.58);
+    const material = new THREE.MeshBasicMaterial({
+        color,
+        side: THREE.DoubleSide,
+    });
+    material.userData.terrainColor = terrainColor;
+    mesh.userData.memoryMaterial = material;
+    return material;
+}
+
+function buildFogMeshes() {
+    clearFogMeshes();
+    if (!scene || !currentLocationData) return;
+    const textureCanvas = document.createElement('canvas');
+    textureCanvas.width = 96;
+    textureCanvas.height = 96;
+    const context = textureCanvas.getContext('2d');
+    const gradient = context.createRadialGradient(48, 48, 8, 48, 48, 68);
+    gradient.addColorStop(0, 'rgba(255,255,255,0.94)');
+    gradient.addColorStop(0.58, 'rgba(255,255,255,0.76)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 96, 96);
+    fogTexture = new THREE.CanvasTexture(textureCanvas);
+    fogGeometry = new THREE.PlaneGeometry(1.01, 1.01);
+    fogMaterial = new THREE.MeshBasicMaterial({
+        color: 0x4b5c62,
+        map: fogTexture,
+        transparent: true,
+        opacity: 0.72,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+    });
+    for (let y = 0; y < currentLocationData.grid_height; y++) {
+        for (let x = 0; x < currentLocationData.grid_width; x++) {
+            const mesh = new THREE.Mesh(fogGeometry, fogMaterial);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(x + 0.5, getTileHeight(x, y) + 0.015, y + 0.5);
+            mesh.userData.fogTile = { x, y };
+            // Fog is visual only and must never intercept map clicks or movement targeting.
+            mesh.raycast = () => {};
+            scene.add(mesh);
+            fogMeshes.push(mesh);
+        }
+    }
+}
+
+function getFogVisionSources() {
+    if (window.isGM && gmVisionCharacterId !== null) {
+        const selected = characterModels.get(gmVisionCharacterId);
+        return selected ? [selected] : [];
+    }
+    const userId = Number(localStorage.getItem('user_id'));
+    const entries = Array.from(characterModels.values());
+    const directSources = entries.filter((entry) => (
+        Number(entry.controlledBy) === userId || Number(entry.characterOwnerId) === userId
+    ));
+    const alliedTeams = new Set(
+        directSources.map((entry) => String(entry.teamName || '').trim()).filter(Boolean),
+    );
+    const teamSources = alliedTeams.size
+        ? entries.filter((entry) => alliedTeams.has(String(entry.teamName || '').trim()))
+        : [];
+    return Array.from(new Set([...directSources, ...teamSources]));
+}
+
+function blocksVision(object) {
+    const properties = object?.properties || {};
+    if (properties.blocks_vision === false) return false;
+    return properties.blocks_vision === true || String(object?.type || '').toLowerCase() === 'wall';
+}
+
+function getFogObjectHeight(object) {
+    const properties = object?.properties || {};
+    const dimensions = properties.dimensions || {};
+    const explicit = Number(dimensions.height ?? properties.height ?? object?.height);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    const type = String(object?.type || '').toLowerCase();
+    return {
+        fence: 1.2,
+        chair: 0.9,
+        chest: 1,
+        table: 1,
+        shelf: 2,
+        tree: 2.5,
+        rock: 1.2,
+        house: 5,
+        tent: 2.2,
+        wall: 2.5,
+    }[type] || 1.5;
+}
+
+function getVisionBlockerHeight(x, y) {
+    const tile = currentLocationData?.tiles_data?.[y]?.[x];
+    const tileObjects = (tile?.objects || []).filter((object) => blocksVision(object));
+    const locationObjects = (currentLocationData?.objects || []).filter((object) => (
+        blocksVision(object) && tileHasObjectFootprint(object, x, y)
+    ));
+    return [...tileObjects, ...locationObjects].reduce(
+        (height, object) => Math.max(height, getTileHeight(x, y) + getFogObjectHeight(object)),
+        -Infinity,
+    );
+}
+
+function visionEyeHeight(entry) {
+    const posture = entry?.posture || 'standing';
+    const eyeOffset = posture === 'prone' ? 0.35 : posture === 'sitting' ? 1.05 : 1.65;
+    return getTileHeight(entry?.posX ?? 0, entry?.posY ?? 0) + eyeOffset;
+}
+
+function hasLineOfSight(sourceX, sourceY, targetX, targetY, sourceHeight = null, targetHeight = null) {
+    let x = sourceX;
+    let y = sourceY;
+    const dx = Math.abs(targetX - sourceX);
+    const sx = sourceX < targetX ? 1 : -1;
+    const dy = -Math.abs(targetY - sourceY);
+    const sy = sourceY < targetY ? 1 : -1;
+    let error = dx + dy;
+    const totalSteps = Math.max(dx, -dy, 1);
+    const fromHeight = sourceHeight ?? (getTileHeight(sourceX, sourceY) + 1.65);
+    const toHeight = targetHeight ?? (getTileHeight(targetX, targetY) + 1.65);
+    let steps = 0;
+    while (x !== targetX || y !== targetY) {
+        const twiceError = 2 * error;
+        if (twiceError >= dy) {
+            error += dy;
+            x += sx;
+        }
+        if (twiceError <= dx) {
+            error += dx;
+            y += sy;
+        }
+        steps += 1;
+        const rayHeight = fromHeight + (toHeight - fromHeight) * (steps / totalSteps);
+        const blockerHeight = getVisionBlockerHeight(x, y);
+        // A low obstacle only hides what is physically below its top edge.
+        if (Number.isFinite(blockerHeight) && blockerHeight >= rayHeight) {
+            return x === targetX && y === targetY;
+        }
+    }
+    return true;
+}
+
+function isPointVisibleToPlayer(x, y, targetHeight, sources) {
+    return sources.some((source) => {
+        const sourceX = Number(source.posX);
+        const sourceY = Number(source.posY);
+        const dx = x - sourceX;
+        const dy = y - sourceY;
+        const distance = Math.hypot(dx, dy);
+        if (!distance) return true;
+        if (distance > FOG_VIEW_RADIUS) return false;
+        const facingX = Number(source.facingX) || 0;
+        const facingY = Number(source.facingY) || 1;
+        const facingLength = Math.hypot(facingX, facingY);
+        const cosine = (dx * facingX + dy * facingY) / (distance * facingLength);
+        if (cosine < Math.cos(FOG_VIEW_HALF_ANGLE)) return false;
+        return hasLineOfSight(sourceX, sourceY, x, y, visionEyeHeight(source), targetHeight);
+    });
+}
+
+function isTileVisibleToPlayer(x, y, sources) {
+    return isPointVisibleToPlayer(x, y, getTileHeight(x, y) + 1.65, sources);
+}
+
+function applyFogOfWar() {
+    if (!scene || !currentLocationData) return;
+    if (!fogMeshes.length) buildFogMeshes();
+    const active = fogIsActive();
+    loadFogMemory();
+    const sources = active ? getFogVisionSources() : [];
+    let learnedNewTiles = false;
+    fogMeshes.forEach((mesh) => {
+        const tile = mesh.userData.fogTile;
+        const visibleNow = active && isTileVisibleToPlayer(tile.x, tile.y, sources);
+        const key = `${tile.x}:${tile.y}`;
+        if (visibleNow) {
+            const remembered = rememberFogTile(tile.x, tile.y);
+            learnedNewTiles = remembered.changed || rememberFogContents(tile.x, tile.y) || learnedNewTiles;
+            mesh.visible = false;
+            return;
+        }
+        if (!active) {
+            mesh.visible = false;
+            return;
+        }
+        const memory = fogMemory.get(key);
+        mesh.visible = true;
+        if (memory) {
+            mesh.material = getFogMemoryMaterial(mesh, memory);
+            mesh.position.y = Number(memory.height) + 0.018;
+        } else {
+            mesh.material = fogMaterial;
+            mesh.position.y = getTileHeight(tile.x, tile.y) + 0.015;
+        }
+    });
+    if (learnedNewTiles) saveFogMemory();
+    characterModels.forEach((entry) => {
+        const visible = !active || isTileVisibleToPlayer(entry.posX, entry.posY, sources);
+        entry.model.visible = visible;
+        entry.label.visible = visible;
+    });
+    objectMeshes.forEach((mesh) => {
+        const { tileX, tileZ } = mesh.userData || {};
+        const sourceObject = mesh.userData?.sourceObject || { type: mesh.userData?.objType };
+        mesh.visible = !active || isPointVisibleToPlayer(
+            tileX,
+            tileZ,
+            getTileHeight(tileX, tileZ) + getFogObjectHeight(sourceObject),
+            sources,
+        );
+    });
+    locationObjectMeshes.forEach((mesh) => {
+        const object = mesh.userData?.locationObject || {};
+        const position = getObjectGridPosition(object);
+        mesh.visible = !active || isPointVisibleToPlayer(
+            position.x ?? 0,
+            position.y ?? 0,
+            getTileHeight(position.x ?? 0, position.y ?? 0) + getFogObjectHeight(object),
+            sources,
+        );
+    });
+    syncFogMemoryGhosts(active, sources);
 }
 
 function closeTeamManagementModal() {
@@ -3027,7 +3823,7 @@ export function applyCharacterPostureVisual(characterId, posture = 'standing') {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
     const normalized = COMBAT_POSTURES[posture] ? posture : 'standing';
-    const labelOffset = normalized === 'prone' ? 0.62 : normalized === 'sitting' ? 0.88 : 1.2;
+    const labelOffset = normalized === 'prone' ? 0.95 : normalized === 'sitting' ? 1.25 : 1.55;
     const tileHeight = getTileHeight(entry.posX, entry.posY);
     const body = entry.model.children.find((child) => child.userData?.posturePart === 'body');
     const head = entry.model.children.find((child) => child.userData?.posturePart === 'head');
@@ -3056,6 +3852,7 @@ function applyCharacterFacingVisual(characterId, facingX = 0, facingY = 1) {
     entry.model.rotation.y = Math.atan2(x, y);
     entry.facingX = x;
     entry.facingY = y;
+    applyFogOfWar();
 }
 
 function applyCharacterGrappleVisual(characterId, combatCharacter = null) {
@@ -3082,16 +3879,18 @@ export function updateCharacterPosition(characterId, posX, posY) {
     if (!entry) return;
     const tileHeight = getTileHeight(posX, posY);
     entry.model.position.set(posX + 0.5, tileHeight, posY + 0.5);
-    const labelOffset = entry.posture === 'prone' ? 0.62 : entry.posture === 'sitting' ? 0.88 : 1.2;
+    const labelOffset = entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55;
     entry.label.position.set(posX + 0.5, tileHeight + labelOffset, posY + 0.5);
     entry.posX = posX;
     entry.posY = posY;
     invalidateMovementMapCache();
+    applyFogOfWar();
 }
 
 export function removeCharacterFromLocation(characterId) {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
+    if (gmVisionCharacterId === characterId) gmVisionCharacterId = null;
     if (entry.model) {
         disposeObject(entry.model);
         scene.remove(entry.model);
@@ -3105,6 +3904,7 @@ export function removeCharacterFromLocation(characterId) {
         combatActionMenuCharacterId = null;
     }
     invalidateMovementMapCache();
+    applyFogOfWar();
 }
 
 // ========== Контекстное меню ==========
@@ -3473,6 +4273,16 @@ function renderCombatHud() {
         teamButton.style.cssText = 'margin-left:auto; flex:0 0 auto;';
         teamButton.onclick = showTeamManagementModal;
         combatHud.querySelector('.combat-hud-header')?.appendChild(teamButton);
+        if (gmVisionCharacterId !== null) {
+            const fullVisionButton = document.createElement('button');
+            fullVisionButton.type = 'button';
+            fullVisionButton.className = 'btn btn-sm btn-secondary';
+            fullVisionButton.textContent = 'Обзор ГМа';
+            fullVisionButton.title = 'Вернуться к полному обзору ГМа';
+            fullVisionButton.style.cssText = 'margin-left:6px; flex:0 0 auto;';
+            fullVisionButton.onclick = () => toggleGmVision();
+            combatHud.querySelector('.combat-hud-header')?.appendChild(fullVisionButton);
+        }
     }
     const collapseBtn = combatHud.querySelector('.combat-hud-collapse-btn');
     if (collapseBtn) {
@@ -3544,6 +4354,7 @@ export function setCombatState(state) {
         );
         applyCharacterGrappleVisual(character.character_id, character);
     });
+    applyFogOfWar();
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
     resumeCompletedCombatAction(combatState);
     renderCombatHud();
@@ -3623,6 +4434,7 @@ export function initLocationScene(containerId) {
     // Контролы
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.enableZoom = true;
     controls.dampingFactor = 0.05;
     controls.maxPolarAngle = Math.PI / 2;
     controls.target.set(0, 0, 0);
@@ -5856,6 +6668,7 @@ function addLocationObjectMesh(obj) {
     const mesh = createLocationObjectMesh(obj);
     scene.add(mesh);
     locationObjectMeshes.push(mesh);
+    applyFogOfWar();
 }
 
 function removeLocationObjectMesh(objectId) {
@@ -5864,6 +6677,7 @@ function removeLocationObjectMesh(objectId) {
     scene.remove(mesh);
     disposeLocationObject(mesh);
     locationObjectMeshes = locationObjectMeshes.filter(item => item !== mesh);
+    applyFogOfWar();
 }
 
 function replaceLocationObjectMesh(object) {
@@ -6081,6 +6895,8 @@ export function loadLocation(data) {
     if (data.objects && data.objects.length) {
         data.objects.forEach(addLocationObjectMesh);
     }
+    buildFogMeshes();
+    applyFogOfWar();
 
     // Камера
     const distance = Math.max(gridWidth, gridHeight) * 0.8;
@@ -6190,7 +7006,7 @@ function rebuildTileObjects(tileX, tileZ) {
         } else {
             mesh = new THREE.Mesh(geometry, material);
         }
-        mesh.userData = { ...mesh.userData, tileX, tileZ, objType: obj.type };
+        mesh.userData = { ...mesh.userData, tileX, tileZ, objType: obj.type, sourceObject: obj };
         mesh.position.set(worldX, tileHeight + yOffset, worldZ);
         mesh.rotation.y = obj.rotation || 0;
         if (!isAnomalyEffect) mesh.scale.setScalar(obj.scale || 1);
@@ -6215,10 +7031,12 @@ export function applyLocationTilesUpdate(locationId, updates) {
         updateLocationObjectHeight(upd.x, upd.z);
     }
     invalidateMovementMapCache();
+    buildFogMeshes();
+    applyFogOfWar();
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
         entry.model.position.y = height;
-        entry.label.position.y = height + 1.2;
+        entry.label.position.y = height + (entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55);
     });
 }
 
@@ -6292,7 +7110,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
         entry.model.position.y = height;
-        entry.label.position.y = height + 1.2;
+        entry.label.position.y = height + (entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55);
     });
 }
 
@@ -6308,7 +7126,7 @@ function setupCharacterDragging() {
         raycaster.setFromCamera(mouse, camera);
         const models = [];
         characterModels.forEach((entry) => {
-            models.push(entry.model);
+        if (entry.model.visible) models.push(entry.model);
         });
         const intersects = raycaster.intersectObjects(models, true);
         if (intersects.length > 0) {
@@ -6418,6 +7236,12 @@ function setupCharacterDragging() {
         if (e.button !== 0) return;
         if (window.locationEditMode) return;
         if (isDraggingCharacter) return;
+        if (pendingFacingSelection) {
+            e.preventDefault();
+            e.stopPropagation();
+            resolveFacingCell(e.clientX, e.clientY);
+            return;
+        }
         if (armedMoveCharacterId) {
             e.preventDefault();
             e.stopPropagation();
@@ -6514,6 +7338,7 @@ function setupCharacterDragging() {
         };
         isDraggingCharacter = true;
         controls.enabled = false;
+        canvas.setPointerCapture?.(e.pointerId);
         canvas.style.cursor = 'grabbing';
         armedMoveCharacterId = null;
 
@@ -6555,7 +7380,7 @@ function setupCharacterDragging() {
         dragCharacter.model.position.set(newX, height, newZ);
         const entry = characterModels.get(dragCharacter.characterId);
         if (entry) {
-            entry.label.position.set(newX, height + 1.2, newZ);
+            entry.label.position.set(newX, height + (entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55), newZ);
             entry.posX = tileX;
             entry.posY = tileZ;
         }
@@ -6605,6 +7430,7 @@ function setupCharacterDragging() {
         isDraggingCharacter = false;
         armedMoveCharacterId = null;
         clearMovementPreview();
+        if (canvas.hasPointerCapture?.(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
         controls.enabled = true;
         canvas.style.cursor = 'default';
     };
@@ -6614,6 +7440,12 @@ function setupCharacterDragging() {
     canvas.addEventListener('pointercancel', onPointerCancel);
     handlers.canvas.charPointerUp = onPointerUp;
     handlers.canvas.charPointerCancel = onPointerCancel;
+    // Pointer capture normally handles this; the window fallback prevents a stuck camera
+    // when the browser cancels the pointer outside of the WebGL canvas.
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+    handlers.window.charDragPointerUp = onPointerUp;
+    handlers.window.charDragPointerCancel = onPointerCancel;
 
     // contextmenu
     const onContextMenu = (e) => {
@@ -6667,6 +7499,11 @@ function setupCharacterDragging() {
         if (postureMenu && postureMenu.style.display !== 'none') {
             e.preventDefault();
             closePostureMenu();
+        }
+        if (pendingFacingSelection || facingMenu) {
+            e.preventDefault();
+            closeFacingMenu();
+            canvas.style.cursor = 'default';
         }
         if (combatParticipantMenu) {
             e.preventDefault();
@@ -6942,6 +7779,14 @@ export function setupLocationEditing() {
     handlers.canvas.wheel = onWheel;
 
     eventCleanup = () => {
+        if (handlers.window.charDragPointerUp) {
+            window.removeEventListener('pointerup', handlers.window.charDragPointerUp);
+            delete handlers.window.charDragPointerUp;
+        }
+        if (handlers.window.charDragPointerCancel) {
+            window.removeEventListener('pointercancel', handlers.window.charDragPointerCancel);
+            delete handlers.window.charDragPointerCancel;
+        }
         // Удаляем все обработчики из хранилища
         Object.keys(handlers.window).forEach(key => {
             window.removeEventListener(key, handlers.window[key]);
@@ -7217,6 +8062,8 @@ export function setEditButtonVisible(visible) {
 
 export function destroyLocationScene() {
     closeNarrativeActionModal();
+    closeFacingMenu();
+    clearFogMeshes();
     locationActive = false;
     closeAimedZoneMenu();
 

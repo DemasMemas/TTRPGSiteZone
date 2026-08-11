@@ -111,6 +111,8 @@ def handle_join_location(data):
             'controlled_by': lc.controlled_by,
             'team_name': lc.team_name,
             'team_color': lc.team_color,
+            'facing_x': lc.facing_x,
+            'facing_y': lc.facing_y,
             'owner_username': character.owner.username if character.owner else None,
             'hp_zones': lc.hp_zones,
             'effects': lc.effects,

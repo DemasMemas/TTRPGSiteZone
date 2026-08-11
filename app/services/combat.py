@@ -118,6 +118,7 @@ COVER_CLASSES = {
 
 
 ACTION_CATALOG = [
+    {'key': 'change_facing', 'label': '\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'attack', 'label': 'Атака', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
     {'key': 'aim', 'label': 'Прицеливание', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
     {'key': 'draw_weapon', 'label': 'Достать оружие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
@@ -809,7 +810,7 @@ class CombatService:
             raise ValidationError("Character is already in this posture")
 
         data = loc_char.character.data if loc_char.character and isinstance(loc_char.character.data, dict) else {}
-        agility_bonus = CombatService._skill_modifier(data, 'skills.physical.agility')
+        agility_bonus = CombatService._base_skill_modifier(data, 'skills.physical.agility')
         transition = frozenset((source, target))
         if transition == frozenset(('standing', 'sitting')):
             return [{'resource': 'movement', 'cost': max(0, 5 - agility_bonus)}]
@@ -819,8 +820,64 @@ class CombatService:
                 {'resource': 'action', 'cost': 1},
             ]
         if transition == frozenset(('standing', 'prone')):
-            return [{'resource': 'movement', 'cost': max(0, 8 - agility_bonus)}]
+            return [
+                {'resource': 'movement', 'cost': max(0, 8 - agility_bonus)},
+                {'resource': 'action', 'cost': 2},
+            ]
         raise ValidationError("Unsupported posture transition")
+
+    @staticmethod
+    def _facing_change_options(loc_char, target_x, target_y):
+        target_x = CombatService._coerce_int(target_x, 0)
+        target_y = CombatService._coerce_int(target_y, 0)
+        if (target_x, target_y) == (0, 0) or abs(target_x) > 1 or abs(target_y) > 1:
+            raise ValidationError("Choose one of the eight facing directions")
+        current_x = CombatService._coerce_int(getattr(loc_char, 'facing_x', 0), 0)
+        current_y = CombatService._coerce_int(getattr(loc_char, 'facing_y', 1), 1)
+        current_length = math.hypot(current_x, current_y)
+        target_length = math.hypot(target_x, target_y)
+        if not current_length:
+            current_x, current_y, current_length = 0, 1, 1
+        cosine = max(
+            -1.0,
+            min(1.0, (current_x * target_x + current_y * target_y) / (current_length * target_length)),
+        )
+        degrees = int(round(math.degrees(math.acos(cosine))))
+        if degrees == 0:
+            raise ValidationError("Character is already facing that direction")
+        character_data = (
+            loc_char.character.data
+            if loc_char.character and isinstance(loc_char.character.data, dict)
+            else {}
+        )
+        agility_bonus = CombatService._base_skill_modifier(
+            character_data, 'skills.physical.agility',
+        )
+        prone = CombatService._posture_key(loc_char) == 'prone'
+        movement_cost = (3 if degrees <= 45 else 5) - agility_bonus + (3 if prone else 0)
+        action_extra = 1 if prone else 0
+        if degrees <= 45:
+            options = [
+                {'payment': 'free', 'action_points': action_extra, 'free_actions': 1, 'movement_points': 0},
+                {'payment': 'action', 'action_points': 1 + action_extra, 'free_actions': 0, 'movement_points': 0},
+                {'payment': 'movement', 'action_points': 0, 'free_actions': 0, 'movement_points': max(0, movement_cost)},
+            ]
+        else:
+            options = [
+                {'payment': 'mixed', 'action_points': 1 + action_extra, 'free_actions': 1, 'movement_points': 0},
+                {'payment': 'action', 'action_points': 2 + action_extra, 'free_actions': 0, 'movement_points': 0},
+                {'payment': 'movement', 'action_points': 0, 'free_actions': 0, 'movement_points': max(0, movement_cost)},
+            ]
+        return {
+            'from_x': current_x,
+            'from_y': current_y,
+            'to_x': target_x,
+            'to_y': target_y,
+            'degrees': degrees,
+            'prone': prone,
+            'agility_bonus': agility_bonus,
+            'options': options,
+        }
 
     @staticmethod
     def _validate_posture_movement(posture, movement_mode):
@@ -1830,6 +1887,21 @@ class CombatService:
         relative_x = attacker.pos_x - target.pos_x
         relative_y = attacker.pos_y - target.pos_y
         return facing_x * relative_x + facing_y * relative_y < 0
+
+    @staticmethod
+    def _is_in_facing_arc(attacker, target_x, target_y, half_angle_degrees=60):
+        delta_x = CombatService._coerce_float(target_x, 0) - CombatService._coerce_float(attacker.pos_x, 0)
+        delta_y = CombatService._coerce_float(target_y, 0) - CombatService._coerce_float(attacker.pos_y, 0)
+        distance = math.hypot(delta_x, delta_y)
+        if distance <= 1e-9:
+            return True
+        facing_x = CombatService._coerce_int(getattr(attacker, 'facing_x', 0), 0)
+        facing_y = CombatService._coerce_int(getattr(attacker, 'facing_y', 1), 1)
+        facing_length = math.hypot(facing_x, facing_y)
+        if facing_length <= 1e-9:
+            facing_x, facing_y, facing_length = 0, 1, 1
+        cosine = (delta_x * facing_x + delta_y * facing_y) / (distance * facing_length)
+        return cosine >= math.cos(math.radians(half_angle_degrees))
 
     @staticmethod
     def _shooting_movement_modifiers(shooter_mode=None, target_mode=None):
@@ -4539,6 +4611,8 @@ class CombatService:
             'braced_weapon_index': loc_char.braced_weapon_index,
             'facing_x': CombatService._coerce_int(loc_char.facing_x, 0),
             'facing_y': CombatService._coerce_int(loc_char.facing_y, 1),
+            'facing_changed_round': loc_char.facing_changed_round,
+            'agility_bonus': CombatService._base_skill_modifier(data, 'skills.physical.agility'),
             'melee_swing_round': loc_char.melee_swing_round,
             'melee_block_round': loc_char.melee_block_round,
             'melee_block_effectiveness': loc_char.melee_block_effectiveness or 0,
@@ -5175,6 +5249,8 @@ class CombatService:
         target_x=None,
         target_y=None,
         posture=None,
+        facing_x=None,
+        facing_y=None,
         attack_type=None,
         target_zone=None,
         payment=None,
@@ -5228,6 +5304,7 @@ class CombatService:
         attack_details = None
         aim_details = None
         posture_details = None
+        facing_details = None
         draw_details = None
         reload_details = None
         clear_jam_details = None
@@ -5789,6 +5866,32 @@ class CombatService:
                 **selected,
             }
 
+        if action_key == 'change_facing':
+            if CombatService._coerce_int(character.facing_changed_round, 0) == current_round:
+                raise ValidationError("A character can turn only once per round")
+            facing_details = CombatService._facing_change_options(character, facing_x, facing_y)
+            selected_payment = str(payment or '').lower()
+            selected = next(
+                (option for option in facing_details['options'] if option['payment'] == selected_payment),
+                None,
+            )
+            if not selected:
+                raise ValidationError("Choose a valid payment method for turning")
+            for field, key in (
+                ('action_points_current', 'action_points'),
+                ('free_actions_current', 'free_actions'),
+                ('movement_points_current', 'movement_points'),
+            ):
+                if getattr(character, field) < selected[key]:
+                    raise ValidationError("Not enough resources")
+            character.action_points_current -= selected['action_points']
+            character.free_actions_current -= selected['free_actions']
+            character.movement_points_current -= selected['movement_points']
+            character.facing_x = facing_details['to_x']
+            character.facing_y = facing_details['to_y']
+            character.facing_changed_round = current_round
+            facing_details['payment'] = selected_payment
+
         if action_key == 'draw_weapon':
             weapons = (character.character.data or {}).get('weapons') or []
             weapon_index = CombatService._coerce_int(weapon_index, -1)
@@ -5905,6 +6008,8 @@ class CombatService:
             ).first()
             if not target or target.id == character.id:
                 raise ValidationError("Aim target not found")
+            if not CombatService._is_in_facing_arc(character, target.pos_x, target.pos_y):
+                raise ValidationError("The target is outside the character's field of view")
             aim_details = {
                 'weapon_index': weapon_index,
                 'target_character_id': target_character_id,
@@ -6173,6 +6278,8 @@ class CombatService:
                     location_id=location_id,
                     character_id=target_character_id,
                 ).first()
+                if not range_target or range_target.id == character.id:
+                    raise ValidationError("Target character not found")
             target_distance = (
                 max(
                     abs(character.pos_x - range_target.pos_x),
@@ -6187,6 +6294,21 @@ class CombatService:
                     if target_object else None
                 )
             )
+            if fire_mode == 'area':
+                facing_target_x, facing_target_y = area_center_x, area_center_y
+            elif target_object:
+                facing_target_x, facing_target_y = target_object.tile_x, target_object.tile_y
+            elif range_target:
+                facing_target_x, facing_target_y = range_target.pos_x, range_target.pos_y
+            else:
+                facing_target_x, facing_target_y = None, None
+            if (
+                facing_target_x is not None
+                and not CombatService._is_in_facing_arc(
+                    character, facing_target_x, facing_target_y,
+                )
+            ):
+                raise ValidationError("The target is outside the character's field of view")
             weapon_range = CombatService._coerce_int(
                 weapon.get('range', (weapon.get('attributes') or {}).get('range')),
                 0,
@@ -6358,7 +6480,7 @@ class CombatService:
             character.movement_points_max += gain
             character.movement_points_current += gain
             CombatService._clear_aim(character)
-        elif action_key == 'change_posture':
+        elif action_key in {'change_posture', 'change_facing'}:
             CombatService._clear_aim(character)
         elif action_key == 'draw_weapon':
             pass
@@ -6651,6 +6773,7 @@ class CombatService:
                 'attack': None,
                 'aim': None,
                 'posture_change': None,
+                'facing_change': None,
                 'draw_weapon': None,
                 'reload_weapon': None,
                 'clear_weapon_jam': None,
@@ -6666,6 +6789,7 @@ class CombatService:
             'attack': attack_details,
             'aim': aim_details,
             'posture_change': posture_details,
+            'facing_change': facing_details,
             'draw_weapon': draw_details,
             'reload_weapon': reload_details,
             'clear_weapon_jam': clear_jam_details,
@@ -6960,6 +7084,7 @@ class CombatService:
             loc_char.grapple_strengthened = False
             loc_char.grapple_choke_rounds = 0
             loc_char.grapple_live_shield = False
+            loc_char.facing_changed_round = None
             CombatService._set_active_weapon(loc_char, loc_char.drawn_weapon_index)
             CombatService._clear_aim(loc_char)
             character = getattr(loc_char, 'character', None)

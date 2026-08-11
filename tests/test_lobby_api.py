@@ -97,6 +97,70 @@ def test_gm_can_assign_location_teams_and_players_cannot_edit_them(
     assert invalid_color.get_json()["characters"][0]["team_color"] is None
 
 
+def test_combat_facing_change_spends_resources_and_is_limited_per_round(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("facing-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers)
+    location = Location(lobby_id=lobby["id"], name="Facing test", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    location_character = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        action_points_current=5,
+        free_actions_current=1,
+        movement_points_current=6,
+        facing_x=0,
+        facing_y=1,
+    )
+    db.session.add(location_character)
+    db.session.flush()
+    combat = LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_order=[location_character.id],
+        current_location_character_id=location_character.id,
+    )
+    db.session.add(combat)
+    db.session.commit()
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action"
+    turned = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={
+            "location_character_id": location_character.id,
+            "action_key": "change_facing",
+            "facing_x": 1,
+            "facing_y": 1,
+            "payment": "free",
+        },
+    )
+    assert turned.status_code == 200
+    db.session.refresh(location_character)
+    assert (location_character.facing_x, location_character.facing_y) == (1, 1)
+    assert location_character.free_actions_current == 0
+    assert location_character.facing_changed_round == 1
+
+    repeated = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={
+            "location_character_id": location_character.id,
+            "action_key": "change_facing",
+            "facing_x": 1,
+            "facing_y": 0,
+            "payment": "action",
+        },
+    )
+    assert repeated.status_code == 400
+
+
 @pytest.mark.parametrize(
     ("penalty", "distance", "label"),
     [

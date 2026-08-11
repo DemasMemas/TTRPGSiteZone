@@ -1853,6 +1853,57 @@ def change_character_posture_outside_combat(
 
 
 @lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/facing',
+    methods=['PATCH'],
+)
+@jwt_required()
+@requires_participant
+def change_character_facing_outside_combat(
+    lobby_id,
+    location_id,
+    character_id,
+    lobby,
+    participant,
+):
+    location = Location.query.filter_by(id=location_id, lobby_id=lobby_id).first()
+    if not location:
+        return jsonify({'error': 'Location not found'}), 404
+    combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
+    if combat_state and combat_state.status == 'active':
+        return jsonify({'error': 'Use the combat action to turn'}), 409
+    location_character = LocationCharacter.query.filter_by(
+        location_id=location_id,
+        character_id=character_id,
+    ).first()
+    if not location_character:
+        return jsonify({'error': 'Character is not in this location'}), 404
+    user_id = participant.user_id
+    can_control = (
+        lobby.gm_id == user_id
+        or location_character.controlled_by == user_id
+        or (location_character.character and location_character.character.owner_id == user_id)
+    )
+    if not can_control:
+        return jsonify({'error': 'You do not control this character'}), 403
+    payload = request.get_json() or {}
+    facing_x = CombatService._coerce_int(payload.get('facing_x'), 0)
+    facing_y = CombatService._coerce_int(payload.get('facing_y'), 0)
+    if (facing_x, facing_y) == (0, 0) or abs(facing_x) > 1 or abs(facing_y) > 1:
+        return jsonify({'error': 'Choose one of the eight facing directions'}), 400
+    location_character.facing_x = facing_x
+    location_character.facing_y = facing_y
+    db.session.commit()
+    result = {
+        'location_id': location_id,
+        'character_id': character_id,
+        'facing_x': facing_x,
+        'facing_y': facing_y,
+    }
+    socketio.emit('location_character_facing_updated', result, room=f"location_{location_id}")
+    return jsonify(result), 200
+
+
+@lobbies_bp.route(
     '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/interaction',
     methods=['GET'],
 )
@@ -2253,6 +2304,8 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         target_x=data.get('target_x'),
         target_y=data.get('target_y'),
         posture=data.get('posture'),
+        facing_x=data.get('facing_x'),
+        facing_y=data.get('facing_y'),
         attack_type=data.get('attack_type'),
         target_zone=data.get('target_zone'),
         payment=data.get('payment'),

@@ -650,7 +650,10 @@ def test_agility_reduces_posture_change_movement_cost(source, target, agility, e
 
     options = CombatService._posture_change_options(location_character, target)
 
-    assert options == [{"resource": "movement", "cost": expected_cost}]
+    expected_options = [{"resource": "movement", "cost": expected_cost}]
+    if {source, target} == {"standing", "prone"}:
+        expected_options.append({"resource": "action", "cost": 2})
+    assert options == expected_options
 
 
 def test_sitting_and_prone_transition_can_use_movement_or_action_points():

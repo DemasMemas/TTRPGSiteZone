@@ -784,6 +784,8 @@ if (socket) {
                     Number(s.controlled_by),
                     s.team_name,
                     s.team_color,
+                    s.facing_x,
+                    s.facing_y,
                 );
             });
         });
@@ -835,6 +837,8 @@ if (socket) {
                 Number(data.character.controlled_by),
                 data.character.team_name,
                 data.character.team_color,
+                data.character.facing_x,
+                data.character.facing_y,
             );
         });
     });
@@ -848,6 +852,12 @@ if (socket) {
         if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
         import('./locationScene.js').then(module => {
             module.applyCharacterPostureVisual(data.character_id, data.posture);
+        });
+    });
+    socket.on('location_character_facing_updated', (data) => {
+        if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
+        import('./locationScene.js').then(module => {
+            module.applyCharacterFacingVisual(data.character_id, data.facing_x, data.facing_y);
         });
     });
     socket.on('location_teams_updated', (data) => {

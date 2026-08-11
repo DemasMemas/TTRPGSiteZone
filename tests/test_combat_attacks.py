@@ -20,6 +20,15 @@ def test_aimed_shot_can_override_hit_zone():
     assert CombatService._random_hit_zone(1, "head") == "head"
 
 
+def test_ranged_targets_must_stay_inside_the_facing_arc():
+    shooter = SimpleNamespace(pos_x=5, pos_y=5, facing_x=0, facing_y=1)
+
+    assert CombatService._is_in_facing_arc(shooter, 5, 12)
+    assert CombatService._is_in_facing_arc(shooter, 10, 10)
+    assert not CombatService._is_in_facing_arc(shooter, 5, 1)
+    assert not CombatService._is_in_facing_arc(shooter, 10, 4)
+
+
 @pytest.mark.parametrize(
     ("shooter_mode", "target_mode", "penalty", "disadvantage"),
     [
