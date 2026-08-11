@@ -475,6 +475,30 @@ export const Server = {
         });
     },
 
+    async reserveLocationCombatReaction(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/reaction/reserve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async requestLocationCombatReaction(lobbyId, locationId, locationCharacterId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/reaction/request`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ location_character_id: locationCharacterId }),
+        });
+    },
+
+    async resolveLocationCombatReaction(lobbyId, locationId, approve) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/reaction/resolve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ approve }),
+        });
+    },
+
     async spendLocationCombatResources(lobbyId, locationId, payload) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/spend`, {
             method: 'POST',

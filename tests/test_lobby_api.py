@@ -161,6 +161,95 @@ def test_combat_facing_change_spends_resources_and_is_limited_per_round(
     assert repeated.status_code == 400
 
 
+def test_reaction_reserve_interrupts_and_returns_to_the_original_turn(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("reaction-gm")
+    player = create_user("reaction-player")
+    other = create_user("reaction-other")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    join_lobby(client, lobby, other, auth_headers)
+    player_character = create_character(client, lobby, player, auth_headers)
+    other_character = create_character(client, lobby, other, auth_headers)
+    location = Location(lobby_id=lobby["id"], name="Reaction test", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    reactor = LocationCharacter(
+        location_id=location.id,
+        character_id=player_character["id"],
+        controlled_by=player["id"],
+        action_points_current=4,
+        free_actions_current=1,
+        movement_points_current=5,
+    )
+    active = LocationCharacter(
+        location_id=location.id,
+        character_id=other_character["id"],
+        controlled_by=other["id"],
+        action_points_current=5,
+        free_actions_current=1,
+        movement_points_current=0,
+    )
+    db.session.add_all([reactor, active])
+    db.session.flush()
+    state = LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_order=[reactor.id, active.id],
+        current_location_character_id=reactor.id,
+    )
+    db.session.add(state)
+    db.session.commit()
+
+    base_url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/reaction"
+    reserved = client.post(
+        f"{base_url}/reserve",
+        headers=auth_headers(player),
+        json={
+            "location_character_id": reactor.id,
+            "action_points": 2,
+            "free_actions": 1,
+            "movement_points": 3,
+            "trigger": "Enemy leaves cover",
+        },
+    )
+    assert reserved.status_code == 200
+    db.session.refresh(reactor)
+    assert (reactor.action_points_current, reactor.free_actions_current, reactor.movement_points_current) == (2, 0, 2)
+
+    state.current_location_character_id = active.id
+    db.session.commit()
+    requested = client.post(
+        f"{base_url}/request",
+        headers=auth_headers(player),
+        json={"location_character_id": reactor.id},
+    )
+    assert requested.status_code == 200
+    assert requested.get_json()["reaction"]["pending_location_character_id"] == reactor.id
+
+    approved = client.post(
+        f"{base_url}/resolve",
+        headers=auth_headers(gm),
+        json={"approve": True},
+    )
+    assert approved.status_code == 200
+    assert approved.get_json()["current_location_character_id"] == reactor.id
+    db.session.refresh(reactor)
+    assert (reactor.action_points_current, reactor.free_actions_current, reactor.movement_points_current) == (2, 1, 3)
+
+    returned = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(player),
+        json={},
+    )
+    assert returned.status_code == 200
+    assert returned.get_json()["current_location_character_id"] == active.id
+
+
 @pytest.mark.parametrize(
     ("penalty", "distance", "label"),
     [

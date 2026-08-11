@@ -4502,6 +4502,9 @@ class CombatService:
             health = data.get('health') if isinstance(data.get('health'), dict) else {}
             meta = health.setdefault('combatMeta', {})
             meta['consumableUsage'] = {}
+            # A reserve is valid only until the character receives their next regular turn.
+            meta.pop('reactionReserve', None)
+            meta.pop('reactionActive', None)
             pending_action = meta.get('pendingAction')
             if isinstance(pending_action, dict):
                 remaining_cost = max(
@@ -4545,6 +4548,11 @@ class CombatService:
             health = {}
         bleeding_profile = CombatService._bleeding_check_profile(data)
         condition = CombatService._character_condition(data)
+        reaction_reserve = (
+            health.get('combatMeta', {}).get('reactionReserve')
+            if isinstance(health.get('combatMeta'), dict)
+            else None
+        )
         return {
             'location_character_id': loc_char.id,
             'character_id': character.id if character else None,
@@ -4572,6 +4580,7 @@ class CombatService:
                 if isinstance(health.get('combatMeta'), dict)
                 else None
             ),
+            'reaction_reserve': reaction_reserve if isinstance(reaction_reserve, dict) else None,
             'completed_pending_action_id': (
                 health.get('combatMeta', {}).get('completedPendingActionId')
                 if isinstance(health.get('combatMeta'), dict)
@@ -4888,6 +4897,10 @@ class CombatService:
             'turn_index': state.turn_index,
             'turn_order': turn_order,
             'current_location_character_id': state.current_location_character_id,
+            'reaction': {
+                'pending_location_character_id': state.reaction_pending_location_character_id,
+                'return_location_character_id': state.reaction_return_location_character_id,
+            },
             'current_character': CombatService._serialize_character(
                 current_character,
                 current_turn_id=state.current_location_character_id,
@@ -5045,6 +5058,36 @@ class CombatService:
         if not _continue_pending and not CombatService._can_end_turn_for_character(current_character, user_id, is_gm=is_gm):
             raise PermissionDenied("You do not control this character")
 
+        if state.reaction_return_location_character_id is not None:
+            if current_character.id != state.current_location_character_id:
+                raise PermissionDenied("Only the reacting character can end this reaction")
+            return_character = LocationCharacter.query.filter_by(
+                id=state.reaction_return_location_character_id,
+                location_id=location_id,
+            ).first()
+            if not return_character:
+                raise NotFoundError("Interrupted character not found")
+            reaction_data = (
+                current_character.character.data
+                if current_character.character and isinstance(current_character.character.data, dict)
+                else {}
+            )
+            reaction_health = reaction_data.setdefault('health', {})
+            reaction_meta = reaction_health.setdefault('combatMeta', {})
+            reaction_meta.pop('reactionActive', None)
+            current_character.character.data = reaction_data
+            flag_modified(current_character.character, 'data')
+            current_character.action_points_current = 0
+            current_character.free_actions_current = 0
+            current_character.movement_points_current = 0
+            state.current_location_character_id = return_character.id
+            state.reaction_return_location_character_id = None
+            state.reaction_pending_location_character_id = None
+            db.session.commit()
+            payload = CombatService._serialize_state(location, state)
+            payload['reaction_returned'] = True
+            return payload
+
         state.turn_order = list(dict.fromkeys(state.turn_order or []))
         current_index = state.turn_order.index(current_character_id)
         next_index = (current_index + 1) % len(state.turn_order)
@@ -5125,6 +5168,133 @@ class CombatService:
         payload = CombatService._serialize_state(location, state)
         payload['pain_shock_check'] = pain_shock_check
         return payload
+
+    @staticmethod
+    def reserve_reaction(
+        location_id,
+        user_id,
+        location_character_id,
+        action_points=0,
+        free_actions=0,
+        movement_points=0,
+        trigger='',
+    ):
+        location = CombatService._get_location(location_id)
+        is_gm = CombatService._ensure_access(location, user_id)
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not state or state.status != 'active':
+            raise ValidationError("Combat is not active")
+        if state.reaction_return_location_character_id is not None:
+            raise ValidationError("A reaction is already in progress")
+        character = LocationCharacter.query.filter_by(
+            id=location_character_id, location_id=location_id,
+        ).first()
+        if not character:
+            raise NotFoundError("Character not found")
+        if state.current_location_character_id != character.id:
+            raise PermissionDenied("A reaction can be reserved only during your turn")
+        if not CombatService._can_end_turn_for_character(character, user_id, is_gm=is_gm):
+            raise PermissionDenied("You do not control this character")
+        CombatService.ensure_character_can_act(character)
+        values = {
+            'action_points': max(0, CombatService._coerce_int(action_points, 0)),
+            'free_actions': max(0, CombatService._coerce_int(free_actions, 0)),
+            'movement_points': max(0, CombatService._coerce_int(movement_points, 0)),
+        }
+        if not any(values.values()):
+            raise ValidationError("Reserve at least one resource for a reaction")
+        if (
+            values['action_points'] > character.action_points_current
+            or values['free_actions'] > character.free_actions_current
+            or values['movement_points'] > character.movement_points_current
+        ):
+            raise ValidationError("Not enough resources for this reaction")
+        data = character.character.data if isinstance(character.character.data, dict) else {}
+        meta = data.setdefault('health', {}).setdefault('combatMeta', {})
+        if isinstance(meta.get('reactionReserve'), dict):
+            raise ValidationError("This character already has a reserved reaction")
+        character.action_points_current -= values['action_points']
+        character.free_actions_current -= values['free_actions']
+        character.movement_points_current -= values['movement_points']
+        meta['reactionReserve'] = {
+            **values,
+            'trigger': str(trigger or '').strip()[:240],
+            'round': state.round_number,
+        }
+        character.character.data = data
+        flag_modified(character.character, 'data')
+        db.session.commit()
+        return CombatService._serialize_state(location, state)
+
+    @staticmethod
+    def request_reaction(location_id, user_id, location_character_id):
+        location = CombatService._get_location(location_id)
+        is_gm = CombatService._ensure_access(location, user_id)
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not state or state.status != 'active':
+            raise ValidationError("Combat is not active")
+        if state.current_location_character_id == location_character_id:
+            raise ValidationError("Use your regular turn instead of a reaction")
+        if state.reaction_return_location_character_id is not None:
+            raise ValidationError("A reaction is already in progress")
+        if state.reaction_pending_location_character_id is not None:
+            raise ValidationError("A reaction request is already waiting for the GM")
+        character = LocationCharacter.query.filter_by(
+            id=location_character_id, location_id=location_id,
+        ).first()
+        if not character:
+            raise NotFoundError("Character not found")
+        if not CombatService._can_end_turn_for_character(character, user_id, is_gm=is_gm):
+            raise PermissionDenied("You do not control this character")
+        CombatService.ensure_character_can_act(character)
+        data = character.character.data if isinstance(character.character.data, dict) else {}
+        reserve = data.get('health', {}).get('combatMeta', {}).get('reactionReserve')
+        if not isinstance(reserve, dict) or not any(
+            CombatService._coerce_int(reserve.get(key), 0) > 0
+            for key in ('action_points', 'free_actions', 'movement_points')
+        ):
+            raise ValidationError("No reaction resources are reserved")
+        state.reaction_pending_location_character_id = character.id
+        db.session.commit()
+        return CombatService._serialize_state(location, state)
+
+    @staticmethod
+    def resolve_reaction_request(location_id, user_id, approve):
+        location = CombatService._get_location(location_id)
+        CombatService._ensure_access(location, user_id)
+        if location.lobby.gm_id != user_id:
+            raise PermissionDenied("Only GM can resolve a reaction request")
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not state or state.status != 'active':
+            raise ValidationError("Combat is not active")
+        pending_id = state.reaction_pending_location_character_id
+        if not pending_id:
+            raise ValidationError("There is no reaction request")
+        character = LocationCharacter.query.filter_by(id=pending_id, location_id=location_id).first()
+        if not character:
+            raise NotFoundError("Reacting character not found")
+        if not approve:
+            state.reaction_pending_location_character_id = None
+            db.session.commit()
+            return CombatService._serialize_state(location, state)
+        if state.current_location_character_id == character.id:
+            raise ValidationError("The reacting character already has the turn")
+        data = character.character.data if isinstance(character.character.data, dict) else {}
+        meta = data.setdefault('health', {}).setdefault('combatMeta', {})
+        reserve = meta.pop('reactionReserve', None)
+        if not isinstance(reserve, dict):
+            raise ValidationError("The reaction reserve is no longer available")
+        state.reaction_return_location_character_id = state.current_location_character_id
+        state.reaction_pending_location_character_id = None
+        state.current_location_character_id = character.id
+        character.action_points_current = max(0, CombatService._coerce_int(reserve.get('action_points'), 0))
+        character.free_actions_current = max(0, CombatService._coerce_int(reserve.get('free_actions'), 0))
+        character.movement_points_current = max(0, CombatService._coerce_int(reserve.get('movement_points'), 0))
+        meta['reactionActive'] = reserve
+        character.character.data = data
+        flag_modified(character.character, 'data')
+        db.session.commit()
+        return CombatService._serialize_state(location, state)
 
     @staticmethod
     def spend_resources(
@@ -7066,6 +7236,8 @@ class CombatService:
         state.turn_index = 0
         state.turn_order = []
         state.current_location_character_id = None
+        state.reaction_pending_location_character_id = None
+        state.reaction_return_location_character_id = None
 
         loc_chars = LocationCharacter.query.filter_by(location_id=location_id).all()
         for loc_char in loc_chars:
@@ -7114,6 +7286,8 @@ class CombatService:
                 meta.pop('painShockRecovered', None)
                 meta.pop('firedRound', None)
                 meta.pop('injuryRound', None)
+                meta.pop('reactionReserve', None)
+                meta.pop('reactionActive', None)
                 sync_health_derived_statuses(health)
                 data['health'] = health
                 character.data = data

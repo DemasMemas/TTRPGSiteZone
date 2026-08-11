@@ -2206,6 +2206,52 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
     return jsonify(state), 200
 
 
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/reaction/reserve', methods=['POST'])
+@jwt_required()
+@requires_participant
+def reserve_location_combat_reaction(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    state = CombatService.reserve_reaction(
+        location_id,
+        participant.user_id,
+        data.get('location_character_id'),
+        action_points=data.get('action_points', 0),
+        free_actions=data.get('free_actions', 0),
+        movement_points=data.get('movement_points', 0),
+        trigger=data.get('trigger', ''),
+    )
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(state), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/reaction/request', methods=['POST'])
+@jwt_required()
+@requires_participant
+def request_location_combat_reaction(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    state = CombatService.request_reaction(
+        location_id,
+        participant.user_id,
+        data.get('location_character_id'),
+    )
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(state), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/reaction/resolve', methods=['POST'])
+@jwt_required()
+@requires_gm
+def resolve_location_combat_reaction(lobby_id, location_id, lobby):
+    data = request.get_json() or {}
+    state = CombatService.resolve_reaction_request(
+        location_id,
+        lobby.gm_id,
+        data.get('approve') is True,
+    )
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    return jsonify(state), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/end', methods=['POST'])
 @jwt_required()
 @requires_gm

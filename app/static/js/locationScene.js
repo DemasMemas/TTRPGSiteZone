@@ -1396,6 +1396,68 @@ function showNarrativeActionModal(characterId) {
     form.elements.action_name.focus();
 }
 
+function showReactionReserveMenu(character) {
+    if (!character?.location_character_id) return;
+    let modal = document.getElementById('combat-reaction-reserve-menu');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'combat-reaction-reserve-menu';
+        modal.style.cssText = 'position:fixed;inset:0;z-index:10060;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.48);';
+        document.body.appendChild(modal);
+    }
+    modal.innerHTML = `
+        <form style="width:min(420px,calc(100vw - 32px));padding:18px;border:1px solid rgba(255,255,255,.17);border-radius:14px;background:rgba(18,23,22,.98);color:#f4f1e8;box-shadow:0 20px 60px rgba(0,0,0,.55);">
+            <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong style="font-size:18px;">Реакция</strong><button type="button" class="reaction-close btn btn-sm btn-secondary">×</button></div>
+            <div style="margin:8px 0 14px;font-size:12px;opacity:.76;">Отложенные ресурсы нельзя использовать в свой ход. В чужой ход вы запросите разрешение у ГМа.</div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;">
+                <label>ОД<input name="action_points" type="number" min="0" max="${character.action_points_current || 0}" value="0" style="width:100%;"></label>
+                <label>СД<input name="free_actions" type="number" min="0" max="${character.free_actions_current || 0}" value="0" style="width:100%;"></label>
+                <label>ОП<input name="movement_points" type="number" min="0" max="${character.movement_points_current || 0}" value="0" style="width:100%;"></label>
+            </div>
+            <label style="display:block;margin-top:12px;">Триггер<input name="trigger" type="text" maxlength="240" placeholder="Например: если враг выйдет из-за укрытия" style="width:100%;"></label>
+            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:15px;">Отложить реакцию</button>
+        </form>
+    `;
+    const form = modal.querySelector('form');
+    modal.querySelector('.reaction-close').onclick = () => { modal.style.display = 'none'; };
+    modal.onpointerdown = (event) => {
+        if (event.target === modal) modal.style.display = 'none';
+    };
+    form.onsubmit = async (event) => {
+        event.preventDefault();
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        try {
+            await Server.reserveLocationCombatReaction(window.currentLobbyId, getCurrentLocationId(), {
+                location_character_id: character.location_character_id,
+                action_points: Number(form.elements.action_points.value) || 0,
+                free_actions: Number(form.elements.free_actions.value) || 0,
+                movement_points: Number(form.elements.movement_points.value) || 0,
+                trigger: form.elements.trigger.value,
+            });
+            modal.style.display = 'none';
+            showNotification('Реакция отложена', 'success');
+        } catch (error) {
+            submit.disabled = false;
+            showNotification(error.message || 'Не удалось отложить реакцию', 'system');
+        }
+    };
+    modal.style.display = 'flex';
+}
+
+async function requestReservedReaction(character) {
+    try {
+        await Server.requestLocationCombatReaction(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            character.location_character_id,
+        );
+        showNotification('Запрос реакции отправлен ГМу', 'system');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось запросить реакцию', 'system');
+    }
+}
+
 function showCombatActionMenu(clientX, clientY, characterId) {
     ensureCombatActionMenu();
     combatActionMenuCharacterId = characterId;
@@ -1470,6 +1532,31 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             ringRadius: 165,
             action: () => showFacingMenu(characterId),
         });
+    }
+    if (combatState?.status === 'active' && combatCharacter?.location_character_id) {
+        const hasReserve = Boolean(combatCharacter.reaction_reserve);
+        if (isCurrentTurn && !hasReserve) {
+            menuItems.push({
+                label: 'Реакция',
+                icon: '↯',
+                title: 'Отложить часть ОД, СД и ОП для действия в чужой ход',
+                angle: 122,
+                ringRadius: 165,
+                requiresCombat: true,
+                action: () => showReactionReserveMenu(combatCharacter),
+            });
+        } else if (!isCurrentTurn && hasReserve) {
+            menuItems.push({
+                label: 'Реакция',
+                icon: '↯',
+                title: 'Запросить у ГМа разрешение на отложенную реакцию',
+                angle: 122,
+                ringRadius: 165,
+                requiresCombat: true,
+                allowReaction: true,
+                action: () => requestReservedReaction(combatCharacter),
+            });
+        }
     }
 
     if (condition.state === 'pain_shock') {
@@ -1623,6 +1710,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         const allowed = (
             item.allowAlways
             || hasFullAccess
+            || (item.allowReaction && canControlCharacter(characterId))
             || (item.allowIncapacitated && canControlCharacter(characterId) && isCurrentTurn)
         )
             && (!item.requiresCombat || combatState?.status === 'active');
@@ -4185,6 +4273,12 @@ function renderCombatHud() {
     const aimedTarget = (combatState.characters || []).find(
         char => char.character_id === combatState.current_character?.aimed_target_character_id
     );
+    const pendingReaction = charactersByLocationId.get(
+        Number(combatState.reaction?.pending_location_character_id),
+    );
+    const reactionReturnCharacter = charactersByLocationId.get(
+        Number(combatState.reaction?.return_location_character_id),
+    );
     const isCollapsed = combatHudCollapsed ?? combatState.status !== 'active';
     const compactStatus = combatState.status === 'active'
         ? `Раунд ${combatState.round_number || 0} · ${combatState.current_character?.name || 'нет хода'} · ${combatState.current_character?.posture_label || 'Стоя'}`
@@ -4243,6 +4337,8 @@ function renderCombatHud() {
             <div>Кровопотеря: ${combatState.current_character?.blood ?? 'normal'} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
             <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
+            ${reactionReturnCharacter ? `<div style="margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(84,139,196,.16);">Реакция: после завершения ход вернётся к <strong>${escapeHtml(reactionReturnCharacter.name || 'персонажу')}</strong>.</div>` : ''}
+            ${pendingReaction && window.isGM ? `<div style="margin-top:8px;padding:8px 9px;border-radius:8px;background:rgba(215,169,75,.16);border:1px solid rgba(215,169,75,.35);"><strong>Запрос реакции: ${escapeHtml(pendingReaction.name || 'персонаж')}</strong>${pendingReaction.reaction_reserve?.trigger ? `<div style="margin-top:3px;font-size:12px;opacity:.86;">${escapeHtml(pendingReaction.reaction_reserve.trigger)}</div>` : ''}<div style="margin-top:7px;"><button class="btn btn-sm btn-primary combat-reaction-approve">Разрешить</button><button class="btn btn-sm btn-secondary combat-reaction-reject" style="margin-left:6px;">Отклонить</button></div></div>` : ''}
             ${pendingCombatAction ? `<div style="margin-top:8px; padding:8px 10px; border-radius:10px; background: rgba(255,255,255,0.06);"><strong>Выбор:</strong> ${
                 pendingCombatAction.targetType === 'structure'
                     ? 'Укрытие для подавления'
@@ -4339,6 +4435,20 @@ function renderCombatHud() {
             }
         };
     }
+    const resolveReaction = async (approve) => {
+        try {
+            await Server.resolveLocationCombatReaction(
+                window.currentLobbyId,
+                getCurrentLocationId(),
+                approve,
+            );
+            showNotification(approve ? 'Реакция разрешена' : 'Реакция отклонена', 'system');
+        } catch (error) {
+            showNotification(error.message || 'Не удалось обработать реакцию', 'system');
+        }
+    };
+    combatHud.querySelector('.combat-reaction-approve')?.addEventListener('click', () => resolveReaction(true));
+    combatHud.querySelector('.combat-reaction-reject')?.addEventListener('click', () => resolveReaction(false));
 }
 
 export function setCombatState(state) {

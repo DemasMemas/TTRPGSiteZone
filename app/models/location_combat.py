@@ -23,6 +23,16 @@ class LocationCombatState(db.Model):
         db.ForeignKey('location_characters.id'),
         nullable=True,
     )
+    reaction_pending_location_character_id = db.Column(
+        db.Integer,
+        db.ForeignKey('location_characters.id'),
+        nullable=True,
+    )
+    reaction_return_location_character_id = db.Column(
+        db.Integer,
+        db.ForeignKey('location_characters.id'),
+        nullable=True,
+    )
     started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now(timezone.utc))
 
