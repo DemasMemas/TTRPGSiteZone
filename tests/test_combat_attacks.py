@@ -20,6 +20,67 @@ def test_aimed_shot_can_override_hit_zone():
     assert CombatService._random_hit_zone(1, "head") == "head"
 
 
+def test_fall_uses_agility_roll_and_breaks_both_legs_on_four_meter_failure(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 1)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"agility": {"base": 5, "bonus": 0}}},
+            "health": {
+                "current": 700,
+                "max": 700,
+                "zones": {
+                    "leftLeg": {"current": 100, "max": 100},
+                    "rightLeg": {"current": 100, "max": 100},
+                },
+                "effects": [],
+            },
+        }),
+        hp_zones={},
+        posture="standing",
+        cover_object_id=None,
+        weapon_braced=False,
+        braced_weapon_index=None,
+    )
+
+    result = CombatService.resolve_fall(target, 4)
+
+    assert result["difficulty"] == 10
+    assert result["success"] is False
+    assert [leg["damage"] for leg in result["legs"]] == [80, 80]
+    assert result["fracture_both_legs"] is True
+    assert target.posture == "prone"
+    fractures = [effect for effect in target.character.data["health"]["effects"] if effect["type"] == "fracture"]
+    assert {effect["area"] for effect in fractures} == {"leftLeg", "rightLeg"}
+
+
+def test_successful_fall_stays_standing_and_reduces_damage_by_leg_protection(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 20)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(CombatService, "_target_armor", lambda *_: (50, []))
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"agility": {"base": 10, "bonus": 0}}},
+            "health": {
+                "current": 700, "max": 700,
+                "zones": {
+                    "leftLeg": {"current": 100, "max": 100},
+                    "rightLeg": {"current": 100, "max": 100},
+                },
+                "effects": [],
+            },
+        }),
+        hp_zones={}, posture="standing", cover_object_id=None,
+        weapon_braced=False, braced_weapon_index=None,
+    )
+
+    result = CombatService.resolve_fall(target, 4)
+
+    assert result["success"] is True
+    assert [leg["damage"] for leg in result["legs"]] == [22, 22]
+    assert target.posture == "standing"
+
+
 def test_ranged_targets_must_stay_inside_the_facing_arc():
     shooter = SimpleNamespace(pos_x=5, pos_y=5, facing_x=0, facing_y=1)
 

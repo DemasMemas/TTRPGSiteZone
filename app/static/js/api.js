@@ -475,6 +475,14 @@ export const Server = {
         });
     },
 
+    async applyLocationGmEvent(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/gm-events`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
     async reserveLocationCombatReaction(lobbyId, locationId, payload) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/reaction/reserve`, {
             method: 'POST',

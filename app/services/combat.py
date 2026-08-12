@@ -2474,6 +2474,11 @@ class CombatService:
             parsed = max(0.0, min(100.0, CombatService._protection_percent(value, 0)))
             if not is_gas_mask:
                 parsed = max(0.0, parsed - CombatService._armor_stage_penalty(item, 'physical'))
+            # Armor protects covered limbs 10 percentage points worse than the body.
+            if slot == 'armor' and zone in {
+                'left_arm', 'right_arm', 'left_leg', 'right_leg',
+            }:
+                parsed = max(0.0, parsed - 10)
             if parsed:
                 total = max(total, parsed)
             if parsed or is_gas_mask:
@@ -3001,6 +3006,98 @@ class CombatService:
             'death': fatal_vital_hit,
         }
         return health
+
+    @staticmethod
+    def resolve_fall(target, height_meters, *, round_number=0):
+        """Resolve impact damage from a fall using the table from the combat rules."""
+        height = max(0.0, CombatService._coerce_float(height_meters, 0))
+        fall_table = (
+            (1, 4, 0, 5, False, False),
+            (4, 8, 0, 30, False, False),
+            (7, 10, 45, 80, False, True),
+            (10, 12, 70, 100, False, True),
+            (13, 14, 140, 230, True, True),
+            (16, 16, 200, 250, True, True),
+            (21, 18, 300, 400, True, True),
+            (float('inf'), 20, 500, 700, True, True),
+        )
+        difficulty = success_damage = failure_damage = 0
+        success_shock = failure_shock = False
+        for upper_bound, difficulty, success_damage, failure_damage, success_shock, failure_shock in fall_table:
+            if height < upper_bound:
+                break
+        attacker_data = target.character.data if target and target.character else {}
+        agility_bonus = CombatService._skill_modifier(
+            attacker_data, 'skills.physical.agility'
+        )
+        roll = random.randint(1, 20)
+        total = roll + agility_bonus
+        success = total >= difficulty
+        base_damage = success_damage if success else failure_damage
+        profile = {
+            'damage_type': 'crushing',
+            'armor_piercing': 0,
+            'damage': base_damage,
+        }
+        leg_results = []
+        for leg in ('left_leg', 'right_leg'):
+            protection, _ = CombatService._target_armor(attacker_data, leg)
+            # Physical protection is stored as a percentage, as in the armor sheet.
+            damage = max(0, round(base_damage * (1 - protection / 100)))
+            health = CombatService._apply_attack_damage(
+                target,
+                damage,
+                leg,
+                profile,
+                round_number=round_number,
+                allow_bleeding=False,
+                trauma_checks=0,
+            )
+            leg_results.append({
+                'area': leg,
+                'protection': round(protection),
+                'damage': damage,
+                'current': health.get('zones', {}).get(
+                    'leftLeg' if leg == 'left_leg' else 'rightLeg', {}
+                ).get('current'),
+            })
+        shock = bool(success_shock if success else failure_shock)
+        fracture_both_legs = bool(
+            (not success and failure_damage >= 80)
+            or (success and success_damage >= 140)
+        )
+        if shock or fracture_both_legs:
+            data = target.character.data if isinstance(target.character.data, dict) else {}
+            health = data.setdefault('health', {})
+            if shock:
+                apply_effect_to_health(health, {
+                    'type': 'shock', 'source': 'fall', 'area': 'legs',
+                })
+            if fracture_both_legs:
+                for leg in ('leftLeg', 'rightLeg'):
+                    apply_effect_to_health(health, {
+                        'type': 'fracture', 'source': 'fall', 'area': leg,
+                    })
+            sync_health_derived_statuses(health)
+            target.character.data = data
+            flag_modified(target.character, 'data')
+        if shock:
+            target.posture = 'prone'
+            target.cover_object_id = None
+            target.weapon_braced = False
+            target.braced_weapon_index = None
+        return {
+            'height': height,
+            'difficulty': difficulty,
+            'roll': roll,
+            'agility_bonus': agility_bonus,
+            'total': total,
+            'success': success,
+            'base_damage': base_damage,
+            'legs': leg_results,
+            'shock': shock,
+            'fracture_both_legs': fracture_both_legs,
+        }
 
     @staticmethod
     def _resolve_attack(

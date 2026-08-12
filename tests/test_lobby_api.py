@@ -351,6 +351,64 @@ def test_help_reaction_grants_advantage_without_switching_turn(
     assert help_bonus["skill_path"] == "skills.physical.melee"
 
 
+def test_gm_location_events_apply_stress_and_fall(client, create_user, auth_headers):
+    gm = create_user("events-gm")
+    player = create_user("events-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    first = create_character(client, lobby, player, auth_headers, data={"health": {"stress": 2}})
+    second = create_character(client, lobby, player, auth_headers, data={"health": {"stress": 0}})
+    location = Location(lobby_id=lobby["id"], name="Events test", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    first_location_character = LocationCharacter(
+        location_id=location.id, character_id=first["id"], controlled_by=player["id"], posture="standing"
+    )
+    second_location_character = LocationCharacter(
+        location_id=location.id, character_id=second["id"], controlled_by=player["id"], posture="standing"
+    )
+    db.session.add_all([first_location_character, second_location_character])
+    db.session.commit()
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/gm-events"
+
+    denied = client.post(
+        url,
+        headers=auth_headers(player),
+        json={"type": "stress", "amount": 1, "location_character_ids": [first_location_character.id]},
+    )
+    assert denied.status_code == 403
+
+    stressed = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={
+            "type": "stress",
+            "amount": 3,
+            "location_character_ids": [first_location_character.id, second_location_character.id],
+            "note": "The blowout begins",
+        },
+    )
+    assert stressed.status_code == 200
+    db.session.refresh(first_location_character.character)
+    db.session.refresh(second_location_character.character)
+    assert first_location_character.character.data["health"]["stress"] == 5
+    assert second_location_character.character.data["health"]["stress"] == 3
+
+    fallen = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={
+            "type": "fall",
+            "height_meters": 1,
+            "location_character_ids": [first_location_character.id],
+        },
+    )
+    assert fallen.status_code == 200
+    db.session.refresh(first_location_character)
+    assert first_location_character.posture == "standing"
+    assert ChatMessage.query.filter_by(lobby_id=lobby["id"], username="ГМ").count() == 2
+
+
 @pytest.mark.parametrize(
     ("penalty", "distance", "label"),
     [

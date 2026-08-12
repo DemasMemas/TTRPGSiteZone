@@ -469,6 +469,32 @@ def test_integrated_exoskeleton_helmet_uses_separate_head_protection():
     assert head_layers[0]["item"] is armor
 
 
+def test_armor_limb_protection_is_ten_points_lower_only_when_limbs_are_covered():
+    covered = {
+        "equipment": {
+            "armor": {
+                "name": "Test suit",
+                "protection": {"physical": 0.3},
+                "attributes": {"protection_zones": ["torso", "arms", "legs"]},
+            },
+        },
+    }
+    uncovered = {
+        "equipment": {
+            "armor": {
+                "name": "Test vest",
+                "protection": {"physical": 0.3},
+                "attributes": {"protection_zones": ["torso"]},
+            },
+        },
+    }
+
+    assert CombatService._target_armor(covered, "left_leg")[0] == 20
+    assert CombatService._target_armor(covered, "left_arm")[0] == 20
+    assert CombatService._target_armor(uncovered, "left_leg")[0] == 0
+    assert CombatService._target_armor(uncovered, "left_arm")[0] == 0
+
+
 def test_integrated_helmet_accuracy_penalty_is_applied_once():
     character_data = {
         "equipment": {

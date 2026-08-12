@@ -2206,6 +2206,118 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
     return jsonify(state), 200
 
 
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/gm-events', methods=['POST'])
+@jwt_required()
+@requires_gm
+def apply_location_gm_event(lobby_id, location_id, lobby):
+    """Apply a small, auditable GM event to selected location characters."""
+    data = request.get_json(silent=True) or {}
+    event_type = str(data.get('type') or '').strip().lower()
+    if event_type not in {'stress', 'fall'}:
+        return jsonify({'error': 'Unsupported GM event'}), 400
+    raw_ids = data.get('location_character_ids') or []
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({'error': 'Choose at least one character'}), 400
+    try:
+        character_ids = list({int(value) for value in raw_ids})
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid character list'}), 400
+    characters = LocationCharacter.query.filter(
+        LocationCharacter.location_id == location_id,
+        LocationCharacter.id.in_(character_ids),
+    ).all()
+    if len(characters) != len(character_ids):
+        return jsonify({'error': 'One or more characters are not on this location'}), 404
+
+    amount = 0
+    height_meters = 0.0
+    if event_type == 'stress':
+        try:
+            amount = int(data.get('amount', 1))
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Stress amount must be a number'}), 400
+        if amount == 0 or abs(amount) > 10:
+            return jsonify({'error': 'Stress amount must be from -10 to 10, excluding zero'}), 400
+    else:
+        try:
+            height_meters = float(data.get('height_meters'))
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Fall height must be a number'}), 400
+        if height_meters < 0 or height_meters > 1000:
+            return jsonify({'error': 'Fall height must be from 0 to 1000 meters'}), 400
+
+    note = ' '.join(str(data.get('note') or '').split())[:240]
+    changed = []
+    for location_character in characters:
+        character = location_character.character
+        if not character:
+            continue
+        character_data = character.data if isinstance(character.data, dict) else {}
+        health = apply_health_maximums(character_data)
+        fall_result = None
+        if event_type == 'stress':
+            apply_effect_to_health(health, {
+                'type': 'stress',
+                'value': amount,
+                'source': 'gm_event',
+            })
+        else:
+            combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
+            fall_result = CombatService.resolve_fall(
+                location_character,
+                height_meters,
+                round_number=(combat_state.round_number if combat_state and combat_state.status == 'active' else 0),
+            )
+            character_data = character.data if isinstance(character.data, dict) else {}
+            health = character_data.setdefault('health', {})
+        sync_health_derived_statuses(health)
+        character_data['health'] = health
+        character.data = character_data
+        flag_modified(character, 'data')
+        changed.append({
+            'id': location_character.id,
+            'character_id': character.id,
+            'name': character.name,
+            'stress': health.get('stress', 0),
+            'posture': location_character.posture,
+            'fall': fall_result,
+        })
+
+    db.session.commit()
+    for item in changed:
+        character = db.session.get(LobbyCharacter, item['character_id'])
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': item['character_id'],
+                'updates': {'data': character.data},
+                'updated_by': lobby.gm_id,
+            },
+            room=f"character_{item['character_id']}",
+        )
+    state = CombatService.get_state(location_id, lobby.gm_id)
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    names = ', '.join(item['name'] or 'Персонаж' for item in changed)
+    event_label = f"Стресс {amount:+d}" if event_type == 'stress' else f"Падение с {height_meters:g} м"
+    fall_lines = []
+    if event_type == 'fall':
+        for item in changed:
+            result = item.get('fall') or {}
+            outcome = 'успех' if result.get('success') else 'провал'
+            fall_lines.append(
+                f"{item['name'] or 'Персонаж'}: d20 {result.get('roll')} "
+                f"{result.get('agility_bonus', 0):+d} = {result.get('total')} против {result.get('difficulty')} ({outcome})"
+            )
+    _emit_lobby_chat_message(
+        lobby_id,
+        lobby.gm_id,
+        f"Событие ГМа: {event_label}. Цели: {names}." + (f" {note}" if note else '')
+        + ("\n" + "\n".join(fall_lines) if fall_lines else ''),
+        username='ГМ',
+    )
+    return jsonify({'characters': changed, 'combat_state': state}), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/reaction/reserve', methods=['POST'])
 @jwt_required()
 @requires_participant

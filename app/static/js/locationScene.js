@@ -1517,6 +1517,79 @@ function showHelpReserveMenu(character) {
     modal.style.display = 'flex';
 }
 
+function showGmEventMenu() {
+    if (!window.isGM || !combatState?.characters?.length) return;
+    let modal = document.getElementById('gm-location-event-menu');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'gm-location-event-menu';
+        modal.style.cssText = 'position:fixed;inset:0;z-index:10060;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.48);';
+        document.body.appendChild(modal);
+    }
+    const characterChoices = combatState.characters.map(character => `
+        <label style="display:flex;gap:7px;align-items:center;margin:4px 0;">
+            <input type="checkbox" name="target" value="${character.location_character_id}">
+            <span>${escapeHtml(character.name || 'Персонаж')}</span>
+        </label>
+    `).join('');
+    modal.innerHTML = `
+        <form style="width:min(440px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:18px;border:1px solid rgba(255,255,255,.17);border-radius:14px;background:rgba(18,23,22,.98);color:#f4f1e8;box-shadow:0 20px 60px rgba(0,0,0,.55);">
+            <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong style="font-size:18px;">Событие ГМа</strong><button type="button" class="gm-event-close btn btn-sm btn-secondary">×</button></div>
+            <label style="display:grid;gap:5px;margin:13px 0 9px;">Событие
+                <select name="type">
+                    <option value="stress">Стресс</option>
+                    <option value="fall">Падение</option>
+                </select>
+            </label>
+            <label class="gm-event-amount" style="display:grid;gap:5px;margin-bottom:9px;max-width:160px;">Изменение стресса
+                <input name="amount" type="number" min="-10" max="10" value="1">
+            </label>
+            <label class="gm-event-height" style="display:none;gap:5px;margin-bottom:9px;max-width:160px;">Высота, м
+                <input name="height_meters" type="number" min="0" max="1000" step="0.1" value="1">
+            </label>
+            <div style="margin:10px 0 6px;font-weight:600;">Цели</div>
+            <div style="max-height:180px;overflow:auto;padding:7px 9px;border:1px solid rgba(255,255,255,.12);border-radius:8px;">${characterChoices}</div>
+            <label style="display:grid;gap:5px;margin-top:11px;">Комментарий для чата <input name="note" type="text" maxlength="240"></label>
+            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:15px;">Применить событие</button>
+        </form>
+    `;
+    const form = modal.querySelector('form');
+    const typeInput = form.elements.type;
+    const amountLabel = form.querySelector('.gm-event-amount');
+    const heightLabel = form.querySelector('.gm-event-height');
+    typeInput.onchange = () => {
+        amountLabel.style.display = typeInput.value === 'stress' ? 'grid' : 'none';
+        heightLabel.style.display = typeInput.value === 'fall' ? 'grid' : 'none';
+    };
+    modal.querySelector('.gm-event-close').onclick = () => { modal.style.display = 'none'; };
+    modal.onpointerdown = event => { if (event.target === modal) modal.style.display = 'none'; };
+    form.onsubmit = async event => {
+        event.preventDefault();
+        const ids = [...form.querySelectorAll('input[name="target"]:checked')].map(input => Number(input.value));
+        if (!ids.length) {
+            showNotification('Выберите хотя бы одного персонажа', 'system');
+            return;
+        }
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        try {
+            await Server.applyLocationGmEvent(window.currentLobbyId, getCurrentLocationId(), {
+                location_character_ids: ids,
+                type: typeInput.value,
+                amount: Number(form.elements.amount.value),
+                height_meters: Number(form.elements.height_meters.value),
+                note: form.elements.note.value.trim(),
+            });
+            modal.style.display = 'none';
+            showNotification('Событие ГМа применено', 'success');
+        } catch (error) {
+            submit.disabled = false;
+            showNotification(error.message || 'Не удалось применить событие', 'system');
+        }
+    };
+    modal.style.display = 'flex';
+}
+
 async function requestReservedReaction(character) {
     try {
         await Server.requestLocationCombatReaction(
@@ -4451,6 +4524,14 @@ function renderCombatHud() {
         teamButton.style.cssText = 'margin-left:auto; flex:0 0 auto;';
         teamButton.onclick = showTeamManagementModal;
         combatHud.querySelector('.combat-hud-header')?.appendChild(teamButton);
+        const eventButton = document.createElement('button');
+        eventButton.type = 'button';
+        eventButton.className = 'btn btn-sm btn-secondary combat-gm-event-btn';
+        eventButton.textContent = 'Событие';
+        eventButton.title = 'Применить событие к персонажам на локации';
+        eventButton.style.cssText = 'margin-left:6px; flex:0 0 auto;';
+        eventButton.onclick = showGmEventMenu;
+        combatHud.querySelector('.combat-hud-header')?.appendChild(eventButton);
         if (gmVisionCharacterId !== null) {
             const fullVisionButton = document.createElement('button');
             fullVisionButton.type = 'button';
