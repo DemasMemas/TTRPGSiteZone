@@ -2255,12 +2255,16 @@ def apply_location_gm_event(lobby_id, location_id, lobby):
         character_data = character.data if isinstance(character.data, dict) else {}
         health = apply_health_maximums(character_data)
         fall_result = None
+        stress_result = None
         if event_type == 'stress':
-            apply_effect_to_health(health, {
-                'type': 'stress',
-                'value': amount,
-                'source': 'gm_event',
-            })
+            stress_result = CombatService.apply_stress_trigger(
+                location_character,
+                amount,
+                trigger=str(data.get('stress_trigger') or 'gm_event'),
+                force_manifest=bool(data.get('force_manifest')),
+            )
+            character_data = character.data if isinstance(character.data, dict) else {}
+            health = character_data.setdefault('health', {})
         else:
             combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
             fall_result = CombatService.resolve_fall(
@@ -2281,6 +2285,7 @@ def apply_location_gm_event(lobby_id, location_id, lobby):
             'stress': health.get('stress', 0),
             'posture': location_character.posture,
             'fall': fall_result,
+            'stress_result': stress_result,
         })
 
     db.session.commit()
@@ -2300,6 +2305,7 @@ def apply_location_gm_event(lobby_id, location_id, lobby):
     names = ', '.join(item['name'] or 'Персонаж' for item in changed)
     event_label = f"Стресс {amount:+d}" if event_type == 'stress' else f"Падение с {height_meters:g} м"
     fall_lines = []
+    stress_lines = []
     if event_type == 'fall':
         for item in changed:
             result = item.get('fall') or {}
@@ -2308,14 +2314,105 @@ def apply_location_gm_event(lobby_id, location_id, lobby):
                 f"{item['name'] or 'Персонаж'}: d20 {result.get('roll')} "
                 f"{result.get('agility_bonus', 0):+d} = {result.get('total')} против {result.get('difficulty')} ({outcome})"
             )
+    if event_type == 'stress':
+        for item in changed:
+            result = item.get('stress_result') or {}
+            if result.get('blocked'):
+                stress_lines.append(f"{item['name'] or 'Персонаж'}: стресс заблокирован эффектом")
+            elif result.get('manifested'):
+                stress_lines.append(
+                    f"{item['name'] or 'Персонаж'}: Воля d20 {result.get('roll')} {result.get('will_bonus', 0):+d} = {result.get('total')} против {result.get('difficulty')}; проявление: {result.get('effect')} (к{result.get('sides')}, {result.get('effect_roll')})"
+                )
+            else:
+                stress_lines.append(
+                    f"{item['name'] or 'Персонаж'}: Воля d20 {result.get('roll')} {result.get('will_bonus', 0):+d} = {result.get('total')} против {result.get('difficulty')}; проявления нет"
+                )
     _emit_lobby_chat_message(
         lobby_id,
         lobby.gm_id,
         f"Событие ГМа: {event_label}. Цели: {names}." + (f" {note}" if note else '')
-        + ("\n" + "\n".join(fall_lines) if fall_lines else ''),
+        + ("\n" + "\n".join(fall_lines + stress_lines) if fall_lines or stress_lines else ''),
         username='ГМ',
     )
     return jsonify({'characters': changed, 'combat_state': state}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/stress-effects/resolve', methods=['POST'])
+@jwt_required()
+@requires_gm
+def resolve_location_stress_effect(lobby_id, location_id, lobby):
+    data = request.get_json(silent=True) or {}
+    loc_char = LocationCharacter.query.filter_by(
+        id=data.get('location_character_id'), location_id=location_id,
+    ).first()
+    if not loc_char or not loc_char.character:
+        return jsonify({'error': 'Character not found'}), 404
+    CombatService.resolve_stress_effect(
+        loc_char,
+        data.get('effect_id'),
+        str(data.get('action') or ''),
+        replacement=data.get('replacement'),
+    )
+    db.session.commit()
+    state = CombatService.get_state(location_id, lobby.gm_id)
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': loc_char.character.id,
+            'updates': {'data': loc_char.character.data},
+            'source': 'stress_resolution',
+        },
+        room=f"character_{loc_char.character.id}",
+    )
+    return jsonify(state), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/stress',
+    methods=['POST'],
+)
+@jwt_required()
+@requires_gm
+def adjust_location_character_stress(lobby_id, location_id, character_id, lobby):
+    data = request.get_json(silent=True) or {}
+    amount = data.get('amount')
+    if amount not in {-1, 1}:
+        return jsonify({'error': 'Stress adjustment must be -1 or 1'}), 400
+    loc_char = LocationCharacter.query.filter_by(
+        location_id=location_id,
+        character_id=character_id,
+    ).first()
+    if not loc_char or not loc_char.character:
+        return jsonify({'error': 'Character is not on this location'}), 404
+    result = CombatService.apply_stress_trigger(
+        loc_char,
+        amount,
+        trigger='gm_quick_adjustment',
+    )
+    db.session.commit()
+    state = CombatService.get_state(location_id, lobby.gm_id)
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': loc_char.character.id,
+            'updates': {'data': loc_char.character.data},
+            'source': 'stress_adjustment',
+        },
+        room=f"character_{loc_char.character.id}",
+    )
+    _emit_lobby_chat_message(
+        lobby_id,
+        lobby.gm_id,
+        f"{loc_char.character.name}: стресс {result['before']} -> {result['after']}.",
+        username='Стресс',
+    )
+    return jsonify({
+        'stress': result,
+        'data': loc_char.character.data,
+        'combat_state': state,
+    }), 200
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/reaction/reserve', methods=['POST'])
@@ -2480,6 +2577,7 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         narrative_action_name=data.get('narrative_action_name'),
         narrative_skill_path=data.get('narrative_skill_path'),
         narrative_roll_required=data.get('narrative_roll_required') is True,
+        narrative_difficulty=data.get('narrative_difficulty'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
@@ -2508,6 +2606,26 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             participant.user_id,
             narrative_summary,
             username='Действие',
+        )
+    must_do = result.get('must_do_it')
+    if isinstance(must_do, dict) and isinstance(must_do.get('check'), dict):
+        check = must_do['check']
+        _emit_lobby_chat_message(
+            lobby_id, participant.user_id,
+            f"Должен это сделать: {must_do.get('name')}. d20 {check.get('roll')}, "
+            f"итог {check.get('total')} против СЛ {check.get('difficulty')}: "
+            f"{'успех' if check.get('success') else 'провал'}.",
+            username='Стресс',
+        )
+    consolation = result.get('consolation')
+    if isinstance(consolation, dict) and isinstance(consolation.get('check'), dict):
+        check = consolation['check']
+        _emit_lobby_chat_message(
+            lobby_id, participant.user_id,
+            f"Утешение: {consolation.get('target_name')}. Воля {check.get('total')} "
+            f"против СЛ {check.get('difficulty')}: "
+            f"{'стресс снижен' if check.get('success') else 'проявление стресса'}.",
+            username='Стресс',
         )
     affected_character_ids = {
         character_id

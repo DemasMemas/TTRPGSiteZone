@@ -126,6 +126,8 @@ ACTION_CATALOG = [
     {'key': 'reload_weapon', 'label': 'Сменить магазин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'clear_weapon_jam', 'label': 'Устранить клин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'narrative_action', 'label': 'Другое действие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'must_do_it', 'label': 'Должен это сделать', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'console_ally', 'label': 'Утешить', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
     {'key': 'change_posture', 'label': 'Смена положения', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'defend', 'label': 'Защита', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
     {'key': 'use_item', 'label': 'Использовать предмет', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
@@ -243,6 +245,8 @@ class CombatService:
                 'can_act': False,
                 'can_recover': False,
             }
+        if 'stress_stupor' in active_types:
+            return {'state': 'critical', 'label': 'Stress stupor', 'can_act': False, 'can_recover': False}
         if 'shock' in active_types:
             pain_level = max(0, CombatService._coerce_int(health.get('painLevel'), 0))
             return {
@@ -1401,11 +1405,281 @@ class CombatService:
         if not isinstance(health, dict):
             return False
         psy_state = CombatService._coerce_int(health.get('psyState', health.get('psy_state')), 0)
-        return (
+        threshold_disadvantage = (
             skill_path == 'skills.physical.shooting' and psy_state >= 30
         ) or (
             skill_path == 'skills.physical.will' and psy_state >= 40
         )
+        if threshold_disadvantage:
+            return True
+        pain = CombatService._coerce_int(health.get('painLevel'), 0)
+        wounded = CombatService._coerce_float(health.get('current'), health.get('max', 700)) < CombatService._coerce_float(health.get('max'), 700)
+        for effect in normalize_effect_list(health.get('effects') or []):
+            if not effect.get('active', True) or effect.get('type') != 'phobia':
+                continue
+            phobia = f"{effect.get('phobia', '')} {effect.get('name', '')}".lower()
+            if ('боль' in phobia or 'pain' in phobia) and pain > 0:
+                return True
+            if ('стрел' in phobia or 'shoot' in phobia) and skill_path == 'skills.physical.shooting':
+                return True
+            if ('люд' in phobia or 'people' in phobia) and skill_path.startswith('skills.social.'):
+                return True
+            if ('кров' in phobia or 'blood' in phobia) and wounded and 'medicine' in skill_path:
+                return True
+        return False
+
+    @staticmethod
+    def _has_roll_advantage(character_data, skill_path, consume=False):
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        effects = normalize_effect_list((health or {}).get('effects') or [])
+        for effect in effects:
+            if not effect.get('active', True) or not effect.get('gmApproved', False):
+                continue
+            skills = effect.get('advantage_skills') or []
+            if '*' in skills or skill_path in skills:
+                if consume and effect.get('consume_on_check'):
+                    effect['active'] = False
+                    health['effects'] = effects
+                return True
+        return False
+
+    @staticmethod
+    def _consume_stress_check_modifier(character_data, *, is_attack=False):
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        effects = normalize_effect_list((health or {}).get('effects') or [])
+        for effect in effects:
+            if not effect.get('active', True) or not effect.get('gmApproved', False):
+                continue
+            if 'next_check_modifier' not in effect:
+                continue
+            value = CombatService._coerce_int(
+                effect.get('attack_modifier') if is_attack else effect.get('next_check_modifier'),
+                0,
+            )
+            if effect.get('consume_on_check'):
+                effect['active'] = False
+                health['effects'] = effects
+            return value
+        return 0
+
+    @staticmethod
+    def _apply_stress_check_consequences(character_data, skill_path, success):
+        if not success:
+            return
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        if skill_path not in {'skills.physical.strength', 'skills.physical.agility'}:
+            return
+        for effect in normalize_effect_list((health or {}).get('effects') or []):
+            if (
+                effect.get('active', True)
+                and effect.get('gmApproved', False)
+                and effect.get('stress_table') == 'tension'
+                and CombatService._coerce_int(effect.get('stress_roll'), 0) == 10
+            ):
+                apply_effect_to_health(
+                    health, {'type': 'exhaustion', 'value': 1, 'source': 'stress_heroism'},
+                )
+                break
+
+    @staticmethod
+    def apply_stress_trigger(
+        loc_char, amount=1, trigger='stress_increase', force_manifest=False,
+        check_manifestation=True,
+    ):
+        """Raise stress and resolve its manifestation table when the rules require it."""
+        data = loc_char.character.data if loc_char and loc_char.character else {}
+        health = data.setdefault('health', {})
+        meta = health.setdefault('combatMeta', {})
+        before = max(0, CombatService._coerce_int(health.get('stress'), 0))
+        amount = CombatService._coerce_int(amount, 0)
+        blocked = amount > 0 and CombatService._coerce_int(meta.get('stressBlockTurns'), 0) > 0
+        if amount and not blocked:
+            apply_effect_to_health(health, {'type': 'stress', 'value': amount, 'source': trigger})
+        level = max(0, CombatService._coerce_int(health.get('stress'), 0))
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        result = {'before': before, 'after': level, 'trigger': trigger, 'blocked': blocked}
+        if level < before:
+            effects = normalize_effect_list(health.get('effects') or [])
+            for existing in effects:
+                if existing.get('expires_on_stress_decrease'):
+                    existing['active'] = False
+                if level == 0 and existing.get('expires_on_stress_zero'):
+                    existing['active'] = False
+            health['effects'] = effects
+            sync_health_derived_statuses(health)
+            loc_char.character.data = data
+            flag_modified(loc_char.character, 'data')
+        if not check_manifestation or (not force_manifest and amount <= 0):
+            return result
+        will_bonus = CombatService._skill_modifier(data, 'skills.physical.will')
+        difficulty = 5 + level * 2
+        rolls = [random.randint(1, 20)]
+        stress_advantage = any(
+            effect.get('stress_advantage') and effect.get('active', True)
+            for effect in normalize_effect_list(health.get('effects') or [])
+        )
+        if stress_advantage:
+            rolls.append(random.randint(1, 20))
+        roll = max(rolls)
+        manifested = bool(force_manifest or roll + will_bonus < difficulty)
+        result.update({
+            'will_bonus': will_bonus, 'difficulty': difficulty, 'rolls': rolls,
+            'roll': roll, 'total': roll + will_bonus, 'manifested': manifested,
+        })
+        if not manifested or level <= 0:
+            return result
+        table = 'concern' if level <= 3 else 'stress' if level <= 6 else 'tension' if level <= 9 else 'psychosis'
+        sides = {'concern': 6, 'stress': 10, 'tension': 12, 'psychosis': 8}[table]
+        effect_roll = random.randint(1, sides)
+        labels = {
+            'concern': ['Боязливость', 'Забота', 'Индивидуальность', 'Обдумывание', 'Несдержанность', 'Пугливость'],
+            'stress': ['Ступор', 'Упреждение', 'Конфликт', 'Трусость', 'Утешение', 'К черту безопасность!', 'Приспособленность', 'Стойкость', 'Концентрация', 'Преимущество'],
+            'tension': ['Сдача', 'Уничтожать', 'По накатанной', 'Зажим', 'Буду биться', 'Или со мной или подо мной', 'Неуверенность', 'Эффективность', 'Ненадежность', 'Героизм', 'Истошный крик', 'Адреналин'],
+            'psychosis': ['Так нельзя', 'Отказ систем', 'Полный ступор', 'Псих', 'Увечье', 'Фобия', 'Спартанец', 'Моральный сброс'],
+        }
+        requirements = {
+            'concern': [
+                'Получите ещё 1 уровень стресса без новой проверки проявления.',
+                'Предложите перемирие либо помощь ближайшему союзнику.',
+                'Отыграй характерную для персонажа безвредную реакцию.',
+                'Займите укрытие и обдумайте ситуацию; следующая проверка Тактики с преимуществом.',
+                'Привлеките внимание или предложите перемирие; следующая проверка Убеждения с преимуществом.',
+                'Следующая проверка получает +3, но атака или бросок гранаты получает -3.',
+            ],
+            'stress': [
+                'Не совершайте действий и реакций 30 секунд. Получение урона прерывает ступор.',
+                'Проявите агрессию, перехватите инициативу или начните бой.',
+                'Ответьте враждебно и совершите подходящую проверку Запугивания.',
+                'Потратьте всё доступное перемещение на отступление либо уклонение.',
+                'Утешьте ближайшего союзника за 3 ОД; при успехе снизьте свой стресс на 1.',
+                'Совершите важное опасное действие с преимуществом.',
+                'Используйте подходящий препарат; негативный эффект заменяется 1 уровнем истощения.',
+                'Снизьте боль на 1к4 и получите стресс, равный половине снятой боли.',
+                'Потратьте 2 ОД на осмотр; следующая проверка Внимательности с преимуществом.',
+                'Совершите одну подходящую проверку навыка с преимуществом.',
+            ],
+            'tension': [
+                'Сдайтесь противнику.',
+                'Сделайте два беглых выстрела по ближайшим разрушаемой и живой целям.',
+                'Получите ещё 1 уровень стресса без новой проверки проявления.',
+                'Выстрелите очередью или трижды бегло по источнику стресса.',
+                'Сблизьтесь с источником стресса и атакуйте его в ближнем бою.',
+                'Атакуйте тех, кто отказывается подчиниться, пока стресс не снизится.',
+                'Штраф 2 ко всем броскам, пока стресс не снизится.',
+                'Продолжайте текущую цель, не отвлекаясь на безопасность.',
+                'Потратьте всё перемещение, чтобы сменить укрытие.',
+                'Проверки Силы и Ловкости с преимуществом; успех даёт 1 истощение.',
+                'Закричите; следующая проверка Запугивания с преимуществом.',
+                'Игнорируйте новую боль до снижения стресса, конца боя или одной минуты.',
+            ],
+            'psychosis': [
+                'Попытайтесь причинить себе смертельный вред; иначе впадите в полный ступор.',
+                'Атакуйте всех вокруг до снижения стресса или потери сознания.',
+                'Лягте и впадите в полный ступор до снижения стресса.',
+                'Отказывайтесь от еды, сна, лечения и путешествия, пока стресс не станет равен 0.',
+                'Наносите себе 50 урона в раунд до снижения стресса.',
+                'Получите постоянную фобию, связанную с причиной стресса.',
+                'Слепо следуйте текущей цели.',
+                'Снизьте стресс на 1.',
+            ],
+        }
+        label = labels[table][effect_roll - 1]
+        effect = {
+            'type': 'stress_effect', 'name': label, 'source': 'stress_manifestation',
+            'stress_table': table, 'stress_roll': effect_roll, 'stress_level': level,
+            'trigger': trigger, 'active': True, 'tick': 'manual',
+            'expires_on_stress_decrease': table in {'tension', 'psychosis'},
+            'requirement': requirements[table][effect_roll - 1],
+            'gmPending': True,
+        }
+        health.setdefault('effects', []).append(effect)
+        sync_health_derived_statuses(health)
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        result.update({'table': table, 'sides': sides, 'effect_roll': effect_roll, 'effect': label})
+        return result
+
+    @staticmethod
+    def resolve_stress_effect(loc_char, effect_id, action, replacement=None):
+        data = loc_char.character.data if loc_char and loc_char.character else {}
+        health = data.setdefault('health', {})
+        effects = normalize_effect_list(health.get('effects') or [])
+        effect = next((item for item in effects if str(item.get('id')) == str(effect_id)), None)
+        if not effect or effect.get('source') != 'stress_manifestation':
+            raise NotFoundError('Stress effect not found')
+        if not effect.get('gmPending'):
+            raise ValidationError('Stress effect has already been resolved')
+        if action == 'skip':
+            effect.update({'active': False, 'gmPending': False, 'gmSkipped': True})
+        elif action == 'replace':
+            replacement = ' '.join(str(replacement or '').split())[:160]
+            if not replacement:
+                raise ValidationError('Replacement is required')
+            effect.update({
+                'name': 'Требование стресса', 'requirement': replacement,
+                'gmPending': False, 'gmApproved': True, 'gmReplaced': True,
+                'type': 'stress_effect',
+            })
+        elif action == 'approve':
+            effect.update({'gmPending': False, 'gmApproved': True})
+            table = effect.get('stress_table')
+            roll = CombatService._coerce_int(effect.get('stress_roll'), 0)
+            if (table, roll) in {('stress', 1), ('psychosis', 3)}:
+                effect['type'] = 'stress_stupor'
+                effect['remaining_seconds'] = 30 if table == 'stress' else None
+                loc_char.posture = 'prone'
+            elif (table, roll) == ('tension', 7):
+                effect['rollPenalty'] = 2
+            elif (table, roll) == ('tension', 10):
+                effect['advantage_skills'] = ['skills.physical.strength', 'skills.physical.agility']
+            elif (table, roll) == ('tension', 12):
+                effect.update({'blocks_new_pain': True, 'remaining_seconds': 60})
+            elif (table, roll) in {('concern', 1), ('tension', 3)}:
+                CombatService.apply_stress_trigger(
+                    loc_char, 1, trigger='stress_manifestation', check_manifestation=False,
+                )
+            elif (table, roll) == ('stress', 8):
+                pain = random.randint(1, 4)
+                apply_effect_to_health(health, {'type': 'pain', 'value': -pain, 'source': 'stress_manifestation'})
+                CombatService.apply_stress_trigger(
+                    loc_char, (pain + 1) // 2, trigger='stress_manifestation',
+                    check_manifestation=False,
+                )
+            elif (table, roll) == ('concern', 4):
+                effect.update({'advantage_skills': ['skills.other.tactics'], 'consume_on_check': True})
+            elif (table, roll) == ('concern', 5):
+                effect.update({'advantage_skills': ['skills.social.persuasion'], 'consume_on_check': True})
+            elif (table, roll) == ('stress', 9):
+                effect.update({'advantage_skills': ['skills.physical.awareness'], 'consume_on_check': True})
+            elif (table, roll) == ('stress', 10):
+                effect.update({'advantage_skills': ['*'], 'consume_on_check': True})
+            elif (table, roll) == ('concern', 6):
+                effect.update({
+                    'next_check_modifier': 3,
+                    'attack_modifier': -3,
+                    'consume_on_check': True,
+                })
+            elif (table, roll) == ('psychosis', 6):
+                effect.update({
+                    'type': 'phobia', 'phobia': str(effect.get('trigger') or 'событие'),
+                    'expires_on_stress_zero': False,
+                })
+            elif (table, roll) == ('psychosis', 8):
+                CombatService.apply_stress_trigger(
+                    loc_char, -1, trigger='stress_manifestation', check_manifestation=False,
+                )
+                effect['active'] = False
+        else:
+            raise ValidationError('Unknown resolution')
+        health['effects'] = effects
+        sync_health_derived_statuses(health)
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        return effect
+
+    # Single entry point for combat, GM events, anomalies and social triggers.
+    trigger_stress = apply_stress_trigger
 
     @staticmethod
     def _narrative_skill_check(character_data, skill_path, advantage=False):
@@ -1442,7 +1716,9 @@ class CombatService:
             if isinstance(detector, dict):
                 equipment_modifier += CombatService._coerce_int(detector.get('bonus'), 0)
         disadvantage = CombatService._has_roll_disadvantage(character_data, skill_path)
-        advantage = bool(advantage)
+        advantage = bool(
+            advantage or CombatService._has_roll_advantage(character_data, skill_path, consume=True)
+        )
         rolls = [random.randint(1, 20) for _ in range(2 if advantage != disadvantage else 1)]
         if advantage and not disadvantage:
             roll = max(rolls)
@@ -1450,7 +1726,10 @@ class CombatService:
             roll = min(rolls)
         else:
             roll = rolls[0]
-        modifier = skill_modifier + related_modifier + equipment_modifier + status_modifier
+        stress_modifier = CombatService._consume_stress_check_modifier(
+            character_data, is_attack=False,
+        )
+        modifier = skill_modifier + related_modifier + equipment_modifier + status_modifier + stress_modifier
         return {
             'skill_path': skill_path,
             'skill_label': CombatService.NARRATIVE_SKILLS[skill_path],
@@ -1463,6 +1742,7 @@ class CombatService:
             'related_modifier': related_modifier,
             'equipment_modifier': equipment_modifier,
             'status_modifier': status_modifier,
+            'stress_modifier': stress_modifier,
             'modifier': modifier,
             'total': roll + modifier,
         }
@@ -2718,10 +2998,18 @@ class CombatService:
         allow_bleeding=True,
         trauma_checks=1,
         trauma_difficulty_modifier=0,
+        stress_trigger='direct_attack',
     ):
         character = target.character
         data = dict(character.data or {})
+        previous_condition = CombatService._character_condition(data)['state']
         health = apply_health_maximums(data)
+        if damage > 0:
+            active_effects = normalize_effect_list(health.get('effects') or [])
+            for effect in active_effects:
+                if effect.get('type') == 'stress_stupor' and effect.get('remaining_seconds'):
+                    effect['active'] = False
+            health['effects'] = active_effects
         maximum = CombatService._coerce_float(health.get('max'), 700)
         health['max'] = maximum
         current = CombatService._coerce_float(health.get('current'), maximum)
@@ -2835,9 +3123,8 @@ class CombatService:
             if meta.get('damageStressRound') != current_round:
                 stress_blocked = CombatService._coerce_int(meta.get('stressBlockTurns'), 0) > 0
                 if not stress_blocked:
-                    apply_effect_to_health(health, {
-                        'type': 'stress', 'value': 1, 'source': 'combat_damage'
-                    })
+                    # The manifestation check is resolved after this damage is recorded.
+                    meta['pendingDamageStressTrigger'] = True
                 meta['damageStressRound'] = current_round
             if meta.get('damagePainRound') != current_round:
                 meta['damagePainRound'] = current_round
@@ -2995,6 +3282,23 @@ class CombatService:
             target.braced_weapon_index = None
         character.data = data
         flag_modified(character, 'data')
+        if meta.pop('pendingDamageStressTrigger', False):
+            stress_result = CombatService.apply_stress_trigger(
+                target, 1, trigger=stress_trigger,
+            )
+            health['stressResult'] = stress_result
+        if (
+            previous_condition not in {'pain_shock', 'critical', 'dead'}
+            and resulting_condition['state'] in {'pain_shock', 'critical', 'dead'}
+            and getattr(target, 'team_name', None)
+            and getattr(target, 'location_id', None) is not None
+        ):
+            ally_trigger = 'ally_death' if resulting_condition['state'] == 'dead' else 'ally_critical'
+            for ally in LocationCharacter.query.filter_by(
+                location_id=target.location_id, team_name=target.team_name,
+            ).all():
+                if ally.id != target.id and ally.character:
+                    CombatService.apply_stress_trigger(ally, 1, trigger=ally_trigger)
         target.hp_zones = health.get('zones') or target.hp_zones
         flag_modified(target, 'hp_zones')
         health['lastTrauma'] = trauma
@@ -3052,6 +3356,7 @@ class CombatService:
                 round_number=round_number,
                 allow_bleeding=False,
                 trauma_checks=0,
+                stress_trigger='indirect_damage',
             )
             leg_results.append({
                 'area': leg,
@@ -3132,6 +3437,9 @@ class CombatService:
                 or CombatService._weapon_damage_profile(weapon, attack_type)
             )
             skill = CombatService._skill_modifier(attacker_data, 'skills.physical.melee')
+            stress_check_modifier = CombatService._consume_stress_check_modifier(
+                attacker_data, is_attack=True,
+            )
             difficulty = CombatService._coerce_int(
                 attack_details.get('hit_difficulty'),
                 12 - skill - CombatService._parse_percent(profile.get('accuracy', 0), 0),
@@ -3146,6 +3454,9 @@ class CombatService:
             has_advantage = bool(
                 attack_details.get('melee_advantage')
                 or getattr(target, 'grappled_by_id', None)
+                or CombatService._has_roll_advantage(
+                    attacker_data, 'skills.physical.melee', consume=True,
+                )
             )
             if forced_roll is None and has_advantage != has_disadvantage:
                 rolls.append(random.randint(1, 20))
@@ -3155,7 +3466,9 @@ class CombatService:
                 roll = min(rolls)
             else:
                 roll = rolls[0]
-            hit = roll == 20 or (roll != 1 and roll >= difficulty)
+            hit = roll == 20 or (
+                roll != 1 and roll + stress_check_modifier >= difficulty
+            )
             result = {
                 'roll': roll,
                 'rolls': rolls,
@@ -3164,6 +3477,7 @@ class CombatService:
                 'mode': 'melee',
                 'target_character_id': target_character_id,
                 'target_name': target_name,
+                'stress_check_modifier': stress_check_modifier,
             }
             if not hit:
                 return result
@@ -3179,9 +3493,17 @@ class CombatService:
             else:
                 profile, _ = CombatService._ranged_damage_profile(weapon)
             difficulty = attack_details['hit_difficulty']
+            stress_check_modifier = CombatService._consume_stress_check_modifier(
+                attacker_data, is_attack=True,
+            )
             rolls = [forced_roll if forced_roll is not None else random.randint(1, 20)]
             has_disadvantage = bool(attack_details.get('shooting_disadvantage'))
-            has_advantage = bool(attack_details.get('shooting_advantage'))
+            has_advantage = bool(
+                attack_details.get('shooting_advantage')
+                or CombatService._has_roll_advantage(
+                    attacker_data, 'skills.physical.shooting', consume=True,
+                )
+            )
             if forced_roll is None and has_advantage != has_disadvantage:
                 rolls.append(random.randint(1, 20))
             if has_advantage and not has_disadvantage:
@@ -3190,7 +3512,9 @@ class CombatService:
                 roll = min(rolls)
             else:
                 roll = rolls[0]
-            hit = roll == 20 or (roll != 1 and roll >= difficulty)
+            hit = roll == 20 or (
+                roll != 1 and roll + stress_check_modifier >= difficulty
+            )
             result = {
                 'roll': roll,
                 'rolls': rolls,
@@ -3202,6 +3526,7 @@ class CombatService:
                 'strength_requirement': attack_details.get('strength_requirement'),
                 'target_character_id': target_character_id,
                 'target_name': target_name,
+                'stress_check_modifier': stress_check_modifier,
             }
             if not profile_adjusted:
                 if (
@@ -4147,6 +4472,26 @@ class CombatService:
         health = character_data.get('health') if isinstance(character_data, dict) else {}
         if isinstance(health, dict):
             loc_char.effects = normalize_effect_list(health.get('effects') or [])
+            meta = health.setdefault('combatMeta', {})
+            triggered_ids = set(meta.get('stressTriggeredEffectIds') or [])
+            for effect in loc_char.effects:
+                effect_id = str(effect.get('id') or '')
+                effect_type = str(effect.get('type') or '').lower()
+                sense_overload = (
+                    effect_type in {'blindness', 'deafness'}
+                    and CombatService._coerce_float(effect.get('value'), 0) >= 90
+                )
+                fear_effect = effect_type in {'fear', 'fright', 'dread'}
+                if effect.get('active', True) and effect_id and effect_id not in triggered_ids and (
+                    sense_overload or fear_effect
+                ):
+                    CombatService.apply_stress_trigger(
+                        loc_char, 1,
+                        trigger=effect_type if fear_effect else f'{effect_type}_90',
+                    )
+                    triggered_ids.add(effect_id)
+            meta['stressTriggeredEffectIds'] = sorted(triggered_ids)
+            loc_char.effects = normalize_effect_list(health.get('effects') or [])
         else:
             loc_char.effects = []
         if CombatService._character_condition(character_data)['state'] in {
@@ -4714,6 +5059,15 @@ class CombatService:
             if isinstance(health.get('combatMeta'), dict)
             else None
         )
+        must_do_retry = (
+            health.get('combatMeta', {}).get('mustDoRetry')
+            if isinstance(health.get('combatMeta'), dict)
+            else None
+        )
+        stress_effects = [
+            effect for effect in normalize_effect_list(health.get('effects') or [])
+            if effect.get('active', True) and effect.get('type') in {'stress_effect', 'stress_stupor', 'phobia'}
+        ]
         return {
             'location_character_id': loc_char.id,
             'character_id': character.id if character else None,
@@ -4743,6 +5097,8 @@ class CombatService:
             ),
             'reaction_reserve': reaction_reserve if isinstance(reaction_reserve, dict) else None,
             'help_advantage': help_advantage if isinstance(help_advantage, dict) else None,
+            'must_do_retry': must_do_retry if isinstance(must_do_retry, dict) else None,
+            'stress_effects': stress_effects,
             'completed_pending_action_id': (
                 health.get('combatMeta', {}).get('completedPendingActionId')
                 if isinstance(health.get('combatMeta'), dict)
@@ -5674,6 +6030,7 @@ class CombatService:
         narrative_action_name=None,
         narrative_skill_path=None,
         narrative_roll_required=False,
+        narrative_difficulty=None,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -5720,6 +6077,8 @@ class CombatService:
         reload_details = None
         clear_jam_details = None
         narrative_action_details = None
+        must_do_details = None
+        consolation_details = None
         cover_details = None
         brace_details = None
         melee_action_details = None
@@ -5737,6 +6096,9 @@ class CombatService:
             skill_path = str(narrative_skill_path or '').strip()
             if roll_required and skill_path not in CombatService.NARRATIVE_SKILLS:
                 raise ValidationError("Choose a valid skill")
+            difficulty = CombatService._coerce_int(narrative_difficulty, 10)
+            if roll_required and not 1 <= difficulty <= 40:
+                raise ValidationError("Difficulty must be between 1 and 40")
             special_action_cost = narrative_cost
             narrative_action_details = {
                 'name': action_name,
@@ -5744,7 +6106,37 @@ class CombatService:
                 'roll_required': roll_required,
                 'skill_path': skill_path if roll_required else None,
                 'skill_label': CombatService.NARRATIVE_SKILLS.get(skill_path) if roll_required else None,
+                'difficulty': difficulty if roll_required else None,
                 'check': None,
+            }
+        elif action_key == 'must_do_it':
+            retry = combat_meta.get('mustDoRetry')
+            if not isinstance(retry, dict):
+                raise ValidationError("There is no failed check to repeat")
+            special_action_cost = 0
+            must_do_details = dict(retry)
+        elif action_key == 'console_ally':
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id, character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError("Choose another character")
+            CombatService.ensure_character_can_act(target)
+            if not CombatService._is_adjacent(character, target):
+                raise ValidationError("The ally must be on an adjacent tile")
+            target_data = target.character.data if isinstance(target.character.data, dict) else {}
+            target_health = target_data.setdefault('health', {})
+            target_meta = target_health.setdefault('combatMeta', {})
+            lobby = location.lobby
+            current_minute = (lobby.game_day or 1) * 1440 + (lobby.game_time_minutes or 0)
+            last_minute = CombatService._coerce_int(target_meta.get('lastConsoledAt'), -100000)
+            if current_minute - last_minute < 60:
+                raise ValidationError("This character has already been consoled during the last hour")
+            special_action_cost = 3
+            consolation_details = {
+                'target': target,
+                'target_data': target_data,
+                'current_minute': current_minute,
             }
         if action_key == 'recover_from_shock':
             health = data.setdefault('health', {})
@@ -6973,6 +7365,77 @@ class CombatService:
                     )
                     if help_bonus:
                         narrative_action_details['help'] = help_bonus
+                    check = narrative_action_details['check']
+                    check['difficulty'] = narrative_action_details['difficulty']
+                    check['success'] = check['roll'] == 20 or (
+                        check['roll'] != 1 and check['total'] >= check['difficulty']
+                    )
+                    CombatService._apply_stress_check_consequences(
+                        data, narrative_action_details['skill_path'], check['success'],
+                    )
+                    if not check['success']:
+                        combat_meta['mustDoRetry'] = {
+                            'name': narrative_action_details['name'],
+                            'skill_path': narrative_action_details['skill_path'],
+                            'difficulty': narrative_action_details['difficulty'],
+                            'created_round': current_round,
+                        }
+                    character.character.data = data
+                    flag_modified(character.character, 'data')
+            if action_key == 'must_do_it' and must_do_details:
+                CombatService.apply_stress_trigger(
+                    character, 1, trigger='must_do_it', check_manifestation=False,
+                )
+                check = CombatService._narrative_skill_check(
+                    data, must_do_details['skill_path'],
+                )
+                check['difficulty'] = CombatService._coerce_int(must_do_details['difficulty'], 1)
+                check['success'] = check['roll'] == 20 or (
+                    check['roll'] != 1 and check['total'] >= check['difficulty']
+                )
+                CombatService._apply_stress_check_consequences(
+                    data, must_do_details['skill_path'], check['success'],
+                )
+                must_do_details['check'] = check
+                combat_meta.pop('mustDoRetry', None)
+                if not check['success']:
+                    must_do_details['stress_manifestation'] = CombatService.apply_stress_trigger(
+                        character, 0, trigger='must_do_it_failure', force_manifest=True,
+                    )
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            if action_key == 'console_ally' and consolation_details:
+                target = consolation_details.pop('target')
+                target_data = consolation_details.pop('target_data')
+                target_health = target_data.setdefault('health', {})
+                target_meta = target_health.setdefault('combatMeta', {})
+                target_stress = max(0, CombatService._coerce_int(target_health.get('stress'), 0))
+                charisma_bonus = CombatService._skill_modifier(
+                    data, 'skills.social.charisma', include_pain=False,
+                )
+                difficulty = max(1, 10 + target_stress - charisma_bonus)
+                check = CombatService._narrative_skill_check(
+                    target_data, 'skills.physical.will',
+                )
+                success = check['roll'] == 20 or (check['roll'] != 1 and check['total'] >= difficulty)
+                check.update({'difficulty': difficulty, 'success': success})
+                target_meta['lastConsoledAt'] = consolation_details['current_minute']
+                if success:
+                    stress_result = CombatService.apply_stress_trigger(
+                        target, -1, trigger='consolation', check_manifestation=False,
+                    )
+                else:
+                    stress_result = CombatService.apply_stress_trigger(
+                        target, 0, trigger='failed_consolation', force_manifest=True,
+                    )
+                consolation_details.update({
+                    'target_character_id': target.character_id,
+                    'target_name': target.character.name,
+                    'check': check,
+                    'stress': stress_result,
+                })
+                target.character.data = target_data
+                flag_modified(target.character, 'data')
             if action_key == 'attack' and attack_details:
                 help_skill = (
                     'skills.physical.melee'
@@ -7074,7 +7537,24 @@ class CombatService:
                     ) + 3
                     target.character.data = target_data
                     flag_modified(target.character, 'data')
-            elif fire_mode not in {'suppression'}:
+            elif fire_mode == 'suppression':
+                suppressed_targets = LocationCharacter.query.filter_by(
+                    location_id=location_id,
+                    cover_object_id=attack_details.get('target_object_id'),
+                ).all()
+                attack_details['suppressed_characters'] = []
+                for suppressed in suppressed_targets:
+                    if suppressed.id == character.id or not suppressed.character:
+                        continue
+                    stress_result = CombatService.apply_stress_trigger(
+                        suppressed, 1, trigger='suppression',
+                    )
+                    attack_details['suppressed_characters'].append({
+                        'character_id': suppressed.character_id,
+                        'name': suppressed.character.name,
+                        'stress': stress_result,
+                    })
+            else:
                 targets = []
                 if attack_details.get('direct_cover_attack'):
                     cover = db.session.get(
@@ -7229,6 +7709,8 @@ class CombatService:
             'reload_weapon': reload_details,
             'clear_weapon_jam': clear_jam_details,
             'narrative_action': narrative_action_details,
+            'must_do_it': must_do_details,
+            'consolation': consolation_details,
             'cover': cover_details,
             'brace_weapon': brace_details,
             'melee_action': melee_action_details,

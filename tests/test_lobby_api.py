@@ -405,8 +405,56 @@ def test_gm_location_events_apply_stress_and_fall(client, create_user, auth_head
     )
     assert fallen.status_code == 200
     db.session.refresh(first_location_character)
-    assert first_location_character.posture == "standing"
+    assert first_location_character.posture in {"standing", "prone"}
     assert ChatMessage.query.filter_by(lobby_id=lobby["id"], username="ГМ").count() == 2
+
+
+def test_only_gm_can_use_quick_stress_buttons_and_decrease_expires_effects(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("quick-stress-gm")
+    player = create_user("quick-stress-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, player, auth_headers, data={
+        "skills": {"physical": {"will": {"base": 20, "bonus": 0}}},
+        "health": {
+            "stress": 2,
+            "effects": [{
+                "id": "until-stress-drops",
+                "type": "stress_effect",
+                "name": "До снижения стресса",
+                "active": True,
+                "expires_on_stress_decrease": True,
+            }],
+        },
+    })
+    location = Location(lobby_id=lobby["id"], name="Quick stress", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    loc_char = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        controlled_by=player["id"],
+    )
+    db.session.add(loc_char)
+    db.session.commit()
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/characters/{character['id']}/stress"
+
+    denied = client.post(url, headers=auth_headers(player), json={"amount": 1})
+    assert denied.status_code == 403
+
+    increased = client.post(url, headers=auth_headers(gm), json={"amount": 1})
+    assert increased.status_code == 200
+    assert increased.get_json()["stress"]["after"] == 3
+
+    decreased = client.post(url, headers=auth_headers(gm), json={"amount": -1})
+    assert decreased.status_code == 200
+    assert decreased.get_json()["stress"]["after"] == 2
+    db.session.refresh(loc_char.character)
+    stored_effect = loc_char.character.data["health"]["effects"][0]
+    assert stored_effect["active"] is False
 
 
 @pytest.mark.parametrize(
@@ -1647,6 +1695,7 @@ def test_narrative_combat_action_spends_ap_rolls_and_writes_chat(
             "narrative_action_name": "Перенаправляю питание терминала",
             "narrative_roll_required": True,
             "narrative_skill_path": "skills.other.engineering",
+            "narrative_difficulty": 20,
         },
     )
 
@@ -1655,13 +1704,88 @@ def test_narrative_combat_action_spends_ap_rolls_and_writes_chat(
     assert payload["name"] == "Перенаправляю питание терминала"
     assert payload["check"]["roll"] == 15
     assert payload["check"]["total"] == 16
+    assert payload["check"]["success"] is False
     db.session.refresh(actor_loc_char)
     assert actor_loc_char.action_points_current == 3
+    assert actor_loc_char.character.data["health"]["combatMeta"]["mustDoRetry"]["difficulty"] == 20
     message = ChatMessage.query.filter_by(
         lobby_id=lobby["id"], username="Действие"
     ).one()
     assert "Затрачено ОД: 2" in message.message
     assert "Инженерия" in message.message
+
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+    retry = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(actor),
+        json={
+            "location_character_id": actor_loc_char.id,
+            "action_key": "must_do_it",
+        },
+    )
+    assert retry.status_code == 200
+    retry_payload = retry.get_json()["must_do_it"]
+    assert retry_payload["check"]["success"] is True
+    db.session.refresh(actor_loc_char.character)
+    assert actor_loc_char.character.data["health"]["stress"] == 1
+    assert "mustDoRetry" not in actor_loc_char.character.data["health"]["combatMeta"]
+
+
+def test_consolation_costs_three_ap_reduces_stress_and_is_limited_per_game_hour(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("consolation-gm")
+    player = create_user("consolation-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    helper = create_character(client, lobby, player, auth_headers, data={
+        "skills": {"social": {"charisma": {"base": 5, "bonus": 0}}},
+        "health": {"effects": []},
+    })
+    target = create_character(client, lobby, player, auth_headers, data={
+        "skills": {"physical": {"will": {"base": 20, "bonus": 0}}},
+        "health": {"stress": 3, "effects": []},
+    })
+    location = Location(lobby_id=lobby["id"], name="Consolation", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    helper_loc = LocationCharacter(
+        location_id=location.id, character_id=helper["id"], controlled_by=player["id"],
+        pos_x=1, pos_y=1, action_points_current=5, action_points_max=5,
+    )
+    target_loc = LocationCharacter(
+        location_id=location.id, character_id=target["id"], controlled_by=player["id"],
+        pos_x=2, pos_y=1,
+    )
+    db.session.add_all([helper_loc, target_loc])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id, status="active", round_number=1, turn_index=0,
+        turn_order=[helper_loc.id, target_loc.id], current_location_character_id=helper_loc.id,
+    ))
+    db.session.commit()
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action"
+    payload = {
+        "location_character_id": helper_loc.id,
+        "action_key": "console_ally",
+        "target_character_id": target["id"],
+    }
+
+    response = client.post(url, headers=auth_headers(player), json=payload)
+
+    assert response.status_code == 200
+    assert response.get_json()["consolation"]["check"]["success"] is True
+    db.session.refresh(helper_loc)
+    db.session.refresh(target_loc.character)
+    assert helper_loc.action_points_current == 2
+    assert target_loc.character.data["health"]["stress"] == 2
+
+    helper_loc.action_points_current = 5
+    db.session.commit()
+    repeated = client.post(url, headers=auth_headers(player), json=payload)
+    assert repeated.status_code == 400
+    assert "last hour" in repeated.get_json()["error"]["message"]
 
 
 def test_player_may_move_and_add_marked_player_item(

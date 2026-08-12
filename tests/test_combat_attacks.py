@@ -81,6 +81,78 @@ def test_successful_fall_stays_standing_and_reduces_damage_by_leg_protection(mon
     assert target.posture == "standing"
 
 
+def test_stress_trigger_checks_will_and_persists_manifestation(monkeypatch):
+    rolls = iter([1, 1])
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"will": {"base": 5, "bonus": 0}}},
+            "health": {"stress": 0, "effects": []},
+        }),
+        posture="standing",
+    )
+
+    result = CombatService.apply_stress_trigger(target, 1, trigger="fright")
+
+    assert result["after"] == 1
+    assert result["difficulty"] == 7
+    assert result["manifested"] is True
+    assert result["table"] == "concern"
+    assert result["effect_roll"] == 1
+    assert target.character.data["health"]["effects"][-1]["name"] == "Боязливость"
+    assert target.character.data["health"]["stress"] == 1
+    effect = target.character.data["health"]["effects"][-1]
+    assert effect["gmPending"] is True
+
+    CombatService.resolve_stress_effect(target, effect["id"], "approve")
+
+    assert target.character.data["health"]["stress"] == 2
+    assert target.character.data["health"]["effects"][-1]["gmApproved"] is True
+
+
+def test_stress_decrease_expires_tension_effects(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "health": {
+                "stress": 7,
+                "effects": [{
+                    "id": "stress-penalty", "type": "stress_effect", "active": True,
+                    "expires_on_stress_decrease": True,
+                }],
+            },
+        }),
+        posture="standing",
+    )
+
+    CombatService.apply_stress_trigger(
+        target, -1, trigger="inspiration", check_manifestation=False,
+    )
+
+    assert target.character.data["health"]["stress"] == 6
+    assert target.character.data["health"]["effects"][0]["active"] is False
+
+
+def test_forced_stress_manifestation_uses_current_level_table(monkeypatch):
+    rolls = iter([20, 12])
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"will": {"base": 20, "bonus": 0}}},
+            "health": {"stress": 7, "effects": []},
+        }),
+        posture="standing",
+    )
+
+    result = CombatService.apply_stress_trigger(target, 0, force_manifest=True)
+
+    assert result["manifested"] is True
+    assert result["table"] == "tension"
+    assert result["effect"] == "Адреналин"
+
+
 def test_ranged_targets_must_stay_inside_the_facing_arc():
     shooter = SimpleNamespace(pos_x=5, pos_y=5, facing_x=0, facing_y=1)
 

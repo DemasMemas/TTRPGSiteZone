@@ -30,6 +30,7 @@ let currentCharacterId = null;
 let currentCharacterData = null;
 let currentCharacterCanEdit = false;
 let autoSaveTimer = null;
+let stressAdjustmentPending = false;
 const AUTO_SAVE_DELAY = 500;
 const pendingConsumableActions = new Map();
 const pendingReloadActions = new Map();
@@ -2506,7 +2507,11 @@ function renderHealthTab(data, container = null) {
                 </div>
                 <div class="health-field">
                     <label>Стресс</label>
-                    <input type="number" class="form-control" name="health.stress" value="${health.stress || 0}">
+                    <div style="display:flex;align-items:stretch;gap:4px;">
+                        ${window.isGM && window.currentLocationId ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(-1)" title="Снизить стресс на 1" aria-label="Снизить стресс">−</button>' : ''}
+                        <div class="health-readonly-value" style="min-width:42px;display:flex;align-items:center;justify-content:center;" title="Стресс изменяется игровыми событиями и действиями">${Number(health.stress || 0)}</div>
+                        ${window.isGM && window.currentLocationId ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(1)" title="Повысить стресс на 1" aria-label="Повысить стресс">+</button>' : ''}
+                    </div>
                 </div>
                 <div class="health-field">
                     <label>Ур. боли</label>
@@ -2688,10 +2693,14 @@ function renderHealthTab(data, container = null) {
         next_rest_healing: 'Усилит лечение во время следующего отдыха и затем исчезнет.',
         untreated_wound: 'Рана остановлена, но не обработана: после боя может привести к заражению.',
         tourniquet: 'Жгут останавливает кровотечения конечности, но накладывает её штрафы.',
+        stress_effect: 'Проявление стресса. Выполните указанное требование по решению ГМа.',
+        stress_stupor: 'Ступор блокирует действия на указанный срок или до предусмотренного правилами прекращения.',
+        phobia: 'Постоянная фобия даёт помеху в ситуациях, связанных с её источником.',
     };
     const describeEffect = (effect) => {
         const source = effectSourceLabels[effect.source] || effect.source;
         const details = [];
+        if (effect.requirement) details.push(`Требование: ${effect.requirement}`);
         if (effect.type === 'generic') {
             details.push('Логика не определена: это старая, повреждённая или служебная запись. Она сама по себе ничего не изменяет.');
         } else if (effect.type === 'custom') {
@@ -2767,6 +2776,40 @@ function refreshHealthPanel(data = currentCharacterData) {
         || document.getElementById('sheet-tab-health');
     if (healthContainer) renderHealthTab(data, healthContainer);
 }
+
+window.adjustCharacterStress = async function(amount) {
+    if (
+        stressAdjustmentPending
+        || !window.isGM
+        || !currentLobbyId
+        || !window.currentLocationId
+        || !currentCharacterId
+        || ![-1, 1].includes(Number(amount))
+    ) return;
+    stressAdjustmentPending = true;
+    try {
+        const result = await Server.adjustLocationCharacterStress(
+            currentLobbyId,
+            window.currentLocationId,
+            currentCharacterId,
+            Number(amount),
+        );
+        if (result?.data) {
+            currentCharacterData = result.data;
+            normalizeCharacterEffects(currentCharacterData);
+            refreshHealthPanel();
+        }
+        const stress = result?.stress;
+        showNotification(
+            `Стресс: ${stress?.before ?? '—'} → ${stress?.after ?? '—'}`,
+            Number(amount) > 0 ? 'system' : 'success',
+        );
+    } catch (error) {
+        showNotification(error.message || 'Не удалось изменить стресс', 'system');
+    } finally {
+        stressAdjustmentPending = false;
+    }
+};
 
 window.addEffect = function() {
     updateDataFromFields();

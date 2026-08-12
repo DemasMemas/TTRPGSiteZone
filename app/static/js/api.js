@@ -483,6 +483,20 @@ export const Server = {
         });
     },
 
+    async resolveLocationStressEffect(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/stress-effects/resolve`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+
+    async adjustLocationCharacterStress(lobbyId, locationId, characterId, amount) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/stress`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount }),
+        });
+    },
+
     async reserveLocationCombatReaction(lobbyId, locationId, payload) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/reaction/reserve`, {
             method: 'POST',

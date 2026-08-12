@@ -1322,12 +1322,18 @@ function showNarrativeActionModal(characterId) {
                 <input name="roll_required" type="checkbox">
                 <span>Требуется проверка навыка</span>
             </label>
-            <label data-narrative-skill-row style="display:grid; gap:5px; margin-bottom:16px; opacity:.45;">
+            <div data-narrative-skill-row style="display:grid;grid-template-columns:1fr 120px;gap:10px;margin-bottom:16px;opacity:.45;">
+            <label style="display:grid; gap:5px;">
                 <span>Навык</span>
                 <select name="skill_path" class="form-control" disabled>
                     ${NARRATIVE_SKILLS.map(([path, label]) => `<option value="${path}">${label}</option>`).join('')}
                 </select>
             </label>
+            <label style="display:grid; gap:5px;">
+                <span>Сложность</span>
+                <input name="difficulty" class="form-control number-input" type="number" min="1" max="40" value="10" disabled>
+            </label>
+            </div>
             <div style="display:flex; justify-content:flex-end; gap:8px;">
                 <button type="button" class="btn btn-secondary" data-narrative-cancel>Отмена</button>
                 <button type="submit" class="btn btn-primary">Выполнить</button>
@@ -1337,9 +1343,11 @@ function showNarrativeActionModal(characterId) {
     const form = modal.querySelector('form');
     const rollInput = form.elements.roll_required;
     const skillInput = form.elements.skill_path;
+    const difficultyInput = form.elements.difficulty;
     const skillRow = modal.querySelector('[data-narrative-skill-row]');
     rollInput.addEventListener('change', () => {
         skillInput.disabled = !rollInput.checked;
+        difficultyInput.disabled = !rollInput.checked;
         skillRow.style.opacity = rollInput.checked ? '1' : '.45';
     });
     modal.querySelector('[data-narrative-cancel]').onclick = closeNarrativeActionModal;
@@ -1368,6 +1376,7 @@ function showNarrativeActionModal(characterId) {
             narrative_action_name: actionName,
             narrative_roll_required: rollInput.checked,
             narrative_skill_path: rollInput.checked ? skillInput.value : null,
+            narrative_difficulty: rollInput.checked ? Number.parseInt(difficultyInput.value, 10) : null,
             pending_action_id: actionId,
         };
         try {
@@ -1385,7 +1394,7 @@ function showNarrativeActionModal(characterId) {
             const check = result?.narrative_action?.check;
             showNotification(
                 check
-                    ? `${actionName}: d20 ${check.roll}, итог ${check.total}`
+                    ? `${actionName}: d20 ${check.roll}, итог ${check.total} против СЛ ${check.difficulty} — ${check.success ? 'успех' : 'провал'}`
                     : `${actionName}: затрачено ${actionPoints} ОД`,
                 'success',
             );
@@ -1544,6 +1553,25 @@ function showGmEventMenu() {
             <label class="gm-event-amount" style="display:grid;gap:5px;margin-bottom:9px;max-width:160px;">Изменение стресса
                 <input name="amount" type="number" min="-10" max="10" value="1">
             </label>
+            <label class="gm-event-stress-trigger" style="display:grid;gap:5px;margin-bottom:9px;">Причина стресса
+                <select name="stress_trigger">
+                    <option value="gm_event">Событие ГМа</option>
+                    <option value="direct_attack">Прямая атака</option>
+                    <option value="indirect_damage">Непрямой урон</option>
+                    <option value="suppression">Подавление укрытия</option>
+                    <option value="fright">Испуг</option>
+                    <option value="intimidation">Устрашение</option>
+                    <option value="provocation">Провокация</option>
+                    <option value="dread">Нагнетение</option>
+                    <option value="phobia">Фобия</option>
+                    <option value="blindness_90">Слепота 90+</option>
+                    <option value="deafness_90">Глухота 90+</option>
+                    <option value="ally_critical">Критическое состояние союзника</option>
+                    <option value="ally_death">Смерть союзника</option>
+                    <option value="inspiration">Воодушевление / снижение стресса</option>
+                </select>
+            </label>
+            <label class="gm-event-force-manifest" style="display:flex;gap:7px;align-items:center;margin-bottom:9px;"><input name="force_manifest" type="checkbox"> Принудительно проявить стресс</label>
             <label class="gm-event-height" style="display:none;gap:5px;margin-bottom:9px;max-width:160px;">Высота, м
                 <input name="height_meters" type="number" min="0" max="1000" step="0.1" value="1">
             </label>
@@ -1556,9 +1584,13 @@ function showGmEventMenu() {
     const form = modal.querySelector('form');
     const typeInput = form.elements.type;
     const amountLabel = form.querySelector('.gm-event-amount');
+    const stressTriggerLabel = form.querySelector('.gm-event-stress-trigger');
+    const forceManifestLabel = form.querySelector('.gm-event-force-manifest');
     const heightLabel = form.querySelector('.gm-event-height');
     typeInput.onchange = () => {
         amountLabel.style.display = typeInput.value === 'stress' ? 'grid' : 'none';
+        stressTriggerLabel.style.display = typeInput.value === 'stress' ? 'grid' : 'none';
+        forceManifestLabel.style.display = typeInput.value === 'stress' ? 'flex' : 'none';
         heightLabel.style.display = typeInput.value === 'fall' ? 'grid' : 'none';
     };
     modal.querySelector('.gm-event-close').onclick = () => { modal.style.display = 'none'; };
@@ -1578,6 +1610,8 @@ function showGmEventMenu() {
                 type: typeInput.value,
                 amount: Number(form.elements.amount.value),
                 height_meters: Number(form.elements.height_meters.value),
+                stress_trigger: form.elements.stress_trigger.value,
+                force_manifest: form.elements.force_manifest.checked,
                 note: form.elements.note.value.trim(),
             });
             modal.style.display = 'none';
@@ -1601,6 +1635,66 @@ async function requestReservedReaction(character) {
     } catch (error) {
         showNotification(error.message || 'Не удалось запросить реакцию', 'system');
     }
+}
+
+async function performMustDoRetry(actor) {
+    try {
+        const result = await Server.performLocationCombatAction(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            { location_character_id: actor.location_character_id, action_key: 'must_do_it' },
+        );
+        const details = result?.must_do_it || {};
+        const check = details.check || {};
+        showNotification(
+            `Должен это сделать: d20 ${check.roll ?? '—'}, итог ${check.total ?? '—'} против СЛ ${check.difficulty ?? '—'} — ${check.success ? 'успех' : 'провал'}`,
+            check.success ? 'success' : 'system',
+        );
+    } catch (error) {
+        showNotification(error.message || 'Не удалось повторить проверку', 'system');
+    }
+}
+
+function showConsolationMenu(actor) {
+    const targets = (combatState?.characters || []).filter(character =>
+        character.location_character_id !== actor.location_character_id && character.condition?.state !== 'dead'
+    );
+    if (!targets.length) {
+        showNotification('Нет доступных союзников для утешения', 'system');
+        return;
+    }
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;z-index:10060;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.58);';
+    modal.innerHTML = `<form style="width:min(390px,100%);background:#171b16;color:#e7e0cb;border:1px solid #625b42;border-radius:8px;padding:18px;">
+        <h3 style="margin:0 0 8px;">Утешить союзника</h3>
+        <p style="margin:0 0 14px;opacity:.8;">3 ОД, не чаще одного раза в игровой час на цель.</p>
+        <select name="target" class="form-control">${targets.map(target => `<option value="${target.character_id}">${escapeHtml(target.name)}</option>`).join('')}</select>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;"><button type="button" class="btn btn-secondary">Отмена</button><button class="btn btn-primary">Утешить</button></div>
+    </form>`;
+    document.body.appendChild(modal);
+    const form = modal.querySelector('form');
+    modal.querySelector('[type="button"]').onclick = () => modal.remove();
+    modal.onpointerdown = event => { if (event.target === modal) modal.remove(); };
+    form.onsubmit = async event => {
+        event.preventDefault();
+        try {
+            const result = await Server.performLocationCombatAction(
+                window.currentLobbyId, getCurrentLocationId(), {
+                    location_character_id: actor.location_character_id,
+                    action_key: 'console_ally',
+                    target_character_id: Number(form.elements.target.value),
+                },
+            );
+            modal.remove();
+            const check = result?.consolation?.check || {};
+            showNotification(
+                `${result?.consolation?.target_name || 'Союзник'}: Воля ${check.total ?? '—'} против СЛ ${check.difficulty ?? '—'} — ${check.success ? 'стресс снижен' : 'проявление стресса'}`,
+                check.success ? 'success' : 'system',
+            );
+        } catch (error) {
+            showNotification(error.message || 'Не удалось утешить союзника', 'system');
+        }
+    };
 }
 
 function showCombatActionMenu(clientX, clientY, characterId) {
@@ -1669,6 +1763,20 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     ];
 
     if (condition.state === 'active') {
+        if (combatCharacter?.must_do_retry) {
+            menuItems.push({
+                label: 'Должен', icon: '!',
+                title: `Повторить проваленную проверку «${combatCharacter.must_do_retry.name || 'действие'}» и получить 1 стресс`,
+                angle: 194, ringRadius: 165, requiresCombat: true,
+                action: () => performMustDoRetry(combatCharacter),
+            });
+        }
+        menuItems.push({
+            label: 'Утешить', icon: '♡',
+            title: 'Помочь союзнику справиться со стрессом за 3 ОД',
+            angle: 230, ringRadius: 165, requiresCombat: true,
+            action: () => showConsolationMenu(combatCharacter),
+        });
         menuItems.push({
             label: '\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442',
             icon: '\u21bb',
@@ -4433,6 +4541,9 @@ function renderCombatHud() {
     const reactionReturnCharacter = charactersByLocationId.get(
         Number(combatState.reaction?.return_location_character_id),
     );
+    const stressCards = window.isGM ? (combatState.characters || []).flatMap(character =>
+        (character.stress_effects || []).filter(effect => effect.gmPending).map(effect => ({ character, effect }))
+    ) : [];
     const isCollapsed = combatHudCollapsed ?? combatState.status !== 'active';
     const compactStatus = combatState.status === 'active'
         ? `Раунд ${combatState.round_number || 0} · ${combatState.current_character?.name || 'нет хода'} · ${combatState.current_character?.posture_label || 'Стоя'}`
@@ -4505,6 +4616,7 @@ function renderCombatHud() {
                             ? `Соседние цели ${(pendingCombatAction.selectedTargetIds || []).length}/3 · Enter для атаки`
                             : (pendingCombatAction.fireMode || pendingCombatAction.actionKey || 'действие')))}
             }</div>` : ''}
+            ${stressCards.map(({character, effect}) => `<div class="stress-effect-card" data-character="${character.location_character_id}" data-effect="${escapeHtml(effect.id)}" style="margin-top:8px;padding:8px;border:1px solid rgba(215,120,80,.45);border-radius:8px;"><strong>Стресс: ${escapeHtml(character.name)} — ${escapeHtml(effect.name)}</strong><div style="margin-top:4px;font-size:12px;opacity:.86;">${escapeHtml(effect.requirement || '')}</div><div style="margin-top:7px"><button class="btn btn-sm btn-primary stress-approve">Разрешить</button><button class="btn btn-sm btn-secondary stress-replace">Заменить эффект</button><button class="btn btn-sm btn-secondary stress-skip">Пропустить</button></div></div>`).join('')}
             <div style="margin-top:10px;">
                 ${combatState.status !== 'active' && window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn" style="margin-top:8px;">Начать бой</button>' : ''}
                 ${combatState.status === 'active' && combatState.current_character && canActWithCombatCharacter(combatState.current_character) ? '<button class="btn btn-sm btn-secondary combat-end-turn-btn" style="margin-top:8px;">Закончить ход</button>' : ''}
@@ -4516,6 +4628,19 @@ function renderCombatHud() {
         </div>
     `;
     ensureCombatHudDragging();
+    combatHud.querySelectorAll('.stress-effect-card button').forEach(button => {
+        button.onclick = async () => {
+            const card = button.closest('.stress-effect-card');
+            const replacing = button.classList.contains('stress-replace');
+            const replacement = replacing ? window.prompt('Какое действие или требование должен получить персонаж?') : null;
+            if (replacing && !replacement?.trim()) return;
+            await Server.resolveLocationStressEffect(window.currentLobbyId, getCurrentLocationId(), {
+                location_character_id: Number(card.dataset.character), effect_id: card.dataset.effect,
+                action: button.classList.contains('stress-approve') ? 'approve' : (replacing ? 'replace' : 'skip'),
+                replacement,
+            });
+        };
+    });
     if (window.isGM) {
         const teamButton = document.createElement('button');
         teamButton.type = 'button';
