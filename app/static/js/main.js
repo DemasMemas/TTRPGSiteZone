@@ -873,6 +873,10 @@ if (socket) {
 
     socket.on('combat_state', syncCombatState);
     socket.on('combat_state_updated', syncCombatState);
+    socket.on('combat_explosion', (data) => {
+        if (Number(data?.location_id) !== Number(getCurrentLocationId())) return;
+        import('./locationScene.js').then(module => module.showCombatExplosion(data));
+    });
     socket.on('character_interaction_requested', (data) => {
         import('./locationScene.js').then(module => module.handleCharacterInteractionRequest(data));
     });

@@ -60,6 +60,7 @@ let gmVisionCharacterId = null;
 const tileInstanceTransform = new THREE.Object3D();
 let objectMeshes = [];
 let anomalyEffectMeshes = [];
+let combatAreaMeshes = [];
 let locationObjectMeshes = [];
 let groundPlaneMesh;
 let characterModels = new Map();
@@ -436,6 +437,122 @@ function clearAttackPreview() {
         disposeObject(attackPreviewLine);
         attackPreviewLine = null;
     }
+}
+
+export function showCombatExplosion(payload) {
+    if (!scene) return;
+    const details = payload?.explosive || payload;
+    const explosion = details?.explosion || {};
+    const impact = details?.impact || explosion?.epicenter;
+    if (!impact || !Number.isFinite(Number(impact.x)) || !Number.isFinite(Number(impact.y))) return;
+    const radius = Math.max(0.75, Number(explosion.radius) || 1);
+    const group = new THREE.Group();
+    const ring = new THREE.Mesh(
+        new THREE.RingGeometry(0.72, 1, 64),
+        new THREE.MeshBasicMaterial({
+            color: 0xff8a2b,
+            transparent: true,
+            opacity: 0.9,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    const core = new THREE.Mesh(
+        new THREE.SphereGeometry(0.32, 16, 12),
+        new THREE.MeshBasicMaterial({
+            color: 0xffd36a,
+            transparent: true,
+            opacity: 1,
+            depthWrite: false,
+        }),
+    );
+    core.position.y = 0.32;
+    group.add(ring, core);
+    group.position.set(
+        Number(impact.x) + 0.5,
+        getTileHeight(Number(impact.x), Number(impact.y)) + 0.05,
+        Number(impact.y) + 0.5,
+    );
+    scene.add(group);
+    const startedAt = performance.now();
+    const duration = 750;
+    const animate = (now) => {
+        const progress = Math.min(1, (now - startedAt) / duration);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const scale = 0.1 + radius * eased;
+        ring.scale.setScalar(scale);
+        ring.material.opacity = 0.9 * (1 - progress);
+        core.scale.setScalar(1 + eased * 4);
+        core.material.opacity = 1 - progress;
+        if (progress < 1 && scene) {
+            requestAnimationFrame(animate);
+            return;
+        }
+        scene?.remove(group);
+        ring.geometry.dispose();
+        ring.material.dispose();
+        core.geometry.dispose();
+        core.material.dispose();
+    };
+    requestAnimationFrame(animate);
+}
+
+function syncCombatAreaVisuals(state) {
+    combatAreaMeshes.forEach((mesh) => {
+        scene?.remove(mesh);
+        disposeObject(mesh);
+    });
+    combatAreaMeshes = [];
+    if (!scene || state?.status !== 'active') return;
+
+    (state.area_effects || []).forEach((area) => {
+        const radius = Math.max(0.2, Number(area.radius) || 0);
+        const type = String(area.type || '');
+        const color = type.startsWith('smoke')
+            ? 0x727872
+            : (type === 'gas' ? 0x879c43 : 0xe46d24);
+        const height = type.startsWith('smoke') ? 2.4 : 0.35;
+        const mesh = new THREE.Mesh(
+            new THREE.CylinderGeometry(radius, radius, height, 48),
+            new THREE.MeshBasicMaterial({
+                color,
+                transparent: true,
+                opacity: type.startsWith('smoke') ? 0.42 : 0.3,
+                depthWrite: false,
+                side: THREE.DoubleSide,
+            }),
+        );
+        mesh.position.set(
+            Number(area.x) + 0.5,
+            getTileHeight(Number(area.x), Number(area.y)) + height / 2 + 0.04,
+            Number(area.y) + 0.5,
+        );
+        mesh.userData.combatArea = area;
+        scene.add(mesh);
+        combatAreaMeshes.push(mesh);
+    });
+
+    (state.pending_explosives || []).forEach((event) => {
+        const marker = new THREE.Mesh(
+            new THREE.RingGeometry(0.18, 0.28, 32),
+            new THREE.MeshBasicMaterial({
+                color: 0xffb02e,
+                transparent: true,
+                opacity: 0.85,
+                depthWrite: false,
+                side: THREE.DoubleSide,
+            }),
+        );
+        marker.rotation.x = -Math.PI / 2;
+        marker.position.set(
+            Number(event.x) + 0.5,
+            getTileHeight(Number(event.x), Number(event.y)) + 0.08,
+            Number(event.y) + 0.5,
+        );
+        scene.add(marker);
+        combatAreaMeshes.push(marker);
+    });
 }
 
 function isCurrentCombatTurnForCharacter(characterId) {
@@ -2945,7 +3062,9 @@ export function beginPendingCombatAction(action) {
     }
     const label = action.actionKey === 'use_item'
         ? 'Использование предмета'
-        : (action.actionKey === 'aim' ? 'Прицеливание' : 'Атака');
+        : (action.actionKey === 'explosive_attack'
+            ? 'Выбор точки взрыва'
+            : (action.actionKey === 'aim' ? 'Прицеливание' : 'Атака'));
     const targetHint = action.targetType === 'structure'
         ? 'выберите укрытие'
         : (['multi_character', 'multi_melee'].includes(action.targetType)
@@ -2968,6 +3087,10 @@ export function clearPendingCombatAction() {
 
 export function queueCombatActionFromSheet(action) {
     return beginPendingCombatAction({ ...action, source: 'sheet' });
+}
+
+export function registerDeferredCombatAction(actionId, payload) {
+    if (actionId && payload) deferredCombatActions.set(String(actionId), { ...payload });
 }
 
 export function startCharacterMoveMode(characterId) {
@@ -3295,20 +3418,43 @@ async function resolveCombatPointSelection(clientX, clientY) {
         return false;
     }
     try {
-        await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+        const payload = {
             location_character_id: action.actorLocationCharacterId,
             action_key: action.actionKey,
             weapon_index: action.weaponIndex,
             fire_mode: action.fireMode,
             shot_count: action.shotCount,
+            item_path: action.itemPath,
+            explosive_source: action.explosiveSource,
+            explosive_fire_mode: action.explosiveFireMode,
+            explosive_fuse_mode: action.explosiveFuseMode,
+            inventory_retrieval_action_points: action.inventoryRetrievalActionPoints,
+            inventory_use_action_discount: action.inventoryUseActionDiscount,
             target_x: targetX,
             target_y: targetY,
-        });
+            pending_action_id: `combat-point-${action.actorLocationCharacterId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        };
+        const result = await Server.performLocationCombatAction(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            payload,
+        );
+        if (result?.pending_action) {
+            deferredCombatActions.set(result.pending_action_id, payload);
+            showNotification(
+                'Действие начато. Недостающие ОД будут списаны в следующих ходах.',
+                'system',
+            );
+            clearPendingCombatAction();
+            return true;
+        }
         if (typeof action.onResolve === 'function') {
             await action.onResolve({ targetX, targetY });
         }
         showNotification(
-            `${action.fireMode === 'suppression' ? 'Подавление' : 'Стрельба по площади'}: ${targetX}, ${targetY}`,
+            `${action.actionKey === 'explosive_attack'
+                ? 'Точка взрыва выбрана'
+                : (action.fireMode === 'suppression' ? 'Подавление' : 'Стрельба по площади')}: ${targetX}, ${targetY}`,
             'success'
         );
         clearPendingCombatAction();
@@ -4742,6 +4888,7 @@ function renderCombatHud() {
 export function setCombatState(state) {
     combatState = state || null;
     window.locationCombatState = combatState;
+    syncCombatAreaVisuals(combatState);
     (combatState?.characters || []).forEach((character) => {
         updateCharacterTeamVisual(character.character_id, character.team_name, character.team_color);
         applyCharacterPostureVisual(character.character_id, character.posture);
@@ -8564,6 +8711,7 @@ export function destroyLocationScene() {
         locationTileMesh = null;
         objectMeshes = [];
         anomalyEffectMeshes = [];
+        combatAreaMeshes = [];
         locationObjectMeshes = [];
         clearAllCharacters();
 

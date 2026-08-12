@@ -18,6 +18,8 @@ class LocationCombatState(db.Model):
     round_number = db.Column(db.Integer, nullable=False, default=0)
     turn_index = db.Column(db.Integer, nullable=False, default=0)
     turn_order = db.Column(db.JSON, nullable=False, default=empty_list)
+    pending_explosives = db.Column(db.JSON, nullable=False, default=empty_list)
+    area_effects = db.Column(db.JSON, nullable=False, default=empty_list)
     current_location_character_id = db.Column(
         db.Integer,
         db.ForeignKey('location_characters.id'),

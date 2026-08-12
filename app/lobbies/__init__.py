@@ -2256,6 +2256,17 @@ def start_location_combat(lobby_id, location_id, lobby):
         location_character_ids=data.get('location_character_ids'),
     )
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
+    for detonation in state.get('detonations') or []:
+        socketio.emit(
+            'combat_explosion',
+            {'location_id': location_id, 'explosive': detonation},
+            room=f"location_{location_id}",
+        )
+        summary = CombatService.format_explosion_summary({'explosive': detonation})
+        if summary:
+            _emit_lobby_chat_message(
+                lobby_id, participant.user_id, summary, username='\u0412\u0437\u0440\u044b\u0432',
+            )
     participants = [
         character
         for character in (state.get('characters') or [])
@@ -2681,9 +2692,22 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         narrative_skill_path=data.get('narrative_skill_path'),
         narrative_roll_required=data.get('narrative_roll_required') is True,
         narrative_difficulty=data.get('narrative_difficulty'),
+        item_path=data.get('item_path'),
+        explosive_source=data.get('explosive_source'),
+        explosive_fire_mode=data.get('explosive_fire_mode'),
+        explosive_fuse_mode=data.get('explosive_fuse_mode'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
+    if result.get('explosive') and result['explosive'].get('detonated', True):
+        socketio.emit(
+            'combat_explosion',
+            {
+                'location_id': location_id,
+                'explosive': result['explosive'],
+            },
+            room=f"location_{location_id}",
+        )
     actor = db.session.get(LobbyCharacter, result['character'].get('character_id'))
     if actor:
         socketio.emit(
@@ -2701,6 +2725,18 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             lobby_id,
             participant.user_id,
             attack_summary,
+        )
+    explosion_summary = (
+        CombatService.format_explosion_summary(result)
+        if not result.get('explosive') or result['explosive'].get('detonated', True)
+        else None
+    )
+    if explosion_summary:
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            explosion_summary,
+            username='\u0412\u0437\u0440\u044b\u0432',
         )
     narrative_summary = CombatService.format_narrative_action_summary(result)
     if narrative_summary:
@@ -2738,6 +2774,12 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         )
         if character_id
     }
+    explosion = (result.get('explosive') or {}).get('explosion') or {}
+    affected_character_ids.update(
+        entry.get('character_id')
+        for entry in (explosion.get('targets') or [])
+        if entry.get('character_id')
+    )
     for character_id in affected_character_ids:
         target = db.session.get(LobbyCharacter, character_id)
         if target:
@@ -2750,4 +2792,17 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
                 },
                 room=f"character_{target.id}",
             )
+            location_target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=character_id,
+            ).first()
+            if location_target:
+                socketio.emit(
+                    'combat_character_updated',
+                    CombatService._serialize_character(
+                        location_target,
+                        current_turn_id=(result.get('state') or {}).get('current_location_character_id'),
+                    ),
+                    room=f"location_{location_id}",
+                )
     return jsonify(result), 200

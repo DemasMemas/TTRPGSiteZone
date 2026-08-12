@@ -4266,6 +4266,18 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
         const drawCost = ergonomics?.draw_action_points ?? 4;
         return `<button type="button" class="btn btn-sm btn-primary" ${disabledAttr} onclick="drawWeaponFromEquipment(${index})">Достать оружие · ${drawCost} ОД</button>`;
     }
+    const isGrenadeLauncher = String(template?.subcategory || weapon?.subcategory || '')
+        .trim()
+        .toLowerCase()
+        .includes('гранатом');
+    if (isGrenadeLauncher) {
+        const inHands = isCombatActive && isSelectedWeaponIndex(drawnWeaponIndex, index)
+            ? '<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>'
+            : '';
+        return `${inHands}${buttButton}
+            <button type="button" class="btn btn-sm btn-success" ${firingDisabledAttr} onclick="useWeaponFromEquipment(${index}, 'unaimed', 1, 2)">Навскидку · 2 ОД · точность −4</button>
+            <button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="useWeaponFromEquipment(${index}, 'aimed', 1, 4)">Прицельный · 4 ОД</button>`;
+    }
     if (!isCombatActive && weapon.requiresManualCycle && !isSelectedWeaponIndex(persistentWeaponIndex, index)) {
         return `<button type="button" class="btn btn-sm btn-primary" onclick="drawWeaponFromEquipment(${index})">Взять в руки</button>`;
     }
@@ -7938,6 +7950,9 @@ window.useWeaponFromEquipment = function(
     const actorCharacterId = currentCharacterId;
     const weapon = sheetData?.weapons?.[weaponIndex];
     if (!weapon) return;
+    const weaponTemplate = (allTemplatesCache || []).find(
+        template => template.id == weapon.templateId
+    );
 
     const combatState = window.locationCombatState;
     const isCombatActive = Boolean(combatState && combatState.status === 'active');
@@ -7951,9 +7966,36 @@ window.useWeaponFromEquipment = function(
         return;
     }
 
+    const weaponCategory = String(
+        weapon.subcategory || weaponTemplate?.subcategory || ''
+    ).toLowerCase();
+    if (weaponCategory.includes('гранатом')) {
+        if (!isCombatActive) {
+            showNotification('Стрельба из гранатомёта выполняется на боевой подлокации', 'system');
+            return;
+        }
+        if (!['unaimed', 'aimed'].includes(fireMode)) {
+            showNotification('Гранатомёту доступны выстрел навскидку и прицельный выстрел', 'system');
+            return;
+        }
+        closeCharacterSheet();
+        import('./locationScene.js').then((scene) => {
+            scene.queueCombatActionFromSheet({
+                actorCharacterId,
+                actionKey: 'explosive_attack',
+                weaponIndex,
+                explosiveSource: 'weapon',
+                explosiveFireMode: fireMode,
+                targetType: 'point',
+                source: 'sheet',
+            });
+        });
+        return;
+    }
+
     const profile = getWeaponFireProfile(
         weapon,
-        (allTemplatesCache || []).find(template => template.id == weapon.templateId)
+        weaponTemplate
     );
     const shots = Math.max(1, Number.parseInt(shotCount, 10) || 1);
     const singleOptions = profile.single_shot_options || [1];
@@ -8127,17 +8169,50 @@ window.fireGrenadeLauncher = async function(weaponIndex) {
         showNotification('Подствольник не заряжен');
         return;
     }
+    if (!window.locationCombatState || window.locationCombatState.status !== 'active') {
+        showNotification('Стрельба из подствольника выполняется на боевой подлокации', 'system');
+        return;
+    }
 
-    const grenade = launcher.loadedGrenade;
-    showNotification(`Выстрел из подствольного гранатомёта (${launcher.name}). Эффект: ${grenade.attributes?.effect || 'взрыв'}`, 'system');
-
-    // Сбрасываем состояние
-    launcher.loaded = false;
-    launcher.loadedGrenade = null;
-
-    renderEquipmentTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
+    document.getElementById('grenade-fire-mode-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'grenade-fire-mode-modal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width:420px">
+            <span class="close">&times;</span>
+            <h3>Выстрел из подствольника</h3>
+            <p>${launcher.loadedGrenade.name || 'Граната'}</p>
+            <div class="form-actions" style="display:grid;gap:8px">
+                <button class="btn btn-primary" data-mode="unaimed">Навскидку · 2 ОД · точность −4</button>
+                <button class="btn btn-warning" data-mode="aimed">Прицельный · 4 ОД</button>
+                <button class="btn btn-secondary" data-cancel>Отмена</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.style.display = 'flex';
+    const close = () => modal.remove();
+    modal.querySelector('.close').onclick = close;
+    modal.querySelector('[data-cancel]').onclick = close;
+    modal.querySelectorAll('[data-mode]').forEach(button => {
+        button.onclick = async () => {
+            const explosiveFireMode = button.dataset.mode;
+            close();
+            const actorCharacterId = currentCharacterId;
+            closeCharacterSheet();
+            const scene = await import('./locationScene.js');
+            scene.queueCombatActionFromSheet({
+                actorCharacterId,
+                actionKey: 'explosive_attack',
+                weaponIndex,
+                explosiveSource: 'underbarrel',
+                explosiveFireMode,
+                targetType: 'point',
+                source: 'sheet',
+            });
+        };
+    });
 };
 
 window.reloadGrenadeLauncher = async function(weaponIndex) {
@@ -8215,42 +8290,56 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
         const selected = grenadeItems[idx];
         const grenade = selected.item;
         try {
-            await spendInventoryAccessForCombat(grenade, selected.path, 0);
-        } catch (error) {
-            showNotification(error.message || 'Не хватает ОД, чтобы достать гранату', 'system');
-            return;
-        }
-        modal.remove();
-
-        // Обработка стопки: если гранат больше 1, создаём копию и уменьшаем исходную
-        let grenadeToUse;
-        if (grenade.quantity > 1) {
-            grenade.quantity -= 1;
-            grenadeToUse = { ...grenade, quantity: 1 };
-        } else {
-            grenadeToUse = grenade;
-            if (!removeItemByPath(selected.path)) {
-                showNotification('Не удалось найти гранату в инвентаре');
+            const combatState = window.locationCombatState;
+            if (!combatState || combatState.status !== 'active') {
+                const grenadeToUse = { ...grenade, quantity: 1 };
+                if (grenade.quantity > 1) grenade.quantity -= 1;
+                else if (!removeItemByPath(selected.path)) {
+                    showNotification('Не удалось найти гранату в инвентаре');
+                    return;
+                }
+                launcher.loaded = true;
+                launcher.loadedGrenade = grenadeToUse;
+                modal.remove();
+                renderInventoryTab(currentCharacterData);
+                renderEquipmentTab(currentCharacterData);
+                scheduleAutoSave();
+                forceSyncCharacter();
+                showNotification('Подствольник заряжен', 'success');
                 return;
             }
+            const actor = combatState.current_character;
+            if (!actor || actor.character_id !== currentCharacterId) {
+                showNotification('Сейчас не ход этого персонажа', 'system');
+                return;
+            }
+            const access = await calculateInventoryAccess(grenade, selected.path);
+            const pendingActionId = `underbarrel-${actor.location_character_id}-${Date.now()}`;
+            const payload = {
+                location_character_id: actor.location_character_id,
+                action_key: 'reload_underbarrel',
+                weapon_index: weaponIndex,
+                item_path: selected.path,
+                inventory_retrieval_action_points: access.retrievalActionPoints,
+                inventory_use_action_discount: access.useActionDiscount,
+                pending_action_id: pendingActionId,
+            };
+            const result = await Server.performLocationCombatAction(
+                window.currentLobbyId,
+                window.currentLocationId,
+                payload,
+            );
+            modal.remove();
+            if (result?.pending_action) {
+                const sceneModule = await import('./locationScene.js');
+                sceneModule.registerDeferredCombatAction(result.pending_action_id, payload);
+                showNotification('Зарядка подствольника начата и продолжится в следующий ход', 'system');
+                return;
+            }
+            showNotification('Подствольник заряжен', 'success');
+        } catch (error) {
+            showNotification(error.message || 'Не удалось зарядить подствольник', 'system');
         }
-
-        // Сохраняем гранату в состоянии гранатомёта
-        launcher.loaded = true;
-        launcher.loadedGrenade = {
-            id: grenadeToUse.id,
-            templateId: grenadeToUse.templateId,
-            name: grenadeToUse.name,
-            attributes: grenadeToUse.attributes
-        };
-
-        // Обновляем UI: перерисовываем только инвентарь, так как изменилось количество
-        renderInventoryTab(currentCharacterData);
-        // Также обновляем экипировку, чтобы кнопка сменилась на "Выстрел ГП"
-        renderEquipmentTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification('Подствольник заряжен', 'success');
     };
 
     modal.style.display = 'flex';
@@ -10120,25 +10209,54 @@ async function useGrenade(item, itemPath, options = {}) {
         return;
     }
 
-    try {
-        await spendInventoryAccessForCombat(item, itemPath, 0);
-    } catch (error) {
-        showNotification(error.message || 'Не хватает ОД, чтобы достать гранату', 'system');
-        return false;
+    const combatState = window.locationCombatState;
+    if (combatState?.status === 'active') {
+        const actorCharacterId = currentCharacterId;
+        const access = await calculateInventoryAccess(item, itemPath);
+        document.getElementById('grenade-fuse-modal')?.remove();
+        const modal = document.createElement('div');
+        modal.id = 'grenade-fuse-modal';
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width:440px">
+                <span class="close">&times;</span>
+                <h3>${escapeHtml(item.name || 'Граната')}</h3>
+                <p>Выберите подготовку запала перед броском.</p>
+                <div class="form-actions" style="display:grid;gap:8px">
+                    <button class="btn btn-primary" data-fuse="normal">Обычный запал</button>
+                    <button class="btn btn-warning" data-fuse="delay">Задержать гранату · +2 ОД</button>
+                    <button class="btn btn-secondary" data-cancel>Отмена</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        modal.style.display = 'flex';
+        const close = () => modal.remove();
+        modal.querySelector('.close').onclick = close;
+        modal.querySelector('[data-cancel]').onclick = close;
+        modal.querySelectorAll('[data-fuse]').forEach((button) => {
+            button.onclick = async () => {
+                const explosiveFuseMode = button.dataset.fuse;
+                close();
+                closeCharacterSheet();
+                const scene = await import('./locationScene.js');
+                scene.queueCombatActionFromSheet({
+                    actorCharacterId,
+                    actionKey: 'explosive_attack',
+                    explosiveSource: 'hand',
+                    explosiveFuseMode,
+                    itemPath,
+                    inventoryRetrievalActionPoints: access.retrievalActionPoints,
+                    inventoryUseActionDiscount: access.useActionDiscount,
+                    targetType: 'point',
+                    source: 'sheet',
+                });
+            };
+        });
+        return true;
     }
-    showNotification(`Вы метнули ${item.name}. Эффект: ${item.attributes?.effect || 'взрыв'}`, 'system');
-    item.quantity -= 1;
-    if (item.quantity <= 0) {
-        removeItemByPath(itemPath);
-    }
-    if (options.render !== false) {
-        renderInventoryTab(currentCharacterData);
-    }
-    if (options.save !== false) {
-        scheduleAutoSave();
-        forceSyncCharacter();
-    }
-    return true;
+    showNotification('Метание гранаты доступно на боевой подлокации', 'system');
+    return false;
 }
 
 export async function useCharacterInventoryItem(characterId, itemPath, options = {}) {
