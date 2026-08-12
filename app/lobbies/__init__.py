@@ -18,6 +18,7 @@ from app.services.character import CharacterService
 from app.services.combat import CombatService
 from app.services.character_interaction import CharacterInteractionService
 from app.services.health import apply_health_maximums
+from app.services.addictions import advance_addictions, record_exposure, withdrawal_check
 from app.services.effects import (
     advance_timed_effects,
     apply_effect_to_health,
@@ -187,6 +188,7 @@ def _world_route_tiles(from_x, from_y, to_x, to_y):
 
 
 def _advance_world_time(lobby, minutes):
+    previous_day = lobby.game_day or 1
     absolute_minutes = (
         (lobby.game_day or 1) * 1440
         + (lobby.game_time_minutes or 0)
@@ -217,6 +219,7 @@ def _advance_world_time(lobby, minutes):
             health.get('effects') or [],
             minutes * 60,
         )
+        advance_addictions(health, previous_day, lobby.game_day)
         character.data = character_data
         flag_modified(character, 'data')
         updated_characters.append(character)
@@ -737,6 +740,7 @@ def update_lobby_time(lobby_id, lobby):
                 health.get('effects') or [],
                 elapsed_seconds,
             )
+            advance_addictions(health, previous_absolute_minutes // 1440, game_day)
             character.data = character_data
             flag_modified(character, 'data')
             updated_characters.append(character)
@@ -891,6 +895,7 @@ def start_lobby_rest(lobby_id, lobby):
         return jsonify({'error': 'Rest participants must be active characters'}), 400
 
     elapsed_seconds = hours * 3600
+    previous_day = lobby.game_day or 1
     absolute_minutes = (
         (lobby.game_day or 1) * 1440
         + (lobby.game_time_minutes or 0)
@@ -938,6 +943,7 @@ def start_lobby_rest(lobby_id, lobby):
                 effects = _resolve_character_day(health, effects, slept=True)
                 _advance_exoskeleton_battery_day(character_data)
         health['effects'] = normalize_effect_list(effects)
+        advance_addictions(health, previous_day, lobby.game_day)
         sync_health_derived_statuses(health)
         character.data = character_data
         flag_modified(character, 'data')
@@ -1147,6 +1153,103 @@ def update_character(character_id):
     data = request.get_json()
     character = CharacterService.update_character(character_id, user_id, data)
     return jsonify({'message': 'Character updated'}), 200
+
+
+def _character_edit_allowed(character, user_id):
+    lobby = db.session.get(Lobby, character.lobby_id)
+    return bool(
+        character.owner_id == user_id
+        or (lobby and lobby.gm_id == user_id)
+        or user_id in (character.editable_to or [])
+        or LocationCharacter.query.filter_by(
+            character_id=character.id, controlled_by=user_id,
+        ).first() is not None
+    )
+
+
+@lobbies_bp.route('/characters/<int:character_id>/addictions/exposure', methods=['POST'])
+@jwt_required()
+def register_character_addiction_exposure(character_id):
+    user_id = int(get_jwt_identity())
+    character = CharacterService.get_character(character_id, user_id)
+    if not _character_edit_allowed(character, user_id):
+        return jsonify({'error': 'Character cannot be edited'}), 403
+    lobby = db.session.get(Lobby, character.lobby_id)
+    data = request.get_json(silent=True) or {}
+    character_data = dict(character.data or {})
+    health = character_data.setdefault('health', {})
+    absolute_minute = (lobby.game_day or 1) * 1440 + (lobby.game_time_minutes or 0)
+    result = record_exposure(
+        health,
+        data.get('item_name'),
+        data.get('price'),
+        absolute_minute,
+        intoxication=data.get('intoxication', 0),
+        exhaustion_relief=data.get('exhaustion_relief', 0),
+        addiction_block_hours=data.get('addiction_block_hours', 0),
+    )
+    character.data = character_data
+    flag_modified(character, 'data')
+    db.session.commit()
+    withdrawal_effects = [
+        effect for effect in normalize_effect_list(health.get('effects') or [])
+        if effect.get('type') == 'addiction_withdrawal'
+    ]
+    return jsonify({
+        'result': result,
+        'addictions': health.get('addictions', {}),
+        'withdrawal_effects': withdrawal_effects,
+    }), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/addictions/<addiction_key>/check', methods=['POST'])
+@jwt_required()
+def check_character_addiction_withdrawal(character_id, addiction_key):
+    user_id = int(get_jwt_identity())
+    character = CharacterService.get_character(character_id, user_id)
+    if not _character_edit_allowed(character, user_id):
+        return jsonify({'error': 'Character cannot be edited'}), 403
+    lobby = db.session.get(Lobby, character.lobby_id)
+    character_data = dict(character.data or {})
+    health = character_data.setdefault('health', {})
+    will_bonus = CombatService._skill_modifier(
+        character_data, 'skills.physical.will', include_pain=False,
+    )
+    difficulty_reduction = 0
+    for effect in normalize_effect_list(health.get('effects') or []):
+        if effect.get('active', True):
+            difficulty_reduction = max(
+                difficulty_reduction,
+                int(effect.get('withdrawal_check_difficulty_reduction') or 0),
+            )
+    try:
+        result = withdrawal_check(
+            health, addiction_key, lobby.game_day or 1, will_bonus,
+            difficulty_reduction=difficulty_reduction,
+        )
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 400
+    character.data = character_data
+    flag_modified(character, 'data')
+    db.session.commit()
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': character.id,
+            'updates': {'data': character.data},
+            'source': 'withdrawal_check',
+        },
+        room=f"character_{character.id}",
+    )
+    _emit_lobby_chat_message(
+        character.lobby_id,
+        user_id,
+        f"{character.name}: проверка ломки ({result['record']['label']}) — "
+        f"d20 {result['roll']} против СЛ {result['difficulty']}: "
+        f"{'успех' if result['success'] else 'провал'}.",
+        username='Зависимость',
+    )
+    return jsonify({'result': result, 'data': character.data}), 200
 
 @lobbies_bp.route('/characters/<int:character_id>', methods=['DELETE'])
 @jwt_required()

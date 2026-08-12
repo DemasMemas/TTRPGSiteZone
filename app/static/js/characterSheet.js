@@ -1264,6 +1264,23 @@ function getSkillRollModifier(data, skillPath) {
         + getHealthRollModifier(data, skillPath);
 }
 
+function getIntoxicationProfile(data) {
+    const health = data?.health || {};
+    const value = Math.max(0, Number(health.intoxication) || 0);
+    const forcedExtreme = (health.effects || []).some(effect =>
+        effect?.active !== false
+        && effect?.forced_intoxication_stage === 'extreme'
+        && (effect.remaining == null || Number(effect.remaining) > 0)
+    );
+    if (value >= 100) return { stage: 'Смертельное', accuracy: -5, agility: -8, charisma: -5, movement: 5 };
+    if (value >= 96) return { stage: 'Околосмертельное', accuracy: -5, agility: -8, charisma: -5, movement: 5 };
+    if (value >= 81 || forcedExtreme) return { stage: 'Экстремальное', accuracy: -5, agility: -8, charisma: -5, movement: 5 };
+    if (value >= 46) return { stage: 'Тяжёлое', accuracy: -3, agility: -5, charisma: -2, movement: 3 };
+    if (value >= 31) return { stage: 'Среднее', accuracy: -1, agility: -3, charisma: 3, movement: 0 };
+    if (value >= 16) return { stage: 'Лёгкое', accuracy: -1, agility: 0, charisma: 1, movement: 0 };
+    return { stage: 'Нет', accuracy: 0, agility: 0, charisma: 0, movement: 0 };
+}
+
 function getHealthRollModifier(data, skillPath, options = {}) {
     const health = data?.health || {};
     let modifier = 0;
@@ -1276,6 +1293,11 @@ function getHealthRollModifier(data, skillPath, options = {}) {
     if (temperature >= 30 && temperature <= 33) modifier -= 7;
     else if (temperature >= 38 && temperature <= 39) modifier -= 3;
     else if (temperature >= 40 && temperature < 41) modifier -= 7;
+
+    const intoxication = getIntoxicationProfile(data);
+    if (['physical.accuracy', 'physical.shooting'].includes(skillPath)) modifier += intoxication.accuracy;
+    else if (skillPath === 'physical.agility') modifier += intoxication.agility;
+    else if (skillPath === 'social.charisma') modifier += intoxication.charisma;
 
     Object.values(health.zones || {}).forEach(zone => {
         if (!zone || typeof zone !== 'object') return;
@@ -1432,8 +1454,9 @@ function getMovementPenaltyBreakdown(data, suppliedWeight = null) {
         if (injuryType === 'mangled_limb') return sum + 5;
         return sum + (zones[key] && Number(zones[key].current) <= 0 ? 3 : 0);
     }, fractureInjuries);
+    const intoxicationPenalty = getIntoxicationProfile(data).movement;
     return {
-        total: Math.max(0, armorPenalty + helmetPenalty + weightPenalty + temporary + injuries),
+        total: Math.max(0, armorPenalty + helmetPenalty + weightPenalty + temporary + injuries + intoxicationPenalty),
         totalWeight,
         weightPerPenalty,
         rawWeightPenalty,
@@ -1443,6 +1466,7 @@ function getMovementPenaltyBreakdown(data, suppliedWeight = null) {
         helmetPenalty,
         temporary,
         injuries,
+        intoxicationPenalty,
         poweredExoskeleton: powered,
     };
 }
@@ -2485,6 +2509,36 @@ function renderHealthTab(data, container = null) {
         ...disabledZoneChips,
         ...modifierChips,
     ];
+    const addictionRecords = Object.values(health.addictions?.records || {})
+        .filter(record => record && record.active !== false);
+    const currentGameDay = Math.max(1, Number(window.lobbyGameDay || 1));
+    const addictionHtml = addictionRecords.map((record) => {
+        const withdrawalDays = Math.max(0, Number(record.withdrawal_days || 0));
+        const remaining = Math.max(0, Number(record.withdrawal_remaining ?? 28));
+        const checks = record.checks || {};
+        const checksToday = Number(checks.day) === currentGameDay ? Number(checks.attempts || 0) : 0;
+        const successesToday = Number(checks.day) === currentGameDay ? Number(checks.successes || 0) : 0;
+        const satisfied = (record.satisfied_days || []).map(Number).includes(currentGameDay);
+        const progress = Number(record.daily_progress?.day) === currentGameDay
+            ? record.daily_progress
+            : {};
+        const progressText = record.kind === 'alcohol'
+            ? `Опьянение за сутки: ${Math.min(50, Number(progress.intoxication || 0))}/50`
+            : (record.kind === 'nicotine'
+                ? `Выведено истощения табаком: ${Math.min(1, Number(progress.exhaustion_relief || 0))}/1`
+                : `Подходящий препарат сегодня: ${Math.min(1, Number(progress.uses || 0))}/1`);
+        const status = withdrawalDays > 0
+            ? `Ломка, неделя ${Math.max(1, Number(record.withdrawal_stage || 1))} · осталось ${remaining} дн.`
+            : (satisfied ? 'Потребность на сегодня закрыта' : 'Зависимость активна');
+        const checkButton = withdrawalDays > 0 && checksToday < 5 && currentCharacterCanEdit
+            ? `<button type="button" class="btn btn-sm btn-warning" onclick="checkAddictionWithdrawal('${escapeHtml(record.key)}')">Проверка Воли</button>`
+            : '';
+        return `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid rgba(255,255,255,.08);border-radius:8px;">
+                <div><strong>${escapeHtml(record.label || record.key)}</strong><div class="text-muted" style="font-size:12px;">${escapeHtml(status)}${withdrawalDays > 0 ? ` · проверки ${checksToday}/5, успехи ${successesToday}` : ''}<br>${escapeHtml(progressText)}</div></div>
+                ${checkButton}
+            </div>`;
+    }).join('');
 
     let html = `
         <div class="health-tab">
@@ -2562,6 +2616,12 @@ function renderHealthTab(data, container = null) {
                     ${visibleEffectChips.length ? visibleEffectChips.map((text) => `<span style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.08); font-size:12px;">${escapeHtml(text)}</span>`).join('') : '<span style="opacity:0.7; font-size:12px;">Сейчас нет активных эффектов</span>'}
                 </div>
             </div>
+            <details class="health-compact-panel" ${addictionRecords.length ? 'open' : ''}>
+                <summary><span>Зависимости</span><strong>${addictionRecords.length}</strong></summary>
+                <div style="display:grid;gap:7px;padding-top:8px;">
+                    ${addictionHtml || '<span class="text-muted" style="font-size:12px;">Активных зависимостей нет</span>'}
+                </div>
+            </details>
             <div class="health-needs-panel">
                 <div class="health-need-field"><label>Еда сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.mealsToday" value="${needs.mealsToday}"><small>${needs.mealsToday}/3</small></div>
                 <div class="health-need-field"><label>Вода сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.drinksToday" value="${needs.drinksToday}"><small>${needs.drinksToday}/3</small></div>
@@ -2725,15 +2785,17 @@ function renderHealthTab(data, container = null) {
         const hasRemaining = !isBleedingEffect;
         const remaining = effect.remaining ?? '';
         const selectedType = effect.type || 'generic';
+        const isManagedEffect = ['addiction_withdrawal', 'withdrawal_support', 'withdrawal_support_pending'].includes(selectedType);
+        const managedDisabled = isManagedEffect ? 'disabled' : '';
         const fractureStatus = getFractureStatusText(effect, effects);
         const isCustomOrUnknown = ['custom', 'generic'].includes(selectedType);
         const visibleName = effect.name || effectTypeOptions.find(option => option.value === selectedType)?.label || selectedType;
         effectsHtml += `
             <div style="display: grid; grid-template-columns: 1.1fr 0.85fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
-                <select class="form-control" name="health.effects.${index}.type" style="width:100%;">
+                <select class="form-control" name="health.effects.${index}.type" style="width:100%;" ${managedDisabled}>
                     ${effectTypeOptions.map(opt => `<option value="${opt.value}" ${opt.value === selectedType ? 'selected' : ''}>${opt.label}</option>`).join('')}
                 </select>
-                <select class="form-control" name="health.effects.${index}.area" style="width:100%;">
+                <select class="form-control" name="health.effects.${index}.area" style="width:100%;" ${managedDisabled}>
                     ${[
                         ['', 'Источник'], ['head', 'Голова'], ['chest', 'Грудь'], ['abdomen', 'Живот'],
                         ['leftArm', 'Левая рука'], ['rightArm', 'Правая рука'],
@@ -2744,10 +2806,10 @@ function renderHealthTab(data, container = null) {
                         ['spine', 'Позвоночник'], ['internalOrgan', 'Внутренний орган']
                     ].map(([key, label]) => `<option value="${key}" ${key === (effect.area || '') ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
-                <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Значение" style="width:80px;">
-                ${hasRemaining ? `<input type="text" class="form-control number-input" name="health.effects.${index}.remaining" value="${escapeHtml(remaining)}" placeholder="Остаток" data-nullable-number="true" style="width:90px;">` : '<div></div>'}
+                <input type="number" class="form-control number-input" name="health.effects.${index}.value" value="${value}" placeholder="Значение" style="width:80px;" ${managedDisabled}>
+                ${hasRemaining ? `<input type="text" class="form-control number-input" name="health.effects.${index}.remaining" value="${escapeHtml(remaining)}" placeholder="Остаток" data-nullable-number="true" style="width:90px;" ${managedDisabled}>` : '<div></div>'}
                 ${selectedType === 'fracture_unfixed' ? `<button type="button" class="btn btn-sm btn-warning" onclick="rebreakUnfixedFracture(${index})" title="Сломать повторно и лечить как обычный перелом">↻</button>` : ''}
-                <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">×</button>
+                ${isManagedEffect ? '<span title="Системный эффект">⌁</span>' : `<button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})">×</button>`}
                 ${isCustomOrUnknown ? `<input class="form-control" name="health.effects.${index}.name" value="${escapeHtml(visibleName)}" placeholder="Название эффекта" style="grid-column:1/-1;">` : ''}
                 <div class="text-muted" style="grid-column:1/-1;font-size:12px;line-height:1.35;">${escapeHtml(describeEffect(effect))}</div>
                 ${fractureStatus ? `<div class="text-muted" style="grid-column:1/-1;font-size:12px;">${escapeHtml(fractureStatus)}</div>` : ''}
@@ -2808,6 +2870,29 @@ window.adjustCharacterStress = async function(amount) {
         showNotification(error.message || 'Не удалось изменить стресс', 'system');
     } finally {
         stressAdjustmentPending = false;
+    }
+};
+
+window.checkAddictionWithdrawal = async function(addictionKey) {
+    if (!currentCharacterCanEdit || !currentCharacterId) return;
+    try {
+        updateDataFromFields();
+        await Server.updateCharacter(currentCharacterId, { data: currentCharacterData });
+        const response = await Server.checkCharacterWithdrawal(currentCharacterId, addictionKey);
+        if (response?.data) {
+            currentCharacterData = response.data;
+            normalizeCharacterEffects(currentCharacterData);
+            refreshHealthPanel();
+        }
+        const result = response?.result;
+        if (result) {
+            showNotification(
+                `Ломка: d20 ${result.roll} против СЛ ${result.difficulty} — ${result.success ? 'успех' : 'провал'}${result.days_reduced ? `, срок сокращён на ${result.days_reduced} дн.` : ''}`,
+                result.success ? 'success' : 'system',
+            );
+        }
+    } catch (error) {
+        showNotification(error.message || 'Не удалось выполнить проверку ломки');
     }
 };
 
@@ -9779,6 +9864,41 @@ async function useConsumable(item, itemPath, options = {}) {
         hasChanges = true;
     }
 
+    if (direct.withdrawal_check_difficulty_reduction) {
+        const reduction = Number(direct.withdrawal_check_difficulty_reduction) || 0;
+        const delayMinutes = Number(direct.withdrawal_support_delay_minutes ?? 1);
+        const durationMinutes = Number(direct.withdrawal_support_duration_minutes ?? 60);
+        const supportEffect = {
+            type: 'withdrawal_support',
+            name: `${item.name}: поддержка при ломке`,
+            source: item.id || item.name,
+            active: true,
+            tick: 'time_elapsed',
+            time_unit: 'minute',
+            remaining: durationMinutes,
+            remaining_seconds: durationMinutes * 60,
+            withdrawal_check_difficulty_reduction: reduction,
+            forced_intoxication_stage: 'extreme',
+            note: `Сложность проверок ломки снижена на ${reduction}.`,
+        };
+        if (delayMinutes > 0) {
+            applyEffectToHealth(health, {
+                type: 'withdrawal_support_pending',
+                name: `${item.name}: действие через ${delayMinutes} мин.`,
+                source: item.id || item.name,
+                active: true,
+                tick: 'time_elapsed',
+                time_unit: 'minute',
+                remaining: delayMinutes,
+                remaining_seconds: delayMinutes * 60,
+                activate_effects: [supportEffect],
+            });
+        } else {
+            applyEffectToHealth(health, supportEffect);
+        }
+        hasChanges = true;
+    }
+
     if (modifiers.length > 0) {
         if (!health.combatMeta) health.combatMeta = {};
         if (!Array.isArray(health.combatMeta.consumableModifiers)) {
@@ -9937,6 +10057,35 @@ async function useConsumable(item, itemPath, options = {}) {
     } else if (effects.length === 0) {
         showNotification('Предмет не имеет эффектов');
         return;
+    }
+
+    const addictionCharacterId = Number(options.targetCharacterId || currentCharacterId);
+    if (addictionCharacterId) {
+        try {
+            const addictionResponse = await Server.registerCharacterAddictionExposure(addictionCharacterId, {
+                item_name: item.name,
+                price: Number(template?.price ?? item.price ?? item.attributes?.price ?? 0),
+                intoxication: Math.max(0, Number(direct.intoxication_delta || 0)),
+                exhaustion_relief: Math.max(0, -Number(direct.exhaustion_delta || 0)),
+                addiction_block_hours: Math.max(0, Number(direct.addiction_block_hours || 0)),
+            });
+            health.addictions = addictionResponse?.addictions || health.addictions || {};
+            if (Array.isArray(addictionResponse?.withdrawal_effects)) {
+                health.effects = normalizeEffectList(health.effects || [])
+                    .filter(effect => effect.type !== 'addiction_withdrawal')
+                    .concat(addictionResponse.withdrawal_effects);
+            }
+            const addictionResult = addictionResponse?.result;
+            if (addictionResult?.acquired) {
+                showNotification(`Получена зависимость: ${addictionResult.profile.label}`, 'system');
+            } else if (addictionResult?.applicable && addictionResult?.blocked) {
+                showNotification('«Котик» заблокировал появление зависимости', 'success');
+            }
+            hasChanges = true;
+        } catch (error) {
+            showNotification(error.message || 'Не удалось проверить появление зависимости');
+            return false;
+        }
     }
 
     if (!direct.not_consumed) {
@@ -11369,6 +11518,7 @@ async function renderInventoryTab(data) {
                     <span>Броня</span><span id="armor-penalty-source">${movementPenalty.armorPenalty}</span>
                     <span>Шлем</span><span id="helmet-penalty-source">${movementPenalty.helmetPenalty}</span>
                     <span>Травмы ног</span><span id="injury-penalty-source">${movementPenalty.injuries}</span>
+                    <span>Опьянение</span><span id="intoxication-penalty-source">${movementPenalty.intoxicationPenalty}</span>
                     <span>Временные модификаторы</span><span id="temporary-penalty-source">${movementPenalty.temporary}</span>
                     <span id="exoskeleton-weight-rule" style="grid-column:span 2; opacity:.7; font-size:12px; display:${movementPenalty.poweredExoskeleton ? 'block' : 'none'};">
                         Запитанный экзоскелет: броня устанавливает штраф 5, перегруз не учитывается. Бег и спринт недоступны.
@@ -12847,6 +12997,7 @@ function recalculateInventoryTotals() {
         'armor-penalty-source': movementPenalty.armorPenalty,
         'helmet-penalty-source': movementPenalty.helmetPenalty,
         'injury-penalty-source': movementPenalty.injuries,
+        'intoxication-penalty-source': movementPenalty.intoxicationPenalty,
         'temporary-penalty-source': movementPenalty.temporary,
     };
     Object.entries(sourceValues).forEach(([id, value]) => {

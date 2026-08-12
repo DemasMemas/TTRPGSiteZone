@@ -358,6 +358,21 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`, { method: 'DELETE' });
     },
 
+    async registerCharacterAddictionExposure(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/addictions/exposure`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async checkCharacterWithdrawal(characterId, addictionKey) {
+        return apiFetch(`/lobbies/characters/${characterId}/addictions/${encodeURIComponent(addictionKey)}/check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+    },
+
     async inspectLocationCharacter(lobbyId, locationId, characterId, actorLocationCharacterId) {
         const params = new URLSearchParams({
             actor_location_character_id: actorLocationCharacterId,

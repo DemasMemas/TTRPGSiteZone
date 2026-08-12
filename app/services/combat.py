@@ -223,6 +223,7 @@ class CombatService:
         skull_health = CombatService._coerce_float(
             (organs.get('skull') or {}).get('current'), 1
         )
+        intoxication = CombatService._intoxication_profile(character_data)
         if 'death' in active_types or brain_health <= 0 or skull_health <= 0:
             return {'state': 'dead', 'label': 'Мёртв', 'can_act': False, 'can_recover': False}
 
@@ -237,6 +238,7 @@ class CombatService:
             or blood_stage == 'critical'
             or temperature <= 29
             or temperature >= 41
+            or intoxication['unconscious']
         )
         if critical:
             return {
@@ -256,6 +258,46 @@ class CombatService:
                 'can_recover': pain_level < 10,
             }
         return {'state': 'active', 'label': 'В сознании', 'can_act': True, 'can_recover': False}
+
+    @staticmethod
+    def _intoxication_profile(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        health = data.get('health') if isinstance(data.get('health'), dict) else {}
+        value = max(0, CombatService._coerce_float(health.get('intoxication'), 0))
+        forced_extreme = any(
+            effect.get('active', True)
+            and effect.get('forced_intoxication_stage') == 'extreme'
+            and (
+                effect.get('remaining') is None
+                or CombatService._coerce_float(effect.get('remaining'), 0) > 0
+            )
+            for effect in normalize_effect_list(health.get('effects') or [])
+        )
+        if value >= 100:
+            stage, modifiers = 'deadly', (-5, -8, -5, 5, True)
+        elif value >= 96:
+            stage, modifiers = 'near_death', (-5, -8, -5, 5, True)
+        elif value >= 81 or forced_extreme:
+            stage, modifiers = 'extreme', (-5, -8, -5, 5, False)
+        elif value >= 46:
+            stage, modifiers = 'heavy', (-3, -5, -2, 3, False)
+        elif value >= 31:
+            stage, modifiers = 'medium', (-1, -3, 3, 0, False)
+        elif value >= 16:
+            stage, modifiers = 'light', (-1, 0, 1, 0, False)
+        else:
+            stage, modifiers = 'none', (0, 0, 0, 0, False)
+        accuracy, agility, charisma, movement, unconscious = modifiers
+        return {
+            'stage': stage,
+            'value': value,
+            'forced_extreme': forced_extreme,
+            'accuracy_modifier': accuracy,
+            'agility_modifier': agility,
+            'charisma_modifier': charisma,
+            'movement_penalty': movement,
+            'unconscious': unconscious,
+        }
 
     @staticmethod
     def _location_character_condition(loc_char):
@@ -1076,6 +1118,7 @@ class CombatService:
             elif effect_type == 'fracture_sequela' and any(token in area for token in ('leg', 'foot')):
                 fracture_penalty += 1
         limb_penalty += fracture_penalty
+        intoxication_penalty = CombatService._intoxication_profile(data)['movement_penalty']
         exoskeleton = CombatService._exoskeleton_power_profile(data)
         if exoskeleton['is_exoskeleton']:
             if exoskeleton['powered']:
@@ -1087,7 +1130,8 @@ class CombatService:
             + CombatService._coerce_int(helmet_penalty, 0)
             + weight_penalty
             + temporary_penalty
-            + limb_penalty,
+            + limb_penalty
+            + intoxication_penalty,
         )
         return {
             'total': total,
@@ -1100,6 +1144,7 @@ class CombatService:
             'total_weight': weight_details['total_weight'],
             'temporary': temporary_penalty,
             'injuries': limb_penalty,
+            'intoxication': intoxication_penalty,
             'is_exoskeleton': exoskeleton['is_exoskeleton'],
             'powered_exoskeleton': exoskeleton['powered'],
         }
@@ -1294,6 +1339,14 @@ class CombatService:
             modifier -= 3
         elif 40 <= temperature < 41:
             modifier -= 7
+
+        intoxication = CombatService._intoxication_profile(character_data)
+        if skill_path == 'skills.physical.accuracy' or skill_path == 'skills.physical.shooting':
+            modifier += intoxication['accuracy_modifier']
+        elif skill_path == 'skills.physical.agility':
+            modifier += intoxication['agility_modifier']
+        elif skill_path == 'skills.social.charisma':
+            modifier += intoxication['charisma_modifier']
 
         for zone in (health.get('zones') or {}).values():
             if not isinstance(zone, dict):

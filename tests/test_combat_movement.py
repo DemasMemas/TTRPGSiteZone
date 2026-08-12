@@ -15,6 +15,61 @@ def movement_path(distance, cost=None, climb_cost=0):
 
 
 @pytest.mark.parametrize(
+    ('intoxication', 'movement_penalty', 'accuracy_modifier', 'agility_modifier', 'charisma_modifier'),
+    [
+        (15, 0, 0, 0, 0),
+        (16, 0, -1, 0, 1),
+        (31, 0, -1, -3, 3),
+        (46, 3, -3, -5, -2),
+        (81, 5, -5, -8, -5),
+    ],
+)
+def test_intoxication_stages_affect_movement_and_rolls(
+    intoxication, movement_penalty, accuracy_modifier, agility_modifier,
+    charisma_modifier,
+):
+    data = {'health': {'intoxication': intoxication}}
+
+    assert CombatService._movement_penalty_breakdown(data)['intoxication'] == movement_penalty
+    assert CombatService._health_roll_modifier(
+        data, 'skills.physical.shooting', include_pain=False,
+        include_blood=False, include_psy=False,
+    ) == accuracy_modifier
+    assert CombatService._health_roll_modifier(
+        data, 'skills.physical.agility', include_pain=False,
+        include_blood=False, include_psy=False,
+    ) == agility_modifier
+    assert CombatService._health_roll_modifier(
+        data, 'skills.social.charisma', include_pain=False,
+        include_blood=False, include_psy=False,
+    ) == charisma_modifier
+
+
+def test_withdrawal_support_forces_extreme_intoxication_stage():
+    data = {'health': {'intoxication': 0, 'effects': [{
+        'type': 'withdrawal_support', 'active': True, 'remaining': 60,
+        'forced_intoxication_stage': 'extreme',
+    }]}}
+
+    profile = CombatService._intoxication_profile(data)
+
+    assert profile['stage'] == 'extreme'
+    assert profile['movement_penalty'] == 5
+
+
+def test_near_death_intoxication_blocks_actions():
+    condition = CombatService._character_condition({
+        'health': {
+            'current': 700, 'intoxication': 96,
+            'zones': {'head': {'current': 50}, 'chest': {'current': 150}},
+            'organs': {'brain': {'current': 1}, 'skull': {'current': 1}},
+        },
+    })
+
+    assert condition['state'] == 'critical'
+
+
+@pytest.mark.parametrize(
     ("mode", "distance", "expected_cost"),
     [
         ("walk", 5, 5),

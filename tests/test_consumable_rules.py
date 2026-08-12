@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.consumable_effects import parse_consumable_effects
 from app.services.effects import (
     apply_effect_to_health,
@@ -5,7 +7,29 @@ from app.services.effects import (
     apply_periodic_effects_to_health,
     get_bleeding_state,
     tick_effects,
+    sync_health_derived_statuses,
 )
+
+
+def test_deadly_intoxication_roll_happens_once_until_level_drops(monkeypatch):
+    rolls = iter((15, 99))
+    monkeypatch.setattr('app.services.effects.random.randint', lambda _low, _high: next(rolls))
+    health = {'intoxication': 100, 'effects': []}
+
+    sync_health_derived_statuses(health)
+    sync_health_derived_statuses(health)
+
+    assert health['combatMeta']['intoxicationDeathRoll'] == 15
+    assert sum(effect['type'] == 'death' for effect in health['effects']) == 1
+
+    health['intoxication'] = 99
+    health['effects'] = []
+    sync_health_derived_statuses(health)
+    health['intoxication'] = 100
+    sync_health_derived_statuses(health)
+
+    assert health['combatMeta']['intoxicationDeathRoll'] == 99
+    assert not any(effect['type'] == 'death' for effect in health['effects'])
 
 
 def test_dried_fish_reduces_stress_without_intoxication():
@@ -40,6 +64,21 @@ def test_tobacco_requires_fire_and_uses_five_minute_delay():
     )
     assert delayed["time_unit"] == "minute"
     assert delayed["remaining_seconds"] == 300
+
+
+@pytest.mark.parametrize(
+    ('name', 'reduction'),
+    [
+        ('Психостимулирующее "Прорыв"', 5),
+        ('Препарат К.О.Д.', 10),
+    ],
+)
+def test_withdrawal_support_drugs_have_delayed_one_hour_effect(name, reduction):
+    direct = parse_consumable_effects(name)['direct']
+
+    assert direct['withdrawal_check_difficulty_reduction'] == reduction
+    assert direct['withdrawal_support_delay_minutes'] == 1
+    assert direct['withdrawal_support_duration_minutes'] == 60
 
 
 def test_dry_ration_counts_as_food_and_water():

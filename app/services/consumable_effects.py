@@ -217,6 +217,18 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
         profile["direct"]["psy_delta"] = -25
     if "стимулятор котик" in lower:
         profile["direct"]["addiction_block_hours"] = 24
+    if "психостимулирующее" in lower and "прорыв" in lower:
+        profile["direct"].update({
+            "withdrawal_check_difficulty_reduction": 5,
+            "withdrawal_support_delay_minutes": 1,
+            "withdrawal_support_duration_minutes": 60,
+        })
+    if "препарат к.о.д." in lower or "препарат код" in lower:
+        profile["direct"].update({
+            "withdrawal_check_difficulty_reduction": 10,
+            "withdrawal_support_delay_minutes": 1,
+            "withdrawal_support_duration_minutes": 60,
+        })
     if "стимулятор воля-н" in lower:
         profile["direct"]["pain_block_turns"] = 3
         profile["direct"]["stress_block_turns"] = 3

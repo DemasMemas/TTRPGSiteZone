@@ -2,6 +2,7 @@ import pytest
 
 from app.extensions import db
 from app.lobbies import _world_group_speed
+from app.services import addictions
 from app.models import (
     ChatMessage,
     Lobby,
@@ -48,6 +49,49 @@ def create_character(client, lobby, user, auth_headers, data=None):
     )
     assert response.status_code == 201
     return response.get_json()
+
+
+def test_addiction_exposure_and_global_time_start_withdrawal(
+    client,
+    create_user,
+    auth_headers,
+    monkeypatch,
+):
+    gm = create_user("addiction-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers, data={"health": {}})
+    stored_character = db.session.get(LobbyCharacter, character['id'])
+    stored_character.time_active = True
+    db.session.commit()
+    monkeypatch.setattr(addictions.random, 'random', lambda: 0)
+
+    exposed = client.post(
+        f"/lobbies/characters/{character['id']}/addictions/exposure",
+        headers=auth_headers(gm),
+        json={"item_name": "Борщевик", "price": 0},
+    )
+    assert exposed.status_code == 200
+    assert exposed.get_json()['result']['acquired'] is True
+
+    advanced = client.patch(
+        f"/lobbies/{lobby['id']}/time",
+        headers=auth_headers(gm),
+        json={"game_day": 3, "game_time_minutes": 480},
+    )
+    assert advanced.status_code == 200
+    stored_character = db.session.get(LobbyCharacter, character['id'])
+    health = stored_character.data['health']
+    record = health['addictions']['records']['borshevik']
+    assert record['withdrawal_stage'] == 1
+    assert any(effect['type'] == 'addiction_withdrawal' for effect in health['effects'])
+
+    monkeypatch.setattr(addictions.random, 'randint', lambda _low, _high: 20)
+    checked = client.post(
+        f"/lobbies/characters/{character['id']}/addictions/borshevik/check",
+        headers=auth_headers(gm),
+    )
+    assert checked.status_code == 200
+    assert checked.get_json()['result']['success'] is True
 
 
 def test_gm_can_assign_location_teams_and_players_cannot_edit_them(

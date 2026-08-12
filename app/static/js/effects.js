@@ -55,6 +55,9 @@ const EFFECT_TYPE_META = {
     temperature_control: { label: 'Контроль температуры', group: 'medical' },
     limb_trauma_suppression: { label: 'Подавление травмы конечности', group: 'medical' },
     pain_block: { label: 'Блок новых уровней боли', group: 'medical' },
+    addiction_withdrawal: { label: 'Ломка', group: 'need' },
+    withdrawal_support: { label: 'Поддержка при ломке', group: 'medical' },
+    withdrawal_support_pending: { label: 'Поддержка при ломке: задержка', group: 'medical' },
 };
 
 const TYPE_ALIASES = {
@@ -143,6 +146,9 @@ const TYPE_ALIASES = {
     'temporary_limb_restoration',
     'delayed_limb_treatment',
     'pain_block',
+    'addiction_withdrawal',
+    'withdrawal_support',
+    'withdrawal_support_pending',
 ].forEach(type => { TYPE_ALIASES[type] = type; });
 
 const STATUS_EFFECT_TYPES = new Set([
@@ -228,6 +234,9 @@ const EFFECT_IMPACT_RULES = {
     amputation: { areas: ['missing_limb'], requiresMedicineCheck: true, treatment: 'medical' },
     mangled_limb: { areas: ['limb'], requiresMedicineCheck: true, treatment: 'surgery' },
     organ_loss: { areas: ['missing_organ'], requiresMedicineCheck: true, treatment: 'medical' },
+    addiction_withdrawal: { areas: ['whole_body', 'mind'], requiresMedicineCheck: false, treatment: 'withdrawal' },
+    withdrawal_support: { areas: ['whole_body', 'mind'], requiresMedicineCheck: false, treatment: 'medical' },
+    withdrawal_support_pending: { areas: ['whole_body', 'mind'], requiresMedicineCheck: false, treatment: 'medical' },
 };
 
 function toInt(value, fallback = 0) {
@@ -356,6 +365,22 @@ function getBleedingState(health = {}) {
 export function syncHealthDerivedStatuses(health = {}) {
     if (!health || typeof health !== 'object') return health;
     const effects = normalizeEffectList(health.effects || []);
+    health.combatMeta = health.combatMeta || {};
+    const intoxication = Number(health.intoxication) || 0;
+    if (intoxication < 100) {
+        delete health.combatMeta.intoxicationDeathChecked;
+        delete health.combatMeta.intoxicationDeathRoll;
+    } else if (!health.combatMeta.intoxicationDeathChecked) {
+        const deathRoll = 1 + Math.floor(Math.random() * 100);
+        health.combatMeta.intoxicationDeathChecked = true;
+        health.combatMeta.intoxicationDeathRoll = deathRoll;
+        if (deathRoll <= 15 && !effects.some(effect => effect.type === 'death')) {
+            effects.push(normalizeEffect({
+                type: 'death', name: 'Смерть от опьянения',
+                source: 'deadly_intoxication', tick: 'manual',
+            }));
+        }
+    }
     const fatalTotalHealth = Number(health.max) > 0 && Number(health.current) <= 0;
     const fatalBrainHealth = health.organs?.brain && Number(health.organs.brain.current) <= 0;
     const fatalSkullHealth = health.organs?.skull && Number(health.organs.skull.current) <= 0;

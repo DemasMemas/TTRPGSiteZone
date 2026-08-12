@@ -12,6 +12,8 @@ function applyLobbyTime(data) {
     const dayInput = document.getElementById('lobby-game-day');
     const timeInput = document.getElementById('lobby-game-time');
     const minutes = Math.max(0, Math.min(1439, Number(data?.game_time_minutes ?? 480)));
+    window.lobbyGameDay = Math.max(1, Number(data?.game_day || 1));
+    window.lobbyGameTimeMinutes = minutes;
     if (dayInput) dayInput.value = Math.max(1, Number(data?.game_day || 1));
     if (timeInput) {
         const hours = Math.floor(minutes / 60);

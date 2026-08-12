@@ -63,6 +63,9 @@ EFFECT_TYPE_META = {
     "temperature_control": {"label": "Контроль температуры", "group": "medical"},
     "limb_trauma_suppression": {"label": "Подавление травмы конечности", "group": "medical"},
     "pain_block": {"label": "Блок новых уровней боли", "group": "medical"},
+    "addiction_withdrawal": {"label": "Ломка", "group": "need"},
+    "withdrawal_support": {"label": "Поддержка при ломке", "group": "medical"},
+    "withdrawal_support_pending": {"label": "Поддержка при ломке: задержка", "group": "medical"},
 }
 
 TYPE_ALIASES = {
@@ -149,6 +152,9 @@ TYPE_ALIASES = {
         "temporary_limb_restoration",
         "delayed_limb_treatment",
         "pain_block",
+        "addiction_withdrawal",
+        "withdrawal_support",
+        "withdrawal_support_pending",
     )},
 }
 
@@ -194,6 +200,9 @@ EFFECT_IMPACT_RULES = {
     "amputation": {"areas": ["missing_limb"], "requiresMedicineCheck": True, "treatment": "medical"},
     "mangled_limb": {"areas": ["limb"], "requiresMedicineCheck": True, "treatment": "surgery"},
     "organ_loss": {"areas": ["missing_organ"], "requiresMedicineCheck": True, "treatment": "medical"},
+    "addiction_withdrawal": {"areas": ["whole_body", "mind"], "requiresMedicineCheck": False, "treatment": "withdrawal"},
+    "withdrawal_support": {"areas": ["whole_body", "mind"], "requiresMedicineCheck": False, "treatment": "medical"},
+    "withdrawal_support_pending": {"areas": ["whole_body", "mind"], "requiresMedicineCheck": False, "treatment": "medical"},
 }
 
 
@@ -469,6 +478,20 @@ def sync_health_derived_statuses(health: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(health, dict):
         return health
     effects = normalize_effect_list(health.get("effects") or [])
+    combat_meta = health.setdefault("combatMeta", {})
+    intoxication = _to_float(health.get("intoxication"), 0)
+    if intoxication < 100:
+        combat_meta.pop("intoxicationDeathChecked", None)
+        combat_meta.pop("intoxicationDeathRoll", None)
+    elif not combat_meta.get("intoxicationDeathChecked"):
+        death_roll = random.randint(1, 100)
+        combat_meta["intoxicationDeathChecked"] = True
+        combat_meta["intoxicationDeathRoll"] = death_roll
+        if death_roll <= 15 and not any(effect.get("type") == "death" for effect in effects):
+            effects.append(normalize_effect({
+                "type": "death", "name": "Смерть от опьянения",
+                "source": "deadly_intoxication", "tick": "manual",
+            }))
     organs = health.get("organs") or {}
     brain = organs.get("brain")
     skull = organs.get("skull")
