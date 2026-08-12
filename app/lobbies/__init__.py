@@ -2219,6 +2219,10 @@ def reserve_location_combat_reaction(lobby_id, location_id, lobby, participant):
         free_actions=data.get('free_actions', 0),
         movement_points=data.get('movement_points', 0),
         trigger=data.get('trigger', ''),
+        kind=data.get('kind', 'reaction'),
+        help_target_character_id=data.get('help_target_character_id'),
+        help_action_label=data.get('help_action_label', ''),
+        help_skill_path=data.get('help_skill_path', ''),
     )
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     return jsonify(state), 200

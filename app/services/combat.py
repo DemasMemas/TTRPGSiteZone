@@ -1408,7 +1408,7 @@ class CombatService:
         )
 
     @staticmethod
-    def _narrative_skill_check(character_data, skill_path):
+    def _narrative_skill_check(character_data, skill_path, advantage=False):
         if skill_path not in CombatService.NARRATIVE_SKILLS:
             raise ValidationError("Unknown skill")
         effective_value = CombatService._skill_value(character_data, skill_path)
@@ -1442,8 +1442,14 @@ class CombatService:
             if isinstance(detector, dict):
                 equipment_modifier += CombatService._coerce_int(detector.get('bonus'), 0)
         disadvantage = CombatService._has_roll_disadvantage(character_data, skill_path)
-        rolls = [random.randint(1, 20) for _ in range(2 if disadvantage else 1)]
-        roll = min(rolls) if disadvantage else rolls[0]
+        advantage = bool(advantage)
+        rolls = [random.randint(1, 20) for _ in range(2 if advantage != disadvantage else 1)]
+        if advantage and not disadvantage:
+            roll = max(rolls)
+        elif disadvantage and not advantage:
+            roll = min(rolls)
+        else:
+            roll = rolls[0]
         modifier = skill_modifier + related_modifier + equipment_modifier + status_modifier
         return {
             'skill_path': skill_path,
@@ -1452,6 +1458,7 @@ class CombatService:
             'rolls': rolls,
             'roll': roll,
             'disadvantage': disadvantage,
+            'advantage': advantage,
             'skill_modifier': skill_modifier,
             'related_modifier': related_modifier,
             'equipment_modifier': equipment_modifier,
@@ -1459,6 +1466,26 @@ class CombatService:
             'modifier': modifier,
             'total': roll + modifier,
         }
+
+    @staticmethod
+    def _consume_help_advantage(character, skill_path):
+        """Consume a GM-approved one-use help bonus only for its declared skill."""
+        if not character or not character.character:
+            return None
+        data = character.character.data if isinstance(character.character.data, dict) else {}
+        meta = data.get('health', {}).get('combatMeta', {})
+        if not isinstance(meta, dict):
+            return None
+        help_bonus = meta.get('helpAdvantage')
+        if not isinstance(help_bonus, dict):
+            return None
+        declared_skill = str(help_bonus.get('skill_path') or '').strip()
+        if declared_skill and declared_skill != skill_path:
+            return None
+        meta.pop('helpAdvantage', None)
+        character.character.data = data
+        flag_modified(character.character, 'data')
+        return help_bonus
 
     @staticmethod
     def _item_attributes(item):
@@ -3056,12 +3083,16 @@ class CombatService:
                 profile, _ = CombatService._ranged_damage_profile(weapon)
             difficulty = attack_details['hit_difficulty']
             rolls = [forced_roll if forced_roll is not None else random.randint(1, 20)]
-            if (
-                forced_roll is None
-                and attack_details.get('shooting_disadvantage')
-            ):
+            has_disadvantage = bool(attack_details.get('shooting_disadvantage'))
+            has_advantage = bool(attack_details.get('shooting_advantage'))
+            if forced_roll is None and has_advantage != has_disadvantage:
                 rolls.append(random.randint(1, 20))
-            roll = min(rolls)
+            if has_advantage and not has_disadvantage:
+                roll = max(rolls)
+            elif has_disadvantage and not has_advantage:
+                roll = min(rolls)
+            else:
+                roll = rolls[0]
             hit = roll == 20 or (roll != 1 and roll >= difficulty)
             result = {
                 'roll': roll,
@@ -3069,6 +3100,8 @@ class CombatService:
                 'difficulty': difficulty,
                 'hit': hit,
                 'mode': attack_details['fire_mode'],
+                'advantage': has_advantage,
+                'disadvantage': has_disadvantage,
                 'strength_requirement': attack_details.get('strength_requirement'),
                 'target_character_id': target_character_id,
                 'target_name': target_name,
@@ -4503,7 +4536,33 @@ class CombatService:
             meta = health.setdefault('combatMeta', {})
             meta['consumableUsage'] = {}
             # A reserve is valid only until the character receives their next regular turn.
-            meta.pop('reactionReserve', None)
+            reaction_reserve = meta.get('reactionReserve')
+            deferred_help_cost = 0
+            deferred_help_ready = False
+            if isinstance(reaction_reserve, dict) and reaction_reserve.get('kind') == 'help':
+                deferred_help_cost = max(
+                    0,
+                    CombatService._coerce_int(
+                        reaction_reserve.get('deferred_action_points'), 0,
+                    ),
+                )
+                deferred_help_ready = bool(reaction_reserve.get('deferred_help_ready'))
+                if deferred_help_cost:
+                    paid = min(loc_char.action_points_current, deferred_help_cost)
+                    loc_char.action_points_current -= paid
+                    deferred_help_cost -= paid
+                    reaction_reserve['deferred_action_points'] = deferred_help_cost
+                    if not deferred_help_cost:
+                        reaction_reserve['deferred_help_ready'] = True
+            if (
+                not isinstance(reaction_reserve, dict)
+                or reaction_reserve.get('kind') != 'help'
+                or (not deferred_help_cost and deferred_help_ready)
+                or (not deferred_help_cost and not deferred_help_ready
+                    and not reaction_reserve.get('deferred_help_ready'))
+            ):
+                # A fully paid reserve expires when its owner receives a new regular turn.
+                meta.pop('reactionReserve', None)
             meta.pop('reactionActive', None)
             pending_action = meta.get('pendingAction')
             if isinstance(pending_action, dict):
@@ -4553,6 +4612,11 @@ class CombatService:
             if isinstance(health.get('combatMeta'), dict)
             else None
         )
+        help_advantage = (
+            health.get('combatMeta', {}).get('helpAdvantage')
+            if isinstance(health.get('combatMeta'), dict)
+            else None
+        )
         return {
             'location_character_id': loc_char.id,
             'character_id': character.id if character else None,
@@ -4581,6 +4645,7 @@ class CombatService:
                 else None
             ),
             'reaction_reserve': reaction_reserve if isinstance(reaction_reserve, dict) else None,
+            'help_advantage': help_advantage if isinstance(help_advantage, dict) else None,
             'completed_pending_action_id': (
                 health.get('combatMeta', {}).get('completedPendingActionId')
                 if isinstance(health.get('combatMeta'), dict)
@@ -5119,6 +5184,10 @@ class CombatService:
             and isinstance(current_health.get('combatMeta'), dict)
             else {}
         )
+        # Help applies only during this character's current turn.
+        if current_meta.pop('helpAdvantage', None) is not None:
+            current_character.character.data = current_data
+            flag_modified(current_character.character, 'data')
         if current_meta.pop('circularAttackRound', None) == ending_round:
             apply_effect_to_health(current_health, {
                 'type': 'circular_attack_recovery',
@@ -5164,6 +5233,16 @@ class CombatService:
                 location_character_id=next_character.id,
                 _continue_pending=True,
             )
+        reaction_reserve = next_meta.get('reactionReserve')
+        if isinstance(reaction_reserve, dict) and CombatService._coerce_int(
+            reaction_reserve.get('deferred_action_points'), 0
+        ) > 0:
+            return CombatService.end_turn(
+                location_id,
+                user_id,
+                location_character_id=next_character.id,
+                _continue_pending=True,
+            )
 
         payload = CombatService._serialize_state(location, state)
         payload['pain_shock_check'] = pain_shock_check
@@ -5178,6 +5257,10 @@ class CombatService:
         free_actions=0,
         movement_points=0,
         trigger='',
+        kind='reaction',
+        help_target_character_id=None,
+        help_action_label='',
+        help_skill_path='',
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -5196,6 +5279,9 @@ class CombatService:
         if not CombatService._can_end_turn_for_character(character, user_id, is_gm=is_gm):
             raise PermissionDenied("You do not control this character")
         CombatService.ensure_character_can_act(character)
+        kind = str(kind or 'reaction').strip().lower()
+        if kind not in {'reaction', 'help'}:
+            raise ValidationError("Unknown reaction type")
         values = {
             'action_points': max(0, CombatService._coerce_int(action_points, 0)),
             'free_actions': max(0, CombatService._coerce_int(free_actions, 0)),
@@ -5203,8 +5289,9 @@ class CombatService:
         }
         if not any(values.values()):
             raise ValidationError("Reserve at least one resource for a reaction")
+        help_deferred_cost = 0
         if (
-            values['action_points'] > character.action_points_current
+            (kind != 'help' and values['action_points'] > character.action_points_current)
             or values['free_actions'] > character.free_actions_current
             or values['movement_points'] > character.movement_points_current
         ):
@@ -5213,14 +5300,45 @@ class CombatService:
         meta = data.setdefault('health', {}).setdefault('combatMeta', {})
         if isinstance(meta.get('reactionReserve'), dict):
             raise ValidationError("This character already has a reserved reaction")
-        character.action_points_current -= values['action_points']
+        help_target = None
+        if kind == 'help':
+            if values['free_actions'] or values['movement_points']:
+                raise ValidationError("Help can reserve only action points")
+            help_target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=CombatService._coerce_int(help_target_character_id, 0),
+            ).first()
+            if not help_target or help_target.id == character.id:
+                raise ValidationError("Choose another character to help")
+            help_action_label = ' '.join(str(help_action_label or '').split())
+            if not help_action_label or len(help_action_label) > 200:
+                raise ValidationError("Describe the action being helped")
+            help_skill_path = str(help_skill_path or '').strip()
+            if help_skill_path and help_skill_path not in CombatService.NARRATIVE_SKILLS:
+                raise ValidationError("Unknown help skill")
+            help_deferred_cost = max(
+                0, values['action_points'] - character.action_points_current
+            )
+        paid_action_points = min(character.action_points_current, values['action_points'])
+        character.action_points_current -= paid_action_points
         character.free_actions_current -= values['free_actions']
         character.movement_points_current -= values['movement_points']
         meta['reactionReserve'] = {
             **values,
+            'kind': kind,
+            'paid_action_points': paid_action_points,
+            'deferred_action_points': help_deferred_cost,
             'trigger': str(trigger or '').strip()[:240],
             'round': state.round_number,
         }
+        if kind == 'help':
+            meta['reactionReserve'].update({
+                'target_character_id': help_target.character_id,
+                'target_name': help_target.character.name if help_target.character else '',
+                'action_label': help_action_label,
+                'skill_path': help_skill_path,
+                'skill_label': CombatService.NARRATIVE_SKILLS.get(help_skill_path, ''),
+            })
         character.character.data = data
         flag_modified(character.character, 'data')
         db.session.commit()
@@ -5254,6 +5372,8 @@ class CombatService:
             for key in ('action_points', 'free_actions', 'movement_points')
         ):
             raise ValidationError("No reaction resources are reserved")
+        if CombatService._coerce_int(reserve.get('deferred_action_points'), 0) > 0:
+            raise ValidationError("Finish paying the help action points first")
         state.reaction_pending_location_character_id = character.id
         db.session.commit()
         return CombatService._serialize_state(location, state)
@@ -5284,6 +5404,30 @@ class CombatService:
         reserve = meta.pop('reactionReserve', None)
         if not isinstance(reserve, dict):
             raise ValidationError("The reaction reserve is no longer available")
+        if reserve.get('kind') == 'help':
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=CombatService._coerce_int(reserve.get('target_character_id'), 0),
+            ).first()
+            if not target or not target.character:
+                raise ValidationError("The character receiving help is no longer here")
+            target_data = target.character.data if isinstance(target.character.data, dict) else {}
+            target_meta = target_data.setdefault('health', {}).setdefault('combatMeta', {})
+            target_meta['helpAdvantage'] = {
+                'source_character_id': character.character_id,
+                'source_name': character.character.name if character.character else '',
+                'action_label': str(reserve.get('action_label') or ''),
+                'skill_path': str(reserve.get('skill_path') or ''),
+                'skill_label': str(reserve.get('skill_label') or ''),
+                'round': state.round_number,
+            }
+            target.character.data = target_data
+            character.character.data = data
+            flag_modified(target.character, 'data')
+            flag_modified(character.character, 'data')
+            state.reaction_pending_location_character_id = None
+            db.session.commit()
+            return CombatService._serialize_state(location, state)
         state.reaction_return_location_character_id = state.current_location_character_id
         state.reaction_pending_location_character_id = None
         state.current_location_character_id = character.id
@@ -6722,9 +6866,31 @@ class CombatService:
                 flag_modified(character.character, 'data')
             if action_key == 'narrative_action' and narrative_action_details:
                 if narrative_action_details['roll_required']:
-                    narrative_action_details['check'] = CombatService._narrative_skill_check(
-                        data, narrative_action_details['skill_path']
+                    help_bonus = CombatService._consume_help_advantage(
+                        character, narrative_action_details['skill_path']
                     )
+                    narrative_action_details['check'] = CombatService._narrative_skill_check(
+                        data,
+                        narrative_action_details['skill_path'],
+                        advantage=bool(help_bonus),
+                    )
+                    if help_bonus:
+                        narrative_action_details['help'] = help_bonus
+            if action_key == 'attack' and attack_details:
+                help_skill = (
+                    'skills.physical.melee'
+                    if attack_details.get('melee')
+                    else 'skills.physical.shooting'
+                )
+                help_bonus = CombatService._consume_help_advantage(character, help_skill)
+                if help_bonus:
+                    attack_details['help'] = help_bonus
+                    advantage_key = (
+                        'melee_advantage'
+                        if attack_details.get('melee')
+                        else 'shooting_advantage'
+                    )
+                    attack_details[advantage_key] = True
             if action_key == 'attack' and attack_details and fire_mode == 'rapid':
                 character.rapid_fire_round = state.round_number
             if action_key == 'aim' and aim_details:
@@ -6767,7 +6933,9 @@ class CombatService:
                                 0,
                             ),
                         )
-                        target_details['melee_advantage'] = bool(target.grappled_by_id)
+                        target_details['melee_advantage'] = bool(
+                            target.grappled_by_id or target_details.get('melee_advantage')
+                        )
                         target_details['hit_difficulty'] = (
                             (
                                 8 - target_details['melee_bonus'] * 2

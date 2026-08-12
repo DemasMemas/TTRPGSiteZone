@@ -1445,6 +1445,78 @@ function showReactionReserveMenu(character) {
     modal.style.display = 'flex';
 }
 
+function showHelpReserveMenu(character) {
+    if (!character?.location_character_id || !combatState?.characters) return;
+    const targets = combatState.characters.filter(item => (
+        item.character_id !== character.character_id && item.location_character_id
+    ));
+    if (!targets.length) {
+        showNotification('На локации нет персонажа, которому можно помочь', 'system');
+        return;
+    }
+    let modal = document.getElementById('combat-help-reserve-menu');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'combat-help-reserve-menu';
+        modal.style.cssText = 'position:fixed;inset:0;z-index:10060;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.48);';
+        document.body.appendChild(modal);
+    }
+    const targetOptions = targets.map(item => (
+        `<option value="${item.character_id}">${escapeHtml(item.name || 'Персонаж')}</option>`
+    )).join('');
+    const skillOptions = [
+        '<option value="">Не указывать</option>',
+        ...NARRATIVE_SKILLS.map(([value, label]) => (
+            `<option value="${value}">${escapeHtml(label)}</option>`
+        )),
+    ].join('');
+    modal.innerHTML = `
+        <form style="width:min(440px,calc(100vw - 32px));padding:18px;border:1px solid rgba(255,255,255,.17);border-radius:14px;background:rgba(18,23,22,.98);color:#f4f1e8;box-shadow:0 20px 60px rgba(0,0,0,.55);">
+            <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong style="font-size:18px;">Помощь</strong><button type="button" class="help-close btn btn-sm btn-secondary">×</button></div>
+            <div style="margin:8px 0 14px;font-size:12px;opacity:.76;">ОД резервируются сейчас. Если их не хватает, остаток будет списан в следующем ходу. В чужой ход запросите помощь у ГМа; после подтверждения следующая подходящая проверка цели получит преимущество.</div>
+            <label style="display:grid;gap:5px;margin-bottom:10px;">Кому помочь<select name="target_character_id">${targetOptions}</select></label>
+            <label style="display:grid;gap:5px;margin-bottom:10px;max-width:140px;">Стоимость, ОД<input name="action_points" type="number" min="1" max="30" value="1"></label>
+            <label style="display:grid;gap:5px;margin-bottom:10px;">Действие<input name="action_label" type="text" maxlength="200" required placeholder="Например: придерживаю рану"></label>
+            <label style="display:grid;gap:5px;">Подходящий навык<select name="skill_path">${skillOptions}</select></label>
+            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:15px;">Заявить помощь</button>
+        </form>
+    `;
+    const form = modal.querySelector('form');
+    modal.querySelector('.help-close').onclick = () => { modal.style.display = 'none'; };
+    modal.onpointerdown = event => {
+        if (event.target === modal) modal.style.display = 'none';
+    };
+    form.onsubmit = async event => {
+        event.preventDefault();
+        const submit = form.querySelector('[type="submit"]');
+        const actionPoints = Number.parseInt(form.elements.action_points.value, 10);
+        if (!Number.isInteger(actionPoints) || actionPoints < 1) {
+            showNotification('Укажите стоимость помощи в ОД', 'system');
+            return;
+        }
+        submit.disabled = true;
+        try {
+            await Server.reserveLocationCombatReaction(window.currentLobbyId, getCurrentLocationId(), {
+                location_character_id: character.location_character_id,
+                action_points: actionPoints,
+                free_actions: 0,
+                movement_points: 0,
+                kind: 'help',
+                trigger: `Помощь: ${form.elements.action_label.value.trim()}`,
+                help_target_character_id: Number(form.elements.target_character_id.value),
+                help_action_label: form.elements.action_label.value.trim(),
+                help_skill_path: form.elements.skill_path.value,
+            });
+            modal.style.display = 'none';
+            showNotification('Помощь заявлена и ожидает подходящего действия', 'success');
+        } catch (error) {
+            submit.disabled = false;
+            showNotification(error.message || 'Не удалось заявить помощь', 'system');
+        }
+    };
+    modal.style.display = 'flex';
+}
+
 async function requestReservedReaction(character) {
     try {
         await Server.requestLocationCombatReaction(
@@ -1544,6 +1616,15 @@ function showCombatActionMenu(clientX, clientY, characterId) {
                 ringRadius: 165,
                 requiresCombat: true,
                 action: () => showReactionReserveMenu(combatCharacter),
+            });
+            menuItems.push({
+                label: 'Помощь',
+                icon: '✚',
+                title: 'Заявить помощь другому персонажу и зарезервировать ОД',
+                angle: 158,
+                ringRadius: 165,
+                requiresCombat: true,
+                action: () => showHelpReserveMenu(combatCharacter),
             });
         } else if (!isCurrentTurn && hasReserve) {
             menuItems.push({
@@ -4335,6 +4416,7 @@ function renderCombatHud() {
             ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong> · Точность +${combatState.current_character?.aim_accuracy_bonus || 0}</div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
             <div>Кровопотеря: ${combatState.current_character?.blood ?? 'normal'} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
+            ${combatState.current_character?.help_advantage ? `<div style="margin-top:6px;padding:6px 8px;border-radius:7px;background:rgba(92,154,110,.16);">Помощь: преимущество${combatState.current_character.help_advantage.action_label ? `, ${escapeHtml(combatState.current_character.help_advantage.action_label)}` : ''}${combatState.current_character.help_advantage.source_name ? ` (${escapeHtml(combatState.current_character.help_advantage.source_name)})` : ''}</div>` : ''}
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
             <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
             ${reactionReturnCharacter ? `<div style="margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(84,139,196,.16);">Реакция: после завершения ход вернётся к <strong>${escapeHtml(reactionReturnCharacter.name || 'персонажу')}</strong>.</div>` : ''}

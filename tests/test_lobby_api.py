@@ -250,6 +250,107 @@ def test_reaction_reserve_interrupts_and_returns_to_the_original_turn(
     assert returned.get_json()["current_location_character_id"] == active.id
 
 
+def test_help_reaction_grants_advantage_without_switching_turn(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("help-gm")
+    player = create_user("help-player")
+    other = create_user("help-other")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    join_lobby(client, lobby, other, auth_headers)
+    helper_character = create_character(client, lobby, player, auth_headers)
+    target_character = create_character(client, lobby, other, auth_headers)
+    location = Location(lobby_id=lobby["id"], name="Help test", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    helper = LocationCharacter(
+        location_id=location.id,
+        character_id=helper_character["id"],
+        controlled_by=player["id"],
+        action_points_current=4,
+        free_actions_current=1,
+        movement_points_current=0,
+    )
+    target = LocationCharacter(
+        location_id=location.id,
+        character_id=target_character["id"],
+        controlled_by=other["id"],
+        action_points_current=5,
+        free_actions_current=1,
+        movement_points_current=0,
+    )
+    db.session.add_all([helper, target])
+    db.session.flush()
+    state = LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_order=[helper.id, target.id],
+        current_location_character_id=helper.id,
+    )
+    db.session.add(state)
+    db.session.commit()
+
+    base_url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/reaction"
+    reserved = client.post(
+        f"{base_url}/reserve",
+        headers=auth_headers(player),
+        json={
+            "location_character_id": helper.id,
+            "action_points": 6,
+            "kind": "help",
+            "help_target_character_id": target.character_id,
+            "help_action_label": "Hold the wound closed",
+            "help_skill_path": "skills.physical.melee",
+        },
+    )
+    assert reserved.status_code == 200
+    db.session.refresh(helper)
+    assert helper.action_points_current == 0
+
+    state.current_location_character_id = target.id
+    db.session.commit()
+    unpaid = client.post(
+        f"{base_url}/request",
+        headers=auth_headers(player),
+        json={"location_character_id": helper.id},
+    )
+    assert unpaid.status_code == 400
+
+    paid_turn = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(other),
+        json={},
+    )
+    assert paid_turn.status_code == 200
+    assert paid_turn.get_json()["current_location_character_id"] == helper.id
+    db.session.refresh(helper)
+    assert helper.action_points_current == 3
+
+    state.current_location_character_id = target.id
+    db.session.commit()
+    requested = client.post(
+        f"{base_url}/request",
+        headers=auth_headers(player),
+        json={"location_character_id": helper.id},
+    )
+    assert requested.status_code == 200
+    approved = client.post(
+        f"{base_url}/resolve",
+        headers=auth_headers(gm),
+        json={"approve": True},
+    )
+    assert approved.status_code == 200
+    assert approved.get_json()["current_location_character_id"] == target.id
+    db.session.refresh(target.character)
+    help_bonus = target.character.data["health"]["combatMeta"]["helpAdvantage"]
+    assert help_bonus["source_character_id"] == helper.character_id
+    assert help_bonus["skill_path"] == "skills.physical.melee"
+
+
 @pytest.mark.parametrize(
     ("penalty", "distance", "label"),
     [

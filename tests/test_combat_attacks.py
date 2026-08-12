@@ -1754,6 +1754,23 @@ def test_narrative_skill_check_uses_conditions_and_disadvantage(monkeypatch):
     assert check["total"] == 2
 
 
+def test_narrative_skill_check_uses_help_advantage(monkeypatch):
+    rolls = iter([3, 17])
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    character_data = {
+        "skills": {"physical": {"shooting": {"base": 10, "bonus": 0}}},
+        "health": {"effects": []},
+    }
+
+    check = CombatService._narrative_skill_check(
+        character_data, "skills.physical.shooting", advantage=True
+    )
+
+    assert check["rolls"] == [3, 17]
+    assert check["roll"] == 17
+    assert check["advantage"] is True
+
+
 def test_narrative_social_check_adds_charisma_modifier(monkeypatch):
     monkeypatch.setattr(combat_module.random, "randint", lambda *_: 10)
     character_data = {
