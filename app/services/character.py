@@ -12,6 +12,55 @@ logger = logging.getLogger(__name__)
 
 class CharacterService:
     @staticmethod
+    def apply_manual_field_resets(current_data, updated_data, manual_fields):
+        """Treat explicitly edited health and skill fields as a new baseline."""
+        if not isinstance(updated_data, dict) or not isinstance(manual_fields, list):
+            return updated_data
+
+        current_data = current_data if isinstance(current_data, dict) else {}
+        health = updated_data.get('health')
+        current_health = current_data.get('health') if isinstance(current_data.get('health'), dict) else {}
+        reset_round_damage = False
+
+        for raw_path in manual_fields:
+            path = str(raw_path or '')
+            parts = path.split('.')
+            if len(parts) == 4 and parts[:2] == ['health', 'zones'] and parts[3] in {'current', 'max'}:
+                area = parts[2]
+                zone = (
+                    (health.get('zones') or {}).get(area)
+                    if isinstance(health, dict) and isinstance(health.get('zones'), dict)
+                    else None
+                )
+                old_zone = (
+                    (current_health.get('zones') or {}).get(area)
+                    if isinstance(current_health.get('zones'), dict)
+                    else None
+                )
+                if (
+                    isinstance(zone, dict)
+                    and isinstance(old_zone, dict)
+                    and zone.get(parts[3]) != old_zone.get(parts[3])
+                ):
+                    zone['destructionDamage'] = 0
+                    reset_round_damage = True
+            elif path == 'health.current' and isinstance(health, dict):
+                if health.get('current') != current_health.get('current'):
+                    reset_round_damage = True
+
+        if reset_round_damage and isinstance(health, dict):
+            combat_meta = health.get('combatMeta')
+            if isinstance(combat_meta, dict):
+                for key in (
+                    'damageTakenThisRound',
+                    'damagePainAppliedThisRound',
+                    'damagePainRound',
+                    'pendingDamageStressTrigger',
+                ):
+                    combat_meta.pop(key, None)
+        return updated_data
+
+    @staticmethod
     def _item_totals(character_data):
         """Count item quantities regardless of their current container or slot."""
         totals = Counter()
@@ -188,6 +237,11 @@ class CharacterService:
             character.name = updates['name']
         if 'data' in updates:
             character_data = dict(updates['data'] or {})
+            CharacterService.apply_manual_field_resets(
+                character.data,
+                character_data,
+                updates.get('_manual_fields'),
+            )
             normalize_inventory_ammo_stacks(character_data)
             if not is_gm:
                 CharacterService.mark_added_items_as_player_created(

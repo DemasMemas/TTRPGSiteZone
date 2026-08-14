@@ -1697,6 +1697,7 @@ class CombatService:
         }
         label = labels[table][effect_roll - 1]
         effect = {
+            'id': uuid.uuid4().hex,
             'type': 'stress_effect', 'name': label, 'source': 'stress_manifestation',
             'stress_table': table, 'stress_roll': effect_roll, 'stress_level': level,
             'trigger': trigger, 'active': True, 'tick': 'manual',
@@ -1712,11 +1713,36 @@ class CombatService:
         return result
 
     @staticmethod
-    def resolve_stress_effect(loc_char, effect_id, action, replacement=None):
+    def resolve_stress_effect(
+        loc_char,
+        effect_id,
+        action,
+        replacement=None,
+        effect_name=None,
+        stress_table=None,
+        stress_roll=None,
+    ):
         data = loc_char.character.data if loc_char and loc_char.character else {}
         health = data.setdefault('health', {})
         effects = normalize_effect_list(health.get('effects') or [])
         effect = next((item for item in effects if str(item.get('id')) == str(effect_id)), None)
+        if not effect and str(effect_id or '').lower() in {'', 'none', 'null', 'undefined'}:
+            candidates = [
+                item for item in effects
+                if item.get('source') == 'stress_manifestation' and item.get('gmPending')
+            ]
+            if stress_table:
+                candidates = [item for item in candidates if item.get('stress_table') == stress_table]
+            if stress_roll not in (None, ''):
+                expected_roll = CombatService._coerce_int(stress_roll, 0)
+                candidates = [
+                    item for item in candidates
+                    if CombatService._coerce_int(item.get('stress_roll'), 0) == expected_roll
+                ]
+            if effect_name:
+                candidates = [item for item in candidates if item.get('name') == effect_name]
+            if len(candidates) == 1:
+                effect = candidates[0]
         if not effect or effect.get('source') != 'stress_manifestation':
             raise NotFoundError('Stress effect not found')
         if not effect.get('gmPending'):
@@ -3346,6 +3372,11 @@ class CombatService:
             zone_data.get('destructionDamage'),
             max(0, zone_max - min(zone_max, zone_current_before)),
         )
+        if zone_current_before > 0:
+            previous_destruction = min(
+                previous_destruction,
+                max(0, zone_max - min(zone_max, zone_current_before)),
+            )
         zone_data['destructionDamage'] = max(0, previous_destruction + max(0, damage))
         active_effects = normalize_effect_list(health.get('effects') or [])
         minimum_limb_health = max([
@@ -3360,7 +3391,12 @@ class CombatService:
             zone_data['current'] = max(minimum_limb_health, zone_data['current'])
         catastrophic_limb_injury = None
         limb_zones = {'leftArm', 'rightArm', 'leftLeg', 'rightLeg'}
-        if zone_key in limb_zones and zone_max > 0 and minimum_limb_health <= 0:
+        if (
+            zone_key in limb_zones
+            and zone_max > 0
+            and zone_data['current'] <= 0
+            and minimum_limb_health <= 0
+        ):
             destruction_ratio = zone_data['destructionDamage'] / zone_max
             active_area_effects = [
                 effect for effect in normalize_effect_list(health.get('effects') or [])
@@ -5090,6 +5126,17 @@ class CombatService:
                     or jam_effects['shooting_disadvantage']
                 )
                 shot_details['weapon_jams_before_shot'] = deepcopy(jam_effects['jams'])
+            machine_gun_penalty = (
+                math.floor(index * 0.5)
+                if attack_details.get('machine_gun_burst')
+                else 0
+            )
+            shot_details['machine_gun_burst_penalty'] = machine_gun_penalty
+            shot_details['hit_difficulty'] = max(
+                1,
+                CombatService._coerce_int(shot_details.get('hit_difficulty'), 1)
+                + machine_gun_penalty,
+            )
             result = CombatService._resolve_attack(
                 target,
                 attacker,
@@ -5098,10 +5145,6 @@ class CombatService:
                 forced_roll=shared_roll if share_hit_roll else None,
             )
             result['shot_number'] = index + 1
-            if isinstance(shot_states, list) and index < len(shot_states):
-                result['weapon_jam_after_shot'] = deepcopy(
-                    shot_states[index].get('jam_after_shot')
-                )
             if index == 0 and share_hit_roll:
                 shared_roll = result.get('roll')
             if share_hit_roll:
@@ -5161,6 +5204,23 @@ class CombatService:
             'medium': 'среднее',
             'severe': 'сильное',
             'extreme': 'экстремальное',
+        }
+        organ_labels = {
+            'heart': '\u0441\u0435\u0440\u0434\u0446\u0435',
+            'rightLung': '\u043f\u0440\u0430\u0432\u043e\u0435 \u043b\u0451\u0433\u043a\u043e\u0435',
+            'leftLung': '\u043b\u0435\u0432\u043e\u0435 \u043b\u0451\u0433\u043a\u043e\u0435',
+            'rightKidney': '\u043f\u0440\u0430\u0432\u0430\u044f \u043f\u043e\u0447\u043a\u0430',
+            'leftKidney': '\u043b\u0435\u0432\u0430\u044f \u043f\u043e\u0447\u043a\u0430',
+            'stomach': '\u0436\u0435\u043b\u0443\u0434\u043e\u043a',
+            'liver': '\u043f\u0435\u0447\u0435\u043d\u044c',
+            'rightEye': '\u043f\u0440\u0430\u0432\u044b\u0439 \u0433\u043b\u0430\u0437',
+            'leftEye': '\u043b\u0435\u0432\u044b\u0439 \u0433\u043b\u0430\u0437',
+            'rightEar': '\u043f\u0440\u0430\u0432\u043e\u0435 \u0443\u0445\u043e',
+            'leftEar': '\u043b\u0435\u0432\u043e\u0435 \u0443\u0445\u043e',
+            'nose': '\u043d\u043e\u0441',
+            'jaw': '\u0447\u0435\u043b\u044e\u0441\u0442\u044c',
+            'spine': '\u043f\u043e\u0437\u0432\u043e\u043d\u043e\u0447\u043d\u0438\u043a',
+            'brain': '\u043c\u043e\u0437\u0433',
         }
         mode_labels = {
             'melee': 'атака ближнего боя',
@@ -5327,6 +5387,29 @@ class CombatService:
                         )
                     if trauma.get('pain'):
                         consequences.append(f"боль +{trauma['pain']}")
+                    organ_damage = trauma.get('organ_damage')
+                    organ_key = (
+                        organ_damage.get('organ')
+                        if isinstance(organ_damage, dict)
+                        else trauma.get('organ')
+                    )
+                    if organ_key:
+                        organ_label = organ_labels.get(organ_key, organ_key)
+                        organ_details = f"\u043e\u0440\u0433\u0430\u043d: {organ_label}"
+                        if isinstance(organ_damage, dict):
+                            before = round(CombatService._coerce_float(
+                                organ_damage.get('current_before'), 0,
+                            ))
+                            current = round(CombatService._coerce_float(
+                                organ_damage.get('current'), 0,
+                            ))
+                            maximum = round(CombatService._coerce_float(
+                                organ_damage.get('max'), 0,
+                            ))
+                            organ_details += f" \u041e\u0417 {before} -> {current}/{maximum}"
+                            if organ_damage.get('disabled'):
+                                organ_details += " (\u0432\u044b\u0432\u0435\u0434\u0435\u043d \u0438\u0437 \u0441\u0442\u0440\u043e\u044f)"
+                        consequences.append(organ_details)
                     if trauma.get('shock'):
                         consequences.append('шок')
                     details = ', '.join(consequences) or 'без доп. эффекта'
@@ -8957,6 +9040,7 @@ class CombatService:
                 'fire_mode': fire_mode,
                 'shot_count': shots,
                 'volley_count': volley_count,
+                'machine_gun_burst': machine_gun,
                 'fire_rate': fire_rate_state['fire_rate'],
                 'shots_fired_before': fire_rate_state['fired'],
                 'action_points': expected_action_points,
@@ -9498,7 +9582,11 @@ class CombatService:
                                         'continuation_hit_difficulty_without_weapon_jam'
                                     ),
                                     attack_details.get('continuation_hit_difficulty', 1),
-                                ) + jam_effects['accuracy_penalty'],
+                                ) + jam_effects['accuracy_penalty'] + (
+                                    math.floor(shot_index * 0.5)
+                                    if attack_details.get('machine_gun_burst')
+                                    else 0
+                                ),
                             )
                             result = CombatService._resolve_cover_attack(
                                 location_id, cover, character, shot_details

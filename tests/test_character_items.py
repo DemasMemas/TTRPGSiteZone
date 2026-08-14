@@ -45,3 +45,47 @@ def test_increasing_stack_marks_resulting_stack_as_player_created():
     CharacterService.mark_added_items_as_player_created(current, updated)
 
     assert updated["inventory"]["pockets"][0]["createdByPlayer"] is True
+
+
+def test_manual_zone_health_edit_resets_accumulated_destruction_damage():
+    current = {
+        "health": {
+            "zones": {
+                "leftLeg": {"current": 10, "max": 100, "destructionDamage": 490},
+            },
+            "combatMeta": {"damageTakenThisRound": 90, "damagePainAppliedThisRound": 1},
+        },
+    }
+    updated = {
+        "health": {
+            "zones": {
+                "leftLeg": {"current": 60, "max": 100, "destructionDamage": 490},
+            },
+            "combatMeta": {"damageTakenThisRound": 90, "damagePainAppliedThisRound": 1},
+        },
+    }
+
+    CharacterService.apply_manual_field_resets(
+        current,
+        updated,
+        ["health.zones.leftLeg.current"],
+    )
+
+    assert updated["health"]["zones"]["leftLeg"]["destructionDamage"] == 0
+    assert "damageTakenThisRound" not in updated["health"]["combatMeta"]
+    assert "damagePainAppliedThisRound" not in updated["health"]["combatMeta"]
+
+
+def test_system_zone_health_change_keeps_accumulated_destruction_damage():
+    current = {"health": {"zones": {"leftLeg": {"current": 10, "max": 100}}}}
+    updated = {
+        "health": {
+            "zones": {
+                "leftLeg": {"current": 60, "max": 100, "destructionDamage": 490},
+            },
+        },
+    }
+
+    CharacterService.apply_manual_field_resets(current, updated, [])
+
+    assert updated["health"]["zones"]["leftLeg"]["destructionDamage"] == 490

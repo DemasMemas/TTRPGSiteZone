@@ -31,6 +31,7 @@ let currentCharacterData = null;
 let currentCharacterCanEdit = false;
 let autoSaveTimer = null;
 let stressAdjustmentPending = false;
+const pendingManualFieldPaths = new Set();
 const AUTO_SAVE_DELAY = 500;
 const pendingConsumableActions = new Map();
 const pendingReloadActions = new Map();
@@ -806,6 +807,10 @@ function updateDataFromFields() {
             value = value === '' ? null : Number(value);
         }
         setValueByPath(currentCharacterData, name, value);
+        const zoneMatch = name.match(/^health\.zones\.([^.]+)\.(current|max)$/);
+        if (zoneMatch && pendingManualFieldPaths.has(name)) {
+            setValueByPath(currentCharacterData, `health.zones.${zoneMatch[1]}.destructionDamage`, 0);
+        }
     });
     normalizeCharacterEffects(currentCharacterData);
     if (currentCharacterData.health) {
@@ -818,6 +823,22 @@ function updateDataFromFields() {
         }
         syncHealthDerivedStatuses(currentCharacterData.health);
     }
+}
+
+function trackManualCharacterField(event) {
+    const path = event?.target?.getAttribute?.('name') || '';
+    if (!event?.isTrusted || !(
+        path === 'health.current'
+        || /^health\.zones\.[^.]+\.(current|max)$/.test(path)
+        || /^skills\./.test(path)
+    )) return;
+    pendingManualFieldPaths.add(path);
+}
+
+function consumeManualFieldPaths() {
+    const paths = [...pendingManualFieldPaths];
+    pendingManualFieldPaths.clear();
+    return paths;
 }
 
 function renderCreatedByPlayerBadge(item) {
@@ -843,15 +864,17 @@ function scheduleAutoSave() {
         autoSaveTimer = null;
         if (currentCharacterId) {
             updateDataFromFields();
+            const manualFields = consumeManualFieldPaths();
+            const updates = { data: currentCharacterData, _manual_fields: manualFields };
             const socket = getSocket();
             if (socket) {
                 socket.emit('update_character_data', {
                     token: localStorage.getItem('access_token'),
                     character_id: currentCharacterId,
-                    updates: { data: currentCharacterData }
+                    updates,
                 });
             } else {
-                Server.updateCharacter(currentCharacterId, { data: currentCharacterData })
+                Server.updateCharacter(currentCharacterId, updates)
                     .then(() => console.log('Auto-saved via HTTP'))
                     .catch(err => showNotification('Ошибка автосохранения: ' + err.message));
             }
@@ -867,12 +890,15 @@ function forceSyncCharacter() {
     }
     const characterId = currentCharacterId;
     if (!characterId || !currentCharacterData) return;
+    updateDataFromFields();
     const dataSnapshot = JSON.parse(JSON.stringify(currentCharacterData));
+    const manualFields = consumeManualFieldPaths();
+    const updates = { data: dataSnapshot, _manual_fields: manualFields };
     let fallbackStarted = false;
     const persistViaHttp = () => {
         if (fallbackStarted) return;
         fallbackStarted = true;
-        Server.updateCharacter(characterId, { data: dataSnapshot })
+        Server.updateCharacter(characterId, updates)
             .catch(error => showNotification('Ошибка сохранения: ' + error.message));
     };
     const socket = getSocket();
@@ -881,7 +907,7 @@ function forceSyncCharacter() {
         socket.emit('update_character_data', {
             token: localStorage.getItem('access_token'),
             character_id: characterId,
-            updates: { data: dataSnapshot }
+            updates,
         }, response => {
             clearTimeout(fallbackTimer);
             if (!response?.ok) persistViaHttp();
@@ -1713,8 +1739,12 @@ async function renderCharacterSheet(characterName, data) {
 
     const form = document.getElementById('character-sheet-form');
     if (form) {
-        form.addEventListener('input', scheduleAutoSave);
-        form.addEventListener('change', scheduleAutoSave);
+        const handleManualFormEdit = event => {
+            trackManualCharacterField(event);
+            scheduleAutoSave();
+        };
+        form.addEventListener('input', handleManualFormEdit);
+        form.addEventListener('change', handleManualFormEdit);
     }
 }
 

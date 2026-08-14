@@ -4858,11 +4858,21 @@ function renderCombatHud() {
             const replacing = button.classList.contains('stress-replace');
             const replacement = replacing ? window.prompt('Какое действие или требование должен получить персонаж?') : null;
             if (replacing && !replacement?.trim()) return;
-            await Server.resolveLocationStressEffect(window.currentLobbyId, getCurrentLocationId(), {
-                location_character_id: Number(card.dataset.character), effect_id: card.dataset.effect,
-                action: button.classList.contains('stress-approve') ? 'approve' : (replacing ? 'replace' : 'skip'),
-                replacement,
-            });
+            const stressIndex = [...combatHud.querySelectorAll('.stress-effect-card')].indexOf(card);
+            const pendingEffect = stressCards[stressIndex]?.effect;
+            try {
+                await Server.resolveLocationStressEffect(window.currentLobbyId, getCurrentLocationId(), {
+                    location_character_id: Number(card.dataset.character),
+                    effect_id: card.dataset.effect,
+                    effect_name: pendingEffect?.name,
+                    stress_table: pendingEffect?.stress_table,
+                    stress_roll: pendingEffect?.stress_roll,
+                    action: button.classList.contains('stress-approve') ? 'approve' : (replacing ? 'replace' : 'skip'),
+                    replacement,
+                });
+            } catch (error) {
+                showNotification(error.message || 'Не удалось обработать эффект стресса');
+            }
         };
     });
     if (window.isGM) {

@@ -103,12 +103,49 @@ def test_stress_trigger_checks_will_and_persists_manifestation(monkeypatch):
     assert target.character.data["health"]["effects"][-1]["name"] == "Боязливость"
     assert target.character.data["health"]["stress"] == 1
     effect = target.character.data["health"]["effects"][-1]
+    assert effect["id"]
     assert effect["gmPending"] is True
 
     CombatService.resolve_stress_effect(target, effect["id"], "approve")
 
     assert target.character.data["health"]["stress"] == 2
     assert target.character.data["health"]["effects"][-1]["gmApproved"] is True
+
+
+def test_legacy_stress_manifestation_without_id_can_be_resolved(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "health": {
+                "stress": 1,
+                "effects": [{
+                    "id": None,
+                    "type": "generic",
+                    "name": "Legacy stress requirement",
+                    "source": "stress_manifestation",
+                    "stress_table": "concern",
+                    "stress_roll": 2,
+                    "active": True,
+                    "gmPending": True,
+                }],
+            },
+        }),
+        posture="standing",
+    )
+
+    CombatService.resolve_stress_effect(
+        target,
+        "null",
+        "skip",
+        effect_name="Legacy stress requirement",
+        stress_table="concern",
+        stress_roll=2,
+    )
+
+    effect = target.character.data["health"]["effects"][0]
+    assert effect["type"] == "stress_effect"
+    assert effect["gmPending"] is False
+    assert effect["gmSkipped"] is True
 
 
 def test_stress_decrease_expires_tension_effects(monkeypatch):
@@ -373,6 +410,37 @@ def test_attack_summary_lists_each_target_damage_bleeding_and_trauma():
     assert "Доп. травма: d20 8 (перелом, боль +1)." in summary
     assert "Вторая цель: d20 4, СЛ 15 — промах." in summary
     assert "Итого: попаданий 1/2, урон 42." in summary
+
+
+def test_attack_summary_reports_additional_trauma_organ_damage():
+    summary = CombatService.format_attack_summary({
+        "character": {"name": "Attacker"},
+        "attack": {
+            "results": [{
+                "target_name": "Target",
+                "roll": 20,
+                "difficulty": 10,
+                "hit": True,
+                "mode": "melee",
+                "zone": "chest",
+                "damage": 35,
+                "additional_traumas": [{
+                    "roll": 1,
+                    "organ": "heart",
+                    "organ_damage": {
+                        "organ": "heart",
+                        "current_before": 100,
+                        "current": 65,
+                        "max": 100,
+                        "disabled": False,
+                    },
+                }],
+            }],
+        },
+    })
+
+    assert "\u043e\u0440\u0433\u0430\u043d: \u0441\u0435\u0440\u0434\u0446\u0435 \u041e\u0417 100 -> 65/100" in summary
+    assert "\u0431\u0435\u0437 \u0434\u043e\u043f. \u044d\u0444\u0444\u0435\u043a\u0442\u0430" not in summary
 
 
 def test_cover_attack_summary_shows_protection_and_target_behind_cover():
@@ -1620,6 +1688,63 @@ def test_limb_damage_at_three_and_five_limits_creates_catastrophic_injuries(monk
     assert character.data["health"]["zones"]["leftArm"]["destructionDamage"] == 500
 
 
+def test_restored_limb_does_not_keep_catastrophic_overkill(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    character = SimpleNamespace(data={
+        "health": {
+            "current": 700,
+            "max": 700,
+            "zones": {
+                "leftArm": {
+                    "current": 100,
+                    "max": 100,
+                    "destructionDamage": 300,
+                },
+            },
+            "effects": [],
+        },
+    })
+    target = SimpleNamespace(character=character, hp_zones={})
+
+    CombatService._apply_attack_damage(
+        target, 100, "left_arm", {}, allow_bleeding=False, round_number=1,
+    )
+
+    health = character.data["health"]
+    assert health["zones"]["leftArm"]["destructionDamage"] == 100
+    assert not any(effect["type"] == "mangled_limb" for effect in health["effects"])
+
+
+def test_positive_health_limb_cannot_receive_catastrophic_injury(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    character = SimpleNamespace(data={
+        "health": {
+            "current": 700,
+            "max": 700,
+            "zones": {
+                "leftLeg": {
+                    "current": 50,
+                    "max": 100,
+                    "destructionDamage": 500,
+                },
+            },
+            "effects": [],
+        },
+    })
+    target = SimpleNamespace(character=character, hp_zones={})
+
+    CombatService._apply_attack_damage(
+        target, 10, "left_leg", {}, allow_bleeding=False, round_number=1,
+    )
+
+    health = character.data["health"]
+    assert health["zones"]["leftLeg"]["current"] == 40
+    assert not any(
+        effect["type"] in {"mangled_limb", "amputation"}
+        for effect in health["effects"]
+    )
+
+
 def test_mangled_and_missing_legs_have_increased_penalties():
     mangled = {
         "health": {
@@ -2090,6 +2215,35 @@ def test_non_blocking_jam_penalty_applies_to_next_attack_roll(monkeypatch):
 
     assert observed_difficulties == [10, 12]
     assert attack_details["shot_count"] == 2
+
+
+def test_machine_gun_burst_difficulty_increases_every_two_shots(monkeypatch):
+    observed_difficulties = []
+
+    def resolve_attack(_target, _attacker, details, **_kwargs):
+        observed_difficulties.append(details["hit_difficulty"])
+        return {"roll": 20, "hit": True}
+
+    monkeypatch.setattr(CombatService, "_resolve_attack", resolve_attack)
+    weapon = {"durability": 100, "maxDurability": 100}
+    attacker = SimpleNamespace(
+        character=SimpleNamespace(data={"weapons": [weapon]}),
+    )
+    attack_details = {
+        "weapon_index": 0,
+        "shot_count": 6,
+        "requested_shot_count": 6,
+        "hit_difficulty": 10,
+        "hit_difficulty_without_weapon_jam": 10,
+        "base_shooting_disadvantage": False,
+        "machine_gun_burst": True,
+    }
+
+    CombatService._resolve_shot_sequence(
+        [SimpleNamespace()], attacker, attack_details,
+    )
+
+    assert observed_difficulties == [10, 10, 11, 11, 12, 12]
 
 
 def test_weapon_wear_is_once_per_combat_plus_each_duplet():

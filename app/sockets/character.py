@@ -106,13 +106,20 @@ def handle_update_character_data(data):
 
     # Применяем обновления
     if 'data' in updates:
-        character.data = updates['data']
+        updated_character_data = deepcopy(updates['data'] or {})
+        CharacterService.apply_manual_field_resets(
+            character.data,
+            updated_character_data,
+            updates.get('_manual_fields'),
+        )
+        character.data = updated_character_data
     else:
         for key, value in updates.items():
             if hasattr(character, key):
                 setattr(character, key, value)
 
     posture_updates = []
+    location_ids = set()
     if isinstance(character.data, dict):
         character_data = deepcopy(character.data)
         normalize_inventory_ammo_stacks(character_data)
@@ -123,6 +130,7 @@ def handle_update_character_data(data):
             sync_health_derived_statuses(health)
             character.data['health'] = health
         for loc_char in LocationCharacter.query.filter_by(character_id=character.id).all():
+            location_ids.add(loc_char.location_id)
             if isinstance(health, dict):
                 loc_char.effects = list(health.get('effects') or [])
                 loc_char.hp_zones = health_zones_to_location(health)
@@ -173,6 +181,7 @@ def handle_update_character_data(data):
         )
 
     saved_updates = dict(updates)
+    saved_updates.pop('_manual_fields', None)
     if 'data' in updates:
         saved_updates['data'] = character.data
     emit('character_data_updated', {
@@ -180,6 +189,16 @@ def handle_update_character_data(data):
         'updates': saved_updates,
         'updated_by': user.id
     }, room=f"character_{character_id}", include_self=False)
+
+    if lobby:
+        from app.services.combat import CombatService
+
+        for location_id in location_ids:
+            socketio.emit(
+                'combat_state_updated',
+                CombatService.get_state(location_id, lobby.gm_id),
+                room=f"location_{location_id}",
+            )
 
     logger.debug("Character %s updated by %s", character_id, user.id)
     return {'ok': True, 'character_id': character_id}

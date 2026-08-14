@@ -96,6 +96,9 @@ TYPE_ALIASES = {
     "exhaustion": "exhaustion",
     "истощение": "exhaustion",
     "stress": "stress",
+    "stress_effect": "stress_effect",
+    "stress_stupor": "stress_stupor",
+    "phobia": "phobia",
     "стресс": "stress",
     "intoxication": "intoxication",
     "опьянение": "intoxication",
@@ -367,7 +370,10 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         return create_effect_draft("generic", {"value": raw})
 
+    source = raw.get("source") or raw.get("origin")
     effect_type = canonical_type(raw.get("type") or raw.get("kind") or raw.get("effectType"), raw.get("name", ""))
+    if source == "stress_manifestation" and effect_type == "generic":
+        effect_type = "stress_effect"
     value = raw.get("value", raw.get("amount", raw.get("power", 0)))
     duration = raw.get("duration", raw.get("turns", raw.get("remaining", None)))
     remaining = raw.get("remaining", duration)
@@ -379,7 +385,7 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
         "duration": None if duration in (None, "") else _to_int(duration, None),
         "remaining": None if remaining in (None, "") else _to_int(remaining, None),
         "stacks": raw.get("stacks", 1),
-        "source": raw.get("source") or raw.get("origin"),
+        "source": source,
         "note": raw.get("note") or raw.get("description", ""),
         "tick": raw.get("tick") or raw.get("tickPhase") or "manual",
         "scope": raw.get("scope", "character"),
@@ -393,7 +399,10 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
     for key, value in raw.items():
         if key not in {"type", "kind", "effectType", "turns", "tickPhase", "zone", "bodyPart", "target"}:
             data.setdefault(key, value)
-    if str(data.get("name") or "").strip().lower() in {"", "общий", "generic"} and effect_type != "generic":
+    generic_names = {
+        "", "общий", "generic", "неопределенный эффект", "неопределённый эффект",
+    }
+    if str(data.get("name") or "").strip().lower() in generic_names and effect_type != "generic":
         data["name"] = get_effect_meta(effect_type)["label"]
     max_hours = _to_int(data.get("max_hours"), 0)
     if data.get("remaining") is None and max_hours > 0:

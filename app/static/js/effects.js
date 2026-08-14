@@ -88,6 +88,9 @@ const TYPE_ALIASES = {
     exhaustion: 'exhaustion',
     истощение: 'exhaustion',
     stress: 'stress',
+    stress_effect: 'stress_effect',
+    stress_stupor: 'stress_stupor',
+    phobia: 'phobia',
     стресс: 'stress',
     intoxication: 'intoxication',
     опьянение: 'intoxication',
@@ -426,7 +429,9 @@ export function normalizeEffect(raw = {}) {
     }
 
     const name = String(raw.name || raw.label || '').trim();
-    const type = canonicalType(raw.type || raw.kind || raw.effectType, name);
+    const source = raw.source || raw.origin || null;
+    let type = canonicalType(raw.type || raw.kind || raw.effectType, name);
+    if (source === 'stress_manifestation' && type === 'generic') type = 'stress_effect';
     const value = raw.value ?? raw.amount ?? raw.power ?? 0;
     const duration = raw.duration ?? raw.turns ?? raw.remaining ?? null;
 
@@ -438,7 +443,7 @@ export function normalizeEffect(raw = {}) {
         duration: duration === null || duration === '' ? null : toInt(duration, null),
         remaining: raw.remaining === undefined || raw.remaining === null || raw.remaining === '' ? null : toInt(raw.remaining, null),
         stacks: raw.stacks === undefined || raw.stacks === null ? 1 : Math.max(1, toInt(raw.stacks, 1)),
-        source: raw.source || raw.origin || null,
+        source,
         note: raw.note || raw.description || '',
         tick: raw.tick || raw.tickPhase || 'manual',
         scope: raw.scope || 'character',
@@ -451,7 +456,7 @@ export function normalizeEffect(raw = {}) {
             normalized[key] = entryValue;
         }
     });
-    if (['', 'общий', 'generic'].includes(String(normalized.name || '').trim().toLowerCase()) && type !== 'generic') {
+    if (['', 'общий', 'generic', 'неопределенный эффект', 'неопределённый эффект'].includes(String(normalized.name || '').trim().toLowerCase()) && type !== 'generic') {
         normalized.name = getEffectMeta(type).label;
     }
     const maxHours = toInt(normalized.max_hours, 0);

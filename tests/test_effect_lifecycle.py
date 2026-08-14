@@ -32,6 +32,24 @@ def test_custom_effect_is_distinct_from_legacy_generic_effect():
     assert legacy["name"] == "Старый статус"
 
 
+def test_stress_manifestation_is_not_normalized_as_generic():
+    current = normalize_effect({
+        "type": "stress_effect",
+        "name": "Retreat from the stress source",
+        "source": "stress_manifestation",
+    })
+    legacy = normalize_effect({
+        "type": "generic",
+        "name": "\u041d\u0435\u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0451\u043d\u043d\u044b\u0439 \u044d\u0444\u0444\u0435\u043a\u0442",
+        "source": "stress_manifestation",
+    })
+
+    assert current["type"] == "stress_effect"
+    assert current["name"] == "Retreat from the stress source"
+    assert legacy["type"] == "stress_effect"
+    assert legacy["name"] == "\u042d\u0444\u0444\u0435\u043a\u0442 \u0441\u0442\u0440\u0435\u0441\u0441\u0430"
+
+
 def test_normalization_preserves_executable_metadata():
     effect = normalize_effect({
         "type": "delayed_adjustment",

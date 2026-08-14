@@ -1153,6 +1153,7 @@ def update_character(character_id):
     data = request.get_json()
     character = CharacterService.update_character(character_id, user_id, data)
     saved_updates = dict(data or {})
+    saved_updates.pop('_manual_fields', None)
     if 'data' in saved_updates:
         saved_updates['data'] = character.data
     socketio.emit(
@@ -1164,6 +1165,18 @@ def update_character(character_id):
         },
         room=f"character_{character.id}",
     )
+    lobby = db.session.get(Lobby, character.lobby_id)
+    if lobby:
+        location_ids = {
+            item.location_id
+            for item in LocationCharacter.query.filter_by(character_id=character.id).all()
+        }
+        for location_id in location_ids:
+            socketio.emit(
+                'combat_state_updated',
+                CombatService.get_state(location_id, lobby.gm_id),
+                room=f"location_{location_id}",
+            )
     return jsonify({'message': 'Character updated'}), 200
 
 
@@ -2499,6 +2512,9 @@ def resolve_location_stress_effect(lobby_id, location_id, lobby):
         data.get('effect_id'),
         str(data.get('action') or ''),
         replacement=data.get('replacement'),
+        effect_name=data.get('effect_name'),
+        stress_table=data.get('stress_table'),
+        stress_roll=data.get('stress_roll'),
     )
     db.session.commit()
     state = CombatService.get_state(location_id, lobby.gm_id)
