@@ -490,6 +490,12 @@ export const Server = {
         });
     },
 
+    async removeLocationCombatParticipant(lobbyId, locationId, locationCharacterId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/participants/${locationCharacterId}`, {
+            method: 'DELETE',
+        });
+    },
+
     async applyLocationGmEvent(lobbyId, locationId, payload) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/gm-events`, {
             method: 'POST',

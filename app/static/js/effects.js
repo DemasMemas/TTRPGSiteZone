@@ -181,7 +181,7 @@ const STATUS_EFFECT_TYPES = new Set([
     'bleeding_internal_extreme',
 ]);
 
-const BLEEDING_STAGE_ORDER = ['normal', 'light', 'medium', 'severe', 'critical'];
+const BLEEDING_STAGE_ORDER = ['normal', 'light', 'medium', 'severe', 'critical', 'fatal'];
 const BLEEDING_STAGE_PENALTIES = {
     normal: 0,
     light: 1,
@@ -463,9 +463,20 @@ export function normalizeEffect(raw = {}) {
     return normalized;
 }
 
+function isLegacyAdditionalTraumaEffect(effect) {
+    if (!effect || typeof effect !== 'object' || Array.isArray(effect)) return false;
+    const rawType = String(effect.type || effect.kind || effect.effectType || '').trim().toLowerCase();
+    if (!['additional_trauma', 'generic'].includes(rawType)) return false;
+    const outcomeKeys = ['fracture', 'bleeding', 'pain', 'shock', 'organ', 'fall_or_drop'];
+    const hasOwn = key => Object.prototype.hasOwnProperty.call(effect, key);
+    return hasOwn('chance_roll')
+        && hasOwn('roll')
+        && outcomeKeys.filter(hasOwn).length >= 3;
+}
+
 export function normalizeEffectList(list) {
     if (!Array.isArray(list)) return [];
-    return list.map(normalizeEffect);
+    return list.filter(effect => !isLegacyAdditionalTraumaEffect(effect)).map(normalizeEffect);
 }
 
 export function createEffectDraft(type = 'generic', overrides = {}) {

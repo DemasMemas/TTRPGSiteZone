@@ -105,6 +105,7 @@ let combatHudCollapsed = storedCombatHudCollapsed === null
 let combatActionMenu = null;
 let combatActionMenuCharacterId = null;
 let pendingCombatAction = null;
+let autoEndingBlockedTurn = false;
 const deferredCombatActions = new Map();
 let structureActionMenu = null;
 let structureActionMenuState = null;
@@ -1027,6 +1028,39 @@ function canActWithCombatCharacter(combatCharacter) {
     if (!combatCharacter) return false;
     const myId = getCurrentUserId();
     return Boolean(window.isGM || combatCharacter.controlled_by === myId || combatCharacter.owner_id === myId);
+}
+
+function canTakeCombatTurn(combatCharacter) {
+    const condition = combatCharacter?.condition || {};
+    return Boolean(
+        condition.can_act
+        || (condition.state === 'pain_shock' && condition.can_recover)
+    );
+}
+
+async function autoEndBlockedCombatTurn() {
+    const current = combatState?.current_character;
+    if (
+        autoEndingBlockedTurn
+        || !window.isGM
+        || combatState?.status !== 'active'
+        || !current
+        || canTakeCombatTurn(current)
+    ) {
+        return;
+    }
+    autoEndingBlockedTurn = true;
+    try {
+        await Server.endLocationCombatTurn(
+            window.currentLobbyId,
+            getCurrentLocationId(),
+            current.location_character_id,
+        );
+    } catch (error) {
+        showNotification(error.message || 'Не удалось автоматически завершить недоступный ход');
+    } finally {
+        autoEndingBlockedTurn = false;
+    }
 }
 
 function closeCombatMenus() {
@@ -3121,6 +3155,14 @@ export function startCharacterMoveMode(characterId) {
     return beginCharacterMoveMode(characterId, 'walk');
 }
 
+function isAttackerBehindTarget(attacker, target) {
+    const facingX = Number(target?.facing_x ?? target?.facingX) || 0;
+    const facingY = Number(target?.facing_y ?? target?.facingY) || 1;
+    const relativeX = Number(attacker?.x ?? attacker?.pos_x) - Number(target?.x ?? target?.pos_x);
+    const relativeY = Number(attacker?.y ?? attacker?.pos_y) - Number(target?.y ?? target?.pos_y);
+    return facingX * relativeX + facingY * relativeY < 0;
+}
+
 async function resolveCombatTargetSelection(targetCharacterId) {
     if (!pendingCombatAction) return false;
     const action = pendingCombatAction;
@@ -3205,6 +3247,17 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         if (!zone) return false;
         payload.target_zone = zone;
     }
+    if (
+        action.actionKey === 'attack'
+        && !action.fireMode
+        && action.targetType === 'character'
+        && isAttackerBehindTarget(actor, target)
+        && window.confirm('Атака со спины: потратить дополнительно 2 ОД для гарантированного попадания?')
+    ) {
+        payload.payment = [action.meleeAimed ? 'aimed' : null, 'back_auto']
+            .filter(Boolean)
+            .join('+');
+    }
 
     try {
         if (action.actionKey === 'use_item') {
@@ -3228,6 +3281,9 @@ async function resolveCombatTargetSelection(targetCharacterId) {
                 const hits = attack.results.filter(item => item.hit);
                 const damage = attack.damage_total || 0;
                 const rolls = attack.results.map((item, index) => {
+                    if (item.automatic_hit) {
+                        return `${index + 1}: автоматическое попадание`;
+                    }
                     const dice = Array.isArray(item.rolls) && item.rolls.length > 1
                         ? `[${item.rolls.join(', ')}] → ${item.roll}`
                         : String(item.roll);
@@ -4672,7 +4728,10 @@ function renderCombatHud() {
             const marker = teamColor
                 ? `<span title="${escapeHtml(character.team_name || '\u041a\u043e\u043c\u0430\u043d\u0434\u0430')}" style="display:inline-block;width:8px;height:8px;margin-right:4px;border-radius:50%;background:${teamColor};"></span>`
                 : '';
-            return `${marker}${escapeHtml(character.name || `#${id}`)}`;
+            const removeButton = window.isGM && combatState.status === 'active'
+                ? `<button type="button" class="combat-remove-participant-btn" data-location-character-id="${id}" title="Убрать из инициативы" aria-label="Убрать ${escapeHtml(character.name || `#${id}`)} из инициативы" style="margin-left:3px;padding:0 3px;border:0;background:transparent;color:#d7a08d;cursor:pointer;font-size:14px;line-height:1;">&times;</button>`
+                : '';
+            return `<span style="display:inline-flex;align-items:center;white-space:nowrap;">${marker}${escapeHtml(character.name || `#${id}`)}${removeButton}</span>`;
         })
         .filter(Boolean);
     const visibleOrderLabels = orderLabels.length
@@ -4774,6 +4833,25 @@ function renderCombatHud() {
         </div>
     `;
     ensureCombatHudDragging();
+    combatHud.querySelectorAll('.combat-remove-participant-btn').forEach(button => {
+        button.onclick = async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const locationCharacterId = Number(button.dataset.locationCharacterId);
+            if (!locationCharacterId) return;
+            button.disabled = true;
+            try {
+                await Server.removeLocationCombatParticipant(
+                    window.currentLobbyId,
+                    getCurrentLocationId(),
+                    locationCharacterId,
+                );
+            } catch (error) {
+                button.disabled = false;
+                showNotification(error.message || 'Не удалось убрать персонажа из инициативы');
+            }
+        };
+    });
     combatHud.querySelectorAll('.stress-effect-card button').forEach(button => {
         button.onclick = async () => {
             const card = button.closest('.stress-effect-card');
@@ -4903,6 +4981,7 @@ export function setCombatState(state) {
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
     resumeCompletedCombatAction(combatState);
     renderCombatHud();
+    void autoEndBlockedCombatTurn();
 }
 
 async function resumeCompletedCombatAction(state) {

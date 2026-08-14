@@ -304,7 +304,7 @@ def get_effect_meta(effect_type: str) -> Dict[str, str]:
     return EFFECT_TYPE_META.get(effect_type, EFFECT_TYPE_META["generic"])
 
 
-BLEEDING_STAGE_ORDER = ["normal", "light", "medium", "severe", "critical"]
+BLEEDING_STAGE_ORDER = ["normal", "light", "medium", "severe", "critical", "fatal"]
 BLEEDING_STAGE_PENALTIES = {
     "normal": 0,
     "light": 1,
@@ -403,10 +403,33 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
     return data
 
 
+def _is_legacy_additional_trauma_effect(effect: Any) -> bool:
+    """Identify combat roll reports that were accidentally stored as effects."""
+    if not isinstance(effect, dict):
+        return False
+    raw_type = str(
+        effect.get("type") or effect.get("kind") or effect.get("effectType") or ""
+    ).strip().lower()
+    if raw_type not in {"additional_trauma", "generic"}:
+        return False
+    outcome_keys = {
+        "fracture", "bleeding", "pain", "shock", "organ", "fall_or_drop"
+    }
+    return (
+        "chance_roll" in effect
+        and "roll" in effect
+        and len(outcome_keys.intersection(effect)) >= 3
+    )
+
+
 def normalize_effect_list(effects: Any) -> List[Dict[str, Any]]:
     if not isinstance(effects, list):
         return []
-    return [normalize_effect(effect) for effect in effects]
+    return [
+        normalize_effect(effect)
+        for effect in effects
+        if not _is_legacy_additional_trauma_effect(effect)
+    ]
 
 
 def _bleeding_rule(effect_type: str) -> Optional[Dict[str, Any]]:

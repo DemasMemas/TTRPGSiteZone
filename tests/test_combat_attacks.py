@@ -438,6 +438,26 @@ def test_pain_shock_only_allows_recovery_attempt():
     assert condition["can_recover"] is True
 
 
+def test_pain_shock_recovery_uses_only_will_bonus_and_ammonia_bonus():
+    data = {
+        "skills": {"physical": {"will": {"base": 5, "bonus": 0}}},
+        "health": {
+            "painLevel": 9,
+            "exhaustion": 4,
+            "bloodStage": "severe",
+            "temperature": 40,
+            "effects": [],
+        },
+    }
+
+    difficulty, will_bonus = CombatService._pain_shock_recovery_difficulty(data)
+    ammonia_difficulty, _ = CombatService._pain_shock_recovery_difficulty(data, 2)
+
+    assert will_bonus == -3
+    assert difficulty == 15
+    assert ammonia_difficulty == 13
+
+
 @pytest.mark.parametrize("effect_type", ["critical_condition", "death"])
 def test_critical_and_dead_characters_cannot_use_recovery(effect_type):
     character = SimpleNamespace(
@@ -605,6 +625,156 @@ def test_back_attack_uses_target_facing():
     assert not CombatService._is_behind(
         SimpleNamespace(pos_x=5, pos_y=6), target
     )
+
+
+def test_back_melee_attack_ignores_block_and_aimed_penalty():
+    attacker = SimpleNamespace(pos_x=5, pos_y=4)
+    target = SimpleNamespace(
+        pos_x=5,
+        pos_y=5,
+        facing_x=0,
+        facing_y=1,
+        posture="standing",
+        melee_block_effectiveness=6,
+        grappled_by_id=None,
+        character=SimpleNamespace(data={"health": {"effects": []}}),
+    )
+
+    profile = CombatService._melee_target_profile(
+        attacker,
+        target,
+        melee_bonus=2,
+        accuracy=1,
+        aimed=True,
+        target_zone="head",
+    )
+
+    assert profile["from_behind"] is True
+    assert profile["block_penalty"] == 0
+    assert profile["aimed_penalty"] == 0
+    assert profile["difficulty"] == 3
+
+
+def test_prone_target_grants_melee_advantage():
+    attacker = SimpleNamespace(pos_x=5, pos_y=6)
+    target = SimpleNamespace(
+        pos_x=5,
+        pos_y=5,
+        facing_x=0,
+        facing_y=1,
+        posture="prone",
+        melee_block_effectiveness=0,
+        grappled_by_id=None,
+        character=SimpleNamespace(data={"health": {"effects": []}}),
+    )
+
+    profile = CombatService._melee_target_profile(attacker, target, melee_bonus=0)
+
+    assert profile["from_behind"] is False
+    assert profile["target_prone"] is True
+    assert profile["advantage"] is True
+
+
+def test_melee_attack_automatically_hits_unconscious_target(monkeypatch):
+    monkeypatch.setattr(
+        CombatService,
+        "_virtual_melee_profile",
+        lambda *args, **kwargs: {
+            "damage": 10,
+            "armor_piercing": 0,
+            "accuracy": 0,
+            "bleeding": "",
+            "melee_damage_type": "crushing",
+            "skip_strength_scaling": True,
+        },
+    )
+    monkeypatch.setattr(CombatService, "_target_armor", lambda *args: (0, []))
+    monkeypatch.setattr(
+        CombatService,
+        "_apply_attack_damage",
+        lambda *args, **kwargs: {
+            "current": 90,
+            "zones": {"rightLeg": {"current": 90}},
+            "_attackOutcome": {},
+        },
+    )
+    attacker = SimpleNamespace(
+        pos_x=0,
+        pos_y=0,
+        character=SimpleNamespace(data={"skills": {"physical": {}}}),
+    )
+    target = SimpleNamespace(
+        pos_x=0,
+        pos_y=1,
+        facing_x=0,
+        facing_y=-1,
+        posture="prone",
+        melee_block_effectiveness=4,
+        character_id=2,
+        character=SimpleNamespace(
+            id=2,
+            name="Target",
+            data={"health": {"effects": [{"type": "unconsciousness"}]}},
+        ),
+        hp_zones={},
+        grappled_by_id=None,
+    )
+    target_profile = CombatService._melee_target_profile(attacker, target, melee_bonus=0)
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": -1,
+            "hit_difficulty": 99,
+            "automatic_hit": target_profile["automatic_hit"],
+            "target_unconscious": target_profile["target_unconscious"],
+            "round_number": 1,
+        },
+        melee=True,
+        attack_type="unarmed",
+        forced_roll=1,
+    )
+
+    assert result["hit"] is True
+    assert result["automatic_hit"] is True
+    assert result["roll"] is None
+    assert result["rolls"] == []
+
+
+def test_failed_bleeding_check_at_critical_stage_causes_death(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: 1)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    data = {
+        "skills": {"physical": {"will": {"base": 5, "bonus": 0}}},
+        "health": {
+            "current": 300,
+            "blood": "critical",
+            "bloodStage": "critical",
+            "effects": [{"type": "bleeding_external_light", "area": "leftArm"}],
+        },
+    }
+    loc_char = SimpleNamespace(
+        character=SimpleNamespace(data=data),
+        posture="standing",
+        cover_object_id=12,
+        weapon_braced=True,
+        braced_weapon_index=0,
+    )
+
+    result = CombatService._resolve_bleeding_check(loc_char)
+
+    assert result["success"] is False
+    assert result["bloodStage"] == "fatal"
+    assert result["death"] is True
+    assert data["health"]["bloodStage"] == "fatal"
+    assert any(
+        effect["type"] == "death" and effect["source"] == "blood_loss"
+        for effect in data["health"]["effects"]
+    )
+    assert CombatService._character_condition(data)["state"] == "dead"
+    assert loc_char.posture == "prone"
+    assert loc_char.cover_object_id is None
 
 
 def test_duplet_reuses_one_hit_roll_for_sequential_impacts(monkeypatch):
@@ -851,7 +1021,8 @@ def test_penetrated_cover_requires_disadvantaged_hit_roll_against_target(monkeyp
     assert resolved["details"]["hit_difficulty"] == 13
     assert "forced_roll" not in resolved["kwargs"]
     assert result["automatic_cover_hit"] is True
-    assert result["rolls"] == []
+    assert result["roll"] == 20
+    assert result["rolls"] == [20]
     assert result["difficulty"] is None
     assert result["target_behind_cover_result"]["hit"] is False
     assert result["damage"] == 0
@@ -1092,6 +1263,43 @@ def test_127x55_full_penetration_checks_additional_trauma_twice(monkeypatch):
     )
 
     assert captured["trauma_checks"] == 2
+
+
+def test_additional_trauma_report_is_not_persisted_as_generic_effect(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    character = SimpleNamespace(data={
+        "health": {
+            "current": 700,
+            "max": 700,
+            "zones": {"leftArm": {"current": 90, "max": 90}},
+            "effects": [],
+        }
+    })
+    target = SimpleNamespace(
+        character=character,
+        hp_zones={},
+        posture="standing",
+        cover_object_id=None,
+        weapon_braced=False,
+        braced_weapon_index=None,
+    )
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "left_arm",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        round_number=1,
+    )
+
+    assert health["_attackOutcome"]["additional_traumas"]
+    assert not any(
+        effect.get("type") in {"generic", "additional_trauma"}
+        for effect in health["effects"]
+    )
 
 
 def test_buckshot_loses_fixed_damage_and_penetration_after_five_meters(monkeypatch):
@@ -1773,16 +1981,115 @@ def test_weapon_jam_thresholds_follow_equipment_rules(
 
 
 def test_weapon_jam_is_saved_and_applies_its_durability_loss(monkeypatch):
-    rolls = iter([1, 4])
-    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 4)
     weapon = {"durability": 90, "maxDurability": 100}
 
-    result = CombatService._roll_weapon_jam(weapon)
+    result = CombatService._roll_weapon_jam(weapon, 1)
 
     assert result["triggered"] is True
+    assert result["attack_roll"] == 1
     assert result["result"] == 4
     assert weapon["jam"]["accuracy_penalty"] == 2
     assert weapon["durability"] == 87
+
+
+def test_non_blocking_weapon_jam_does_not_prevent_another_jam(monkeypatch):
+    rolls = iter([4, 2])
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    weapon = {"durability": 90, "maxDurability": 100}
+
+    first = CombatService._roll_weapon_jam(weapon, 1)
+    second = CombatService._roll_weapon_jam(weapon, 1)
+
+    assert first["result"] == 4
+    assert not first.get("blocks_fire", False)
+    assert second["result"] == 2
+    assert second["blocks_fire"] is True
+    assert [jam["result"] for jam in weapon["jams"]] == [4, 2]
+    assert weapon["jam"]["result"] == 2
+
+
+def test_weapon_jam_uses_attack_roll_without_separate_d20(monkeypatch):
+    random_calls = []
+
+    def roll_strength(start, end):
+        random_calls.append((start, end))
+        return 4
+
+    monkeypatch.setattr(combat_module.random, "randint", roll_strength)
+    weapon = {"durability": 75, "maxDurability": 100}
+
+    no_jam = CombatService._roll_weapon_jam(weapon, 3)
+    jam = CombatService._roll_weapon_jam(weapon, 2)
+
+    assert no_jam["triggered"] is False
+    assert jam["triggered"] is True
+    assert jam["attack_roll"] == 2
+    assert random_calls == [(1, 6)]
+
+
+def test_blocking_weapon_jam_stops_remaining_burst(monkeypatch):
+    attack_rolls = iter([20, 1, 20, 20])
+    monkeypatch.setattr(
+        CombatService,
+        "_resolve_attack",
+        lambda *args, **kwargs: {"roll": next(attack_rolls), "hit": False},
+    )
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 1)
+    weapon = {"durability": 75, "maxDurability": 100}
+    attacker = SimpleNamespace(
+        character=SimpleNamespace(data={"weapons": [weapon]}),
+    )
+    target = SimpleNamespace()
+    attack_details = {
+        "weapon_index": 0,
+        "shot_count": 4,
+        "requested_shot_count": 4,
+        "hit_difficulty": 10,
+        "hit_difficulty_without_weapon_jam": 10,
+        "base_shooting_disadvantage": False,
+    }
+
+    results = CombatService._resolve_shot_sequence(
+        [target], attacker, attack_details,
+    )
+
+    assert len(results) == 2
+    assert attack_details["shot_count"] == 2
+    assert attack_details["stopped_by_jam"] is True
+    assert attack_details["weapon_jams"][0]["shot_number"] == 2
+    assert attack_details["weapon_jams"][0]["attack_roll"] == 1
+
+
+def test_non_blocking_jam_penalty_applies_to_next_attack_roll(monkeypatch):
+    observed_difficulties = []
+    attack_rolls = iter([1, 20])
+
+    def resolve_attack(_target, _attacker, details, **_kwargs):
+        observed_difficulties.append(details["hit_difficulty"])
+        return {"roll": next(attack_rolls), "hit": False}
+
+    monkeypatch.setattr(CombatService, "_resolve_attack", resolve_attack)
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 4)
+    weapon = {"durability": 75, "maxDurability": 100}
+    attacker = SimpleNamespace(
+        character=SimpleNamespace(data={"weapons": [weapon]}),
+    )
+    attack_details = {
+        "weapon_index": 0,
+        "shot_count": 2,
+        "requested_shot_count": 2,
+        "hit_difficulty": 10,
+        "hit_difficulty_without_weapon_jam": 10,
+        "base_shooting_disadvantage": False,
+    }
+
+    CombatService._resolve_shot_sequence(
+        [SimpleNamespace()], attacker, attack_details,
+    )
+
+    assert observed_difficulties == [10, 12]
+    assert attack_details["shot_count"] == 2
 
 
 def test_weapon_wear_is_once_per_combat_plus_each_duplet():
@@ -1923,3 +2230,22 @@ def test_narrative_social_check_adds_charisma_modifier(monkeypatch):
     assert check["skill_modifier"] == 1
     assert check["related_modifier"] == 2
     assert check["total"] == 13
+
+
+def test_weapon_fire_rate_counts_shots_per_weapon_and_resets_each_round():
+    meta = {}
+    weapon = {"fireRate": 3}
+
+    first = CombatService._validate_weapon_fire_rate(meta, 1, 0, weapon, 2)
+    assert first == {"fire_rate": 3, "fired": 0, "remaining": 3}
+    assert CombatService._record_weapon_shots(meta, 1, 0, 2) == 2
+
+    with pytest.raises(ValidationError, match="осталось выстрелов.*1"):
+        CombatService._validate_weapon_fire_rate(meta, 1, 0, weapon, 2)
+
+    assert CombatService._validate_weapon_fire_rate(
+        meta, 1, 1, weapon, 3
+    )["fired"] == 0
+    assert CombatService._validate_weapon_fire_rate(
+        meta, 2, 0, weapon, 3
+    )["fired"] == 0

@@ -8,6 +8,7 @@ from app.models import Lobby, LobbyCharacter, LobbyParticipant, LocationCharacte
 from app.services.character import CharacterService
 from app.services.effects import normalize_effect_list, sync_health_derived_statuses
 from app.services.health import apply_health_maximums, health_zones_to_location
+from app.services.inventory import normalize_inventory_ammo_stacks
 from .utils import get_user_from_token
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ def handle_update_character_data(data):
     posture_updates = []
     if isinstance(character.data, dict):
         character_data = deepcopy(character.data)
+        normalize_inventory_ammo_stacks(character_data)
         health = apply_health_maximums(character_data)
         character.data = character_data
         if isinstance(health, dict):
@@ -170,10 +172,14 @@ def handle_update_character_data(data):
             room=f"location_{posture_update['location_id']}",
         )
 
+    saved_updates = dict(updates)
+    if 'data' in updates:
+        saved_updates['data'] = character.data
     emit('character_data_updated', {
         'character_id': character_id,
-        'updates': updates,
+        'updates': saved_updates,
         'updated_by': user.id
     }, room=f"character_{character_id}", include_self=False)
 
     logger.debug("Character %s updated by %s", character_id, user.id)
+    return {'ok': True, 'character_id': character_id}

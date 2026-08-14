@@ -8,6 +8,7 @@ from app.services.effects import (
     create_effect_draft,
     get_bleeding_state,
     normalize_effect,
+    normalize_effect_list,
     sync_health_derived_statuses,
     tick_effect,
     tick_effects,
@@ -44,6 +45,27 @@ def test_normalization_preserves_executable_metadata():
     assert effect["tick"] == "day_start"
     assert effect["adjustments"] == [{"field": "stress", "delta": -2}]
     assert effect["custom_flag"] is True
+
+
+def test_normalization_removes_legacy_trauma_report_but_keeps_manual_generic_effect():
+    effects = normalize_effect_list([
+        {
+            "type": "generic",
+            "name": "Неопределённый эффект",
+            "chance_roll": 74,
+            "roll": 12,
+            "fracture": False,
+            "bleeding": None,
+            "pain": 0,
+            "shock": False,
+            "organ": None,
+            "fall_or_drop": None,
+        },
+        {"type": "generic", "name": "Старый пользовательский эффект", "value": 2},
+    ])
+
+    assert len(effects) == 1
+    assert effects[0]["name"] == "Старый пользовательский эффект"
 
 
 def test_manual_effect_does_not_tick():

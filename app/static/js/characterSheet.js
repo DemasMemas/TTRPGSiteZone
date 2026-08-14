@@ -246,6 +246,98 @@ function normalizeCaliberText(value) {
         .replace(/[^a-zа-яё0-9x+-]/gu, '');
 }
 
+const AMMO_SLOT_LIMITS = new Map([
+    ['9x18', 50], ['9x19', 50], ['9x21', 50], ['45acp', 50],
+    ['545x39', 50], ['556x45', 50], ['18x45', 50], ['57x28', 50],
+    ['762x25', 50], ['12x70', 25], ['762x39', 25], ['762x51', 25],
+    ['762x54', 25], ['127x55', 25], ['9x39', 25], ['сп-4', 25], ['sp-4', 25],
+]);
+
+function getAmmoSlotLimit(item) {
+    if (String(item?.category || '').toLowerCase() !== 'ammo') return null;
+    return AMMO_SLOT_LIMITS.get(getItemCaliber(item)) || null;
+}
+
+function splitAmmoItemIntoSlotStacks(item, requestedQuantity = null) {
+    if (String(item?.category || '').toLowerCase() !== 'ammo') return [item];
+    const quantity = Math.max(0, Math.floor(Number(
+        requestedQuantity ?? item?.quantity ?? 0
+    ) || 0));
+    const limit = getAmmoSlotLimit(item);
+    if (!limit || quantity <= limit) {
+        item.quantity = quantity;
+        if (limit) updateAmmoWeight(item);
+        return quantity > 0 ? [item] : [];
+    }
+    const stacks = [];
+    let remaining = quantity;
+    while (remaining > 0) {
+        const stack = stacks.length === 0
+            ? item
+            : {
+                ...item,
+                id: generateItemId(),
+                attributes: { ...(item.attributes || {}) },
+                contents: Array.isArray(item.contents) ? [...item.contents] : [],
+            };
+        stack.quantity = Math.min(limit, remaining);
+        updateAmmoWeight(stack);
+        stacks.push(stack);
+        remaining -= stack.quantity;
+    }
+    return stacks;
+}
+
+function normalizeAmmoSlotsInItemList(items) {
+    if (!Array.isArray(items)) return;
+    const normalized = [];
+    items.forEach(item => {
+        if (!item || typeof item !== 'object') {
+            normalized.push(item);
+            return;
+        }
+        if (Array.isArray(item.contents)) normalizeAmmoSlotsInItemList(item.contents);
+        normalized.push(...splitAmmoItemIntoSlotStacks(item));
+    });
+    items.splice(0, items.length, ...normalized);
+}
+
+function normalizeCharacterAmmoSlots(data) {
+    normalizeAmmoSlotsInItemList(data?.inventory?.pockets);
+    normalizeAmmoSlotsInItemList(data?.inventory?.backpack);
+    (data?.equipment?.belt?.pouches || []).forEach(pouch => normalizeAmmoSlotsInItemList(pouch?.contents));
+    (data?.equipment?.vest?.pouches || []).forEach(pouch => normalizeAmmoSlotsInItemList(pouch?.contents));
+}
+
+function addAmmoToInventorySlots(targetItems, ammoItem, quantity) {
+    if (!Array.isArray(targetItems) || !ammoItem) return;
+    let remaining = Math.max(0, Math.floor(Number(quantity) || 0));
+    const limit = getAmmoSlotLimit(ammoItem);
+    const matching = targetItems.filter(item =>
+        item?.category === 'ammo' && getAmmoStackKey(item) === getAmmoStackKey(ammoItem)
+    );
+    for (const stack of matching) {
+        if (remaining <= 0) break;
+        const capacity = limit ? Math.max(0, limit - Number(stack.quantity || 0)) : remaining;
+        const moved = Math.min(remaining, capacity);
+        stack.quantity = Number(stack.quantity || 0) + moved;
+        updateAmmoWeight(stack);
+        remaining -= moved;
+    }
+    while (remaining > 0) {
+        const stack = {
+            ...ammoItem,
+            id: generateItemId(),
+            attributes: { ...(ammoItem.attributes || {}) },
+            contents: [],
+            quantity: Math.min(limit || remaining, remaining),
+        };
+        updateAmmoWeight(stack);
+        targetItems.push(stack);
+        remaining -= stack.quantity;
+    }
+}
+
 function normalizeBaseCaliberText(value) {
     const normalized = normalizeCaliberText(value);
     const numericCaliber = normalized.match(/^(\d+(?:\.\d+)?x\d+)/i);
@@ -773,13 +865,29 @@ function forceSyncCharacter() {
         clearTimeout(autoSaveTimer);
         autoSaveTimer = null;
     }
+    const characterId = currentCharacterId;
+    if (!characterId || !currentCharacterData) return;
+    const dataSnapshot = JSON.parse(JSON.stringify(currentCharacterData));
+    let fallbackStarted = false;
+    const persistViaHttp = () => {
+        if (fallbackStarted) return;
+        fallbackStarted = true;
+        Server.updateCharacter(characterId, { data: dataSnapshot })
+            .catch(error => showNotification('Ошибка сохранения: ' + error.message));
+    };
     const socket = getSocket();
-    if (socket && currentCharacterId) {
+    if (socket?.connected) {
+        const fallbackTimer = setTimeout(persistViaHttp, 2000);
         socket.emit('update_character_data', {
             token: localStorage.getItem('access_token'),
-            character_id: currentCharacterId,
-            updates: { data: currentCharacterData }
+            character_id: characterId,
+            updates: { data: dataSnapshot }
+        }, response => {
+            clearTimeout(fallbackTimer);
+            if (!response?.ok) persistViaHttp();
         });
+    } else {
+        persistViaHttp();
     }
 }
 
@@ -933,6 +1041,12 @@ function universalInstallModule(targetItem, targetPath, moduleItem, modulePath, 
  * @returns {Object} экземпляр Item
  */
 function createItemFromTemplate(template, quantity = 1, options = {}) {
+    const isWeapon = ['weapon', 'melee_weapon'].includes(template.category);
+    const templateMaxDurability = template.attributes?.max_durability
+        ?? template.attributes?.durability
+        ?? (isWeapon ? 100 : null);
+    const templateDurability = template.attributes?.durability
+        ?? (isWeapon ? templateMaxDurability : null);
     const item = {
         id: generateItemId(),
         templateId: template.id,
@@ -946,8 +1060,8 @@ function createItemFromTemplate(template, quantity = 1, options = {}) {
         volume: template.volume || 0,
         price: template.price || 0,
         attributes: { ...template.attributes },
-        durability: template.attributes?.durability || null,
-        maxDurability: template.attributes?.max_durability || null,
+        durability: templateDurability,
+        maxDurability: templateMaxDurability,
         installedModules: [],
         contents: [],
         isContainer: template.category === 'container' || template.category === 'backpack' || template.category === 'pouch',
@@ -2456,7 +2570,8 @@ function renderHealthTab(data, container = null) {
         { value: 'light', label: 'Легкая кровопотеря' },
         { value: 'medium', label: 'Средняя кровопотеря' },
         { value: 'severe', label: 'Сильная кровопотеря' },
-        { value: 'critical', label: 'Критическая кровопотеря' }
+        { value: 'critical', label: 'Критическая кровопотеря' },
+        { value: 'fatal', label: 'Смертельная кровопотеря' }
     ];
     const bloodSelect = bloodOptions.map(opt =>
         `<option value="${opt.value}" ${currentBlood === opt.value ? 'selected' : ''}>${opt.label}</option>`
@@ -4581,6 +4696,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         let jamHtml = '';
         if (!isMelee && weapon.jam) {
             const jam = weapon.jam;
+            const jamCount = Array.isArray(weapon.jams) ? weapon.jams.length : 1;
             const shooting = getSkillEffectiveValue(currentCharacterData, 'physical.shooting');
             const reduction = shooting >= 20 ? 2 : (shooting >= 15 ? 1 : 0);
             const clearCost = Math.max(0, Number(jam.fix_ap || 0) - reduction);
@@ -4595,6 +4711,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
             jamHtml = `
                 <div style="margin:8px 0; padding:8px 10px; border:1px solid #8d5d2d; background:rgba(126,70,25,.18); border-radius:4px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                     <strong>Клин ${Number(jam.result) || ''}: ${escapeHtml(jam.label || 'Неисправность')}</strong>
+                    ${jamCount > 1 ? `<span>Активных неисправностей: ${jamCount}</span>` : ''}
                     <span>${repairText}</span>
                     ${clearButton}
                 </div>`;
@@ -5349,7 +5466,13 @@ window.reloadFixedMagazine = async function(weaponIndex) {
         if (ammoSelect.value !== '') loaderSelect.selectedIndex = -1;
         updateReloadPreview();
     });
-    if (loaderItems.length && ammoItems.length) ammoSelect.selectedIndex = -1;
+    if (ammoItems.length > 0) {
+        ammoSelect.selectedIndex = 0;
+        loaderSelect.selectedIndex = -1;
+    } else if (loaderItems.length > 0) {
+        loaderSelect.selectedIndex = 0;
+        ammoSelect.selectedIndex = -1;
+    }
     await updateReloadPreview();
 
     const fullReloadButton = modal.querySelector('#reload-fixed-full-btn');
@@ -5758,18 +5881,9 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
         last.quantity -= 1;
         if (last.quantity <= 0) mag.ammo.pop();
 
-        // Ищем существующую пачку такого же типа в том же контейнере
-        const existing = targetArray.find(item => item.category === 'ammo' && getAmmoStackKey(item) === getAmmoStackKey(last));
-        if (existing) {
-            existing.quantity += 1;
-            updateAmmoWeight(existing);
-        } else {
-            const newAmmo = createItemFromTemplate(ammoTemplate);
-            newAmmo.quantity = 1;
-            applyAmmoVariantToItem(newAmmo, ammoTemplate, last.ammo_variant || null);
-            updateAmmoWeight(newAmmo);
-            targetArray.push(newAmmo);
-        }
+        const returnedAmmo = createItemFromTemplate(ammoTemplate);
+        applyAmmoVariantToItem(returnedAmmo, ammoTemplate, last.ammo_variant || null);
+        addAmmoToInventorySlots(targetArray, returnedAmmo, 1);
 
         updateMagazineWeight(mag);
         showNotification(`-1 патрон (${last.name})`, 'system', 'bottom-left');
@@ -5870,6 +5984,7 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     });
     modal._ammoList = ammoItems;
     modal._magPath = pathStr;
+    select.selectedIndex = ammoItems.length > 0 ? 0 : -1;
     const reloadPreview = modal.querySelector('#inventory-magazine-reload-preview');
     let previewVersion = 0;
     const updateReloadPreview = async () => {
@@ -6065,28 +6180,17 @@ async function returnAmmoStacksToInventory(ammoStacks, targetArray) {
         if (quantity <= 0) continue;
         const template = allTemplates.find(t => t.id == ammoEntry.templateId);
         const category = template?.category || ammoEntry.category || 'ammo';
-        const existing = targetArray.find(item =>
-            item.category === category
-            && getAmmoStackKey(item) === getAmmoStackKey(ammoEntry)
-        );
-        if (existing) {
-            existing.quantity += quantity;
-            updateAmmoWeight(existing);
-        } else {
-            const newAmmo = template
-                ? createItemFromTemplate(template)
-                : {
-                    ...ammoEntry,
-                    attributes: { ...(ammoEntry.attributes || {}) },
-                    category,
-                };
-            newAmmo.quantity = quantity;
-            if (template) {
-                applyAmmoVariantToItem(newAmmo, template, ammoEntry.ammo_variant || null);
-            }
-            updateAmmoWeight(newAmmo);
-            targetArray.push(newAmmo);
+        const newAmmo = template
+            ? createItemFromTemplate(template)
+            : {
+                ...ammoEntry,
+                attributes: { ...(ammoEntry.attributes || {}) },
+                category,
+            };
+        if (template) {
+            applyAmmoVariantToItem(newAmmo, template, ammoEntry.ammo_variant || null);
         }
+        addAmmoToInventorySlots(targetArray, newAmmo, quantity);
     }
 }
 
@@ -6330,6 +6434,15 @@ window.selectWeaponModel = async function(index) {
         'weight': 'weight'
     };
     applyTemplateToObject(weapon, template, mapping);
+    const maximumDurability = Number(
+        template.attributes?.max_durability
+        ?? template.attributes?.durability
+        ?? 100
+    ) || 100;
+    weapon.maxDurability = maximumDurability;
+    weapon.durability = Number(
+        template.attributes?.durability ?? maximumDurability
+    );
     weapon.model = template.name;
     weapon.createdByPlayer = !window.isGM;
 
@@ -6828,6 +6941,7 @@ window.equipWeaponFromInventory = async function(itemPath) {
         fixedAmmo: Array.isArray(item.fixedAmmo) ? item.fixedAmmo.map(stack => ({ ...stack })) : [],
         ammo: item.ammo || 0,
         jam: item.jam ? { ...item.jam } : null,
+        jams: Array.isArray(item.jams) ? item.jams.map(jam => ({ ...jam })) : [],
         requiresManualCycle: Boolean(item.requiresManualCycle)
     };
 
@@ -7804,6 +7918,9 @@ window.unequipWeapon = async function(weaponIndex) {
             ? weapon.fixedAmmo.map(stack => ({ ...stack }))
             : [];
         restoredItem.jam = weapon.jam ? { ...weapon.jam } : null;
+        restoredItem.jams = Array.isArray(weapon.jams)
+            ? weapon.jams.map(jam => ({ ...jam }))
+            : [];
         restoredItem.requiresManualCycle = Boolean(weapon.requiresManualCycle);
     } else {
         // Для ближнего боя дополнительно копируем специфичные поля (если они менялись)
@@ -11581,6 +11698,7 @@ async function renderVestTemplatePouches() {
 // ========== 6. ВКЛАДКА "ИНВЕНТАРЬ" ==========
 async function renderInventoryTab(data) {
     const container = document.getElementById('sheet-tab-inventory');
+    normalizeCharacterAmmoSlots(data);
     const inv = data.inventory || {};
     const eq = data.equipment || {};
     const pockets = Array.isArray(inv.pockets) ? inv.pockets : [];
@@ -11836,10 +11954,7 @@ window.updateBackpackItemAtPath = function(pathStr, field, value) {
     if (!item) return;
 
     if (field === 'quantity') {
-        item.quantity = parseInt(value) || 1;
-        if (item.category === 'ammo') {
-            updateAmmoWeight(item);
-        }
+        setBackpackItemQuantityAtPath(path, parseInt(value) || 1);
     } else if (field === 'name') {
         item.name = value;
     } else {
@@ -11953,7 +12068,12 @@ function setBackpackItemQuantityAtPath(path, quantity) {
         parentData.splice(index, 1);
         return true;
     }
-    item.quantity = Math.floor(quantity);
+    if (item.category === 'ammo') {
+        const stacks = splitAmmoItemIntoSlotStacks(item, quantity);
+        parentData.splice(index, 1, ...stacks);
+    } else {
+        item.quantity = Math.floor(quantity);
+    }
     return true;
 }
 
@@ -12637,7 +12757,7 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
     const newItem = createItemFromTemplateSelection(template, quantity, ammoVariant, {
         createdByPlayer: !window.isGM,
     });
-    targetItems.push(newItem);
+    targetItems.push(...splitAmmoItemIntoSlotStacks(newItem));
 
     await rerenderContainer(targetPath, null, { keepExpanded: true });
     recalculateInventoryTotals();
@@ -12897,14 +13017,23 @@ window.confirmAmmoSelection = async function() {
     const ammoVariant = variantSelect
         ? (variantSelect.value || null)
         : normalizeAmmoVariant(template.attributes?.ammo_variant || template.attributes?.ammo_kind || template.attributes?.special_version || template.attributes?.effect);
-    const added = modal._templateSelectionHandler
-        ? await modal._templateSelectionHandler(
-            createItemFromTemplateSelection(template, quantity, ammoVariant, {
-                createdByPlayer: !window.isGM,
-            }),
-            template
-        )
-        : await addTemplateItemToInventory(templateId, modal._inventoryTarget, quantity, ammoVariant);
+    let added;
+    if (modal._templateSelectionHandler) {
+        const newItem = createItemFromTemplateSelection(template, quantity, ammoVariant, {
+            createdByPlayer: !window.isGM,
+        });
+        added = true;
+        for (const stack of splitAmmoItemIntoSlotStacks(newItem)) {
+            if (!await modal._templateSelectionHandler(stack, template)) {
+                added = false;
+                break;
+            }
+        }
+    } else {
+        added = await addTemplateItemToInventory(
+            templateId, modal._inventoryTarget, quantity, ammoVariant
+        );
+    }
     if (added) closeAmmoSelectionModal();
 };
 

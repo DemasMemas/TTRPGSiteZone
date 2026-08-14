@@ -1585,6 +1585,196 @@ def test_only_gm_or_controller_can_end_combat_turn(
     assert allowed_for_gm.status_code == 200
 
 
+def test_only_gm_can_remove_current_character_from_initiative(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("initiative-remove-gm")
+    player = create_user("initiative-remove-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    first_character = create_character(client, lobby, gm, auth_headers)
+    second_character = create_character(client, lobby, player, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"], name="Initiative removal", world_tile_x=0, world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    first = LocationCharacter(location_id=location.id, character_id=first_character["id"])
+    second = LocationCharacter(location_id=location.id, character_id=second_character["id"])
+    db.session.add_all([first, second])
+    db.session.flush()
+    first.initiative_roll = 20
+    first.initiative_total = 20
+    second.initiative_roll = 10
+    second.initiative_total = 10
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[first.id, second.id],
+        current_location_character_id=first.id,
+    ))
+    db.session.commit()
+    endpoint = (
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/participants/{first.id}"
+    )
+
+    forbidden = client.delete(endpoint, headers=auth_headers(player))
+    allowed = client.delete(endpoint, headers=auth_headers(gm))
+
+    assert forbidden.status_code == 403
+    assert allowed.status_code == 200
+    state = allowed.get_json()
+    assert state["turn_order"] == [second.id]
+    assert state["current_location_character_id"] == second.id
+    assert state["removed_location_character_id"] == first.id
+    assert db.session.get(LocationCharacter, first.id) is not None
+    assert db.session.get(LocationCharacter, first.id).initiative_roll is None
+
+
+def test_end_turn_automatically_skips_dead_character(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("initiative-auto-skip-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    active_character = create_character(client, lobby, gm, auth_headers)
+    dead_character = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"effects": [{"type": "death", "active": True}]},
+    })
+    next_character = create_character(client, lobby, gm, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"], name="Initiative auto skip", world_tile_x=0, world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    active = LocationCharacter(location_id=location.id, character_id=active_character["id"])
+    dead = LocationCharacter(location_id=location.id, character_id=dead_character["id"])
+    next_active = LocationCharacter(location_id=location.id, character_id=next_character["id"])
+    db.session.add_all([active, dead, next_active])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[active.id, dead.id, next_active.id],
+        current_location_character_id=active.id,
+    ))
+    db.session.commit()
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(gm),
+        json={"location_character_id": active.id},
+    )
+
+    assert response.status_code == 200
+    state = response.get_json()
+    assert state["current_location_character_id"] == next_active.id
+    assert [item["location_character_id"] for item in state["auto_skipped"]] == [dead.id]
+    assert state["auto_skipped"][0]["condition"]["state"] == "dead"
+
+
+def test_end_turn_keeps_recoverable_pain_shock_in_initiative(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("initiative-shock-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    active_character = create_character(client, lobby, gm, auth_headers)
+    shocked_character = create_character(client, lobby, gm, auth_headers, data={
+        "health": {
+            "painLevel": 5,
+            "effects": [{"type": "shock", "active": True}],
+        },
+    })
+    location = Location(
+        lobby_id=lobby["id"], name="Initiative shock", world_tile_x=0, world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    active = LocationCharacter(location_id=location.id, character_id=active_character["id"])
+    shocked = LocationCharacter(location_id=location.id, character_id=shocked_character["id"])
+    db.session.add_all([active, shocked])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[active.id, shocked.id],
+        current_location_character_id=active.id,
+    ))
+    db.session.commit()
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(gm),
+        json={"location_character_id": active.id},
+    )
+
+    assert response.status_code == 200
+    state = response.get_json()
+    assert state["current_location_character_id"] == shocked.id
+    assert "auto_skipped" not in state
+    assert state["current_character"]["condition"]["state"] == "pain_shock"
+
+
+def test_end_turn_skips_pain_shock_that_cannot_recover(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("initiative-blocked-shock-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    active_character = create_character(client, lobby, gm, auth_headers)
+    shocked_character = create_character(client, lobby, gm, auth_headers, data={
+        "health": {
+            "painLevel": 10,
+            "effects": [{"type": "shock", "active": True}],
+        },
+    })
+    next_character = create_character(client, lobby, gm, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"], name="Blocked pain shock", world_tile_x=0, world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    active = LocationCharacter(location_id=location.id, character_id=active_character["id"])
+    shocked = LocationCharacter(location_id=location.id, character_id=shocked_character["id"])
+    next_active = LocationCharacter(location_id=location.id, character_id=next_character["id"])
+    db.session.add_all([active, shocked, next_active])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[active.id, shocked.id, next_active.id],
+        current_location_character_id=active.id,
+    ))
+    db.session.commit()
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(gm),
+        json={"location_character_id": active.id},
+    )
+
+    assert response.status_code == 200
+    state = response.get_json()
+    assert state["current_location_character_id"] == next_active.id
+    assert [item["location_character_id"] for item in state["auto_skipped"]] == [shocked.id]
+    assert state["auto_skipped"][0]["condition"]["state"] == "pain_shock"
+    assert state["auto_skipped"][0]["condition"]["can_recover"] is False
+
+
 def test_reload_can_be_paid_across_combat_turns(
     client,
     create_user,
@@ -1919,3 +2109,100 @@ def test_player_may_move_and_add_marked_player_item(
     assert player_add.status_code == 200
     assert player_item["createdByPlayer"] is True
     assert gm_add.status_code == 200
+
+
+def test_weapon_fire_rate_rejects_excess_shots_without_spending_ammo_or_ap(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("fire-rate-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    actor = create_character(client, lobby, gm, auth_headers, data={
+        "weapons": [{
+            "name": "Test pistol",
+            "subcategory": "Пистолеты",
+            "fireRate": 2,
+            "fireModes": {"single_shot_options": [1], "supports_burst": False},
+            "accuracy": 0,
+            "range": 20,
+            "durability": 100,
+            "installedMagazine": {
+                "ammo": [{
+                    "name": "9x19",
+                    "category": "ammo",
+                    "quantity": 5,
+                    "attributes": {"damage": 0, "armor_piercing": 0},
+                }],
+            },
+        }],
+        "health": {"effects": []},
+    })
+    target = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"effects": []},
+    })
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Fire rate arena",
+        world_tile_x=0,
+        world_tile_z=0,
+        grid_width=10,
+        grid_height=10,
+    )
+    db.session.add(location)
+    db.session.flush()
+    actor_location = LocationCharacter(
+        location_id=location.id,
+        character_id=actor["id"],
+        pos_x=1,
+        pos_y=1,
+        facing_x=0,
+        facing_y=1,
+        drawn_weapon_index=0,
+        action_points_current=5,
+        action_points_max=5,
+    )
+    target_location = LocationCharacter(
+        location_id=location.id,
+        character_id=target["id"],
+        pos_x=1,
+        pos_y=3,
+    )
+    db.session.add_all([actor_location, target_location])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[actor_location.id, target_location.id],
+        current_location_character_id=actor_location.id,
+    ))
+    db.session.commit()
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action"
+    payload = {
+        "location_character_id": actor_location.id,
+        "action_key": "attack",
+        "weapon_index": 0,
+        "fire_mode": "unaimed",
+        "shot_count": 1,
+        "volley_count": 1,
+        "action_points": 1,
+        "target_character_id": target["id"],
+    }
+
+    assert client.post(url, headers=auth_headers(gm), json=payload).status_code == 200
+    assert client.post(url, headers=auth_headers(gm), json=payload).status_code == 200
+    rejected = client.post(url, headers=auth_headers(gm), json=payload)
+
+    assert rejected.status_code == 400
+    assert "скорострельность" in rejected.get_json()["error"]["message"]
+    db.session.refresh(actor_location)
+    stored_data = actor_location.character.data
+    assert actor_location.action_points_current == 3
+    assert stored_data["weapons"][0]["ammo"] == 3
+    assert stored_data["health"]["combatMeta"]["weaponShots"] == {
+        "round": 1,
+        "shots": {"0": 2},
+    }

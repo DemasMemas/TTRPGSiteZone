@@ -253,12 +253,17 @@ class CombatService:
             (organs.get('skull') or {}).get('current'), 1
         )
         intoxication = CombatService._intoxication_profile(character_data)
-        if 'death' in active_types or brain_health <= 0 or skull_health <= 0:
+        blood_stage = str(health.get('bloodStage') or health.get('blood') or 'normal').lower()
+        if (
+            'death' in active_types
+            or brain_health <= 0
+            or skull_health <= 0
+            or blood_stage == 'fatal'
+        ):
             return {'state': 'dead', 'label': 'Мёртв', 'can_act': False, 'can_recover': False}
 
         temperature = CombatService._coerce_float(health.get('temperature'), 36)
         current_health = CombatService._coerce_float(health.get('current'), 1)
-        blood_stage = str(health.get('bloodStage') or health.get('blood') or 'normal').lower()
         critical = bool(
             active_types.intersection({'critical_condition', 'unconsciousness', 'sleep'})
             or current_health <= 0
@@ -333,6 +338,17 @@ class CombatService:
         character = getattr(loc_char, 'character', None)
         data = character.data if character and isinstance(character.data, dict) else {}
         return CombatService._character_condition(data)
+
+    @staticmethod
+    def _can_take_combat_turn(loc_char):
+        condition = CombatService._location_character_condition(loc_char)
+        return bool(
+            condition.get('can_act')
+            or (
+                condition.get('state') == 'pain_shock'
+                and condition.get('can_recover')
+            )
+        )
 
     @staticmethod
     def ensure_character_can_act(loc_char, action_key=None):
@@ -1918,16 +1934,61 @@ class CombatService:
         )))
         weapon['maxDurability'] = maximum
         weapon['durability'] = current
-        jam = weapon.get('jam')
-        if isinstance(jam, dict):
+        jams = CombatService._weapon_jams(weapon)
+        remaining_jams = []
+        for jam in jams:
             requirement = jam.get('repair_required')
             if requirement == 'increase' and current > CombatService._coerce_int(
                 jam.get('durability_after'), current
             ):
-                weapon.pop('jam', None)
+                continue
             elif requirement == 'full' and current >= maximum:
-                weapon.pop('jam', None)
+                continue
+            remaining_jams.append(jam)
+        CombatService._set_weapon_jams(weapon, remaining_jams)
         return current, maximum
+
+    @staticmethod
+    def _weapon_jams(weapon):
+        if not isinstance(weapon, dict):
+            return []
+        jams = weapon.get('jams')
+        if isinstance(jams, list):
+            normalized = [jam for jam in jams if isinstance(jam, dict)]
+        else:
+            legacy = weapon.get('jam')
+            normalized = [legacy] if isinstance(legacy, dict) else []
+        CombatService._set_weapon_jams(weapon, normalized)
+        return normalized
+
+    @staticmethod
+    def _set_weapon_jams(weapon, jams):
+        normalized = [jam for jam in (jams or []) if isinstance(jam, dict)]
+        if normalized:
+            weapon['jams'] = normalized
+            weapon['jam'] = normalized[-1]
+        else:
+            weapon.pop('jams', None)
+            weapon.pop('jam', None)
+
+    @staticmethod
+    def _weapon_jam_effects(weapon):
+        jams = CombatService._weapon_jams(weapon)
+        return {
+            'jams': deepcopy(jams),
+            'blocks_fire': any(bool(jam.get('blocks_fire')) for jam in jams),
+            'accuracy_penalty': sum(
+                max(0, CombatService._coerce_int(jam.get('accuracy_penalty'), 0))
+                for jam in jams
+            ),
+            'shooting_disadvantage': any(
+                bool(jam.get('shooting_disadvantage')) for jam in jams
+            ),
+            'extra_wear_per_shot': sum(
+                max(0, CombatService._coerce_int(jam.get('extra_wear_per_shot'), 0))
+                for jam in jams
+            ),
+        }
 
     @staticmethod
     def _weapon_wear_multiplier(weapon, ammo_profile=None):
@@ -1972,28 +2033,35 @@ class CombatService:
         return 0, 0, 0
 
     @staticmethod
-    def _roll_weapon_jam(weapon):
-        if isinstance(weapon.get('jam'), dict):
+    def _roll_weapon_jam(weapon, attack_roll):
+        active = CombatService._weapon_jam_effects(weapon)
+        if active['blocks_fire']:
             return None
         current, _ = CombatService._weapon_durability(weapon)
         chance, die, bonus = CombatService._weapon_jam_profile(current)
         if chance <= 0:
-            return {'triggered': False, 'check_roll': None, 'chance': 0}
-        check_roll = random.randint(1, 20)
-        if check_roll > chance:
-            return {'triggered': False, 'check_roll': check_roll, 'chance': chance}
+            return {'triggered': False, 'attack_roll': attack_roll, 'chance': 0}
+        clean_roll = CombatService._coerce_int(attack_roll, 0)
+        if clean_roll <= 0 or clean_roll > chance:
+            return {
+                'triggered': False,
+                'attack_roll': attack_roll,
+                'chance': chance,
+            }
         strength_roll = random.randint(1, die) + bonus
         result_number = min(12, strength_roll)
         jam = {
             'result': result_number,
-            'check_roll': check_roll,
+            'attack_roll': clean_roll,
             'chance': chance,
             'strength_roll': strength_roll,
             **CombatService.WEAPON_JAM_RESULTS[result_number],
         }
         wear = CombatService._apply_weapon_wear(weapon, jam.get('durability_loss', 0))
         jam['durability_after'] = wear['after']
-        weapon['jam'] = jam
+        jams = CombatService._weapon_jams(weapon)
+        jams.append(jam)
+        CombatService._set_weapon_jams(weapon, jams)
         return {'triggered': True, **jam}
 
     @staticmethod
@@ -2024,6 +2092,58 @@ class CombatService:
                 )
         else:
             weapon['ammo'] = max(0, CombatService._coerce_int(weapon.get('ammo'), 0) - remaining)
+
+    @staticmethod
+    def _weapon_fire_rate(weapon):
+        weapon = weapon if isinstance(weapon, dict) else {}
+        attributes = CombatService._template_attributes(weapon)
+        raw_value = weapon.get(
+            'fireRate',
+            weapon.get('fire_rate', attributes.get('fire_rate')),
+        )
+        if raw_value in (None, ''):
+            return None
+        value = CombatService._coerce_int(raw_value, 0)
+        return value if value > 0 else None
+
+    @staticmethod
+    def _weapon_round_shots(combat_meta, round_number, weapon_index):
+        tracker = combat_meta.get('weaponShots') if isinstance(combat_meta, dict) else None
+        if not isinstance(tracker, dict):
+            return 0
+        if CombatService._coerce_int(tracker.get('round'), 0) != round_number:
+            return 0
+        shots = tracker.get('shots') if isinstance(tracker.get('shots'), dict) else {}
+        return max(0, CombatService._coerce_int(shots.get(str(weapon_index)), 0))
+
+    @staticmethod
+    def _validate_weapon_fire_rate(combat_meta, round_number, weapon_index, weapon, shots):
+        fire_rate = CombatService._weapon_fire_rate(weapon)
+        fired = CombatService._weapon_round_shots(combat_meta, round_number, weapon_index)
+        requested = max(0, CombatService._coerce_int(shots, 0))
+        if fire_rate is not None and fired + requested > fire_rate:
+            remaining = max(0, fire_rate - fired)
+            raise ValidationError(
+                f"Превышена скорострельность оружия: осталось выстрелов в этом раунде: {remaining}"
+            )
+        return {'fire_rate': fire_rate, 'fired': fired, 'remaining': None if fire_rate is None else fire_rate - fired}
+
+    @staticmethod
+    def _record_weapon_shots(combat_meta, round_number, weapon_index, shots):
+        tracker = combat_meta.get('weaponShots') if isinstance(combat_meta, dict) else None
+        if (
+            not isinstance(tracker, dict)
+            or CombatService._coerce_int(tracker.get('round'), 0) != round_number
+        ):
+            tracker = {'round': round_number, 'shots': {}}
+            combat_meta['weaponShots'] = tracker
+        shot_totals = tracker.get('shots') if isinstance(tracker.get('shots'), dict) else {}
+        key = str(weapon_index)
+        shot_totals[key] = max(0, CombatService._coerce_int(shot_totals.get(key), 0)) + max(
+            0, CombatService._coerce_int(shots, 0)
+        )
+        tracker['shots'] = shot_totals
+        return shot_totals[key]
 
     @staticmethod
     def _weapon_use_wear(weapon, *, fire_mode=None, shot_count=1, volley_count=1, ammo_profile=None, butt=False):
@@ -2289,6 +2409,73 @@ class CombatService:
         relative_x = attacker.pos_x - target.pos_x
         relative_y = attacker.pos_y - target.pos_y
         return facing_x * relative_x + facing_y * relative_y < 0
+
+    @staticmethod
+    def _melee_target_profile(
+        attacker,
+        target,
+        melee_bonus,
+        accuracy=0,
+        aimed=False,
+        target_zone=None,
+        circular=False,
+    ):
+        target_data = (
+            target.character.data
+            if getattr(target, 'character', None) and isinstance(target.character.data, dict)
+            else {}
+        )
+        health = target_data.get('health') if isinstance(target_data.get('health'), dict) else {}
+        active_types = {
+            effect.get('type')
+            for effect in normalize_effect_list(health.get('effects') or [])
+            if effect.get('active', True)
+            and (
+                effect.get('remaining') is None
+                or CombatService._coerce_float(effect.get('remaining'), 0) > 0
+            )
+        }
+        temperature = CombatService._coerce_float(health.get('temperature'), 36)
+        unconscious = bool(
+            active_types.intersection({'unconsciousness', 'sleep', 'shock'})
+            or CombatService._intoxication_profile(target_data)['unconscious']
+            or temperature <= 29
+            or temperature >= 41
+        )
+        behind = CombatService._is_behind(attacker, target)
+        prone = str(getattr(target, 'posture', '') or '').strip().lower() == 'prone'
+        block_penalty = (
+            0
+            if behind or unconscious
+            else max(
+                0,
+                CombatService._coerce_int(
+                    getattr(target, 'melee_block_effectiveness', 0), 0,
+                ),
+            )
+        )
+        aimed_penalty = (
+            0
+            if behind
+            else (4 if aimed and target_zone == 'head' else (2 if aimed else 0))
+        )
+        difficulty = (
+            (8 - melee_bonus * 2 if behind else 12 - melee_bonus)
+            + block_penalty
+            + aimed_penalty
+            + (3 if circular else 0)
+            - accuracy
+        )
+        return {
+            'from_behind': behind,
+            'target_prone': prone,
+            'target_unconscious': unconscious,
+            'automatic_hit': unconscious,
+            'advantage': bool(prone or getattr(target, 'grappled_by_id', None)),
+            'block_penalty': block_penalty,
+            'aimed_penalty': aimed_penalty,
+            'difficulty': difficulty,
+        }
 
     @staticmethod
     def _is_in_facing_arc(attacker, target_x, target_y, half_angle_degrees=60):
@@ -3355,9 +3542,6 @@ class CombatService:
                     'fall_or_drop': trauma_rules['fall_or_drop'],
                 }
                 traumas.append(trauma)
-                effects = normalize_effect_list(health.get('effects') or [])
-                effects.append(trauma)
-                health['effects'] = effects
                 if trauma_rules['fracture']:
                     apply_effect_to_health(health, {
                         'type': 'fracture', 'area': zone_key, 'source': 'combat_attack'
@@ -4380,7 +4564,12 @@ class CombatService:
                 attack_details.get('hit_difficulty'),
                 12 - skill - CombatService._parse_percent(profile.get('accuracy', 0), 0),
             )
-            rolls = [forced_roll if forced_roll is not None else random.randint(1, 20)]
+            automatic_hit = bool(attack_details.get('automatic_hit'))
+            rolls = (
+                []
+                if automatic_hit
+                else [forced_roll if forced_roll is not None else random.randint(1, 20)]
+            )
             has_disadvantage = bool(
                 attack_details.get('melee_disadvantage')
                 or CombatService._has_roll_disadvantage(
@@ -4390,19 +4579,24 @@ class CombatService:
             has_advantage = bool(
                 attack_details.get('melee_advantage')
                 or getattr(target, 'grappled_by_id', None)
-                or CombatService._has_roll_advantage(
-                    attacker_data, 'skills.physical.melee', consume=True,
+                or (
+                    not automatic_hit
+                    and CombatService._has_roll_advantage(
+                        attacker_data, 'skills.physical.melee', consume=True,
+                    )
                 )
             )
-            if forced_roll is None and has_advantage != has_disadvantage:
+            if not automatic_hit and forced_roll is None and has_advantage != has_disadvantage:
                 rolls.append(random.randint(1, 20))
-            if has_advantage and not has_disadvantage:
+            if automatic_hit:
+                roll = None
+            elif has_advantage and not has_disadvantage:
                 roll = max(rolls)
             elif has_disadvantage and not has_advantage:
                 roll = min(rolls)
             else:
                 roll = rolls[0]
-            hit = roll == 20 or (
+            hit = automatic_hit or roll == 20 or (
                 roll != 1 and roll + stress_check_modifier >= difficulty
             )
             result = {
@@ -4414,6 +4608,12 @@ class CombatService:
                 'target_character_id': target_character_id,
                 'target_name': target_name,
                 'stress_check_modifier': stress_check_modifier,
+                'automatic_hit': automatic_hit,
+                'advantage': has_advantage,
+                'disadvantage': has_disadvantage,
+                'from_behind': bool(attack_details.get('from_behind')),
+                'target_prone': bool(attack_details.get('target_prone')),
+                'target_unconscious': bool(attack_details.get('target_unconscious')),
             }
             if not hit:
                 return result
@@ -4756,8 +4956,9 @@ class CombatService:
         weapon_index = CombatService._coerce_int(attack_details.get('weapon_index'), -1)
         weapon = weapons[weapon_index] if 0 <= weapon_index < len(weapons) else {}
         profile, _ = CombatService._ranged_damage_profile(weapon)
+        attack_roll = random.randint(1, 20)
         result = {
-            'roll': None, 'rolls': [], 'difficulty': None,
+            'roll': attack_roll, 'rolls': [attack_roll], 'difficulty': None,
             'hit': True, 'automatic_cover_hit': True,
             'mode': attack_details.get('fire_mode'),
             'target_object_id': cover.id,
@@ -4835,22 +5036,102 @@ class CombatService:
     ):
         results = []
         shared_roll = None
-        for index in range(CombatService._coerce_int(attack_details.get('shot_count'), 0)):
+        requested_shots = CombatService._coerce_int(
+            attack_details.get('requested_shot_count', attack_details.get('shot_count')), 0,
+        )
+        attacker_character = getattr(attacker, 'character', None)
+        attacker_data = (
+            attacker_character.data
+            if attacker_character and isinstance(attacker_character.data, dict)
+            else {}
+        )
+        weapons = attacker_data.get('weapons') if isinstance(attacker_data.get('weapons'), list) else []
+        weapon_index = CombatService._coerce_int(attack_details.get('weapon_index'), -1)
+        weapon = weapons[weapon_index] if 0 <= weapon_index < len(weapons) else None
+        shot_states = []
+        triggered_jams = []
+        for index in range(requested_shots):
             if not targets:
                 break
             target = targets[index % len(targets)]
+            shot_details = dict(attack_details)
+            jam_effects = (
+                CombatService._weapon_jam_effects(weapon)
+                if isinstance(weapon, dict)
+                else {
+                    'accuracy_penalty': 0,
+                    'shooting_disadvantage': False,
+                    'jams': [],
+                    'blocks_fire': False,
+                }
+            )
+            if jam_effects['blocks_fire']:
+                break
+            shot_state = {
+                'shot_number': index + 1,
+                'accuracy_penalty': jam_effects['accuracy_penalty'],
+                'shooting_disadvantage': jam_effects['shooting_disadvantage'],
+                'jams_before_shot': deepcopy(jam_effects['jams']),
+                'jam_after_shot': None,
+            }
+            if isinstance(weapon, dict):
+                shot_details['weapon_jam_accuracy_penalty'] = max(
+                    0, CombatService._coerce_int(jam_effects['accuracy_penalty'], 0),
+                )
+                shot_details['hit_difficulty'] = max(
+                    1,
+                    CombatService._coerce_int(
+                        attack_details.get('hit_difficulty_without_weapon_jam'),
+                        attack_details.get('hit_difficulty', 1),
+                    ) + shot_details['weapon_jam_accuracy_penalty'],
+                )
+                shot_details['shooting_disadvantage'] = bool(
+                    attack_details.get('base_shooting_disadvantage')
+                    or jam_effects['shooting_disadvantage']
+                )
+                shot_details['weapon_jams_before_shot'] = deepcopy(jam_effects['jams'])
             result = CombatService._resolve_attack(
                 target,
                 attacker,
-                attack_details,
+                shot_details,
                 aimed_zone=aimed_zone,
                 forced_roll=shared_roll if share_hit_roll else None,
             )
+            result['shot_number'] = index + 1
+            if isinstance(shot_states, list) and index < len(shot_states):
+                result['weapon_jam_after_shot'] = deepcopy(
+                    shot_states[index].get('jam_after_shot')
+                )
             if index == 0 and share_hit_roll:
                 shared_roll = result.get('roll')
             if share_hit_roll:
                 result['shared_hit_roll'] = True
             results.append(result)
+            shot_states.append(shot_state)
+            if isinstance(weapon, dict) and not share_hit_roll:
+                jam = CombatService._roll_weapon_jam(weapon, result.get('roll'))
+                shot_state['jam_after_shot'] = deepcopy(jam)
+                result['weapon_jam_after_shot'] = deepcopy(jam)
+                if isinstance(jam, dict) and jam.get('triggered'):
+                    triggered = {'shot_number': index + 1, **deepcopy(jam)}
+                    triggered_jams.append(triggered)
+                    if jam.get('blocks_fire'):
+                        break
+        if isinstance(weapon, dict) and share_hit_roll and results:
+            jam = CombatService._roll_weapon_jam(weapon, shared_roll)
+            shot_states[-1]['jam_after_shot'] = deepcopy(jam)
+            results[-1]['weapon_jam_after_shot'] = deepcopy(jam)
+            if isinstance(jam, dict) and jam.get('triggered'):
+                triggered_jams.append({
+                    'shot_number': len(results),
+                    **deepcopy(jam),
+                })
+        attack_details['requested_shot_count'] = requested_shots
+        attack_details['shot_count'] = len(results)
+        attack_details['shot_jam_states'] = shot_states
+        attack_details['weapon_jams'] = triggered_jams
+        attack_details['weapon_jam'] = triggered_jams[-1] if triggered_jams else None
+        attack_details['stopped_by_jam'] = len(results) < requested_shots
         return results
 
     @staticmethod
@@ -4905,7 +5186,11 @@ class CombatService:
             rolls = [roll for roll in rolls if roll is not None]
             roll_text = '/'.join(str(roll) for roll in rolls) or '—'
             difficulty = hit_result.get('difficulty', '—')
-            prefix = f"{index}. {target_name}: d20 {roll_text}, СЛ {difficulty}"
+            prefix = (
+                f"{index}. {target_name}: автоматическое попадание"
+                if hit_result.get('automatic_hit')
+                else f"{index}. {target_name}: d20 {roll_text}, СЛ {difficulty}"
+            )
             if not hit_result.get('hit'):
                 lines.append(f"{prefix} — промах.")
                 cover_impact = hit_result.get('cover_hit')
@@ -5086,11 +5371,20 @@ class CombatService:
                 f"Прочность оружия: {wear.get('before')} -> {wear.get('after')} "
                 f"(-{wear.get('loss')})."
             )
-        jam = attack.get('weapon_jam')
-        if isinstance(jam, dict) and jam.get('triggered'):
+        weapon_jams = attack.get('weapon_jams')
+        if not isinstance(weapon_jams, list):
+            jam = attack.get('weapon_jam')
+            weapon_jams = [jam] if isinstance(jam, dict) and jam.get('triggered') else []
+        for jam in weapon_jams:
             lines.append(
-                f"Клин: d20 {jam.get('check_roll')} (порог {jam.get('chance')}), "
+                f"Клин после выстрела {jam.get('shot_number', '?')}: "
+                f"бросок атаки {jam.get('attack_roll')} (порог {jam.get('chance')}), "
                 f"результат {jam.get('strength_roll')} - {jam.get('label')}."
+            )
+        if attack.get('stopped_by_jam'):
+            lines.append(
+                f"Очередь остановлена: произведено {attack.get('shot_count', 0)} "
+                f"из {attack.get('requested_shot_count', 0)} выстрелов."
             )
         return '\n'.join(lines)
 
@@ -5197,6 +5491,17 @@ class CombatService:
         return math.floor((skill_value - 10) / 2)
 
     @staticmethod
+    def _pain_shock_recovery_difficulty(character_data, medicine_bonus=0):
+        will_bonus = CombatService._base_skill_modifier(
+            character_data, 'skills.physical.will'
+        )
+        difficulty = max(
+            1,
+            12 - will_bonus - CombatService._coerce_int(medicine_bonus, 0),
+        )
+        return difficulty, will_bonus
+
+    @staticmethod
     def _consumable_stat_value_bonus(character_data, stat_name):
         if not isinstance(character_data, dict):
             return 0
@@ -5258,7 +5563,7 @@ class CombatService:
 
     @staticmethod
     def _advance_blood_stage(stage):
-        order = ['normal', 'light', 'medium', 'severe', 'critical']
+        order = ['normal', 'light', 'medium', 'severe', 'critical', 'fatal']
         current = str(stage or 'normal').lower()
         if current not in order:
             current = 'normal'
@@ -5370,7 +5675,19 @@ class CombatService:
 
         if not success:
             health['blood'] = CombatService._advance_blood_stage(stage)
+            if health['blood'] == 'fatal':
+                apply_effect_to_health(health, {
+                    'type': 'death',
+                    'source': 'blood_loss',
+                    'tick': 'manual',
+                })
+                loc_char.posture = 'prone'
+                loc_char.cover_object_id = None
+                loc_char.weapon_braced = False
+                loc_char.braced_weapon_index = None
         health['bloodStage'] = str(health.get('blood') or stage or 'normal').lower()
+        meta['bleedingCheck']['bloodStage'] = health['bloodStage']
+        meta['bleedingCheck']['death'] = health['bloodStage'] == 'fatal'
         sync_health_derived_statuses(health)
         character_data['health'] = health
         character.data = character_data
@@ -6556,11 +6873,21 @@ class CombatService:
             ),
         )
 
+        first_actionable_index = next(
+            (
+                index for index, loc_char in enumerate(ordered_chars)
+                if CombatService._can_take_combat_turn(loc_char)
+            ),
+            None,
+        )
+        if first_actionable_index is None:
+            raise ValidationError("No selected combat participant can take a turn")
+
         state.status = 'active'
         state.round_number = 1
-        state.turn_index = 0
+        state.turn_index = first_actionable_index
         state.turn_order = [item.id for item in ordered_chars]
-        state.current_location_character_id = ordered_chars[0].id
+        state.current_location_character_id = ordered_chars[first_actionable_index].id
         state.pending_explosives = []
         state.area_effects = []
         db.session.commit()
@@ -6568,7 +6895,13 @@ class CombatService:
         return CombatService._serialize_state(location, state)
 
     @staticmethod
-    def end_turn(location_id, user_id, location_character_id=None, _continue_pending=False):
+    def end_turn(
+        location_id,
+        user_id,
+        location_character_id=None,
+        _continue_pending=False,
+        _auto_skip_remaining=None,
+    ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
         CombatService._release_invalid_grapples(location_id)
@@ -6626,6 +6959,30 @@ class CombatService:
             state.reaction_return_location_character_id = None
             state.reaction_pending_location_character_id = None
             db.session.commit()
+            if not CombatService._can_take_combat_turn(return_character):
+                remaining = (
+                    max(0, len(state.turn_order) - 1)
+                    if _auto_skip_remaining is None
+                    else _auto_skip_remaining
+                )
+                if remaining <= 0:
+                    payload = CombatService.end_combat(location_id, location.lobby.gm_id)
+                    payload['auto_ended'] = True
+                    return payload
+                payload = CombatService.end_turn(
+                    location_id,
+                    user_id,
+                    location_character_id=return_character.id,
+                    _continue_pending=True,
+                    _auto_skip_remaining=remaining - 1,
+                )
+                payload.setdefault('auto_skipped', []).insert(0, {
+                    'location_character_id': return_character.id,
+                    'name': return_character.character.name if return_character.character else '',
+                    'condition': CombatService._location_character_condition(return_character),
+                })
+                payload['reaction_returned'] = True
+                return payload
             payload = CombatService._serialize_state(location, state)
             payload['reaction_returned'] = True
             return payload
@@ -6730,10 +7087,121 @@ class CombatService:
                 _continue_pending=True,
             )
 
+        if not CombatService._can_take_combat_turn(next_character):
+            remaining = (
+                max(0, len(state.turn_order) - 1)
+                if _auto_skip_remaining is None
+                else _auto_skip_remaining
+            )
+            if remaining <= 0:
+                payload = CombatService.end_combat(location_id, location.lobby.gm_id)
+                payload['auto_ended'] = True
+                return payload
+            payload = CombatService.end_turn(
+                location_id,
+                user_id,
+                location_character_id=next_character.id,
+                _continue_pending=True,
+                _auto_skip_remaining=remaining - 1,
+            )
+            payload.setdefault('auto_skipped', []).insert(0, {
+                'location_character_id': next_character.id,
+                'name': next_character.character.name if next_character.character else '',
+                'condition': CombatService._location_character_condition(next_character),
+            })
+            return payload
+
         payload = CombatService._serialize_state(location, state)
         payload['pain_shock_check'] = pain_shock_check
         payload['detonations'] = detonations
         payload['area_updates'] = area_updates
+        return payload
+
+    @staticmethod
+    def remove_combat_participant(location_id, user_id, location_character_id):
+        location = CombatService._get_location(location_id)
+        CombatService._ensure_access(location, user_id)
+        if location.lobby.gm_id != user_id:
+            raise PermissionDenied("Only GM can remove combat participants")
+
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not state or state.status != 'active':
+            raise ValidationError("Combat is not active")
+
+        participant_id = CombatService._coerce_int(location_character_id, 0)
+        turn_order = list(dict.fromkeys(state.turn_order or []))
+        if participant_id not in turn_order:
+            raise ValidationError("Character is not in the turn order")
+        participant = LocationCharacter.query.filter_by(
+            id=participant_id,
+            location_id=location_id,
+        ).first()
+        if not participant:
+            raise NotFoundError("Character not found")
+
+        removed_index = turn_order.index(participant_id)
+        was_current = state.current_location_character_id == participant_id
+        turn_order.remove(participant_id)
+        participant.initiative_roll = None
+        participant.initiative_total = None
+        participant.action_points_current = 0
+        participant.free_actions_current = 0
+        participant.movement_points_current = 0
+
+        if state.reaction_pending_location_character_id == participant_id:
+            state.reaction_pending_location_character_id = None
+        if state.reaction_return_location_character_id == participant_id:
+            state.reaction_return_location_character_id = None
+        if was_current and state.reaction_return_location_character_id is not None:
+            state.reaction_return_location_character_id = None
+            state.reaction_pending_location_character_id = None
+
+        if not turn_order:
+            db.session.flush()
+            payload = CombatService.end_combat(location_id, user_id)
+            payload['removed_location_character_id'] = participant_id
+            return payload
+
+        state.turn_order = turn_order
+        if was_current:
+            next_index = removed_index % len(turn_order)
+            if removed_index >= len(turn_order):
+                state.round_number = max(1, state.round_number or 1) + 1
+            next_character_id = turn_order[next_index]
+            next_character = LocationCharacter.query.filter_by(
+                id=next_character_id,
+                location_id=location_id,
+            ).first()
+            if not next_character:
+                raise NotFoundError("Next character not found")
+            state.turn_index = next_index
+            state.current_location_character_id = next_character_id
+            CombatService._prepare_character_for_turn(next_character)
+            CombatService._sync_location_effects_from_character(next_character)
+        else:
+            try:
+                state.turn_index = turn_order.index(state.current_location_character_id)
+            except ValueError:
+                state.turn_index = 0
+                state.current_location_character_id = turn_order[0]
+
+        db.session.commit()
+
+        current_character = LocationCharacter.query.filter_by(
+            id=state.current_location_character_id,
+            location_id=location_id,
+        ).first()
+        if current_character and not CombatService._can_take_combat_turn(current_character):
+            payload = CombatService.end_turn(
+                location_id,
+                user_id,
+                location_character_id=current_character.id,
+                _continue_pending=True,
+                _auto_skip_remaining=len(turn_order) - 1,
+            )
+        else:
+            payload = CombatService._serialize_state(location, state)
+        payload['removed_location_character_id'] = participant_id
         return payload
 
     @staticmethod
@@ -7125,6 +7593,7 @@ class CombatService:
         explosive_item = None
         explosive_weapon = None
         explosive_module = None
+        explosive_fire_rate_state = None
         melee_action_details = None
         special_action_cost = None
         resolved_hits = []
@@ -7237,6 +7706,10 @@ class CombatService:
                         explosive_weapon.get('accuracy', weapon_attributes.get('accuracy')), 0,
                     )
                 special_action_cost = 2 if mode == 'unaimed' else 4
+                if source == 'weapon':
+                    explosive_fire_rate_state = CombatService._validate_weapon_fire_rate(
+                        combat_meta, current_round, weapon_index, explosive_weapon, 1,
+                    )
 
             explosive_profile = CombatService._explosive_profile(explosive_item)
             if not explosive_profile:
@@ -7345,6 +7818,10 @@ class CombatService:
                 'fire_mode': mode if source != 'hand' else None,
                 'fuse_mode': fuse_mode if source == 'hand' else None,
                 'weapon_index': weapon_index if source != 'hand' else None,
+                'fire_rate': (
+                    explosive_fire_rate_state.get('fire_rate')
+                    if explosive_fire_rate_state else None
+                ),
                 'item_name': explosive_profile['name'],
                 'profile': explosive_profile,
                 'target': {'x': target_x, 'y': target_y},
@@ -7427,14 +7904,13 @@ class CombatService:
             if CombatService._coerce_int(meta.get('shockRecoveryRound'), 0) == current_round:
                 raise ValidationError("An attempt to regain consciousness has already been made this turn")
             meta['shockRecoveryRound'] = current_round
-            will_bonus = CombatService._skill_modifier(
-                data, 'skills.physical.will', include_pain=False
-            )
             medicine_bonus = CombatService._coerce_int(meta.get('willShockBonus'), 0)
+            difficulty, will_bonus = CombatService._pain_shock_recovery_difficulty(
+                data, medicine_bonus
+            )
             advantage = bool(meta.get('willShockAdvantage'))
             rolls = [random.randint(1, 20) for _ in range(2 if advantage else 1)]
             roll = max(rolls)
-            difficulty = max(1, 12 - will_bonus - medicine_bonus)
             success = roll == 20 or (roll != 1 and roll >= difficulty)
             if success:
                 health['effects'] = [
@@ -8226,7 +8702,13 @@ class CombatService:
                 character.character.data or {}, 'skills.physical.melee'
             )
             accuracy = CombatService._coerce_int(profile.get('accuracy'), 0)
-            aimed_melee = str(payment or '').strip().lower() == 'aimed'
+            payment_tokens = {
+                token
+                for token in re.split(r'[^a-z_]+', str(payment or '').strip().lower())
+                if token
+            }
+            aimed_melee = 'aimed' in payment_tokens
+            paid_automatic_back_attack = 'back_auto' in payment_tokens
             if circular_attack and aimed_melee:
                 raise ValidationError("A circular attack cannot be aimed")
             swing_prepared = character.melee_swing_round == current_round
@@ -8234,20 +8716,22 @@ class CombatService:
                 raise ValidationError("Prepare a swing before an aimed melee attack")
             if aimed_melee and target_zone not in HIT_ZONES:
                 raise ValidationError("Choose a valid body part for an aimed melee attack")
-            behind = CombatService._is_behind(character, target)
-            block_penalty = max(
-                0,
-                CombatService._coerce_int(target.melee_block_effectiveness, 0),
+            target_profile = CombatService._melee_target_profile(
+                character,
+                target,
+                melee_bonus,
+                accuracy,
+                aimed_melee,
+                target_zone,
+                circular_attack,
             )
-            aimed_penalty = 4 if aimed_melee and target_zone == 'head' else (2 if aimed_melee else 0)
-            hit_difficulty = (
-                (8 - melee_bonus * 2 if behind else 12 - melee_bonus)
-                + block_penalty
-                + aimed_penalty
-                + (3 if circular_attack else 0)
-                - accuracy
-            )
+            if paid_automatic_back_attack and (
+                circular_attack or not target_profile['from_behind']
+            ):
+                raise ValidationError("Automatic melee hit is only available against a target from behind")
             melee_cost = CombatService._melee_action_cost(profile, attack_type_key)
+            if paid_automatic_back_attack:
+                melee_cost += 2
             attack_details = {
                 'weapon_index': weapon_index,
                 'attack_type': attack_type,
@@ -8258,13 +8742,19 @@ class CombatService:
                 'target_distance': distance,
                 'melee': True,
                 'circular_attack': circular_attack,
-                'hit_difficulty': hit_difficulty,
+                'hit_difficulty': target_profile['difficulty'],
                 'aimed_melee': aimed_melee,
-                'from_behind': behind,
-                'block_penalty': block_penalty,
-                'aimed_penalty': aimed_penalty,
+                'from_behind': target_profile['from_behind'],
+                'target_prone': target_profile['target_prone'],
+                'target_unconscious': target_profile['target_unconscious'],
+                'automatic_hit': bool(
+                    target_profile['automatic_hit'] or paid_automatic_back_attack
+                ),
+                'paid_automatic_back_attack': paid_automatic_back_attack,
+                'block_penalty': target_profile['block_penalty'],
+                'aimed_penalty': target_profile['aimed_penalty'],
                 'swing_bonus': swing_prepared,
-                'melee_advantage': bool(target.grappled_by_id),
+                'melee_advantage': target_profile['advantage'],
                 'melee_bonus': melee_bonus,
                 'weapon_accuracy': accuracy,
             }
@@ -8281,7 +8771,8 @@ class CombatService:
             weapon = weapons[weapon_index] or {}
             CombatService._weapon_durability(weapon)
             active_jam = weapon.get('jam') if isinstance(weapon.get('jam'), dict) else None
-            if active_jam and active_jam.get('blocks_fire'):
+            active_jam_effects = CombatService._weapon_jam_effects(weapon)
+            if active_jam_effects['blocks_fire']:
                 raise ValidationError("Clear the weapon jam before firing")
             if weapon.get('requiresManualCycle'):
                 raise ValidationError("Cycle the weapon action before firing")
@@ -8347,6 +8838,9 @@ class CombatService:
                 shots < 2 * volley_count or shots % volley_count != 0
             ):
                 raise ValidationError("Invalid machine gun burst size")
+            fire_rate_state = CombatService._validate_weapon_fire_rate(
+                combat_meta, current_round, weapon_index, weapon, shots,
+            )
             target_object = None
             if fire_mode == 'suppression':
                 target_object = LocationObject.query.filter_by(
@@ -8452,11 +8946,19 @@ class CombatService:
                 character.movement_mode_this_turn,
                 target_movement_mode,
             )
+            base_shooting_disadvantage = (
+                CombatService._has_roll_disadvantage(
+                    data, 'skills.physical.shooting',
+                )
+                or movement_modifiers['disadvantage']
+            )
             attack_details = {
                 'weapon_index': weapon_index,
                 'fire_mode': fire_mode,
                 'shot_count': shots,
                 'volley_count': volley_count,
+                'fire_rate': fire_rate_state['fire_rate'],
+                'shots_fired_before': fire_rate_state['fired'],
                 'action_points': expected_action_points,
                 'round_number': state.round_number,
                 'target_character_id': target_character_id,
@@ -8484,17 +8986,14 @@ class CombatService:
                     data,
                     'skills.physical.shooting',
                 ),
-                'shooting_disadvantage': CombatService._has_roll_disadvantage(
-                    data,
-                    'skills.physical.shooting',
-                ) or bool(active_jam and active_jam.get('shooting_disadvantage'))
-                or movement_modifiers['disadvantage'],
-                'weapon_jam_before_shot': deepcopy(active_jam),
-                'weapon_jam_accuracy_penalty': max(
-                    0, CombatService._coerce_int(
-                        active_jam.get('accuracy_penalty') if active_jam else 0, 0
-                    )
+                'shooting_disadvantage': (
+                    base_shooting_disadvantage
+                    or active_jam_effects['shooting_disadvantage']
                 ),
+                'base_shooting_disadvantage': base_shooting_disadvantage,
+                'weapon_jam_before_shot': deepcopy(active_jam),
+                'weapon_jams_before_shot': active_jam_effects['jams'],
+                'weapon_jam_accuracy_penalty': active_jam_effects['accuracy_penalty'],
                 'aim_accuracy_bonus': CombatService._aim_bonus_for_target(
                     character,
                     target_character_id,
@@ -8555,6 +9054,7 @@ class CombatService:
                 hit_difficulty += 2
                 if target_distance > weapon_range + 10:
                     attack_details['shooting_disadvantage'] = True
+                    attack_details['base_shooting_disadvantage'] = True
             if range_target:
                 cover_analysis = CombatService._cover_analysis(
                     location_id,
@@ -8565,6 +9065,7 @@ class CombatService:
                     cover_analysis['blind_fire'] = True
                     cover_analysis['targetable'] = True
                     attack_details['shooting_disadvantage'] = True
+                    attack_details['base_shooting_disadvantage'] = True
                 attack_details['cover'] = cover_analysis
                 hit_difficulty += cover_analysis.get('accuracy_penalty', 0)
                 if range_target.grapple_live_shield and range_target.grapple_target_id:
@@ -8589,11 +9090,20 @@ class CombatService:
                     })
                     hit_difficulty += max(0, 2 - previous_penalty)
                     attack_details['shooting_disadvantage'] = True
+                    attack_details['base_shooting_disadvantage'] = True
             if fire_mode == 'aimed':
                 hit_difficulty += CombatService._aimed_zone_difficulty_penalty(target_zone)
             if target_object and not target_character_id:
                 attack_details['continuation_hit_difficulty'] = max(1, hit_difficulty)
+                attack_details['continuation_hit_difficulty_without_weapon_jam'] = max(
+                    1,
+                    hit_difficulty - attack_details['weapon_jam_accuracy_penalty'],
+                )
             attack_details['hit_difficulty'] = max(1, hit_difficulty)
+            attack_details['hit_difficulty_without_weapon_jam'] = max(
+                1,
+                hit_difficulty - attack_details['weapon_jam_accuracy_penalty'],
+            )
             attack_details['target_zone'] = target_zone if fire_mode == 'aimed' else None
 
         if action_key == 'convert_free_action_to_movement':
@@ -8675,7 +9185,10 @@ class CombatService:
             if action_key == 'clear_weapon_jam' and clear_jam_details:
                 weapons = data.get('weapons') or []
                 cleared_weapon = weapons[clear_jam_details['weapon_index']]
-                cleared_weapon.pop('jam', None)
+                jams = CombatService._weapon_jams(cleared_weapon)
+                if jams:
+                    jams.pop()
+                CombatService._set_weapon_jams(cleared_weapon, jams)
                 character.character.data = data
                 flag_modified(character.character, 'data')
             if action_key == 'reload_underbarrel' and underbarrel_reload_details:
@@ -8812,6 +9325,13 @@ class CombatService:
 
         if explosive_details:
             source = explosive_details['source']
+            if source == 'weapon':
+                explosive_details['shots_fired_this_round'] = CombatService._record_weapon_shots(
+                    combat_meta,
+                    current_round,
+                    explosive_details['weapon_index'],
+                    1,
+                )
             if source == 'hand':
                 CombatService._take_inventory_item(data, item_path, 1)
             elif source == 'underbarrel':
@@ -8827,6 +9347,7 @@ class CombatService:
                 )
                 explosive_details['weapon_jam'] = CombatService._roll_weapon_jam(
                     explosive_weapon,
+                    explosive_details.get('roll'),
                 )
             fuse = str(explosive_details['profile'].get('fuse') or 'instant')
             if fuse == 'instant':
@@ -8869,6 +9390,12 @@ class CombatService:
             CombatService._clear_aim(character)
 
         if attack_details:
+            if not attack_details.get('melee'):
+                attack_details['requested_shot_count'] = max(
+                    1, CombatService._coerce_int(
+                        attack_details.get('shot_count'), 1,
+                    ),
+                )
             if attack_details.get('melee'):
                 if attack_details.get('circular_attack'):
                     circular_targets = [
@@ -8881,30 +9408,25 @@ class CombatService:
                     for target in (item for item in circular_targets if item):
                         target_details = dict(attack_details)
                         target_details['target_character_id'] = target.character_id
-                        target_details['from_behind'] = CombatService._is_behind(
+                        circular_profile = CombatService._melee_target_profile(
                             character,
                             target,
+                            target_details['melee_bonus'],
+                            target_details['weapon_accuracy'],
+                            False,
+                            None,
+                            True,
                         )
-                        target_details['block_penalty'] = max(
-                            0,
-                            CombatService._coerce_int(
-                                target.melee_block_effectiveness,
-                                0,
-                            ),
-                        )
-                        target_details['melee_advantage'] = bool(
-                            target.grappled_by_id or target_details.get('melee_advantage')
-                        )
-                        target_details['hit_difficulty'] = (
-                            (
-                                8 - target_details['melee_bonus'] * 2
-                                if target_details['from_behind']
-                                else 12 - target_details['melee_bonus']
-                            )
-                            + target_details['block_penalty']
-                            + 3
-                            - target_details['weapon_accuracy']
-                        )
+                        target_details.update({
+                            'from_behind': circular_profile['from_behind'],
+                            'target_prone': circular_profile['target_prone'],
+                            'target_unconscious': circular_profile['target_unconscious'],
+                            'automatic_hit': circular_profile['automatic_hit'],
+                            'block_penalty': circular_profile['block_penalty'],
+                            'aimed_penalty': circular_profile['aimed_penalty'],
+                            'melee_advantage': circular_profile['advantage'],
+                            'hit_difficulty': circular_profile['difficulty'],
+                        })
                         resolved_hits.append(CombatService._resolve_attack(
                             target,
                             character,
@@ -8960,10 +9482,53 @@ class CombatService:
                         LocationObject, attack_details.get('target_object_id')
                     )
                     if cover:
-                        for _ in range(max(1, attack_details.get('shot_count', 1))):
-                            resolved_hits.append(CombatService._resolve_cover_attack(
-                                location_id, cover, character, attack_details
-                            ))
+                        cover_shot_states = []
+                        cover_jams = []
+                        cover_weapon = (data.get('weapons') or [])[attack_details['weapon_index']]
+                        requested_shots = attack_details['requested_shot_count']
+                        for shot_index in range(requested_shots):
+                            jam_effects = CombatService._weapon_jam_effects(cover_weapon)
+                            if jam_effects['blocks_fire']:
+                                break
+                            shot_details = dict(attack_details)
+                            shot_details['continuation_hit_difficulty'] = max(
+                                1,
+                                CombatService._coerce_int(
+                                    attack_details.get(
+                                        'continuation_hit_difficulty_without_weapon_jam'
+                                    ),
+                                    attack_details.get('continuation_hit_difficulty', 1),
+                                ) + jam_effects['accuracy_penalty'],
+                            )
+                            result = CombatService._resolve_cover_attack(
+                                location_id, cover, character, shot_details
+                            )
+                            jam = CombatService._roll_weapon_jam(
+                                cover_weapon, result.get('roll'),
+                            )
+                            state_item = {
+                                'shot_number': shot_index + 1,
+                                'accuracy_penalty': jam_effects['accuracy_penalty'],
+                                'shooting_disadvantage': jam_effects['shooting_disadvantage'],
+                                'jams_before_shot': deepcopy(jam_effects['jams']),
+                                'jam_after_shot': deepcopy(jam),
+                            }
+                            cover_shot_states.append(state_item)
+                            result['shot_number'] = shot_index + 1
+                            result['weapon_jam_after_shot'] = deepcopy(jam)
+                            resolved_hits.append(result)
+                            if isinstance(jam, dict) and jam.get('triggered'):
+                                cover_jams.append({
+                                    'shot_number': shot_index + 1,
+                                    **deepcopy(jam),
+                                })
+                                if jam.get('blocks_fire'):
+                                    break
+                        attack_details['shot_count'] = len(resolved_hits)
+                        attack_details['shot_jam_states'] = cover_shot_states
+                        attack_details['weapon_jams'] = cover_jams
+                        attack_details['weapon_jam'] = cover_jams[-1] if cover_jams else None
+                        attack_details['stopped_by_jam'] = len(resolved_hits) < requested_shots
                 elif fire_mode == 'area':
                     targets = [
                         LocationCharacter.query.filter_by(
@@ -9035,8 +9600,13 @@ class CombatService:
                             used_weapon, butt=True
                         )
                 else:
+                    attack_details['shots_fired_this_round'] = CombatService._record_weapon_shots(
+                        combat_meta,
+                        current_round,
+                        weapon_index_for_wear,
+                        attack_details.get('shot_count', 1),
+                    )
                     ammo_profile, _ = CombatService._ranged_damage_profile(used_weapon)
-                    previous_jam = used_weapon.get('jam') if isinstance(used_weapon.get('jam'), dict) else None
                     CombatService._consume_weapon_ammo(
                         used_weapon, attack_details.get('shot_count', 1)
                     )
@@ -9047,15 +9617,21 @@ class CombatService:
                         volley_count=attack_details.get('volley_count', 1),
                         ammo_profile=ammo_profile,
                     )
-                    if previous_jam and previous_jam.get('extra_wear_per_shot'):
-                        extra_loss = (
-                            CombatService._coerce_int(previous_jam.get('extra_wear_per_shot'), 0)
-                            * CombatService._coerce_int(attack_details.get('shot_count'), 1)
+                    extra_loss = sum(
+                        sum(
+                            max(0, CombatService._coerce_int(
+                                jam.get('extra_wear_per_shot'), 0,
+                            ))
+                            for jam in (state_item.get('jams_before_shot') or [])
+                            if isinstance(jam, dict)
                         )
+                        for state_item in (attack_details.get('shot_jam_states') or [])
+                        if isinstance(state_item, dict)
+                    )
+                    if extra_loss:
                         attack_details['spring_wear'] = CombatService._apply_weapon_wear(
                             used_weapon, extra_loss
                         )
-                    attack_details['weapon_jam'] = CombatService._roll_weapon_jam(used_weapon)
                     if CombatService._manual_cycle_type(used_weapon):
                         used_weapon['requiresManualCycle'] = True
                     attack_details['ammo_remaining'] = CombatService._coerce_int(

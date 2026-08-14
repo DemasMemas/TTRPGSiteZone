@@ -6,6 +6,7 @@ from app.extensions import db
 from app.models import LobbyCharacter, Lobby, LobbyParticipant, LocationCharacter
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 from app.services.health import apply_health_maximums, health_zones_to_location
+from app.services.inventory import normalize_inventory_ammo_stacks
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ class CharacterService:
             raise PermissionDenied("You are not in this lobby")
 
         character_data = dict(data or {})
+        normalize_inventory_ammo_stacks(character_data)
         apply_health_maximums(character_data)
         character = LobbyCharacter(
             lobby_id=lobby_id,
@@ -186,6 +188,7 @@ class CharacterService:
             character.name = updates['name']
         if 'data' in updates:
             character_data = dict(updates['data'] or {})
+            normalize_inventory_ammo_stacks(character_data)
             if not is_gm:
                 CharacterService.mark_added_items_as_player_created(
                     character.data,

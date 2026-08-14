@@ -1152,6 +1152,18 @@ def update_character(character_id):
     user_id = int(get_jwt_identity())
     data = request.get_json()
     character = CharacterService.update_character(character_id, user_id, data)
+    saved_updates = dict(data or {})
+    if 'data' in saved_updates:
+        saved_updates['data'] = character.data
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': character.id,
+            'updates': saved_updates,
+            'updated_by': user_id,
+        },
+        room=f"character_{character.id}",
+    )
     return jsonify({'message': 'Character updated'}), 200
 
 
@@ -2317,6 +2329,27 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
             },
             room=f"character_{character.id}",
         )
+    return jsonify(state), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/combat/participants/<int:location_character_id>',
+    methods=['DELETE'],
+)
+@jwt_required()
+@requires_gm
+def remove_location_combat_participant(
+    lobby_id,
+    location_id,
+    location_character_id,
+    lobby,
+):
+    state = CombatService.remove_combat_participant(
+        location_id,
+        lobby.gm_id,
+        location_character_id,
+    )
+    socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     return jsonify(state), 200
 
 
