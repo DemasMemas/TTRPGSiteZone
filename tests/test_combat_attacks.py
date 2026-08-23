@@ -1485,6 +1485,301 @@ def test_additional_trauma_report_is_not_persisted_as_generic_effect(monkeypatch
     )
 
 
+@pytest.mark.parametrize(
+    ("roll", "attacker_position", "armor_zone", "damages_head", "head_on_penetration", "primary", "secondary", "skull"),
+    [
+        (3, (0, 1), "crown", True, False, None, [], True),
+        (7, (0, 1), "crown", True, False, None, [], False),
+        (4, (0, 1), "face", True, False, "rightEye", [], False),
+        (4, (1, 0), "ears", False, True, "rightEye", ["brain"], False),
+        (4, (0, -1), "back", True, False, None, ["brain"], True),
+        (6, (1, 0), "face", False, False, "nose", [], False),
+        (2, (1, 0), "face", False, False, "jaw", [], False),
+        (1, (1, 0), "face", False, False, "jaw", [], False),
+        (8, (1, 0), "ears", False, True, "rightEar", ["brain"], False),
+        (8, (0, 1), "ears", False, False, "rightEar", [], False),
+        (8, (0, -1), "ears", False, False, "rightEar", [], False),
+    ],
+)
+def test_head_impact_profile_uses_directional_helmet_zones_and_trajectories(
+    roll,
+    attacker_position,
+    armor_zone,
+    damages_head,
+    head_on_penetration,
+    primary,
+    secondary,
+    skull,
+):
+    attacker = SimpleNamespace(pos_x=attacker_position[0], pos_y=attacker_position[1])
+    target = SimpleNamespace(pos_x=0, pos_y=0, facing_x=0, facing_y=1)
+
+    profile = CombatService._head_impact_profile(roll, attacker, target)
+
+    assert profile["armor_zone"] == armor_zone
+    assert profile["damage_head"] is damages_head
+    assert profile["damage_head_if_penetrated"] is head_on_penetration
+    assert profile["primary_organ"] == primary
+    assert profile["secondary_organs_if_penetrated"] == secondary
+    assert profile["damage_skull_if_penetrated"] is skull
+
+
+def test_head_subzone_only_uses_helmet_layer_that_covers_it():
+    target_data = {
+        "equipment": {
+            "helmet": {
+                "name": "Open helmet",
+                "durability": 10,
+                "protection": {"physical": 40},
+                "attributes": {
+                    "protection_zones": ["crown", "back"],
+                },
+            }
+        }
+    }
+
+    crown_data = {**target_data, "_headProtectionZone": "crown"}
+    face_data = {**target_data, "_headProtectionZone": "face"}
+
+    assert CombatService._target_armor(crown_data, "head")[0] == 40
+    assert CombatService._target_armor(face_data, "head")[0] == 0
+
+
+def _head_trauma_target():
+    return SimpleNamespace(
+        character=SimpleNamespace(data={
+            "health": {
+                "current": 700,
+                "max": 700,
+                "zones": {"head": {"current": 50, "max": 50}},
+                "organs": {
+                    "rightEye": {"current": 15, "max": 15},
+                    "brain": {"current": 1, "max": 1},
+                    "skull": {"current": 50, "max": 50},
+                },
+                "effects": [],
+            }
+        }),
+        hp_zones={},
+        posture="standing",
+        cover_object_id=None,
+        weapon_braced=False,
+        braced_weapon_index=None,
+        drawn_weapon_index=None,
+        aimed_target_character_id=None,
+        aimed_weapon_index=None,
+        aim_accuracy_bonus=0,
+        location_id=None,
+    )
+
+
+def test_side_eye_behind_armor_disables_eye_but_not_head_or_brain(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    target = _head_trauma_target()
+    impact = CombatService._head_impact_profile(
+        4,
+        SimpleNamespace(pos_x=1, pos_y=0),
+        SimpleNamespace(pos_x=0, pos_y=0, facing_x=0, facing_y=1),
+    )
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "head",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        head_impact=impact,
+        armor_penetrated=False,
+        prepared_trauma_rolls=[4],
+        round_number=1,
+    )
+
+    assert health["zones"]["head"]["current"] == 50
+    assert health["organs"]["rightEye"]["current"] == 0
+    assert health["organs"]["brain"]["current"] == 1
+    assert health["organs"]["skull"]["current"] == 50
+    assert not any(effect["type"] == "death" for effect in health["effects"])
+
+
+def test_side_eye_penetration_reaches_head_and_brain(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    target = _head_trauma_target()
+    impact = CombatService._head_impact_profile(
+        4,
+        SimpleNamespace(pos_x=1, pos_y=0),
+        SimpleNamespace(pos_x=0, pos_y=0, facing_x=0, facing_y=1),
+    )
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "head",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        head_impact=impact,
+        armor_penetrated=True,
+        prepared_trauma_rolls=[4],
+        round_number=1,
+    )
+
+    assert health["zones"]["head"]["current"] == 30
+    assert health["organs"]["rightEye"]["current"] == 0
+    assert health["organs"]["brain"]["current"] == 0
+    assert health["organs"]["skull"]["current"] == 50
+    assert any(effect["type"] == "death" for effect in health["effects"])
+
+
+def test_back_eye_penetration_uses_occiput_and_reaches_skull_and_brain(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    target = _head_trauma_target()
+    impact = CombatService._head_impact_profile(
+        4,
+        SimpleNamespace(pos_x=0, pos_y=-1),
+        SimpleNamespace(pos_x=0, pos_y=0, facing_x=0, facing_y=1),
+    )
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "head",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        head_impact=impact,
+        armor_penetrated=True,
+        prepared_trauma_rolls=[4],
+        round_number=1,
+    )
+
+    assert health["zones"]["head"]["current"] == 30
+    assert health["organs"]["rightEye"]["current"] == 15
+    assert health["organs"]["skull"]["current"] == 30
+    assert health["organs"]["brain"]["current"] == 0
+
+
+@pytest.mark.parametrize(
+    ("roll", "attacker_position", "organ", "expected_head"),
+    [
+        (6, (1, 0), "nose", 50),
+        (6, (0, 1), "nose", 30),
+        (2, (1, 0), "jaw", 50),
+        (1, (1, 0), "jaw", 50),
+    ],
+)
+def test_face_trauma_routes_damage_without_inventing_head_damage(
+    monkeypatch, roll, attacker_position, organ, expected_head,
+):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    target = _head_trauma_target()
+    impact = CombatService._head_impact_profile(
+        roll,
+        SimpleNamespace(pos_x=attacker_position[0], pos_y=attacker_position[1]),
+        SimpleNamespace(pos_x=0, pos_y=0, facing_x=0, facing_y=1),
+    )
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "head",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        head_impact=impact,
+        armor_penetrated=True,
+        prepared_trauma_rolls=[roll],
+        round_number=1,
+    )
+
+    assert health["zones"]["head"]["current"] == expected_head
+    assert health["organs"][organ]["current"] == 0
+
+
+@pytest.mark.parametrize(
+    ("penetrated", "expected_skull"),
+    [(False, 50), (True, 30)],
+)
+def test_crown_hit_damages_head_but_skull_only_after_penetration(
+    monkeypatch, penetrated, expected_skull,
+):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    target = _head_trauma_target()
+    impact = CombatService._head_impact_profile(3)
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "head",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        head_impact=impact,
+        armor_penetrated=penetrated,
+        prepared_trauma_rolls=[3],
+        round_number=1,
+    )
+
+    assert health["zones"]["head"]["current"] == 30
+    assert health["organs"]["skull"]["current"] == expected_skull
+
+
+def test_limb_fall_trauma_knocks_character_prone(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    target = _head_trauma_target()
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "left_leg",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        prepared_trauma_rolls=[1],
+        round_number=1,
+    )
+
+    trauma = health["_attackOutcome"]["additional_traumas"][0]
+    assert target.posture == "prone"
+    assert trauma["fall_or_drop"]["kind"] == "fall"
+
+
+def test_arm_drop_trauma_removes_drawn_weapon_and_applies_fall_wear(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    monkeypatch.setattr(combat_module.random, "randint", lambda start, end: end)
+    target = _head_trauma_target()
+    target.character.data["weapons"] = [{
+        "name": "Test pistol",
+        "durability": 100,
+        "maxDurability": 100,
+    }]
+    target.character.data["activeWeaponIndex"] = 0
+    target.drawn_weapon_index = 0
+
+    health = CombatService._apply_attack_damage(
+        target,
+        20,
+        "right_arm",
+        {"bleeding": ""},
+        force_trauma=True,
+        allow_bleeding=False,
+        prepared_trauma_rolls=[1],
+        round_number=1,
+    )
+
+    trauma = health["_attackOutcome"]["additional_traumas"][0]
+    assert target.character.data["weapons"] == []
+    assert target.drawn_weapon_index is None
+    assert "activeWeaponIndex" not in target.character.data
+    assert trauma["fall_or_drop"]["weapon_wear"]["after"] == 97
+
+
 def test_buckshot_loses_fixed_damage_and_penetration_after_five_meters(monkeypatch):
     captured = {}
     monkeypatch.setattr(

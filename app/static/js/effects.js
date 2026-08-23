@@ -188,7 +188,7 @@ const STATUS_EFFECT_TYPES = new Set([
 const ORGAN_LABELS = {
     heart: 'Сердце', rightLung: 'Правое лёгкое', leftLung: 'Левое лёгкое',
     rightKidney: 'Правая почка', leftKidney: 'Левая почка', stomach: 'Желудок',
-    liver: 'Печень', brain: 'Мозг', spine: 'Позвоночник',
+    liver: 'Печень', brain: 'Мозг', skull: 'Череп', spine: 'Позвоночник',
     rightEye: 'Правый глаз', leftEye: 'Левый глаз',
     rightEar: 'Правое ухо', leftEar: 'Левое ухо', nose: 'Нос', jaw: 'Челюсть',
 };

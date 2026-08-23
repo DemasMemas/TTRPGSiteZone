@@ -2510,7 +2510,7 @@ const BASE_ORGAN_MAXIMUMS = {
     heart: 20, rightLung: 40, leftLung: 40,
     rightKidney: 25, leftKidney: 25, stomach: 25, liver: 20,
     rightEye: 15, leftEye: 15, nose: 20, jaw: 20,
-    rightEar: 20, leftEar: 20, brain: 1, spine: 1,
+    rightEar: 20, leftEar: 20, brain: 1, skull: 50, spine: 1,
 };
 
 function hasMountainBackground(data) {
@@ -2871,7 +2871,7 @@ function renderHealthTab(data, container = null) {
                     ${[
                         ['heart', 'Сердце'], ['rightLung', 'Правое лёгкое'], ['leftLung', 'Левое лёгкое'],
                         ['rightKidney', 'Правая почка'], ['leftKidney', 'Левая почка'], ['stomach', 'Желудок'],
-                        ['liver', 'Печень'], ['brain', 'Мозг'], ['spine', 'Позвоночник'],
+                        ['liver', 'Печень'], ['brain', 'Мозг'], ['skull', 'Череп'], ['spine', 'Позвоночник'],
                         ['rightEye', 'Правый глаз'], ['leftEye', 'Левый глаз'], ['nose', 'Нос'],
                         ['jaw', 'Челюсть'], ['rightEar', 'Правое ухо'], ['leftEar', 'Левое ухо'],
                     ].map(([key, label]) => `
@@ -3004,7 +3004,7 @@ function renderHealthTab(data, container = null) {
                         ['leftEye', 'Левый глаз'], ['rightEye', 'Правый глаз'],
                         ['heart', 'Сердце'], ['rightLung', 'Правое лёгкое'], ['leftLung', 'Левое лёгкое'],
                         ['rightKidney', 'Правая почка'], ['leftKidney', 'Левая почка'],
-                        ['stomach', 'Желудок'], ['liver', 'Печень'], ['brain', 'Мозг'],
+                        ['stomach', 'Желудок'], ['liver', 'Печень'], ['brain', 'Мозг'], ['skull', 'Череп'],
                         ['spine', 'Позвоночник'], ['internalOrgan', 'Внутренний орган']
                     ].map(([key, label]) => `<option value="${key}" ${key === (effect.area || '') ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>

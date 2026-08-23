@@ -2839,7 +2839,7 @@ class CombatService:
         return multiplier
 
     @staticmethod
-    def _armor_covers_zone(slot, item, attributes, zone):
+    def _armor_covers_zone(slot, item, attributes, zone, head_protection_zone=None):
         zone_group = (
             'head' if zone == 'head'
             else 'torso' if zone in {'chest', 'abdomen'}
@@ -2873,6 +2873,11 @@ class CombatService:
         if isinstance(declared, list) and declared:
             normalized = {str(value).strip().lower() for value in declared}
             if zone_group == 'head':
+                if head_protection_zone:
+                    return bool(
+                        'head' in normalized
+                        or str(head_protection_zone).strip().lower() in normalized
+                    )
                 return bool(normalized & {'head', 'crown', 'back', 'ears', 'face'})
             return zone_group in normalized
         return zone == 'head' if slot in {'helmet', 'gasMask'} else zone != 'head'
@@ -3111,7 +3116,9 @@ class CombatService:
         return total
 
     @staticmethod
-    def _target_armor(target_data, zone):
+    def _target_armor(target_data, zone, head_protection_zone=None):
+        if head_protection_zone is None and isinstance(target_data, dict):
+            head_protection_zone = target_data.get('_headProtectionZone')
         equipment = target_data.get('equipment') if isinstance(target_data, dict) else {}
         equipment = equipment if isinstance(equipment, dict) else {}
         candidates = []
@@ -3134,7 +3141,9 @@ class CombatService:
                 if integrated_profile and zone == 'head':
                     continue
                 attrs = CombatService._template_attributes(item)
-                if not CombatService._armor_covers_zone(slot, item, attrs, zone):
+                if not CombatService._armor_covers_zone(
+                    slot, item, attrs, zone, head_protection_zone,
+                ):
                     continue
                 protection = item.get('protection')
                 if not isinstance(protection, dict):
@@ -3267,6 +3276,180 @@ class CombatService:
         }
 
     @staticmethod
+    def _attack_direction(attacker, target):
+        if attacker is None or target is None:
+            return 'front'
+        facing_x = CombatService._coerce_float(getattr(target, 'facing_x', 0), 0)
+        facing_y = CombatService._coerce_float(getattr(target, 'facing_y', 1), 1)
+        relative_x = CombatService._coerce_float(getattr(attacker, 'pos_x', 0), 0) - CombatService._coerce_float(getattr(target, 'pos_x', 0), 0)
+        relative_y = CombatService._coerce_float(getattr(attacker, 'pos_y', 0), 0) - CombatService._coerce_float(getattr(target, 'pos_y', 0), 0)
+        facing_length = math.hypot(facing_x, facing_y)
+        relative_length = math.hypot(relative_x, relative_y)
+        if facing_length <= 1e-9 or relative_length <= 1e-9:
+            return 'front'
+        cosine = (facing_x * relative_x + facing_y * relative_y) / (
+            facing_length * relative_length
+        )
+        if cosine >= 0.5:
+            return 'front'
+        if cosine <= -0.5:
+            return 'back'
+        return 'side'
+
+    @staticmethod
+    def _head_impact_profile(roll, attacker=None, target=None):
+        parts = {
+            1: ('jaw', 'jaw'),
+            2: ('rightCheek', None),
+            3: ('crown', None),
+            4: ('rightEye', 'rightEye'),
+            5: ('crown', None),
+            6: ('nose', 'nose'),
+            8: ('rightEar', 'rightEar'),
+            10: ('crown', None),
+            11: ('crown', None),
+            12: ('leftCheek', None),
+            13: ('jaw', 'jaw'),
+            14: ('leftEye', 'leftEye'),
+            15: ('crown', None),
+            16: ('nose', 'nose'),
+            17: ('jaw', 'jaw'),
+            18: ('leftCheek', None),
+            19: ('crown', None),
+            20: ('leftEar', 'leftEar'),
+        }
+        part, primary_organ = parts.get(CombatService._coerce_int(roll, 0), ('head', None))
+        direction = CombatService._attack_direction(attacker, target)
+        is_eye = part in {'rightEye', 'leftEye'}
+        is_ear = part in {'rightEar', 'leftEar'}
+        is_cheek = part in {'rightCheek', 'leftCheek'}
+
+        profile = {
+            'part': part,
+            'direction': direction,
+            'armor_zone': 'crown',
+            'damage_head': True,
+            'damage_head_if_penetrated': False,
+            'damage_skull_if_penetrated': part == 'crown',
+            'primary_organ': primary_organ,
+            'secondary_organs_if_penetrated': [],
+        }
+        if part in {'crown', 'head'}:
+            return profile
+
+        if is_ear:
+            profile.update({
+                'armor_zone': 'ears',
+                'damage_head': False,
+                'damage_head_if_penetrated': direction == 'side',
+            })
+            if direction == 'side':
+                profile['secondary_organs_if_penetrated'] = ['brain']
+            return profile
+
+        if direction == 'back':
+            profile.update({
+                'armor_zone': 'back',
+                'damage_head': True,
+                'primary_organ': None,
+            })
+            if is_eye:
+                profile['damage_skull_if_penetrated'] = True
+                profile['secondary_organs_if_penetrated'] = ['brain']
+            return profile
+
+        if direction == 'side':
+            profile.update({
+                'armor_zone': 'ears' if is_eye else 'face',
+                'damage_head': False,
+                'damage_head_if_penetrated': is_eye,
+            })
+            if is_eye:
+                profile['secondary_organs_if_penetrated'] = ['brain']
+            elif is_cheek:
+                profile['primary_organ'] = 'jaw'
+            return profile
+
+        profile['armor_zone'] = 'face'
+        profile['damage_head'] = True
+        return profile
+
+    @staticmethod
+    def _apply_fall_or_drop(target, character_data, zone):
+        if zone in {'left_leg', 'right_leg', 'leftLeg', 'rightLeg'}:
+            target.posture = 'prone'
+            target.cover_object_id = None
+            target.weapon_braced = False
+            target.braced_weapon_index = None
+            CombatService._clear_aim(target)
+            return {'kind': 'fall', 'posture': 'prone'}
+
+        if zone not in {'left_arm', 'right_arm', 'leftArm', 'rightArm'}:
+            return None
+        weapons = character_data.get('weapons')
+        weapon_index = CombatService._coerce_int(
+            getattr(target, 'drawn_weapon_index', -1), -1,
+        )
+        if not isinstance(weapons, list) or not (0 <= weapon_index < len(weapons)):
+            return {'kind': 'drop_weapon', 'dropped': False}
+
+        weapon = weapons.pop(weapon_index)
+        wear = CombatService._apply_weapon_wear(weapon, 3)
+        character_data.pop('activeWeaponIndex', None)
+        target.drawn_weapon_index = None
+        target.weapon_braced = False
+        target.braced_weapon_index = None
+        CombatService._clear_aim(target)
+
+        ground_object = None
+        object_event = None
+        location_id = getattr(target, 'location_id', None)
+        if location_id is not None:
+            ground_object = LocationObject.query.filter_by(
+                location_id=location_id,
+                type='ground_item',
+                tile_x=target.pos_x,
+                tile_y=target.pos_y,
+            ).first()
+            if ground_object:
+                properties = deepcopy(ground_object.properties or {})
+                properties.setdefault('contents', []).append(deepcopy(weapon))
+                properties.update({
+                    'is_ground_item': True,
+                    'passable': True,
+                    'interactions': ['open_container'],
+                })
+                ground_object.properties = properties
+                flag_modified(ground_object, 'properties')
+                object_event = 'updated'
+            else:
+                ground_object = LocationObject(
+                    location_id=location_id,
+                    name='Пол',
+                    type='ground_item',
+                    tile_x=target.pos_x,
+                    tile_y=target.pos_y,
+                    properties={
+                        'contents': [deepcopy(weapon)],
+                        'is_ground_item': True,
+                        'passable': True,
+                        'dropped_by_character_id': getattr(target, 'character_id', None),
+                        'interactions': ['open_container'],
+                    },
+                )
+                db.session.add(ground_object)
+                db.session.flush()
+                object_event = 'created'
+        return {
+            'kind': 'drop_weapon',
+            'dropped': True,
+            'weapon_name': weapon.get('name'),
+            'weapon_wear': wear,
+            'ground_object_id': getattr(ground_object, 'id', None),
+            'ground_object_event': object_event,
+        }
+
+    @staticmethod
     def _trauma_effects(zone, roll):
         bleeding = {
             'chest': {
@@ -3379,10 +3562,10 @@ class CombatService:
             CombatService._coerce_float((organs.get(key) or {}).get('current'), BASE_ORGAN_MAXIMUMS[key]) <= 0
             for key in ('rightKidney', 'leftKidney')
         )
-        if organ_key == 'brain':
+        if organ_key in {'brain', 'skull'}:
             apply_effect_to_health(health, {
                 'type': 'death', 'name': 'Смерть',
-                'source': 'brain_destroyed', 'tick': 'manual',
+                'source': f'{organ_key}_destroyed', 'tick': 'manual',
             })
             result['death'] = True
         else:
@@ -3428,6 +3611,10 @@ class CombatService:
         trauma_difficulty_modifier=0,
         force_trauma=False,
         stress_trigger='direct_attack',
+        attacker=None,
+        head_impact=None,
+        armor_penetrated=True,
+        prepared_trauma_rolls=None,
     ):
         character = target.character
         data = dict(character.data or {})
@@ -3455,9 +3642,25 @@ class CombatService:
         zone_max = CombatService._coerce_float(zone_data.get('max'), 0)
         zone_data['max'] = zone_max
         zone_current_before = CombatService._coerce_float(zone_data.get('current'), zone_max)
-        zone_data['current'] = max(0, zone_current_before - damage)
+        zone_damage = damage
+        if zone == 'head' and isinstance(head_impact, dict):
+            damages_head = bool(
+                head_impact.get('damage_head')
+                or (
+                    armor_penetrated
+                    and head_impact.get('damage_head_if_penetrated')
+                )
+            )
+            zone_damage = damage if damages_head else 0
+        zone_data['current'] = max(0, zone_current_before - zone_damage)
         fatal_vital_hit = bool(
-            zone_current_before <= 0 and zone_key in {'head', 'chest'}
+            zone_current_before <= 0
+            and zone_key in {'head', 'chest'}
+            and not (
+                zone == 'head'
+                and isinstance(head_impact, dict)
+                and zone_damage <= 0
+            )
         )
         if fatal_vital_hit:
             apply_effect_to_health(health, {
@@ -3476,7 +3679,9 @@ class CombatService:
                 previous_destruction,
                 max(0, zone_max - min(zone_max, zone_current_before)),
             )
-        zone_data['destructionDamage'] = max(0, previous_destruction + max(0, damage))
+        zone_data['destructionDamage'] = max(
+            0, previous_destruction + max(0, zone_damage),
+        )
         active_effects = normalize_effect_list(health.get('effects') or [])
         minimum_limb_health = max([
             CombatService._coerce_float(effect.get('minimum_limb_health'), 0)
@@ -3635,8 +3840,9 @@ class CombatService:
         trauma_roll = None
         trauma = None
         traumas = []
+        prepared_rolls = list(prepared_trauma_rolls or [])
         if damage >= 11:
-            for _ in range(max(0, CombatService._coerce_int(trauma_checks, 1))):
+            for trauma_index in range(max(0, CombatService._coerce_int(trauma_checks, 1))):
                 trauma_chance_roll = random.randint(1, 100)
                 threshold = {
                     'head': 0,
@@ -3655,8 +3861,21 @@ class CombatService:
                 )
                 if not force_trauma and trauma_chance_roll < threshold:
                     continue
-                trauma_roll = random.randint(1, 20)
-                trauma_rules = CombatService._trauma_effects(zone, trauma_roll)
+                trauma_roll = (
+                    CombatService._coerce_int(prepared_rolls.pop(0), 1)
+                    if prepared_rolls else random.randint(1, 20)
+                )
+                trauma_rules = dict(CombatService._trauma_effects(zone, trauma_roll))
+                impact = None
+                if zone == 'head':
+                    impact = (
+                        head_impact
+                        if trauma_index == 0 and isinstance(head_impact, dict)
+                        else CombatService._head_impact_profile(
+                            trauma_roll, attacker, target,
+                        )
+                    )
+                    trauma_rules['organ'] = impact.get('primary_organ')
                 trauma = {
                     'type': 'additional_trauma',
                     'area': zone_key,
@@ -3675,6 +3894,7 @@ class CombatService:
                     'shock': bool(trauma_rules['shock']),
                     'organ': trauma_rules['organ'],
                     'fall_or_drop': trauma_rules['fall_or_drop'],
+                    'head_impact': deepcopy(impact),
                 }
                 traumas.append(trauma)
                 if trauma_rules['fracture']:
@@ -3702,13 +3922,33 @@ class CombatService:
                     apply_effect_to_health(health, {
                         'type': 'shock', 'area': zone_key, 'source': 'combat_attack'
                     })
+                organ_keys = []
                 if trauma_rules['organ']:
-                    organ_damage = CombatService._apply_organ_damage(
-                        health, trauma_rules['organ'], damage, zone_key
+                    organ_keys.append(trauma_rules['organ'])
+                if impact and armor_penetrated:
+                    if impact.get('damage_skull_if_penetrated'):
+                        organ_keys.append('skull')
+                    organ_keys.extend(
+                        impact.get('secondary_organs_if_penetrated') or []
                     )
-                    trauma['organ_damage'] = organ_damage
-                    if organ_damage and organ_damage.get('bleeding'):
-                        created_bleedings.append(organ_damage['bleeding'])
+                organ_damages = []
+                for organ_key in dict.fromkeys(organ_keys):
+                    organ_damage = CombatService._apply_organ_damage(
+                        health, organ_key, damage, zone_key
+                    )
+                    if organ_damage:
+                        organ_damages.append(organ_damage)
+                        if organ_damage.get('bleeding'):
+                            created_bleedings.append(organ_damage['bleeding'])
+                if organ_damages:
+                    trauma['organ_damage'] = organ_damages[0]
+                    trauma['organ_damages'] = organ_damages
+                    if not trauma.get('organ'):
+                        trauma['organ'] = organ_damages[0].get('organ')
+                if trauma_rules['fall_or_drop']:
+                    trauma['fall_or_drop'] = CombatService._apply_fall_or_drop(
+                        target, data, zone_key,
+                    )
         sync_health_derived_statuses(health)
         resulting_condition = CombatService._character_condition(data)
         if resulting_condition['state'] in {'pain_shock', 'critical', 'dead'}:
@@ -5074,7 +5314,18 @@ class CombatService:
                 }.get(zone, zone), {}).get('current'),
             })
             return result
-        armor, armor_layers = CombatService._target_armor(target_data, zone)
+        head_impact_roll = random.randint(1, 20) if zone == 'head' else None
+        head_impact = (
+            CombatService._head_impact_profile(
+                head_impact_roll, attacker, target,
+            )
+            if head_impact_roll is not None else None
+        )
+        armor_target_data = target_data
+        if head_impact:
+            armor_target_data = dict(target_data)
+            armor_target_data['_headProtectionZone'] = head_impact.get('armor_zone')
+        armor, armor_layers = CombatService._target_armor(armor_target_data, zone)
         armor_damage = []
         for layer in armor_layers:
             if layer.get('is_gas_mask'):
@@ -5124,6 +5375,9 @@ class CombatService:
             )
             damage_multiplier = behind_armor_multiplier
         final_damage = max(0, round(profile['damage'] * damage_multiplier))
+        armor_penetrated = bool(
+            armor <= 0 or profile['armor_piercing'] >= armor
+        )
         allow_bleeding = bool(
             melee
             or armor <= 0
@@ -5155,6 +5409,12 @@ class CombatService:
             allow_bleeding=allow_bleeding,
             trauma_checks=trauma_checks,
             trauma_difficulty_modifier=trauma_difficulty_modifier,
+            attacker=attacker,
+            head_impact=head_impact,
+            armor_penetrated=armor_penetrated,
+            prepared_trauma_rolls=(
+                [head_impact_roll] if head_impact_roll is not None else None
+            ),
         )
         attack_outcome = health.pop('_attackOutcome', {})
         result.update({
@@ -5174,6 +5434,7 @@ class CombatService:
             'buckshot_mutant_non_penetration': buckshot_mutant_non_penetration,
             'damage': final_damage,
             'armor_damage': armor_damage,
+            'head_impact': head_impact,
             'bleeding_check': bleeding_result,
             'bleedings': attack_outcome.get('bleedings') or [],
             'additional_traumas': attack_outcome.get('additional_traumas') or [],
@@ -5429,6 +5690,7 @@ class CombatService:
             'leftEar': '\u043b\u0435\u0432\u043e\u0435 \u0443\u0445\u043e',
             'nose': '\u043d\u043e\u0441',
             'jaw': '\u0447\u0435\u043b\u044e\u0441\u0442\u044c',
+            'skull': '\u0447\u0435\u0440\u0435\u043f',
             'spine': '\u043f\u043e\u0437\u0432\u043e\u043d\u043e\u0447\u043d\u0438\u043a',
             'brain': '\u043c\u043e\u0437\u0433',
         }
@@ -5611,6 +5873,29 @@ class CombatService:
                 trauma_labels = []
                 for trauma in traumas:
                     consequences = []
+                    head_impact = trauma.get('head_impact')
+                    if isinstance(head_impact, dict):
+                        part_labels = {
+                            'head': 'голова',
+                            'crown': 'теменная часть',
+                            'rightCheek': 'правая щека',
+                            'leftCheek': 'левая щека',
+                            'rightEye': 'правый глаз',
+                            'leftEye': 'левый глаз',
+                            'rightEar': 'правое ухо',
+                            'leftEar': 'левое ухо',
+                            'nose': 'нос',
+                            'jaw': 'челюсть',
+                        }
+                        direction_labels = {
+                            'front': 'спереди',
+                            'side': 'сбоку',
+                            'back': 'сзади',
+                        }
+                        consequences.append(
+                            f"{part_labels.get(head_impact.get('part'), head_impact.get('part') or 'голова')} "
+                            f"{direction_labels.get(head_impact.get('direction'), '')}".strip()
+                        )
                     if trauma.get('fracture'):
                         consequences.append('перелом')
                     trauma_bleeding = trauma.get('bleeding')
@@ -5628,16 +5913,19 @@ class CombatService:
                         )
                     if trauma.get('pain'):
                         consequences.append(f"боль +{trauma['pain']}")
-                    organ_damage = trauma.get('organ_damage')
-                    organ_key = (
-                        organ_damage.get('organ')
-                        if isinstance(organ_damage, dict)
-                        else trauma.get('organ')
-                    )
-                    if organ_key:
+                    organ_damages = trauma.get('organ_damages')
+                    if not isinstance(organ_damages, list):
+                        organ_damage = trauma.get('organ_damage')
+                        organ_damages = [organ_damage] if isinstance(organ_damage, dict) else []
+                    if not organ_damages and trauma.get('organ'):
+                        organ_damages = [{'organ': trauma.get('organ')}]
+                    for organ_damage in organ_damages:
+                        organ_key = organ_damage.get('organ')
+                        if not organ_key:
+                            continue
                         organ_label = organ_labels.get(organ_key, organ_key)
                         organ_details = f"\u043e\u0440\u0433\u0430\u043d: {organ_label}"
-                        if isinstance(organ_damage, dict):
+                        if organ_damage.get('current_before') is not None:
                             before = round(CombatService._coerce_float(
                                 organ_damage.get('current_before'), 0,
                             ))
@@ -5653,6 +5941,16 @@ class CombatService:
                         consequences.append(organ_details)
                     if trauma.get('shock'):
                         consequences.append('шок')
+                    fall_or_drop = trauma.get('fall_or_drop')
+                    if isinstance(fall_or_drop, dict):
+                        if fall_or_drop.get('kind') == 'fall':
+                            consequences.append('падение персонажа')
+                        elif fall_or_drop.get('dropped'):
+                            consequences.append(
+                                f"выпало оружие: {fall_or_drop.get('weapon_name') or 'оружие'}"
+                            )
+                        else:
+                            consequences.append('падение оружия: в руках ничего нет')
                     details = ', '.join(consequences) or 'без доп. эффекта'
                     trauma_labels.append(
                         f"d20 {trauma.get('roll', '—')} ({details})"

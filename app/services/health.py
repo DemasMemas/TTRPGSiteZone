@@ -28,6 +28,7 @@ BASE_ORGAN_MAXIMUMS = {
     "rightEar": 20,
     "leftEar": 20,
     "brain": 1,
+    "skull": 50,
     "spine": 1,
 }
 NORMAL_BODY_TEMPERATURE = 36.0

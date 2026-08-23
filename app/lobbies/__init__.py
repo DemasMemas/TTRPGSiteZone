@@ -2821,6 +2821,30 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
+    ground_object_events = {}
+    pending_nodes = [result]
+    while pending_nodes:
+        node = pending_nodes.pop()
+        if isinstance(node, dict):
+            object_id = node.get('ground_object_id')
+            object_event = node.get('ground_object_event')
+            if object_id and object_event:
+                ground_object_events[int(object_id)] = object_event
+            pending_nodes.extend(node.values())
+        elif isinstance(node, list):
+            pending_nodes.extend(node)
+    for object_id, object_event in ground_object_events.items():
+        ground_object = db.session.get(LocationObject, object_id)
+        if not ground_object:
+            continue
+        socketio.emit(
+            'location_object_created' if object_event == 'created' else 'location_object_updated',
+            {
+                'location_id': location_id,
+                'object': LocationObjectSchema().dump(ground_object),
+            },
+            room=f"location_{location_id}",
+        )
     if result.get('explosive') and result['explosive'].get('detonated', True):
         socketio.emit(
             'combat_explosion',
