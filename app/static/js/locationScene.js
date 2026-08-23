@@ -4826,6 +4826,27 @@ async function showCombatParticipantSelection() {
     document.body.appendChild(combatParticipantMenu);
 }
 
+const COMBAT_STATUS_LABELS = {
+    active: 'Идёт',
+    idle: 'Не активен',
+    finished: 'Завершён',
+    completed: 'Завершён',
+};
+
+const BLOOD_STAGE_LABELS = {
+    normal: 'Норма',
+    light: 'Лёгкая',
+    medium: 'Средняя',
+    severe: 'Сильная',
+    critical: 'Критическая',
+    fatal: 'Смертельная',
+};
+
+function getBloodStageLabel(value) {
+    const key = String(value || 'normal').toLowerCase();
+    return BLOOD_STAGE_LABELS[key] || key;
+}
+
 function renderCombatHud() {
     if (!combatState) {
         if (combatHud && combatHud.parentNode) {
@@ -4868,6 +4889,9 @@ function renderCombatHud() {
     ) : [];
     const currentMustDoUsage = getMustDoUsage(combatState.current_character);
     const currentMustDoRetry = combatState.current_character?.must_do_retry;
+    const isCombatActive = combatState.status === 'active';
+    const combatStatusLabel = COMBAT_STATUS_LABELS[combatState.status] || 'Не активен';
+    const currentBloodLabel = getBloodStageLabel(combatState.current_character?.blood);
     const isCollapsed = combatHudCollapsed ?? combatState.status !== 'active';
     const compactStatus = combatState.status === 'active'
         ? `Раунд ${combatState.round_number || 0} · ${combatState.current_character?.name || 'нет хода'} · ${combatState.current_character?.posture_label || 'Стоя'}`
@@ -4914,7 +4938,8 @@ function renderCombatHud() {
                 : ''}
         </div>
         <div class="combat-hud-body" style="display:${isCollapsed ? 'none' : 'block'}; padding:12px 14px; font-size:13px; line-height:1.45;">
-            <div>Статус: <strong>${combatState.status || 'idle'}</strong></div>
+            ${isCombatActive ? `
+            <div>Статус: <strong>${combatStatusLabel}</strong></div>
             <div>Раунд: <strong>${combatState.round_number || 0}</strong></div>
             <div>Ход: <strong>${combatState.current_character?.name || 'нет'}</strong></div>
             <div>Положение: <strong>${combatState.current_character?.posture_label || 'Стоя'}</strong></div>
@@ -4923,7 +4948,7 @@ function renderCombatHud() {
             <div>ОП: ${combatState.current_character?.movement_points_current ?? 0}/${combatState.current_character?.movement_points_max ?? 0}</div>
             ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong> · Точность +${combatState.current_character?.aim_accuracy_bonus || 0}</div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
-            <div>Кровопотеря: ${combatState.current_character?.blood ?? 'normal'} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
+            <div>Кровопотеря: ${currentBloodLabel} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
             ${combatState.status === 'active' && combatState.current_character ? `<div style="margin-top:6px;padding:7px 8px;border-radius:7px;background:rgba(190,143,72,.16);border:1px solid rgba(190,143,72,.28);"><button type="button" class="btn btn-sm btn-secondary combat-must-do-btn" style="width:100%;">Должен это сделать · ${currentMustDoUsage.remaining}/${currentMustDoUsage.limit}</button><div style="margin-top:5px;font-size:12px;opacity:.8;">${currentMustDoRetry ? `Сохранённый провал: ${escapeHtml(currentMustDoRetry.name || 'повторная проверка')}` : 'Ручной повтор по разрешению ГМа'}</div></div>` : ''}
             ${combatState.current_character?.help_advantage ? `<div style="margin-top:6px;padding:6px 8px;border-radius:7px;background:rgba(92,154,110,.16);">Помощь: преимущество${combatState.current_character.help_advantage.action_label ? `, ${escapeHtml(combatState.current_character.help_advantage.action_label)}` : ''}${combatState.current_character.help_advantage.source_name ? ` (${escapeHtml(combatState.current_character.help_advantage.source_name)})` : ''}</div>` : ''}
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
@@ -4943,13 +4968,18 @@ function renderCombatHud() {
             }</div>` : ''}
             ${stressCards.map(({character, effect}) => `<div class="stress-effect-card" data-character="${character.location_character_id}" data-effect="${escapeHtml(effect.id)}" style="margin-top:8px;padding:8px;border:1px solid rgba(215,120,80,.45);border-radius:8px;"><strong>Стресс: ${escapeHtml(character.name)} — ${escapeHtml(effect.name)}</strong><div style="margin-top:4px;font-size:12px;opacity:.86;">${escapeHtml(effect.requirement || '')}</div><div style="margin-top:7px"><button class="btn btn-sm btn-primary stress-approve">Разрешить</button><button class="btn btn-sm btn-secondary stress-replace">Заменить эффект</button><button class="btn btn-sm btn-secondary stress-skip">Пропустить</button></div></div>`).join('')}
             <div style="margin-top:10px;">
-                ${combatState.status !== 'active' && window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn" style="margin-top:8px;">Начать бой</button>' : ''}
                 ${combatState.status === 'active' && combatState.current_character && canActWithCombatCharacter(combatState.current_character) ? '<button class="btn btn-sm btn-secondary combat-end-turn-btn" style="margin-top:8px;">Закончить ход</button>' : ''}
                 ${combatState.status === 'active' && window.isGM ? '<button class="btn btn-sm btn-danger combat-end-combat-btn" style="margin-top:8px; margin-left:6px;">Закончить бой</button>' : ''}
             </div>
             <div style="margin-top:8px; font-size:12px; opacity:0.75;">
                 ${combatState.current_character && canActWithCombatCharacter(combatState.current_character) ? 'ПКМ по модели персонажа открывает боевое меню.' : 'Сейчас управление доступно только активному персонажу.'}
             </div>
+            ` : `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+                <span style="opacity:.72;">Бой не активен</span>
+                ${window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn">Начать бой</button>' : ''}
+            </div>
+            `}
         </div>
     `;
     ensureCombatHudDragging();
@@ -6179,7 +6209,7 @@ async function inspectIncapacitatedCharacter(actorLocationCharacterId, targetCha
             health.current !== null && health.current !== undefined
                 ? `ОЗ ${health.current}/${health.max ?? '?'}`
                 : null,
-            `Кровопотеря: ${health.blood_stage || 'normal'}`,
+            `Кровопотеря: ${getBloodStageLabel(health.blood_stage)}`,
             `Боль: ${health.pain_level ?? 0}`,
             effects.length ? `Эффекты: ${effects.join(', ')}` : 'Активных эффектов нет',
         ].filter(Boolean).join('. '),

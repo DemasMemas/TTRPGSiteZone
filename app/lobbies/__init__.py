@@ -2638,12 +2638,6 @@ def adjust_location_character_stress(lobby_id, location_id, character_id, lobby)
         },
         room=f"character_{loc_char.character.id}",
     )
-    _emit_lobby_chat_message(
-        lobby_id,
-        lobby.gm_id,
-        f"{loc_char.character.name}: стресс {result['before']} -> {result['after']}.",
-        username='Стресс',
-    )
     return jsonify({
         'stress': result,
         'data': loc_char.character.data,

@@ -3067,11 +3067,6 @@ window.adjustCharacterStress = async function(amount) {
             normalizeCharacterEffects(currentCharacterData);
             refreshHealthPanel();
         }
-        const stress = result?.stress;
-        showNotification(
-            `Стресс: ${stress?.before ?? '—'} → ${stress?.after ?? '—'}`,
-            Number(amount) > 0 ? 'system' : 'success',
-        );
     } catch (error) {
         showNotification(error.message || 'Не удалось изменить стресс', 'system');
     } finally {
