@@ -2579,6 +2579,13 @@ function ensureHealthMaximums(data) {
 }
 
 // ========== 12. ВКЛАДКА "ЗДОРОВЬЕ" ==========
+function isStressManifestationEffect(effect) {
+    return (
+        ['stress_effect', 'stress_stupor', 'phobia'].includes(String(effect?.type || ''))
+        || effect?.source === 'stress_manifestation'
+    );
+}
+
 function renderHealthTab(data, container = null) {
     const targetContainer = container || document.getElementById('sheet-tab-health');
     if (!targetContainer) return;
@@ -2618,14 +2625,10 @@ function renderHealthTab(data, container = null) {
         { key: 'infection', label: 'Заражение', value: health.infection, color: '#86d48f' },
     ].filter(item => Number.isFinite(Number(item.value)) && Number(item.value) !== 0);
     const storedEffects = Array.isArray(health.effects) ? normalizeEffectList(health.effects) : [];
-    const isStressManifestation = effect => (
-        ['stress_effect', 'stress_stupor', 'phobia'].includes(String(effect?.type || ''))
-        || effect?.source === 'stress_manifestation'
-    );
-    const stressEffects = storedEffects.filter(
-        effect => isStressManifestation(effect) && effect?.active !== false
-    );
-    const generalStoredEffects = storedEffects.filter(effect => !isStressManifestation(effect));
+    const stressEffects = storedEffects
+        .map((effect, index) => ({ effect, index }))
+        .filter(({ effect }) => isStressManifestationEffect(effect) && effect?.active !== false);
+    const generalStoredEffects = storedEffects.filter(effect => !isStressManifestationEffect(effect));
     const disabledZoneChips = Object.entries(zones)
         .filter(([, zone]) => Number(zone?.max || 0) > 0 && Number(zone?.current) <= 0)
         .map(([area]) => `Выбита зона: ${getEffectAreaLabel(area)}`);
@@ -2693,7 +2696,7 @@ function renderHealthTab(data, container = null) {
                 ${checkButton}
             </div>`;
     }).join('');
-    const stressEffectsHtml = stressEffects.map((effect) => {
+    const stressEffectsHtml = stressEffects.map(({ effect, index }) => {
         const status = effect.gmPending
             ? '\u041e\u0436\u0438\u0434\u0430\u0435\u0442 \u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0413\u041c'
             : (effect.gmSkipped ? '\u041f\u0440\u043e\u043f\u0443\u0449\u0435\u043d \u0413\u041c' : '\u0410\u043a\u0442\u0438\u0432\u0435\u043d');
@@ -2707,6 +2710,7 @@ function renderHealthTab(data, container = null) {
                     <strong>${escapeHtml(effect.name || '\u042d\u0444\u0444\u0435\u043a\u0442 \u0441\u0442\u0440\u0435\u0441\u0441\u0430')}</strong>
                     <div class="text-muted" style="font-size:12px;line-height:1.4;">${escapeHtml(status + remaining)}${requirement ? `<br>${escapeHtml(requirement)}` : ''}</div>
                 </div>
+                ${currentCharacterCanEdit ? `<button type="button" class="btn btn-sm btn-danger" onclick="endStressEffect(${index})" title="\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u044d\u0444\u0444\u0435\u043a\u0442">\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c</button>` : ''}
             </div>`;
     }).join('');
 
@@ -2963,7 +2967,7 @@ function renderHealthTab(data, container = null) {
     };
     let effectsHtml = '';
     effects.forEach((effect, index) => {
-        if (isStressManifestation(effect)) return;
+        if (isStressManifestationEffect(effect)) return;
         const value = effect.value || 0;
         const selectedType = effect.type || 'generic';
         const isBleedingEffect = String(effect.type || '').startsWith('bleeding');
@@ -3145,6 +3149,29 @@ window.removeEffect = function(index) {
     currentCharacterData.health.effects.splice(index, 1);
     refreshHealthPanel();
     scheduleAutoSave();
+};
+
+window.endStressEffect = function(index) {
+    if (!currentCharacterCanEdit || !currentCharacterData?.health) return;
+    updateDataFromFields();
+
+    const effects = normalizeEffectList(currentCharacterData.health.effects || []);
+    const effect = effects[Number(index)];
+    if (!effect || !isStressManifestationEffect(effect) || effect.active === false) {
+        showNotification('\u042d\u0444\u0444\u0435\u043a\u0442 \u0441\u0442\u0440\u0435\u0441\u0441\u0430 \u0443\u0436\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d', 'system');
+        refreshHealthPanel();
+        return;
+    }
+
+    effect.active = false;
+    effect.gmPending = false;
+    effect.endedManually = true;
+    effect.endedAt = new Date().toISOString();
+    currentCharacterData.health.effects = effects;
+    syncHealthDerivedStatuses(currentCharacterData.health);
+    refreshHealthPanel();
+    forceSyncCharacter();
+    showNotification('\u042d\u0444\u0444\u0435\u043a\u0442 \u0441\u0442\u0440\u0435\u0441\u0441\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d', 'success');
 };
 
 // ========== 4. ВКЛАДКА "НАВЫКИ" ==========
@@ -14535,7 +14562,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
         if (socket) {
             socket.emit('join_character', { token: localStorage.getItem('access_token'), character_id: characterId });
             socket.off('character_data_updated');
-            socket.on('character_data_updated', (data) => {
+            socket.on('character_data_updated', async (data) => {
                 if (Number(data.character_id) === Number(currentCharacterId)) {
                     currentCharacterData = data.updates.data || currentCharacterData;
                     normalizeCharacterEffects(currentCharacterData);

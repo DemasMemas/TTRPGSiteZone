@@ -2914,7 +2914,7 @@ function showFacingPaymentSelection(characterId, targetX, targetY, isCombatActiv
     document.body.appendChild(facingMenu);
 }
 
-function resolveFacingCell(clientX, clientY) {
+async function resolveFacingCell(clientX, clientY) {
     const pending = pendingFacingSelection;
     if (!pending) return;
     const tile = getLocationTileAtScreen(clientX, clientY);
@@ -2936,6 +2936,27 @@ function resolveFacingCell(clientX, clientY) {
     }
     pendingFacingSelection = null;
     renderer.domElement.style.cursor = 'default';
+    if (!pending.isCombatActive) {
+        try {
+            const response = await fetch(
+                `/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/characters/${pending.characterId}/facing`,
+                {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${localStorage.getItem('access_token')}`,
+                    },
+                    body: JSON.stringify({ facing_x: targetX, facing_y: targetY }),
+                },
+            );
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || 'Unable to turn');
+            applyCharacterFacingVisual(pending.characterId, targetX, targetY);
+        } catch (error) {
+            showNotification(error.message || 'Не удалось развернуться', 'system');
+        }
+        return;
+    }
     showFacingPaymentSelection(pending.characterId, targetX, targetY, pending.isCombatActive);
 }
 
