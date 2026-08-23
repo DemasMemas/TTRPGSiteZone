@@ -26,7 +26,6 @@ const NARRATIVE_SKILLS = [
     ['skills.physical.strength', 'Сила'],
     ['skills.physical.agility', 'Ловкость'],
     ['skills.physical.will', 'Воля'],
-    ['skills.physical.throwing', 'Метание'],
     ['skills.physical.awareness', 'Внимательность'],
     ['skills.physical.melee', 'Ближний бой'],
     ['skills.physical.shooting', 'Стрельба'],
@@ -1788,21 +1787,100 @@ async function requestReservedReaction(character) {
     }
 }
 
-async function performMustDoRetry(actor) {
+function getMustDoUsage(actor) {
+    const usage = actor?.must_do_usage || {};
+    const retry = actor?.must_do_retry || {};
+    const limit = Math.max(1, Number(usage.limit ?? retry.use_limit) || 1);
+    const remaining = Math.max(0, Number(usage.remaining ?? retry.uses_remaining ?? limit) || 0);
+    return { limit, remaining };
+}
+
+function showManualMustDoModal(actor) {
+    const { limit, remaining } = getMustDoUsage(actor);
+    if (remaining <= 0) {
+        showNotification(`Лимит «Должен это сделать» исчерпан: 0/${limit}`, 'system');
+        return;
+    }
+    document.getElementById('must-do-manual-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'must-do-manual-modal';
+    modal.tabIndex = -1;
+    modal.style.cssText = 'position:fixed;inset:0;z-index:10065;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.58);';
+    modal.innerHTML = `<form style="width:min(460px,100%);background:#171b16;color:#e7e0cb;border:1px solid #625b42;border-radius:8px;padding:18px;box-shadow:0 18px 55px rgba(0,0,0,.58);">
+        <h3 style="margin:0 0 8px;">Должен это сделать</h3>
+        <p style="margin:0 0 14px;opacity:.8;">Ручной повтор по разрешению ГМа. Добавляет 1 стресс. Осталось: ${remaining}/${limit}.</p>
+        <label style="display:grid;gap:5px;margin-bottom:12px;"><span>Действие</span><input name="action_name" class="form-control" maxlength="200" required placeholder="Какой бросок повторяется"></label>
+        <div style="display:grid;grid-template-columns:1fr 120px;gap:10px;margin-bottom:16px;">
+            <label style="display:grid;gap:5px;"><span>Навык</span><select name="skill_path" class="form-control">${NARRATIVE_SKILLS.map(([path, label]) => `<option value="${path}">${label}</option>`).join('')}</select></label>
+            <label style="display:grid;gap:5px;"><span>Сложность</span><input name="difficulty" class="form-control number-input" type="number" min="1" max="40" value="10" required></label>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" class="btn btn-secondary">Отмена</button><button type="submit" class="btn btn-primary">Бросить</button></div>
+    </form>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    const form = modal.querySelector('form');
+    modal.querySelector('[type="button"]').onclick = close;
+    modal.onpointerdown = event => { if (event.target === modal) close(); };
+    modal.onkeydown = event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            close();
+        }
+    };
+    form.onsubmit = async event => {
+        event.preventDefault();
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        const payload = {
+            narrative_action_name: form.elements.action_name.value.trim(),
+            narrative_skill_path: form.elements.skill_path.value,
+            narrative_difficulty: Number.parseInt(form.elements.difficulty.value, 10),
+        };
+        const succeeded = await performMustDoRetry(actor, payload);
+        if (succeeded) close();
+        else submit.disabled = false;
+    };
+    modal.focus();
+    form.elements.action_name.focus();
+}
+
+async function performMustDoRetry(actor, manualPayload = null) {
+    const { limit, remaining } = getMustDoUsage(actor);
+    if (remaining <= 0) {
+        showNotification(`Лимит «Должен это сделать» исчерпан: 0/${limit}`, 'system');
+        return false;
+    }
+    if (!actor?.must_do_retry && !manualPayload) {
+        showManualMustDoModal(actor);
+        return false;
+    }
     try {
         const result = await Server.performLocationCombatAction(
             window.currentLobbyId,
             getCurrentLocationId(),
-            { location_character_id: actor.location_character_id, action_key: 'must_do_it' },
+            {
+                location_character_id: actor.location_character_id,
+                action_key: 'must_do_it',
+                ...(manualPayload || {}),
+            },
         );
         const details = result?.must_do_it || {};
         const check = details.check || {};
+        const uses = Number.isFinite(Number(details.uses_remaining))
+            ? ` Осталось применений: ${details.uses_remaining}/${details.use_limit}.`
+            : '';
+        if (details.kind === 'medical') {
+            const sheet = await import('./characterSheet.js');
+            await sheet.resolveMustDoMedicalRetry(details.medical_retry, Boolean(check.success));
+        }
         showNotification(
-            `Должен это сделать: d20 ${check.roll ?? '—'}, итог ${check.total ?? '—'} против СЛ ${check.difficulty ?? '—'} — ${check.success ? 'успех' : 'провал'}`,
+            `Должен это сделать: d20 ${check.roll ?? '—'}, итог ${check.total ?? '—'} против СЛ ${check.difficulty ?? '—'} — ${check.success ? 'успех' : 'провал'}.${uses}`,
             check.success ? 'success' : 'system',
         );
+        return true;
     } catch (error) {
         showNotification(error.message || 'Не удалось повторить проверку', 'system');
+        return false;
     }
 }
 
@@ -1914,10 +1992,14 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     ];
 
     if (condition.state === 'active') {
-        if (combatCharacter?.must_do_retry) {
+        if (combatCharacter) {
+            const retry = combatCharacter.must_do_retry;
+            const { remaining, limit } = getMustDoUsage(combatCharacter);
             menuItems.push({
-                label: 'Должен', icon: '!',
-                title: `Повторить проваленную проверку «${combatCharacter.must_do_retry.name || 'действие'}» и получить 1 стресс`,
+                label: `Должен ${remaining}/${limit}`, icon: '!',
+                title: retry
+                    ? `Повторить проверку «${retry.name || 'действие'}», получить 1 стресс. Осталось применений: ${remaining}/${limit}`
+                    : `Выполнить разрешённый ГМом повтор, получить 1 стресс. Осталось применений: ${remaining}/${limit}`,
                 angle: 194, ringRadius: 165, requiresCombat: true,
                 action: () => performMustDoRetry(combatCharacter),
             });
@@ -2244,6 +2326,18 @@ function showMeleeCombatMenu(characterId) {
                 <strong>Ближний бой</strong>
                 <button type="button" class="btn btn-sm btn-secondary melee-menu-close">×</button>
             </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:9px;">
+                <label style="display:flex;align-items:center;gap:6px;">Рука блока
+                    <select class="form-control melee-block-arm" style="width:auto;">
+                        <option value="left_arm">Левая</option>
+                        <option value="right_arm">Правая</option>
+                    </select>
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;">
+                    <input type="checkbox" class="melee-block-counterattack" checked>
+                    Ответная атака при глубоком промахе
+                </label>
+            </div>
             <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px;">${blockButtons}</div>
             <div class="melee-action-options" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;"></div>
         </div>
@@ -2252,6 +2346,8 @@ function showMeleeCombatMenu(characterId) {
     menu.querySelectorAll('.melee-block-option').forEach((button) => {
         button.onclick = () => directAction('melee_block', {
             action_points: Number(button.dataset.cost),
+            target_zone: menu.querySelector('.melee-block-arm')?.value || 'right_arm',
+            payment: menu.querySelector('.melee-block-counterattack')?.checked ? 'counterattack' : '',
             label: `Блок за ${button.dataset.cost} ОД`,
         });
     });
@@ -4749,6 +4845,8 @@ function renderCombatHud() {
     const stressCards = window.isGM ? (combatState.characters || []).flatMap(character =>
         (character.stress_effects || []).filter(effect => effect.gmPending).map(effect => ({ character, effect }))
     ) : [];
+    const currentMustDoUsage = getMustDoUsage(combatState.current_character);
+    const currentMustDoRetry = combatState.current_character?.must_do_retry;
     const isCollapsed = combatHudCollapsed ?? combatState.status !== 'active';
     const compactStatus = combatState.status === 'active'
         ? `Раунд ${combatState.round_number || 0} · ${combatState.current_character?.name || 'нет хода'} · ${combatState.current_character?.posture_label || 'Стоя'}`
@@ -4805,6 +4903,7 @@ function renderCombatHud() {
             ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong> · Точность +${combatState.current_character?.aim_accuracy_bonus || 0}</div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
             <div>Кровопотеря: ${combatState.current_character?.blood ?? 'normal'} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
+            ${combatState.status === 'active' && combatState.current_character ? `<div style="margin-top:6px;padding:7px 8px;border-radius:7px;background:rgba(190,143,72,.16);border:1px solid rgba(190,143,72,.28);"><button type="button" class="btn btn-sm btn-secondary combat-must-do-btn" style="width:100%;">Должен это сделать · ${currentMustDoUsage.remaining}/${currentMustDoUsage.limit}</button><div style="margin-top:5px;font-size:12px;opacity:.8;">${currentMustDoRetry ? `Сохранённый провал: ${escapeHtml(currentMustDoRetry.name || 'повторная проверка')}` : 'Ручной повтор по разрешению ГМа'}</div></div>` : ''}
             ${combatState.current_character?.help_advantage ? `<div style="margin-top:6px;padding:6px 8px;border-radius:7px;background:rgba(92,154,110,.16);">Помощь: преимущество${combatState.current_character.help_advantage.action_label ? `, ${escapeHtml(combatState.current_character.help_advantage.action_label)}` : ''}${combatState.current_character.help_advantage.source_name ? ` (${escapeHtml(combatState.current_character.help_advantage.source_name)})` : ''}</div>` : ''}
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
             <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
@@ -4916,6 +5015,11 @@ function renderCombatHud() {
     if (startBtn) {
         startBtn.onclick = showCombatParticipantSelection;
     }
+    const mustDoBtn = combatHud.querySelector('.combat-must-do-btn');
+    if (mustDoBtn) {
+        mustDoBtn.disabled = !canActWithCombatCharacter(combatState.current_character);
+        mustDoBtn.onclick = () => performMustDoRetry(combatState.current_character);
+    }
     const endTurnBtn = combatHud.querySelector('.combat-end-turn-btn');
     if (endTurnBtn) {
         endTurnBtn.onclick = async () => {
@@ -4993,6 +5097,19 @@ export function setCombatState(state) {
     renderCombatHud();
     void autoEndBlockedCombatTurn();
 }
+
+window.addEventListener('must-do-retry-registered', event => {
+    const characterId = Number(event.detail?.characterId);
+    if (!combatState || !characterId || !event.detail?.retry) return;
+    const actor = (combatState.characters || []).find(
+        character => Number(character.character_id) === characterId,
+    );
+    if (actor) actor.must_do_retry = event.detail.retry;
+    if (Number(combatState.current_character?.character_id) === characterId) {
+        combatState.current_character.must_do_retry = event.detail.retry;
+    }
+    renderCombatHud();
+});
 
 async function resumeCompletedCombatAction(state) {
     const current = state?.current_character;

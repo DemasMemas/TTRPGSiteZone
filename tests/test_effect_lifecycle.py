@@ -356,6 +356,20 @@ def test_lost_organ_treatment_window_expires_without_removing_status():
     assert effects[0]["treatment_window_seconds"] == 0
 
 
+def test_lost_organ_is_normalized_as_named_status_with_treatment_window():
+    effect = normalize_effect({
+        "type": "organ_loss",
+        "name": "Повреждённый орган",
+        "area": "rightLung",
+        "source": "organ_damage",
+    })
+
+    assert effect["type"] == "organ_loss"
+    assert effect["name"] == "Повреждённый орган: Правое лёгкое"
+    assert effect["treatment_window_seconds"] == 3600
+    assert effect["treatment_window_expired"] is False
+
+
 def test_five_minute_delayed_effect_advances_in_six_second_rounds():
     health = {"stress": 5}
     effects = [{

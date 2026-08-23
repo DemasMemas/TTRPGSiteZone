@@ -10,11 +10,52 @@ from app.services.equipment_importer import (
     _parse_helmets,
     _parse_melee_weapons,
     _parse_ranged_weapons,
+    _parse_tools,
 )
 
 
 def test_molotov_cocktail_is_not_imported_as_ammunition():
     assert _looks_like_grenade_ammo({"L": "Коктейль Молотова"}) is True
+
+
+def test_repair_tools_are_imported_with_machine_readable_profiles():
+    rows = [
+        {"A": "Инструменты"},
+        {
+            "A": "Набор инструментов Оружейника (Упрощёные) 15/15",
+            "B": "1", "C": "3000", "D": "8", "E": "Ремонт оружия",
+        },
+        {
+            "A": "Набор инструментов Бронника (Расширенные) 35/35",
+            "B": "5", "C": "15000", "D": "16", "E": "Ремонт брони",
+        },
+        {"A": "Вообще другое"},
+    ]
+
+    weapon_tool, armor_tool = _parse_tools(rows)
+
+    assert weapon_tool["category"] == "tool"
+    assert weapon_tool["attributes"]["uses"] == 15
+    assert weapon_tool["attributes"]["repair_profile"]["repair_amount"] == 5
+    assert weapon_tool["attributes"]["repair_profile"]["engineering_min"] == 10
+    assert armor_tool["attributes"]["uses"] == 35
+    assert armor_tool["attributes"]["repair_profile"]["repair_stages"] == 2
+
+
+def test_field_repair_kits_are_single_use_tools():
+    rows = [
+        {"A": "Инструменты"},
+        {"A": "Набор смазочных приспособлений", "E": "Полевой ремонт оружия"},
+        {"A": "Полевой ремкомплект для брони", "E": "Полевой ремонт брони"},
+        {"A": "Вообще другое"},
+    ]
+
+    weapon_kit, armor_kit = _parse_tools(rows)
+
+    assert weapon_kit["attributes"]["uses"] == 1
+    assert weapon_kit["attributes"]["repair_profile"]["consumed_on_use"] is True
+    assert armor_kit["attributes"]["uses"] == 1
+    assert armor_kit["attributes"]["repair_profile"]["consumed_on_use"] is True
 
 
 def test_dash_disables_all_automatic_fire_modes():
@@ -71,6 +112,21 @@ def test_melee_weapon_imports_weight_class_from_rules_description():
     weapon = _parse_melee_weapons(rows)[0]
 
     assert weapon["attributes"]["weight_class"] == "\u0422\u044f\u0436\u0435\u043b\u043e\u0435"
+
+
+def test_melee_weapon_rule_overrides_update_prices_and_tomahawk_attacks():
+    rows = [
+        {"S": "Топор", "T": "Тяжелое", "U": "40", "W": "2500", "AC": "Рубящий"},
+        {
+            "S": "Томагавк", "T": "Легкое", "U": "30", "W": "1000",
+            "AC": "Рубящий", "AD": "Режущий", "AE": "Колющий",
+        },
+    ]
+
+    axe, tomahawk = _parse_melee_weapons(rows)
+
+    assert axe["price"] == 5000
+    assert tomahawk["attributes"]["allowed_attacks"] == ["Рубящий", "Колющий"]
 
 
 def test_ranged_weapon_keeps_fractional_and_textual_characteristics():

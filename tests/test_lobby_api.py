@@ -1964,6 +1964,100 @@ def test_narrative_combat_action_spends_ap_rolls_and_writes_chat(
     assert actor_loc_char.character.data["health"]["stress"] == 1
     assert "mustDoRetry" not in actor_loc_char.character.data["health"]["combatMeta"]
 
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 15)
+    failed_again = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(actor),
+        json={
+            "location_character_id": actor_loc_char.id,
+            "action_key": "narrative_action",
+            "action_points": 0,
+            "narrative_action_name": "Повторная важная проверка",
+            "narrative_roll_required": True,
+            "narrative_skill_path": "skills.other.engineering",
+            "narrative_difficulty": 20,
+        },
+    )
+    assert failed_again.status_code == 200
+
+    exhausted_retry = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(actor),
+        json={
+            "location_character_id": actor_loc_char.id,
+            "action_key": "must_do_it",
+        },
+    )
+    assert exhausted_retry.status_code == 400
+    assert "ten-minute interval" in exhausted_retry.get_json()["error"]["message"]
+
+
+def test_must_do_it_allows_gm_approved_manual_check_without_stored_failure(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("manual-must-do-gm")
+    actor = create_user("manual-must-do-player")
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, actor, auth_headers)
+    character = create_character(client, lobby, actor, auth_headers, data={
+        "skills": {
+            "physical": {"will": {"base": 12, "bonus": 0}},
+            "other": {"engineering": {"base": 12, "bonus": 0}},
+        },
+        "health": {"effects": [], "stress": 0},
+    })
+    location = Location(
+        lobby_id=lobby["id"], name="Manual must do", world_tile_x=0, world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    actor_loc_char = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        controlled_by=actor["id"],
+        action_points_current=5,
+        action_points_max=5,
+    )
+    db.session.add(actor_loc_char)
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[actor_loc_char.id],
+        current_location_character_id=actor_loc_char.id,
+    ))
+    db.session.commit()
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(actor),
+        json={
+            "location_character_id": actor_loc_char.id,
+            "action_key": "must_do_it",
+            "narrative_action_name": "Запускаю аварийный генератор",
+            "narrative_skill_path": "skills.other.engineering",
+            "narrative_difficulty": 18,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["must_do_it"]["kind"] == "manual"
+    assert payload["must_do_it"]["check"]["success"] is True
+    assert payload["must_do_it"]["uses_remaining"] == 0
+    assert payload["state"]["current_character"]["must_do_retry"] is None
+    assert payload["state"]["current_character"]["must_do_usage"] == {
+        "will_bonus": 1,
+        "limit": 1,
+        "used": 1,
+        "remaining": 0,
+    }
+    db.session.refresh(actor_loc_char.character)
+    assert actor_loc_char.character.data["health"]["stress"] == 1
+
 
 def test_consolation_costs_three_ap_reduces_stress_and_is_limited_per_game_hour(
     client, create_user, auth_headers, monkeypatch
@@ -2206,3 +2300,121 @@ def test_weapon_fire_rate_rejects_excess_shots_without_spending_ammo_or_ap(
         "round": 1,
         "shots": {"0": 2},
     }
+
+
+def test_area_fire_uses_two_bursts_and_applies_weapon_class_penalty(
+    client, create_user, auth_headers, monkeypatch,
+):
+    gm = create_user("area-fire-rules-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    actor = create_character(client, lobby, gm, auth_headers, data={
+        "weapons": [{
+            "name": "Test rifle",
+            "subcategory": "Штурмовые винтовки и карабины",
+            "fireRate": 20,
+            "fireModes": {
+                "burst_size": 4,
+                "supports_burst": True,
+                "supports_area_fire": True,
+            },
+            "accuracy": 0,
+            "range": 20,
+            "durability": 100,
+            "installedMagazine": {
+                "ammo": [{
+                    "name": "5.56x45",
+                    "category": "ammo",
+                    "quantity": 20,
+                    "attributes": {
+                        "caliber": "5.56x45", "damage": 0,
+                        "armor_piercing": 0,
+                    },
+                }],
+            },
+        }],
+        "health": {"effects": []},
+    })
+    target = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"effects": []},
+    })
+    unselected_target = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"effects": []},
+    })
+    location = Location(
+        lobby_id=lobby["id"], name="Area fire arena",
+        world_tile_x=0, world_tile_z=0, grid_width=10, grid_height=10,
+    )
+    db.session.add(location)
+    db.session.flush()
+    actor_location = LocationCharacter(
+        location_id=location.id, character_id=actor["id"],
+        pos_x=1, pos_y=1, facing_x=0, facing_y=1,
+        drawn_weapon_index=0, action_points_current=5, action_points_max=5,
+        team_name="Blue",
+    )
+    target_location = LocationCharacter(
+        location_id=location.id, character_id=target["id"], pos_x=1, pos_y=3,
+        team_name="Red",
+    )
+    unselected_location = LocationCharacter(
+        location_id=location.id, character_id=unselected_target["id"],
+        pos_x=2, pos_y=3, team_name="Red",
+    )
+    db.session.add_all([actor_location, target_location, unselected_location])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id, status="active", round_number=1,
+        turn_index=0,
+        turn_order=[actor_location.id, target_location.id, unselected_location.id],
+        current_location_character_id=actor_location.id,
+    ))
+    db.session.commit()
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 10)
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(gm),
+        json={
+            "location_character_id": actor_location.id,
+            "action_key": "attack",
+            "weapon_index": 0,
+            "fire_mode": "area",
+            "shot_count": 8,
+            "volley_count": 2,
+            "action_points": 5,
+            "target_character_ids": [target["id"]],
+            "area_center_x": 1,
+            "area_center_y": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    attack = response.get_json()["attack"]
+    assert attack["shot_count"] == 8
+    assert attack["volley_count"] == 2
+    assert attack["area_fire_accuracy_penalty"] == 4
+    assert attack["hit_difficulty"] == 16
+    assert {
+        entry["character_id"] for entry in attack["area_stressed_characters"]
+    } == {target["id"], unselected_target["id"]}
+    assert response.get_json()["character"]["must_do_retry"]["kind"] == "attack"
+    db.session.refresh(actor_location.character)
+    assert actor_location.character.data["weapons"][0]["ammo"] == 12
+
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+    retry = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(gm),
+        json={
+            "location_character_id": actor_location.id,
+            "action_key": "must_do_it",
+        },
+    )
+
+    assert retry.status_code == 200
+    retry_payload = retry.get_json()
+    assert retry_payload["must_do_it"]["check"]["success"] is True
+    assert retry_payload["attack"]["hits"] >= 1
+    db.session.refresh(actor_location.character)
+    assert actor_location.character.data["weapons"][0]["ammo"] == 12
+    assert actor_location.character.data["health"]["stress"] == 1

@@ -29,6 +29,7 @@ const EFFECT_TYPE_META = {
     mangled_limb: { label: 'Искореженная конечность', group: 'injury' },
     temporary_limb_restoration: { label: 'Временное восстановление конечности', group: 'medical' },
     delayed_limb_treatment: { label: 'Отложенное лечение конечности', group: 'medical' },
+    organ_loss: { label: 'Повреждённый орган', group: 'injury' },
     organ_failure: { label: 'Смертельное повреждение органа', group: 'critical' },
     shock: { label: 'Шок', group: 'injury' },
     unconsciousness: { label: 'Без сознания', group: 'critical' },
@@ -183,6 +184,14 @@ const STATUS_EFFECT_TYPES = new Set([
     'bleeding_internal_severe',
     'bleeding_internal_extreme',
 ]);
+
+const ORGAN_LABELS = {
+    heart: 'Сердце', rightLung: 'Правое лёгкое', leftLung: 'Левое лёгкое',
+    rightKidney: 'Правая почка', leftKidney: 'Левая почка', stomach: 'Желудок',
+    liver: 'Печень', brain: 'Мозг', spine: 'Позвоночник',
+    rightEye: 'Правый глаз', leftEye: 'Левый глаз',
+    rightEar: 'Правое ухо', leftEar: 'Левое ухо', nose: 'Нос', jaw: 'Челюсть',
+};
 
 const BLEEDING_STAGE_ORDER = ['normal', 'light', 'medium', 'severe', 'critical', 'fatal'];
 const BLEEDING_STAGE_PENALTIES = {
@@ -458,6 +467,18 @@ export function normalizeEffect(raw = {}) {
     });
     if (['', 'общий', 'generic', 'неопределенный эффект', 'неопределённый эффект'].includes(String(normalized.name || '').trim().toLowerCase()) && type !== 'generic') {
         normalized.name = getEffectMeta(type).label;
+    }
+    if (type === 'organ_loss') {
+        if (normalized.area) {
+            normalized.name = `Повреждённый орган: ${ORGAN_LABELS[normalized.area] || normalized.area}`;
+        }
+        normalized.treatment_window_seconds = Math.max(
+            0,
+            Number(raw.treatment_window_seconds ?? normalized.treatment_window_seconds ?? 3600),
+        );
+        normalized.treatment_window_expired = Boolean(
+            raw.treatment_window_expired || normalized.treatment_window_seconds <= 0,
+        );
     }
     const maxHours = toInt(normalized.max_hours, 0);
     if (normalized.remaining === null && maxHours > 0) {

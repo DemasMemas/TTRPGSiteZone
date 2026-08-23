@@ -647,11 +647,15 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
 
     if "бинт" in lower:
         direct["uses"] = 1
+        direct["treatment_action_points"] = 4
+        direct["treatment_time_uses_medicine"] = True
         bleeding("light", treated="стерильный" in lower)
         applications.append({"kind": "bleeding", "max_stage": "medium", "internal": False,
                              "action_points": 1, "treated": "стерильный" in lower,
                              "item_uses": 2, "medicine_bonus": 2, "allow_weakening": True})
     if "антисептический тампон" in lower:
+        direct["treatment_action_points"] = 2
+        direct["treatment_time_uses_medicine"] = True
         bleeding("light", treated=True)
     if "пластырь с гемостатиком" in lower:
         bleeding("medium", ap=2)
@@ -663,6 +667,8 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
         bleeding("light", ap=1)
         bleeding("medium", ap=2)
     if any(name in lower for name in ("жгут", "турникет")) and "шина шарнирова" not in lower:
+        direct["treatment_action_points"] = 4
+        direct["treatment_time_uses_medicine"] = True
         stage = "extreme" if "альфа" in lower else "severe" if "турникет" in lower else "medium"
         bleeding(stage)
         direct.update({"tourniquet": True, "limb_only": True})

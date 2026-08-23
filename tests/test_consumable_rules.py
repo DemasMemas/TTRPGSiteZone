@@ -363,6 +363,29 @@ def test_hemostatic_applications_allow_weakening_next_bleeding_stage():
     ]
 
 
+def test_bandage_uses_four_action_point_treatment_time():
+    direct = parse_consumable_effects(
+        "Бинт. Останавливает Слабое кровотечение."
+    )["direct"]
+
+    assert direct["treatment_action_points"] == 4
+    assert direct["treatment_time_uses_medicine"] is True
+
+
+def test_tampon_and_tourniquet_have_their_treatment_times():
+    tampon = parse_consumable_effects(
+        "Антисептический тампон. Останавливает Слабое кровотечение."
+    )["direct"]
+    tourniquet = parse_consumable_effects(
+        "Жгут. Останавливает Среднее кровотечение."
+    )["direct"]
+
+    assert tampon["treatment_action_points"] == 2
+    assert tampon["treatment_time_uses_medicine"] is True
+    assert tourniquet["treatment_action_points"] == 4
+    assert tourniquet["treatment_time_uses_medicine"] is True
+
+
 def test_internal_hemostatic_keeps_internal_targeting_and_weakening():
     profile = parse_consumable_effects(
         "Глобулин. Останавливает внутреннее Сильное кровотечение."

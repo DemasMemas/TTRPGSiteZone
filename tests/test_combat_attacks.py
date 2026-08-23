@@ -20,6 +20,24 @@ def test_aimed_shot_can_override_hit_zone():
     assert CombatService._random_hit_zone(1, "head") == "head"
 
 
+@pytest.mark.parametrize(("roll", "zone"), [
+    (1, "right_leg"),
+    (2, "right_leg"),
+    (3, "left_leg"),
+    (4, "left_leg"),
+    (5, "abdomen"),
+    (8, "abdomen"),
+    (9, "chest"),
+    (12, "chest"),
+    (13, "left_arm"),
+    (16, "left_arm"),
+    (17, "right_arm"),
+    (20, "right_arm"),
+])
+def test_unaimed_melee_hit_zone_follows_d20_table_without_head(roll, zone):
+    assert CombatService._random_hit_zone(roll, melee=True) == zone
+
+
 def test_fall_uses_agility_roll_and_breaks_both_legs_on_four_meter_failure(monkeypatch):
     monkeypatch.setattr(combat_module.random, "randint", lambda *_: 1)
     monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
@@ -327,6 +345,82 @@ def test_melee_action_cost_uses_attack_and_weight_class_rules():
     assert CombatService._melee_action_cost({"weight_class": "heavy"}, "\u043a\u0440\u0443\u0433\u043e\u0432\u043e\u0439") == 4
 
 
+def test_block_converts_near_miss_to_half_damage_in_selected_arm(monkeypatch):
+    monkeypatch.setattr(CombatService, "_target_armor", lambda *_: (0, []))
+    monkeypatch.setattr(
+        CombatService,
+        "_apply_attack_damage",
+        lambda *args, **kwargs: {
+            "current": 695,
+            "zones": {"leftArm": {"current": 85}},
+        },
+    )
+    attacker = SimpleNamespace(
+        character=SimpleNamespace(id=1, name="Attacker", data={"weapons": []}),
+    )
+    target = SimpleNamespace(
+        character=SimpleNamespace(id=2, name="Defender", data={"health": {}}),
+        hp_zones={},
+    )
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": -1,
+            "attack_type": "unarmed",
+            "hit_difficulty": 12,
+            "round_number": 1,
+            "melee": True,
+            "block_penalty": 3,
+            "block_arm": "left_arm",
+        },
+        melee=True,
+        attack_type="unarmed",
+        forced_roll=10,
+    )
+
+    assert result["partial_block"] is True
+    assert result["zone"] == "left_arm"
+    assert result["base_damage"] == 5
+    assert result["damage"] == 5
+
+
+def test_deep_block_miss_can_trigger_counterattack(monkeypatch):
+    counterattack = {"hit": True, "roll": 18, "difficulty": 10, "damage": 12}
+    monkeypatch.setattr(
+        CombatService, "_resolve_block_counterattack", lambda *args: counterattack,
+    )
+    attacker = SimpleNamespace(
+        character=SimpleNamespace(id=1, name="Attacker", data={"weapons": []}),
+    )
+    target = SimpleNamespace(
+        character=SimpleNamespace(id=2, name="Defender", data={"health": {}}),
+        hp_zones={},
+    )
+
+    result = CombatService._resolve_attack(
+        target,
+        attacker,
+        {
+            "weapon_index": -1,
+            "attack_type": "unarmed",
+            "hit_difficulty": 15,
+            "round_number": 1,
+            "melee": True,
+            "block_penalty": 4,
+            "block_counterattack": True,
+        },
+        melee=True,
+        attack_type="unarmed",
+        forced_roll=5,
+    )
+
+    assert result["hit"] is False
+    assert result["block_counterattack_triggered"] is True
+    assert result["counterattack_result"] is counterattack
+
+
 def test_circular_attack_uses_slashing_or_crushing_damage_profile(app):
     with app.app_context():
         slashing = CombatService._weapon_damage_profile(
@@ -410,6 +504,27 @@ def test_attack_summary_lists_each_target_damage_bleeding_and_trauma():
     assert "Доп. травма: d20 8 (перелом, боль +1)." in summary
     assert "Вторая цель: d20 4, СЛ 15 — промах." in summary
     assert "Итого: попаданий 1/2, урон 42." in summary
+
+
+def test_attack_summary_explains_partial_block_arm_damage():
+    summary = CombatService.format_attack_summary({
+        "character": {"name": "Attacker"},
+        "attack": {
+            "results": [{
+                "target_name": "Defender",
+                "roll": 10,
+                "difficulty": 12,
+                "hit": True,
+                "mode": "melee",
+                "zone": "left_arm",
+                "damage": 20,
+                "partial_block": True,
+                "block_arm": "left_arm",
+            }],
+        },
+    })
+
+    assert "частичный блок: половина урона приходится в левую руку" in summary
 
 
 def test_attack_summary_reports_additional_trauma_organ_damage():
@@ -1844,6 +1959,57 @@ def test_only_pistol_subcategory_gets_cheap_unaimed_shot():
     assert CombatService._is_pistol_weapon({"subcategory": "пистолеты-пулеметы"}) is False
 
 
+def test_rapid_fire_adds_four_difficulty_except_for_12x70_buckshot(app):
+    regular_weapon = {
+        "installedMagazine": {
+            "ammo": [{
+                "name": "9x19 обычный",
+                "quantity": 1,
+                "attributes": {"caliber": "9x19", "damage": 30},
+            }],
+        },
+    }
+    buckshot_weapon = {
+        "fixedAmmo": [{
+            "name": "12х70 Картечь",
+            "quantity": 1,
+            "attributes": {
+                "caliber": "12x70", "ammo_variant": "buckshot", "damage": 50,
+            },
+        }],
+    }
+
+    with app.app_context():
+        assert CombatService._rapid_fire_accuracy_penalty(regular_weapon) == 4
+        assert CombatService._rapid_fire_accuracy_penalty(buckshot_weapon) == 0
+
+
+@pytest.mark.parametrize(("subcategory", "penalty"), [
+    ("Штурмовые винтовки и карабины", 4),
+    ("Пистолеты-пулеметы", 2),
+    ("Дробовики", 6),
+    ("Пулемёты", -4),
+])
+def test_area_fire_penalty_depends_only_on_weapon_class(subcategory, penalty):
+    assert CombatService._area_fire_accuracy_penalty(
+        {"subcategory": subcategory},
+    ) == penalty
+
+
+def test_area_fire_spends_two_bursts_or_ten_machine_gun_rounds():
+    assert CombatService._area_fire_shot_count({"burst_size": 4}) == 8
+    assert CombatService._area_fire_shot_count({
+        "machine_gun_burst": True,
+    }) == 10
+
+
+def test_area_fire_gains_one_hit_for_each_three_above_difficulty():
+    assert CombatService._area_fire_hit_count(12, 12, 8) == 1
+    assert CombatService._area_fire_hit_count(15, 12, 8) == 2
+    assert CombatService._area_fire_hit_count(18, 12, 8) == 3
+    assert CombatService._area_fire_hit_count(30, 1, 2) == 2
+
+
 def test_fixed_magazine_uses_the_next_loaded_ammo_stack():
     weapon = {
         "fixedAmmo": [
@@ -2114,6 +2280,8 @@ def test_weapon_jam_is_saved_and_applies_its_durability_loss(monkeypatch):
     assert result["triggered"] is True
     assert result["attack_roll"] == 1
     assert result["result"] == 4
+    assert result["id"]
+    assert result["durability_loss_applied"] == 3
     assert weapon["jam"]["accuracy_penalty"] == 2
     assert weapon["durability"] == 87
 
@@ -2151,6 +2319,31 @@ def test_weapon_jam_uses_attack_roll_without_separate_d20(monkeypatch):
     assert jam["triggered"] is True
     assert jam["attack_roll"] == 2
     assert random_calls == [(1, 6)]
+
+
+def test_must_do_retry_replaces_only_jam_caused_by_original_roll():
+    old_jam = {"id": "old", "result": 4, "accuracy_penalty": 2}
+    replaced_jam = {
+        "id": "replaced", "result": 2, "blocks_fire": True,
+        "durability_loss_applied": 3,
+    }
+    weapon = {
+        "durability": 87,
+        "maxDurability": 100,
+        "jams": [old_jam, replaced_jam],
+        "jam": replaced_jam,
+    }
+
+    result = CombatService._replace_must_do_weapon_jams(
+        weapon,
+        [{"id": "replaced", "durability_loss_applied": 3}],
+        20,
+    )
+
+    assert result["triggered"] is False
+    assert weapon["durability"] == 90
+    assert weapon["jams"] == [old_jam]
+    assert weapon["jam"] == old_jam
 
 
 def test_blocking_weapon_jam_stops_remaining_burst(monkeypatch):
@@ -2307,6 +2500,20 @@ def test_repair_clears_catastrophic_jam_only_at_required_durability():
     assert "jam" in weapon
 
     weapon["durability"] = 100
+    CombatService._weapon_durability(weapon)
+    assert "jam" not in weapon
+
+
+def test_catastrophic_jam_uses_repair_reduced_maximum_durability():
+    weapon = {
+        "durability": 59,
+        "maxDurability": 60,
+        "jam": {"result": 12, "repair_required": "full"},
+    }
+    CombatService._weapon_durability(weapon)
+    assert "jam" in weapon
+
+    weapon["durability"] = 60
     CombatService._weapon_durability(weapon)
     assert "jam" not in weapon
 

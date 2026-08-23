@@ -47,6 +47,14 @@ export const Server = {
         });
     },
 
+    async repairCharacterEquipment(characterId, toolPath, targetPath) {
+        return apiFetch(`/lobbies/characters/${characterId}/repair-equipment`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tool_path: toolPath, target_path: targetPath }),
+        });
+    },
+
     async getWorldGroups(lobbyId) {
         return apiFetch(`/lobbies/${lobbyId}/world-groups`);
     },

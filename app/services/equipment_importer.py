@@ -398,6 +398,16 @@ def _finalize_weapon_magazine_attributes(template: Dict[str, Any], fixed_magazin
         attributes.pop("magazine_size", None)
 
 
+MELEE_PRICE_OVERRIDES = {
+    "Спиральный нож": 3500,
+    "Топор": 5000,
+    "Сабля": 8000,
+    "Кортик": 9000,
+    "Кувалда": 10000,
+    "Меч": 10000,
+}
+
+
 def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     templates: List[Dict[str, Any]] = []
     ignored = {"Название", "Ваши руки", "Ваш приклад"}
@@ -411,6 +421,11 @@ def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
             attack = _normalize_text(row.get(column))
             if attack and attack != "-" and attack not in allowed_attacks:
                 allowed_attacks.append(attack)
+        if name == "Томагавк":
+            allowed_attacks = [
+                attack for attack in allowed_attacks
+                if "режущ" not in attack.lower().replace("ё", "е")
+            ]
         if not allowed_attacks and name != "Нож стреляющий":
             continue
         description = _normalize_text(row.get("T"))
@@ -433,7 +448,7 @@ def _parse_melee_weapons(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
                 "subcategory": "Оружие ближнего боя",
                 "item_class": None,
                 "description": description,
-                "price": _as_int(row.get("W")),
+                "price": MELEE_PRICE_OVERRIDES.get(name, _as_int(row.get("W"))),
                 "weight": _parse_weight(row.get("Y")),
                 "volume": float(_as_int(row.get("Z"))),
                 "attributes": {
@@ -650,6 +665,88 @@ def _parse_exoskeleton_battery(rows: List[Dict[str, str]]) -> List[Dict[str, Any
     return []
 
 
+def _parse_tools(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    profiles = {
+        "набор смазочных приспособлений": {
+            "kind": "weapon", "repair_amount": 10, "duration_minutes": 5,
+            "minimum_durability": 0, "engineering_min": 0, "consumed_on_use": True,
+        },
+        "набор инструментов оружейника (упрощеные) 15/15": {
+            "kind": "weapon", "repair_amount": 5, "duration_minutes": 30,
+            "minimum_durability": 75, "engineering_min": 10, "max_item_class": 2,
+        },
+        "набор инструментов оружейника (стандартные) 25/25": {
+            "kind": "weapon", "repair_amount": 10, "duration_minutes": 30,
+            "minimum_durability": 45, "engineering_min": 13, "max_item_class": 3,
+        },
+        "набор инструментов оружейника (расширенные) 40/40": {
+            "kind": "weapon", "repair_amount": 20, "duration_minutes": 30,
+            "minimum_durability": 20, "engineering_min": 17,
+        },
+        "полевой ремкомплект для брони": {
+            "kind": "armor_current_stage", "duration_minutes": 5, "engineering_min": 0,
+            "consumed_on_use": True,
+        },
+        "набор инструментов бронника (упрощеные) 10/10": {
+            "kind": "armor", "repair_stages": 1, "duration_minutes": 30,
+            "maximum_damage_stage": 3, "engineering_min": 11, "max_item_class": 2,
+        },
+        "набор инструментов бронника (стандартные) 20/20": {
+            "kind": "armor", "repair_stages": 1, "duration_minutes": 30,
+            "maximum_damage_stage": 4, "engineering_min": 14, "max_item_class": 3,
+        },
+        "набор инструментов бронника (расширенные) 35/35": {
+            "kind": "armor", "repair_stages": 2, "duration_minutes": 30,
+            "maximum_damage_stage": 5, "engineering_min": 17,
+        },
+        "набор восстановления инструментов": {
+            "kind": "restore_tool", "restore_fraction": 0.5, "duration_minutes": 0,
+        },
+    }
+    profiles = {_normalize_equipment_name(name): profile for name, profile in profiles.items()}
+    templates: List[Dict[str, Any]] = []
+    section_starts = [
+        index for index, row in enumerate(rows)
+        if _normalize_text(row.get("A")) == "Инструменты"
+    ]
+    if not section_starts:
+        return templates
+    for row in rows[section_starts[-1] + 1:]:
+        name = _normalize_text(row.get("A"))
+        if name == "Вообще другое":
+            break
+        if not name:
+            continue
+        normalized = _normalize_equipment_name(name)
+        uses_match = re.search(r"(\d+)\s*/\s*\d+\s*$", normalized)
+        attributes: Dict[str, Any] = {
+            "import_source": "equipment_workbook",
+            "section": "Инструменты",
+            "raw_row": row,
+        }
+        if uses_match:
+            attributes["uses"] = _as_int(uses_match.group(1), 0)
+        profile = profiles.get(normalized)
+        if profile:
+            attributes["repair_profile"] = profile
+            attributes["usable"] = True
+            if profile.get("consumed_on_use"):
+                attributes["uses"] = 1
+        templates.append({
+            "name": name,
+            "category": "tool",
+            "subcategory": "Инструменты",
+            "item_class": None,
+            "description": _normalize_text(row.get("E")),
+            "price": _as_int(row.get("C")),
+            "weight": _as_float(row.get("B")),
+            "volume": _as_float(row.get("D")),
+            "attributes": attributes,
+            "compatible_ids": [],
+        })
+    return templates
+
+
 def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
     rows = _read_sheet_rows(workbook_path, "Магазины и Патроны")
     weapon_rows = _read_sheet_rows(workbook_path, "Оружие")
@@ -661,6 +758,7 @@ def parse_equipment_templates(workbook_path: Path) -> List[Dict[str, Any]]:
         *_parse_armor(armor_rows),
         *_parse_helmets(armor_rows),
         *_parse_exoskeleton_battery(misc_rows),
+        *_parse_tools(misc_rows),
     ]
     for row in rows:
         name_a = _normalize_text(row.get("A"))
@@ -839,7 +937,7 @@ def upsert_equipment_templates(workbook_path: str | Path, session=None) -> Dict[
 
     imported_categories = [
         "ammo", "magazine", "weapon", "melee_weapon", "armor", "helmet",
-        "gas_mask", "exoskeleton_module",
+        "gas_mask", "exoskeleton_module", "tool",
     ]
     existing_by_category: Dict[str, List[ItemTemplate]] = {}
     for item in ItemTemplate.query.filter(ItemTemplate.category.in_(imported_categories)).all():

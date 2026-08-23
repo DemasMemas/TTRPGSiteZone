@@ -18,6 +18,7 @@ from app.services.character import CharacterService
 from app.services.combat import CombatService
 from app.services.character_interaction import CharacterInteractionService
 from app.services.health import apply_health_maximums
+from app.services.equipment_repair import repair_equipment, resolve_item_path
 from app.services.addictions import advance_addictions, record_exposure, withdrawal_check
 from app.services.effects import (
     advance_timed_effects,
@@ -1190,6 +1191,78 @@ def _character_edit_allowed(character, user_id):
             character_id=character.id, controlled_by=user_id,
         ).first() is not None
     )
+
+
+@lobbies_bp.route('/characters/<int:character_id>/repair-equipment', methods=['POST'])
+@jwt_required()
+def repair_character_equipment(character_id):
+    user_id = int(get_jwt_identity())
+    character = CharacterService.get_character(character_id, user_id)
+    if not _character_edit_allowed(character, user_id):
+        return jsonify({'error': 'Character cannot be edited'}), 403
+    lobby = db.session.get(Lobby, character.lobby_id)
+    location_ids = [
+        entry.location_id
+        for entry in LocationCharacter.query.filter_by(character_id=character.id).all()
+    ]
+    if location_ids and LocationCombatState.query.filter(
+        LocationCombatState.location_id.in_(location_ids),
+        LocationCombatState.status == 'active',
+    ).first():
+        return jsonify({'error': 'Ремонт снаряжения доступен только вне боя'}), 400
+
+    payload = request.get_json(silent=True) or {}
+    tool_path = payload.get('tool_path')
+    target_path = payload.get('target_path')
+    if not isinstance(tool_path, list) or not isinstance(target_path, list):
+        return jsonify({'error': 'Нужно выбрать инструменты и предмет для ремонта'}), 400
+    character_data = deepcopy(character.data or {})
+    try:
+        tool = resolve_item_path(character_data, tool_path)
+        target = resolve_item_path(character_data, target_path)
+        template_ids = {
+            int(value) for value in (tool.get('templateId'), target.get('templateId'))
+            if str(value or '').isdigit()
+        }
+        templates = {
+            item.id: item for item in ItemTemplate.query.filter(ItemTemplate.id.in_(template_ids)).all()
+        } if template_ids else {}
+        result = repair_equipment(
+            character_data, tool_path, target_path,
+            tool_template=templates.get(int(tool.get('templateId'))) if str(tool.get('templateId') or '').isdigit() else None,
+            target_template=templates.get(int(target.get('templateId'))) if str(target.get('templateId') or '').isdigit() else None,
+        )
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 400
+
+    character.data = character_data
+    flag_modified(character, 'data')
+    db.session.commit()
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': character.id,
+            'updates': {'data': character.data},
+            'updated_by': user_id,
+        },
+        room=f"character_{character.id}",
+    )
+    _emit_lobby_chat_message(
+        lobby.id,
+        user_id,
+        (
+            f"{character.name}: ремонт «{result['target_name']}» набором "
+            f"«{result['tool_name']}». Длительность действия: {result['duration_minutes']} мин. "
+            "Глобальное время не изменено."
+        ),
+        username='Система',
+    )
+    return jsonify({
+        'message': 'Снаряжение отремонтировано',
+        'result': result,
+        'character_data': character.data,
+        'time_advanced': False,
+    }), 200
 
 
 @lobbies_bp.route('/characters/<int:character_id>/addictions/exposure', methods=['POST'])

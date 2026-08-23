@@ -4,6 +4,7 @@ import heapq
 import re
 import uuid
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from app.extensions import db
 from app.models import Location, LocationCharacter, LocationCombatState, LobbyParticipant, LobbyCharacter, LocationObject
@@ -185,7 +186,6 @@ class CombatService:
         'skills.physical.strength': 'Сила',
         'skills.physical.agility': 'Ловкость',
         'skills.physical.will': 'Воля',
-        'skills.physical.throwing': 'Метание',
         'skills.physical.awareness': 'Внимательность',
         'skills.physical.melee': 'Ближний бой',
         'skills.physical.shooting': 'Стрельба',
@@ -201,9 +201,9 @@ class CombatService:
         'skills.other.survival': 'Выживание',
     }
     WEAPON_JAM_RESULTS = {
-        1: {'label': 'Гильза осталась в затворе', 'fix_ap': 1, 'durability_loss': 0, 'blocks_fire': True},
-        2: {'label': 'Печная труба', 'fix_ap': 2, 'durability_loss': 1, 'blocks_fire': True},
-        3: {'label': 'Смятый патрон сместил затвор', 'fix_ap': 4, 'durability_loss': 3, 'blocks_fire': True},
+        1: {'label': 'Гильза не выброшена из затвора', 'fix_ap': 1, 'durability_loss': 0, 'blocks_fire': True},
+        2: {'label': 'Гильза застряла в окне затворной рамы', 'fix_ap': 2, 'durability_loss': 1, 'blocks_fire': True},
+        3: {'label': 'Гильза смята в затворе', 'fix_ap': 4, 'durability_loss': 3, 'blocks_fire': True},
         4: {'label': 'Сбит прицел', 'fix_ap': 4, 'durability_loss': 3, 'accuracy_penalty': 2},
         5: {'label': 'Искривлён приклад', 'fix_ap': 4, 'durability_loss': 4, 'shooting_disadvantage': True},
         6: {'label': 'Натяжение пружины', 'fix_ap': 4, 'durability_loss': 4, 'extra_wear_per_shot': 1},
@@ -211,8 +211,8 @@ class CombatService:
         8: {'label': 'Двойная подача заклинила затвор', 'fix_ap': 5, 'durability_loss': 5, 'blocks_fire': True},
         9: {'label': 'Искривлён спусковой механизм', 'fix_ap': 5, 'durability_loss': 6, 'blocks_fire': True},
         10: {'label': 'Повреждены курок, затвор и рама', 'fix_ap': 8, 'durability_loss': 10, 'blocks_fire': True},
-        11: {'label': 'Разрыв ствола', 'durability_loss': 10, 'accuracy_penalty': 5, 'repair_required': 'increase'},
-        12: {'label': 'Разрушены боёк и затвор', 'durability_loss': 15, 'blocks_fire': True, 'repair_required': 'full'},
+        11: {'label': 'Разрыв ствола на конце', 'durability_loss': 10, 'accuracy_penalty': 5, 'repair_required': 'increase'},
+        12: {'label': 'Разрушены ударник и затвор', 'durability_loss': 15, 'blocks_fire': True, 'repair_required': 'full'},
     }
 
     @staticmethod
@@ -2077,6 +2077,7 @@ class CombatService:
         strength_roll = random.randint(1, die) + bonus
         result_number = min(12, strength_roll)
         jam = {
+            'id': uuid.uuid4().hex,
             'result': result_number,
             'attack_roll': clean_roll,
             'chance': chance,
@@ -2085,10 +2086,37 @@ class CombatService:
         }
         wear = CombatService._apply_weapon_wear(weapon, jam.get('durability_loss', 0))
         jam['durability_after'] = wear['after']
+        jam['durability_loss_applied'] = wear['loss']
         jams = CombatService._weapon_jams(weapon)
         jams.append(jam)
         CombatService._set_weapon_jams(weapon, jams)
         return {'triggered': True, **jam}
+
+    @staticmethod
+    def _replace_must_do_weapon_jams(weapon, replaced_jams, attack_roll):
+        replaced_jams = replaced_jams if isinstance(replaced_jams, list) else []
+        replaced_ids = {
+            str(item.get('id')) for item in replaced_jams
+            if isinstance(item, dict) and item.get('id')
+        }
+        if replaced_ids:
+            CombatService._set_weapon_jams(weapon, [
+                jam for jam in CombatService._weapon_jams(weapon)
+                if str(jam.get('id')) not in replaced_ids
+            ])
+        durability_refund = sum(
+            max(0, CombatService._coerce_int(
+                item.get('durability_loss_applied'), 0,
+            ))
+            for item in replaced_jams if isinstance(item, dict)
+        )
+        if durability_refund:
+            current_durability, maximum_durability = CombatService._weapon_durability(weapon)
+            weapon['durability'] = min(
+                maximum_durability,
+                current_durability + durability_refund,
+            )
+        return CombatService._roll_weapon_jam(weapon, attack_roll)
 
     @staticmethod
     def _consume_weapon_ammo(weapon, shots):
@@ -2190,15 +2218,63 @@ class CombatService:
 
     @staticmethod
     def _is_pistol_weapon(item):
+        return CombatService._weapon_subcategory(item) == 'пистолеты'
+
+    @staticmethod
+    def _weapon_subcategory(item):
         if not isinstance(item, dict):
-            return False
-        subcategory = str(item.get('subcategory') or '').strip().lower()
+            return ''
+        subcategory = str(
+            item.get('subcategory') or ''
+        ).strip().lower().replace('ё', 'е')
         template_id = CombatService._coerce_int(item.get('templateId'), 0)
         if template_id:
             template = db.session.get(ItemTemplate, template_id)
             if template:
-                subcategory = str(template.subcategory or subcategory).strip().lower()
-        return subcategory == 'пистолеты'
+                subcategory = str(
+                    template.subcategory or subcategory
+                ).strip().lower().replace('ё', 'е')
+        return subcategory
+
+    @staticmethod
+    def _area_fire_accuracy_penalty(weapon):
+        subcategory = CombatService._weapon_subcategory(weapon)
+        if 'пистолет' in subcategory and 'пулемет' in subcategory:
+            base_penalty = 2
+        elif 'дробовик' in subcategory:
+            base_penalty = 6
+        elif subcategory == 'пулеметы' or subcategory.startswith('пулемет'):
+            base_penalty = -4
+        else:
+            base_penalty = 4
+        return base_penalty
+
+    @staticmethod
+    def _are_opponents(actor, target):
+        if not actor or not target or actor.id == target.id:
+            return False
+        actor_team = str(getattr(actor, 'team_name', None) or '').strip().lower()
+        target_team = str(getattr(target, 'team_name', None) or '').strip().lower()
+        return not (actor_team and target_team and actor_team == target_team)
+
+    @staticmethod
+    def _area_fire_shot_count(fire_profile):
+        profile = fire_profile if isinstance(fire_profile, dict) else {}
+        if profile.get('machine_gun_burst'):
+            return 10
+        return max(0, CombatService._coerce_int(profile.get('burst_size'), 0)) * 2
+
+    @staticmethod
+    def _area_fire_hit_count(roll, difficulty, shot_count, roll_modifier=0):
+        margin = (
+            CombatService._coerce_int(roll, 0)
+            + CombatService._coerce_int(roll_modifier, 0)
+            - CombatService._coerce_int(difficulty, 0)
+        )
+        return min(
+            max(1, CombatService._coerce_int(shot_count, 1)),
+            1 + max(0, margin // 3),
+        )
 
     @staticmethod
     def _aimed_zone_difficulty_penalty(zone):
@@ -2226,10 +2302,17 @@ class CombatService:
         if aimed_zone in {'head', 'chest', 'abdomen', 'left_arm', 'right_arm', 'left_leg', 'right_leg'}:
             return aimed_zone
         if melee:
-            return {
-                1: 'right_leg', 2: 'left_leg', 3: 'abdomen',
-                4: 'chest', 5: 'left_arm', 6: 'right_arm',
-            }.get(random.randint(1, 6), 'chest')
+            if roll <= 2:
+                return 'right_leg'
+            if roll <= 4:
+                return 'left_leg'
+            if roll <= 8:
+                return 'abdomen'
+            if roll <= 12:
+                return 'chest'
+            if roll <= 16:
+                return 'left_arm'
+            return 'right_arm'
         if roll <= 3:
             return 'left_arm'
         if roll <= 6:
@@ -2480,6 +2563,7 @@ class CombatService:
                 ),
             )
         )
+        combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
         aimed_penalty = (
             0
             if behind
@@ -2499,6 +2583,12 @@ class CombatService:
             'automatic_hit': unconscious,
             'advantage': bool(prone or getattr(target, 'grappled_by_id', None)),
             'block_penalty': block_penalty,
+            'block_arm': (
+                combat_meta.get('meleeBlockArm')
+                if combat_meta.get('meleeBlockArm') in {'left_arm', 'right_arm'}
+                else 'right_arm'
+            ),
+            'block_counterattack': bool(combat_meta.get('meleeBlockCounterattack')),
             'aimed_penalty': aimed_penalty,
             'difficulty': difficulty,
         }
@@ -2676,6 +2766,11 @@ class CombatService:
             CombatService._caliber_key(profile.get('caliber')) == '12x70'
             and (variant == 'buckshot' or 'картеч' in ammo_name)
         )
+
+    @staticmethod
+    def _rapid_fire_accuracy_penalty(weapon):
+        ammo_profile, _ = CombatService._ranged_damage_profile(weapon)
+        return 0 if CombatService._is_buckshot_profile(ammo_profile) else 4
 
     @staticmethod
     def _is_12x70_slug_profile(profile):
@@ -3049,6 +3144,8 @@ class CombatService:
         total = 0.0
         details = []
         for slot, item, attrs, protection in candidates:
+            if item.get('protectionDisabled'):
+                continue
             is_gas_mask = CombatService._is_gas_mask_item(slot, item, attrs)
             if is_gas_mask and CombatService._coerce_int(
                 item.get(
@@ -3087,6 +3184,8 @@ class CombatService:
         for slot in ('armor', 'helmet', 'gasMask'):
             item = equipment.get(slot)
             if not isinstance(item, dict):
+                continue
+            if item.get('protectionDisabled'):
                 continue
             attributes = CombatService._template_attributes(item)
             if not CombatService._armor_covers_zone(slot, item, attributes, zone):
@@ -4561,6 +4660,74 @@ class CombatService:
         }
 
     @staticmethod
+    def _resolve_block_counterattack(blocker, original_attacker, round_number):
+        blocker_data = (
+            blocker.character.data
+            if blocker.character and isinstance(blocker.character.data, dict)
+            else {}
+        )
+        weapons = blocker_data.get('weapons') if isinstance(blocker_data.get('weapons'), list) else []
+        weapon_index = CombatService._coerce_int(getattr(blocker, 'drawn_weapon_index', -1), -1)
+        attack_type = 'unarmed'
+        if 0 <= weapon_index < len(weapons):
+            weapon = weapons[weapon_index] or {}
+            template = (
+                db.session.get(ItemTemplate, weapon.get('templateId'))
+                if weapon.get('templateId') else None
+            )
+            weapon_category = template.category if template else weapon.get('category')
+            if weapon_category == 'melee_weapon':
+                allowed = CombatService._template_attributes(weapon).get('allowed_attacks') or []
+                attack_type = allowed[0] if allowed else 'slashing'
+            elif weapon_category == 'weapon':
+                attack_type = 'firearm_butt'
+            else:
+                weapon_index = -1
+        else:
+            weapon_index = -1
+
+        profile = (
+            CombatService._virtual_melee_profile(attack_type, weapons[weapon_index] if weapon_index >= 0 else {}, blocker_data)
+            or CombatService._weapon_damage_profile(
+                weapons[weapon_index] if weapon_index >= 0 else {}, attack_type,
+            )
+        )
+        melee_bonus = CombatService._skill_modifier(
+            blocker_data, 'skills.physical.melee',
+        )
+        target_profile = CombatService._melee_target_profile(
+            blocker,
+            original_attacker,
+            melee_bonus,
+            CombatService._coerce_int(profile.get('accuracy'), 0),
+        )
+        details = {
+            'weapon_index': weapon_index,
+            'attack_type': attack_type,
+            'round_number': round_number,
+            'melee': True,
+            'hit_difficulty': target_profile['difficulty'],
+            'from_behind': target_profile['from_behind'],
+            'target_prone': target_profile['target_prone'],
+            'target_unconscious': target_profile['target_unconscious'],
+            'automatic_hit': target_profile['automatic_hit'],
+            'block_penalty': target_profile['block_penalty'],
+            'block_arm': target_profile['block_arm'],
+            'block_counterattack': False,
+            'is_block_counterattack': True,
+            'melee_advantage': target_profile['advantage'],
+        }
+        result = CombatService._resolve_attack(
+            original_attacker,
+            blocker,
+            details,
+            melee=True,
+            attack_type=attack_type,
+        )
+        result['block_counterattack'] = True
+        return result
+
+    @staticmethod
     def _resolve_attack(
         target,
         attacker,
@@ -4651,14 +4818,57 @@ class CombatService:
                 'target_prone': bool(attack_details.get('target_prone')),
                 'target_unconscious': bool(attack_details.get('target_unconscious')),
             }
+            effective_roll = None if roll is None else roll + stress_check_modifier
+            shortfall = (
+                max(0, difficulty - effective_roll)
+                if effective_roll is not None
+                else 0
+            )
+            block_penalty = max(
+                0, CombatService._coerce_int(attack_details.get('block_penalty'), 0),
+            )
+            counterattack_triggered = bool(
+                not hit
+                and block_penalty > 0
+                and shortfall >= 10
+                and attack_details.get('block_counterattack')
+                and not attack_details.get('is_block_counterattack')
+            )
+            partial_block = bool(
+                not hit
+                and not counterattack_triggered
+                and block_penalty > 0
+                and 0 < shortfall <= block_penalty
+            )
+            result.update({
+                'block_shortfall': shortfall,
+                'partial_block': partial_block,
+                'block_counterattack_triggered': counterattack_triggered,
+            })
+            if counterattack_triggered:
+                result['counterattack_result'] = CombatService._resolve_block_counterattack(
+                    target,
+                    attacker,
+                    attack_details.get('round_number'),
+                )
+            if partial_block:
+                hit = True
+                result['hit'] = True
+                result['block_arm'] = attack_details.get('block_arm', 'right_arm')
             if not hit:
                 return result
-            zone = CombatService._random_hit_zone(random.randint(1, 6), aimed_zone, melee=True)
+            zone = (
+                attack_details.get('block_arm', 'right_arm')
+                if partial_block
+                else CombatService._random_hit_zone(random.randint(1, 20), aimed_zone, melee=True)
+            )
             strength_bonus = CombatService._skill_modifier(attacker_data, 'skills.physical.strength')
             if not profile.get('skip_strength_scaling'):
                 profile['damage'] *= max(0, 1 + 0.1 * strength_bonus)
             if attack_details.get('swing_bonus'):
                 profile['damage'] *= 1.25
+            if partial_block:
+                profile['damage'] *= 0.5
         else:
             if isinstance(profile_override, dict):
                 profile = dict(profile_override)
@@ -5240,6 +5450,13 @@ class CombatService:
             attack.get('attack_type') or attack.get('fire_mode') or 'атака',
         )
         lines = [f"{actor}: {mode}."]
+        if attack.get('fire_mode') == 'area':
+            first = results[0]
+            lines.append(
+                f"Один бросок: d20 {first.get('roll', '—')}, "
+                f"СЛ {first.get('difficulty', '—')}; "
+                f"попаданий {attack.get('area_hit_count', 0)}."
+            )
         for index, hit_result in enumerate(results, start=1):
             target_name = hit_result.get('target_name') or 'цель'
             rolls = hit_result.get('rolls') or [hit_result.get('roll')]
@@ -5253,6 +5470,21 @@ class CombatService:
             )
             if not hit_result.get('hit'):
                 lines.append(f"{prefix} — промах.")
+                counterattack = hit_result.get('counterattack_result')
+                if isinstance(counterattack, dict):
+                    counter_rolls = counterattack.get('rolls') or [counterattack.get('roll')]
+                    counter_roll_text = '/'.join(
+                        str(value) for value in counter_rolls if value is not None
+                    ) or '\u2014'
+                    counter_result = (
+                        f"\u043f\u043e\u043f\u0430\u0434\u0430\u043d\u0438\u0435, \u0443\u0440\u043e\u043d {round(CombatService._coerce_float(counterattack.get('damage'), 0))}"
+                        if counterattack.get('hit')
+                        else '\u043f\u0440\u043e\u043c\u0430\u0445'
+                    )
+                    lines.append(
+                        f"   \u041e\u0442\u0432\u0435\u0442\u043d\u0430\u044f \u0430\u0442\u0430\u043a\u0430 \u0431\u043b\u043e\u043a\u0430: d20 {counter_roll_text}, "
+                        f"\u0421\u041b {counterattack.get('difficulty', '\u2014')} \u2014 {counter_result}."
+                    )
                 cover_impact = hit_result.get('cover_hit')
                 if isinstance(cover_impact, dict):
                     cover_state = cover_impact.get('damage') or {}
@@ -5269,6 +5501,15 @@ class CombatService:
                         f"{cover_state.get('hp', '—')}/{cover_state.get('max_hp', '—')}."
                     )
                 continue
+
+            if hit_result.get('partial_block'):
+                arm_label = {
+                    'left_arm': 'левую руку',
+                    'right_arm': 'правую руку',
+                }.get(hit_result.get('block_arm'), 'руку')
+                lines.append(
+                    f"{prefix} — частичный блок: половина урона приходится в {arm_label}."
+                )
 
             if hit_result.get('cover_hit') is True:
                 cover_state = hit_result.get('cover_damage') or {}
@@ -5448,6 +5689,13 @@ class CombatService:
                 f"Итого: попаданий {attack.get('hits', 0)}/{len(results)}, "
                 f"урон {round(CombatService._coerce_float(attack.get('damage_total'), 0))}."
             )
+        area_stress = attack.get('area_stressed_characters') or []
+        if area_stress:
+            lines.append(
+                "Стресс от огня по области: "
+                + ", ".join(str(item.get('name') or 'цель') for item in area_stress)
+                + "."
+            )
         wear = attack.get('weapon_wear')
         if isinstance(wear, dict) and wear.get('loss'):
             lines.append(
@@ -5572,6 +5820,30 @@ class CombatService:
             return 0
         skill_value = CombatService._skill_value(character_data, skill_path)
         return math.floor((skill_value - 10) / 2)
+
+    @staticmethod
+    def _must_do_usage_profile(character_data, combat_state, initialize=True):
+        health = character_data.setdefault('health', {})
+        combat_meta = health.setdefault('combatMeta', {})
+        started_at = getattr(combat_state, 'started_at', None)
+        window = started_at.isoformat() if started_at else 'combat'
+        usage = combat_meta.get('mustDoUsage')
+        if not isinstance(usage, dict) or usage.get('window') != window:
+            usage = {'window': window, 'used': 0}
+            if initialize:
+                combat_meta['mustDoUsage'] = usage
+        will_bonus = CombatService._base_skill_modifier(
+            character_data, 'skills.physical.will',
+        )
+        limit = max(1, will_bonus)
+        used = max(0, CombatService._coerce_int(usage.get('used'), 0))
+        return {
+            'usage': usage,
+            'will_bonus': will_bonus,
+            'limit': limit,
+            'used': used,
+            'remaining': max(0, limit - used),
+        }
 
     @staticmethod
     def _pain_shock_recovery_difficulty(character_data, medicine_bonus=0):
@@ -6426,7 +6698,7 @@ class CombatService:
         return loc_char
 
     @staticmethod
-    def _serialize_character(loc_char, current_turn_id=None):
+    def _serialize_character(loc_char, current_turn_id=None, combat_state=None):
         character = loc_char.character
         profile = CombatService._combat_profile(loc_char)
         posture = CombatService._posture_key(loc_char)
@@ -6465,6 +6737,21 @@ class CombatService:
             if isinstance(health.get('combatMeta'), dict)
             else None
         )
+        if isinstance(must_do_retry, dict):
+            must_do_retry = deepcopy(must_do_retry)
+            must_do_retry.pop('attack_details', None)
+            must_do_retry.pop('medical_retry', None)
+        must_do_usage = None
+        if combat_state is not None and combat_state.status == 'active':
+            usage_profile = CombatService._must_do_usage_profile(
+                data, combat_state, initialize=False,
+            )
+            must_do_usage = {
+                'will_bonus': usage_profile['will_bonus'],
+                'limit': usage_profile['limit'],
+                'used': usage_profile['used'],
+                'remaining': usage_profile['remaining'],
+            }
         stress_effects = [
             effect for effect in normalize_effect_list(health.get('effects') or [])
             if effect.get('active', True) and effect.get('type') in {'stress_effect', 'stress_stupor', 'phobia'}
@@ -6499,6 +6786,7 @@ class CombatService:
             'reaction_reserve': reaction_reserve if isinstance(reaction_reserve, dict) else None,
             'help_advantage': help_advantage if isinstance(help_advantage, dict) else None,
             'must_do_retry': must_do_retry if isinstance(must_do_retry, dict) else None,
+            'must_do_usage': must_do_usage,
             'stress_effects': stress_effects,
             'completed_pending_action_id': (
                 health.get('combatMeta', {}).get('completedPendingActionId')
@@ -6844,11 +7132,13 @@ class CombatService:
             'current_character': CombatService._serialize_character(
                 current_character,
                 current_turn_id=state.current_location_character_id,
+                combat_state=state,
             ) if current_character else None,
             'characters': [
                 CombatService._serialize_character(
                     item,
                     current_turn_id=state.current_location_character_id,
+                    combat_state=state,
                 )
                 for item in ordered_characters
             ],
@@ -6917,6 +7207,7 @@ class CombatService:
         state = CombatService._get_or_create_state(location_id)
         if state.status == 'active':
             raise ValidationError("Combat is already active")
+        state.started_at = datetime.now(timezone.utc)
 
         selected_location_ids = {item.id for item in loc_chars}
         for loc_char in available_characters:
@@ -7680,6 +7971,7 @@ class CombatService:
         melee_action_details = None
         special_action_cost = None
         resolved_hits = []
+        single_fire = False
         current_round = max(1, state.round_number or 1)
         if action_key == 'explosive_attack':
             source = str(explosive_source or '').strip().lower()
@@ -7829,7 +8121,6 @@ class CombatService:
                 throwing_bonus = sum(
                     CombatService._base_skill_modifier(data, path)
                     for path in (
-                        'skills.physical.throwing',
                         'skills.physical.strength',
                         'skills.physical.agility',
                         'skills.other.tactics',
@@ -7839,7 +8130,7 @@ class CombatService:
                     CombatService._posture_key(character), 0,
                 )
                 condition_modifier = CombatService._health_roll_modifier(
-                    data, 'skills.physical.throwing',
+                    data, 'skills.physical.agility',
                 )
                 obstacle_difficulty = CombatService._throw_obstacle_difficulty(
                     location_id, character, impact_x, impact_y,
@@ -7847,7 +8138,7 @@ class CombatService:
                 difficulty = max(
                     1,
                     round(
-                        5 + actual_distance + posture_penalty + obstacle_difficulty
+                        3 + actual_distance + posture_penalty + obstacle_difficulty
                         - throwing_bonus - condition_modifier
                     ),
                 )
@@ -7952,9 +8243,48 @@ class CombatService:
         elif action_key == 'must_do_it':
             retry = combat_meta.get('mustDoRetry')
             if not isinstance(retry, dict):
-                raise ValidationError("There is no failed check to repeat")
+                action_name = str(narrative_action_name or '').strip()
+                skill_path = str(narrative_skill_path or '').strip()
+                difficulty = CombatService._coerce_int(narrative_difficulty, 0)
+                if not action_name:
+                    raise ValidationError("Describe the check approved by the GM")
+                if skill_path not in CombatService.NARRATIVE_SKILLS:
+                    raise ValidationError("Choose a valid skill")
+                if not 1 <= difficulty <= 40:
+                    raise ValidationError("Difficulty must be between 1 and 40")
+                retry = {
+                    'kind': 'manual',
+                    'name': action_name,
+                    'skill_path': skill_path,
+                    'skill_label': CombatService.NARRATIVE_SKILLS[skill_path],
+                    'difficulty': difficulty,
+                    'created_round': current_round,
+                }
+            usage_profile = CombatService._must_do_usage_profile(data, state)
+            if usage_profile['remaining'] <= 0:
+                raise ValidationError(
+                    "The Must Do It limit for this ten-minute interval has been reached"
+                )
             special_action_cost = 0
-            must_do_details = dict(retry)
+            must_do_details = {
+                **retry,
+                'will_bonus': usage_profile['will_bonus'],
+                'use_limit': usage_profile['limit'],
+                'uses_before': usage_profile['used'],
+            }
+            must_do_details.pop('attack_details', None)
+            if retry.get('kind') == 'attack':
+                stored_attack = retry.get('attack_details')
+                if not isinstance(stored_attack, dict):
+                    raise ValidationError("The failed attack can no longer be repeated")
+                attack_details = deepcopy(stored_attack)
+                attack_details['must_do_retry'] = True
+                fire_mode = attack_details.get('fire_mode')
+                attack_type = attack_details.get('attack_type')
+                target_zone = attack_details.get('target_zone')
+                target_character_id = attack_details.get('target_character_id')
+                target_character_ids = attack_details.get('target_character_ids')
+                single_fire = fire_mode in {'unaimed', 'rapid', 'aimed'}
         elif action_key == 'console_ally':
             target = LocationCharacter.query.filter_by(
                 location_id=location_id, character_id=target_character_id,
@@ -8056,10 +8386,16 @@ class CombatService:
             )
             character.melee_block_round = current_round
             character.melee_block_effectiveness = block_base + strength_bonus
+            combat_meta['meleeBlockArm'] = (
+                target_zone if target_zone in {'left_arm', 'right_arm'} else 'right_arm'
+            )
+            combat_meta['meleeBlockCounterattack'] = 'counterattack' in str(payment or '').lower()
             special_action_cost = block_cost
             melee_action_details = {
                 'block_cost': block_cost,
                 'effectiveness': character.melee_block_effectiveness,
+                'block_arm': combat_meta['meleeBlockArm'],
+                'counterattack': combat_meta['meleeBlockCounterattack'],
             }
 
         targeted_melee_actions = {'melee_disarm', 'melee_shove', 'grapple'}
@@ -8835,6 +9171,8 @@ class CombatService:
                 ),
                 'paid_automatic_back_attack': paid_automatic_back_attack,
                 'block_penalty': target_profile['block_penalty'],
+                'block_arm': target_profile['block_arm'],
+                'block_counterattack': target_profile['block_counterattack'],
                 'aimed_penalty': target_profile['aimed_penalty'],
                 'swing_bonus': swing_prepared,
                 'melee_advantage': target_profile['advantage'],
@@ -8880,6 +9218,17 @@ class CombatService:
             machine_gun = bool(profile.get('machine_gun_burst'))
             burst_size = CombatService._coerce_int(profile.get('burst_size'), 0)
 
+            if fire_mode == 'area':
+                expected_area_shots = CombatService._area_fire_shot_count(profile)
+                if (
+                    volley_count != 2
+                    or expected_area_shots <= 0
+                    or shots != expected_area_shots
+                ):
+                    raise ValidationError(
+                        "Area fire requires two weapon bursts or 10 machine gun shots"
+                    )
+
             single_fire = fire_mode in {'unaimed', 'rapid', 'aimed'}
             requested_action_points = CombatService._coerce_int(action_points, 0)
             expected_action_points = {
@@ -8896,9 +9245,9 @@ class CombatService:
             if requested_action_points != expected_action_points:
                 raise ValidationError("Invalid action point cost")
             allowed_volley_counts = {1}
-            if fire_mode == 'area' or (
-                fire_mode == 'suppression' and expected_action_points == 5
-            ):
+            if fire_mode == 'area':
+                allowed_volley_counts = {2}
+            elif fire_mode == 'suppression' and expected_action_points == 5:
                 allowed_volley_counts = {1, 2}
             if volley_count not in allowed_volley_counts:
                 raise ValidationError("Invalid volley count")
@@ -9035,6 +9384,16 @@ class CombatService:
                 )
                 or movement_modifiers['disadvantage']
             )
+            rapid_fire_accuracy_penalty = (
+                CombatService._rapid_fire_accuracy_penalty(weapon)
+                if fire_mode == 'rapid'
+                else 0
+            )
+            area_fire_accuracy_penalty = (
+                CombatService._area_fire_accuracy_penalty(weapon)
+                if fire_mode == 'area'
+                else 0
+            )
             attack_details = {
                 'weapon_index': weapon_index,
                 'fire_mode': fire_mode,
@@ -9057,6 +9416,8 @@ class CombatService:
                 'shooter_movement_mode': character.movement_mode_this_turn,
                 'target_movement_mode': target_movement_mode,
                 'movement_accuracy_penalty': movement_modifiers['difficulty_penalty'],
+                'rapid_fire_accuracy_penalty': rapid_fire_accuracy_penalty,
+                'area_fire_accuracy_penalty': area_fire_accuracy_penalty,
                 'ergonomics': ergonomics_profile,
                 'strength_requirement': strength_profile,
                 'target_distance': target_distance,
@@ -9134,6 +9495,8 @@ class CombatService:
                 attack_details['aim_accuracy_bonus'] * -1, 0
             )
             hit_difficulty += movement_modifiers['difficulty_penalty']
+            hit_difficulty += rapid_fire_accuracy_penalty
+            hit_difficulty += area_fire_accuracy_penalty
             if target_distance is not None and weapon_range and target_distance > weapon_range:
                 hit_difficulty += 2
                 if target_distance > weapon_range + 10:
@@ -9312,34 +9675,48 @@ class CombatService:
                         data, narrative_action_details['skill_path'], check['success'],
                     )
                     if not check['success']:
+                        usage_profile = CombatService._must_do_usage_profile(data, state)
                         combat_meta['mustDoRetry'] = {
                             'name': narrative_action_details['name'],
                             'skill_path': narrative_action_details['skill_path'],
                             'difficulty': narrative_action_details['difficulty'],
                             'created_round': current_round,
+                            'will_bonus': usage_profile['will_bonus'],
+                            'use_limit': usage_profile['limit'],
+                            'uses_used': usage_profile['used'],
+                            'uses_remaining': usage_profile['remaining'],
                         }
                     character.character.data = data
                     flag_modified(character.character, 'data')
             if action_key == 'must_do_it' and must_do_details:
+                usage_profile = CombatService._must_do_usage_profile(data, state)
+                usage_profile['usage']['used'] = usage_profile['used'] + 1
                 CombatService.apply_stress_trigger(
                     character, 1, trigger='must_do_it', check_manifestation=False,
                 )
-                check = CombatService._narrative_skill_check(
-                    data, must_do_details['skill_path'],
+                must_do_details['uses_used'] = usage_profile['used'] + 1
+                must_do_details['uses_remaining'] = max(
+                    0, usage_profile['limit'] - usage_profile['used'] - 1,
                 )
-                check['difficulty'] = CombatService._coerce_int(must_do_details['difficulty'], 1)
-                check['success'] = check['roll'] == 20 or (
-                    check['roll'] != 1 and check['total'] >= check['difficulty']
-                )
-                CombatService._apply_stress_check_consequences(
-                    data, must_do_details['skill_path'], check['success'],
-                )
-                must_do_details['check'] = check
                 combat_meta.pop('mustDoRetry', None)
-                if not check['success']:
-                    must_do_details['stress_manifestation'] = CombatService.apply_stress_trigger(
-                        character, 0, trigger='must_do_it_failure', force_manifest=True,
+                if must_do_details.get('kind') != 'attack':
+                    check = CombatService._narrative_skill_check(
+                        data, must_do_details['skill_path'],
                     )
+                    check['difficulty'] = CombatService._coerce_int(
+                        must_do_details['difficulty'], 1,
+                    )
+                    check['success'] = check['roll'] == 20 or (
+                        check['roll'] != 1 and check['total'] >= check['difficulty']
+                    )
+                    CombatService._apply_stress_check_consequences(
+                        data, must_do_details['skill_path'], check['success'],
+                    )
+                    must_do_details['check'] = check
+                    if not check['success']:
+                        must_do_details['stress_manifestation'] = CombatService.apply_stress_trigger(
+                            character, 0, trigger='must_do_it_failure', force_manifest=True,
+                        )
                 character.character.data = data
                 flag_modified(character.character, 'data')
             if action_key == 'console_ally' and consolation_details:
@@ -9642,13 +10019,68 @@ class CombatService:
                         )
                         resolved_hits.append(first)
                         if first.get('hit'):
-                            extra_hits = min(2, max(0, (first['roll'] - first['difficulty']) // 4))
+                            hit_count = CombatService._area_fire_hit_count(
+                                first.get('roll'),
+                                first.get('difficulty'),
+                                attack_details.get('shot_count', 1),
+                                first.get('stress_check_modifier'),
+                            )
+                            extra_hits = hit_count - 1
                             for index in range(extra_hits):
                                 target = targets[(index + 1) % len(targets)]
-                                resolved_hits.append(CombatService._resolve_attack(
+                                extra_hit = CombatService._resolve_attack(
                                     target, character, attack_details,
                                     aimed_zone=target_zone, forced_roll=20
-                                ))
+                                )
+                                extra_hit['roll'] = first.get('roll')
+                                extra_hit['rolls'] = first.get('rolls')
+                                extra_hit['shared_area_roll'] = True
+                                resolved_hits.append(extra_hit)
+                            attack_details['area_hit_count'] = hit_count
+                        else:
+                            attack_details['area_hit_count'] = 0
+                    if not attack_details.get('must_do_retry'):
+                        attack_details['area_stressed_characters'] = []
+                        for opponent in LocationCharacter.query.filter_by(
+                            location_id=location_id,
+                        ).all():
+                            if (
+                                not opponent.character
+                                or not CombatService._are_opponents(character, opponent)
+                                or abs(opponent.pos_x - attack_details['area_center_x']) > 2
+                                or abs(opponent.pos_y - attack_details['area_center_y']) > 2
+                                or CombatService._character_condition(
+                                    opponent.character.data
+                                    if isinstance(opponent.character.data, dict)
+                                    else {}
+                                )['state'] == 'dead'
+                            ):
+                                continue
+                            stress_result = CombatService.apply_stress_trigger(
+                                opponent, 1, trigger='area_fire',
+                            )
+                            attack_details['area_stressed_characters'].append({
+                                'character_id': opponent.character_id,
+                                'name': opponent.character.name,
+                                'stress': stress_result,
+                            })
+                elif attack_details.get('must_do_retry') and single_fire:
+                    target = targets[0] if targets else None
+                    if target:
+                        first = CombatService._resolve_attack(
+                            target, character, attack_details, aimed_zone=target_zone,
+                        )
+                        resolved_hits.append(first)
+                        if first.get('hit'):
+                            for _ in range(1, attack_details.get('shot_count', 1)):
+                                extra_hit = CombatService._resolve_attack(
+                                    target, character, attack_details,
+                                    aimed_zone=target_zone, forced_roll=20,
+                                )
+                                extra_hit['roll'] = first.get('roll')
+                                extra_hit['rolls'] = first.get('rolls')
+                                extra_hit['shared_retry_roll'] = True
+                                resolved_hits.append(extra_hit)
                 else:
                     resolved_hits.extend(CombatService._resolve_shot_sequence(
                         targets,
@@ -9665,6 +10097,100 @@ class CombatService:
                 item.get('combined_damage', item.get('damage', 0))
                 for item in resolved_hits
             )
+            if action_key == 'attack' and resolved_hits and not any(
+                item.get('hit') for item in resolved_hits
+            ):
+                retryable_attack = bool(
+                    (
+                        attack_details.get('melee')
+                        and not attack_details.get('circular_attack')
+                    )
+                    or (
+                        attack_details.get('fire_mode')
+                        in {'unaimed', 'rapid', 'aimed', 'area'}
+                        and not attack_details.get('direct_cover_attack')
+                    )
+                )
+                if retryable_attack:
+                    retry_attack_details = deepcopy(attack_details)
+                    retry_attack_details['_must_do_replaced_jams'] = [
+                        {
+                            'id': jam.get('id'),
+                            'durability_loss_applied': max(
+                                0,
+                                CombatService._coerce_int(
+                                    jam.get('durability_loss_applied'), 0,
+                                ),
+                            ),
+                        }
+                        for jam in (attack_details.get('weapon_jams') or [])
+                        if isinstance(jam, dict) and jam.get('id')
+                    ]
+                    for key in (
+                        'results', 'weapon_wear', 'weapon_jams', 'weapon_jam',
+                        'shot_jam_states', 'area_stressed_characters',
+                    ):
+                        retry_attack_details.pop(key, None)
+                    usage_profile = CombatService._must_do_usage_profile(data, state)
+                    target_names = ', '.join(dict.fromkeys(
+                        str(item.get('target_name') or '')
+                        for item in resolved_hits if item.get('target_name')
+                    ))
+                    combat_meta['mustDoRetry'] = {
+                        'kind': 'attack',
+                        'name': (
+                            f"Повторить атаку по {target_names}"
+                            if target_names else 'Повторить атаку'
+                        ),
+                        'difficulty': resolved_hits[0].get('difficulty'),
+                        'created_round': current_round,
+                        'will_bonus': usage_profile['will_bonus'],
+                        'use_limit': usage_profile['limit'],
+                        'uses_used': usage_profile['used'],
+                        'uses_remaining': usage_profile['remaining'],
+                        'attack_details': retry_attack_details,
+                    }
+            if (
+                action_key == 'must_do_it'
+                and must_do_details
+                and must_do_details.get('kind') == 'attack'
+            ):
+                first_result = resolved_hits[0] if resolved_hits else {}
+                if not attack_details.get('melee'):
+                    weapon_index = CombatService._coerce_int(
+                        attack_details.get('weapon_index'), -1,
+                    )
+                    weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+                    retry_weapon = weapons[weapon_index] if 0 <= weapon_index < len(weapons) else None
+                    replaced_jams = attack_details.pop('_must_do_replaced_jams', [])
+                    if isinstance(retry_weapon, dict) and isinstance(replaced_jams, list):
+                        replacement_jam = CombatService._replace_must_do_weapon_jams(
+                            retry_weapon, replaced_jams, first_result.get('roll'),
+                        )
+                        attack_details['weapon_jam'] = replacement_jam
+                        attack_details['weapon_jams'] = (
+                            [replacement_jam]
+                            if isinstance(replacement_jam, dict)
+                            and replacement_jam.get('triggered')
+                            else []
+                        )
+                        if resolved_hits:
+                            resolved_hits[0]['weapon_jam_after_shot'] = deepcopy(
+                                replacement_jam,
+                            )
+                retry_success = any(item.get('hit') for item in resolved_hits)
+                must_do_details['check'] = {
+                    'roll': first_result.get('roll'),
+                    'rolls': first_result.get('rolls'),
+                    'difficulty': first_result.get(
+                        'difficulty', must_do_details.get('difficulty'),
+                    ),
+                    'success': retry_success,
+                }
+                if not retry_success:
+                    must_do_details['stress_manifestation'] = CombatService.apply_stress_trigger(
+                        character, 0, trigger='must_do_it_failure', force_manifest=True,
+                    )
             if attack_details.get('circular_attack'):
                 health = data.setdefault('health', {})
                 health.setdefault('combatMeta', {})['circularAttackRound'] = current_round
@@ -9680,7 +10206,10 @@ class CombatService:
                 attack_details.get('weapon_index'), -1
             )
             weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
-            if 0 <= weapon_index_for_wear < len(weapons):
+            if (
+                0 <= weapon_index_for_wear < len(weapons)
+                and not attack_details.get('must_do_retry')
+            ):
                 used_weapon = weapons[weapon_index_for_wear]
                 if attack_details.get('melee'):
                     if str(attack_details.get('attack_type') or '').strip().lower() == 'firearm_butt':

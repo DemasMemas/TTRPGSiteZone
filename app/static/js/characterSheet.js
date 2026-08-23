@@ -36,6 +36,7 @@ const AUTO_SAVE_DELAY = 500;
 const pendingConsumableActions = new Map();
 const pendingReloadActions = new Map();
 const pendingWeaponJamActions = new Map();
+let equipmentRenderVersion = 0;
 
 // ========== DRAG-AND-DROP ==========
 let draggedItem = null;
@@ -62,7 +63,6 @@ const skillCategories = [
     { label: 'Сила', path: 'physical.strength' },
     { label: 'Ловкость', path: 'physical.agility' },
     { label: 'Воля', path: 'physical.will' },
-    { label: 'Метание', path: 'physical.throwing' },
     { label: 'Внимательность', path: 'physical.awareness' },
     { label: 'Ближний бой', path: 'physical.melee' },
     { label: 'Стрельба', path: 'physical.shooting' },
@@ -149,7 +149,8 @@ function getCategoryDisplay(cat) {
         'headphones': 'Наушники',
         'glasses': 'Очки',
         'gloves': 'Перчатки',
-        'jewelry': 'Бижутерия'
+        'jewelry': 'Бижутерия',
+        'tool': 'Инструменты'
     };
     return map[cat] || cat;
 }
@@ -372,7 +373,7 @@ const ITEM_CATEGORY_ORDER = [
     'Магазины', 'Патроны', 'Гранаты', 'Оружейные модули', 'Бронеплиты',
     'Рюкзаки', 'Разгрузки', 'Пояс', 'Подсумки', 'Контейнеры',
     'Расходники', 'Приборы', 'Детекторы', 'Фильтры противогазов',
-    'Модули шлемов', 'Артефакты', 'Материалы', 'Прочее',
+    'Модули шлемов', 'Артефакты', 'Материалы', 'Инструменты', 'Прочее',
 ];
 const CONSUMABLE_SECTION_ORDER = [
     'Продукты', 'Кровь', 'Обезболивающее', 'Стимуляторы',
@@ -2617,12 +2618,20 @@ function renderHealthTab(data, container = null) {
         { key: 'infection', label: 'Заражение', value: health.infection, color: '#86d48f' },
     ].filter(item => Number.isFinite(Number(item.value)) && Number(item.value) !== 0);
     const storedEffects = Array.isArray(health.effects) ? normalizeEffectList(health.effects) : [];
+    const isStressManifestation = effect => (
+        ['stress_effect', 'stress_stupor', 'phobia'].includes(String(effect?.type || ''))
+        || effect?.source === 'stress_manifestation'
+    );
+    const stressEffects = storedEffects.filter(
+        effect => isStressManifestation(effect) && effect?.active !== false
+    );
+    const generalStoredEffects = storedEffects.filter(effect => !isStressManifestation(effect));
     const disabledZoneChips = Object.entries(zones)
         .filter(([, zone]) => Number(zone?.max || 0) > 0 && Number(zone?.current) <= 0)
         .map(([area]) => `Выбита зона: ${getEffectAreaLabel(area)}`);
     const needs = normalizeDailyNeeds(health.needs);
     health.needs = needs;
-    const storedEffectChips = storedEffects.map((effect) => {
+    const storedEffectChips = generalStoredEffects.map((effect) => {
         const parts = [effect.name || effect.type];
         if (effect.value !== undefined && effect.value !== null && effect.value !== 0) {
             parts.push(`+${effect.value}`);
@@ -2682,6 +2691,22 @@ function renderHealthTab(data, container = null) {
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid rgba(255,255,255,.08);border-radius:8px;">
                 <div><strong>${escapeHtml(record.label || record.key)}</strong><div class="text-muted" style="font-size:12px;">${escapeHtml(status)}${withdrawalDays > 0 ? ` · проверки ${checksToday}/5, успехи ${successesToday}` : ''}<br>${escapeHtml(progressText)}</div></div>
                 ${checkButton}
+            </div>`;
+    }).join('');
+    const stressEffectsHtml = stressEffects.map((effect) => {
+        const status = effect.gmPending
+            ? '\u041e\u0436\u0438\u0434\u0430\u0435\u0442 \u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0413\u041c'
+            : (effect.gmSkipped ? '\u041f\u0440\u043e\u043f\u0443\u0449\u0435\u043d \u0413\u041c' : '\u0410\u043a\u0442\u0438\u0432\u0435\u043d');
+        const requirement = effect.requirement || effect.note || '';
+        const remaining = effect.remaining !== null && effect.remaining !== undefined
+            ? ` \u00b7 \u043e\u0441\u0442. ${effect.remaining}`
+            : '';
+        return `
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid rgba(212,165,255,.18);border-radius:8px;background:rgba(212,165,255,.035);">
+                <div>
+                    <strong>${escapeHtml(effect.name || '\u042d\u0444\u0444\u0435\u043a\u0442 \u0441\u0442\u0440\u0435\u0441\u0441\u0430')}</strong>
+                    <div class="text-muted" style="font-size:12px;line-height:1.4;">${escapeHtml(status + remaining)}${requirement ? `<br>${escapeHtml(requirement)}` : ''}</div>
+                </div>
             </div>`;
     }).join('');
 
@@ -2767,6 +2792,11 @@ function renderHealthTab(data, container = null) {
                     ${addictionHtml || '<span class="text-muted" style="font-size:12px;">Активных зависимостей нет</span>'}
                 </div>
             </details>
+            ${stressEffects.length ? `
+                <details class="health-compact-panel" open>
+                    <summary><span>\u042d\u0444\u0444\u0435\u043a\u0442\u044b \u0441\u0442\u0440\u0435\u0441\u0441\u0430</span><strong>${stressEffects.length}</strong></summary>
+                    <div style="display:grid;gap:7px;padding-top:8px;">${stressEffectsHtml}</div>
+                </details>` : ''}
             <div class="health-needs-panel">
                 <div class="health-need-field"><label>Еда сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.mealsToday" value="${needs.mealsToday}"><small>${needs.mealsToday}/3</small></div>
                 <div class="health-need-field"><label>Вода сегодня</label><input type="number" min="0" max="3" class="form-control" name="health.needs.drinksToday" value="${needs.drinksToday}"><small>${needs.drinksToday}/3</small></div>
@@ -2910,6 +2940,12 @@ function renderHealthTab(data, container = null) {
             details.push('Логика не определена: это старая, повреждённая или служебная запись. Она сама по себе ничего не изменяет.');
         } else if (effect.type === 'custom') {
             details.push('Ручной эффект ГМа. Его последствия определяются описанием и решением ведущего.');
+        } else if (effect.type === 'organ_loss') {
+            details.push(
+                effect.treatment_window_expired || Number(effect.treatment_window_seconds || 0) <= 0
+                    ? 'Окно восстановления органа истекло.'
+                    : `Возможно вылечить ещё: ${formatTreatmentWindow(effect.treatment_window_seconds)}.`,
+            );
         } else if (effect.note) {
             details.push(effect.note);
         } else if (effectRuleDescriptions[effect.type]) {
@@ -2919,26 +2955,44 @@ function renderHealthTab(data, container = null) {
         } else {
             details.push('Правила применяются системой автоматически, если это предусмотрено типом эффекта.');
         }
-        if (source) details.push(`Источник: ${source}.`);
-        if (effect.area) details.push(`Область: ${getEffectAreaLabel(effect.area)}.`);
+        if (source && effect.type !== 'organ_loss') details.push(`Источник: ${source}.`);
+        if (effect.area && effect.type !== 'organ_loss') {
+            details.push(`Область: ${getEffectAreaLabel(effect.area)}.`);
+        }
         return details.join(' ');
     };
     let effectsHtml = '';
     effects.forEach((effect, index) => {
+        if (isStressManifestation(effect)) return;
         const value = effect.value || 0;
-        const isBleedingEffect = String(effect.type || '').startsWith('bleeding');
-        const hasRemaining = !isBleedingEffect;
-        const remaining = effect.remaining ?? '';
         const selectedType = effect.type || 'generic';
+        const isBleedingEffect = String(effect.type || '').startsWith('bleeding');
+        const hasRemaining = !isBleedingEffect && selectedType !== 'organ_loss';
+        const remaining = effect.remaining ?? '';
         const isManagedEffect = ['addiction_withdrawal', 'withdrawal_support', 'withdrawal_support_pending'].includes(selectedType);
         const managedDisabled = isManagedEffect ? 'disabled' : '';
         const fractureStatus = getFractureStatusText(effect, effects);
         const isCustomOrUnknown = ['custom', 'generic'].includes(selectedType);
-        const visibleName = effect.name || effectTypeOptions.find(option => option.value === selectedType)?.label || selectedType;
+        const visibleName = getEffectDisplayName(effect);
+        if (selectedType === 'organ_loss') {
+            const treatmentExpired = effect.treatment_window_expired
+                || Number(effect.treatment_window_seconds || 0) <= 0;
+            effectsHtml += `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px;padding:10px 12px;border:1px solid rgba(180,92,70,.4);border-radius:8px;background:rgba(115,48,38,.13);">
+                    <div style="min-width:0;">
+                        <strong style="display:block;color:#e3c0ae;">${escapeHtml(visibleName)}</strong>
+                        <span class="text-muted" style="display:block;margin-top:3px;font-size:12px;">${treatmentExpired
+                            ? 'Окно восстановления органа истекло'
+                            : `Возможно вылечить ещё: ${escapeHtml(formatTreatmentWindow(effect.treatment_window_seconds))}`}</span>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-danger" onclick="removeEffect(${index})" title="Удалить состояние">×</button>
+                </div>`;
+            return;
+        }
         effectsHtml += `
             <div style="display: grid; grid-template-columns: 1.1fr 0.85fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
                 <select class="form-control" name="health.effects.${index}.type" style="width:100%;" ${managedDisabled}>
-                    ${effectTypeOptions.map(opt => `<option value="${opt.value}" ${opt.value === selectedType ? 'selected' : ''}>${opt.label}</option>`).join('')}
+                    ${effectTypeOptions.map(opt => `<option value="${opt.value}" ${opt.value === selectedType ? 'selected' : ''}>${opt.value === selectedType ? escapeHtml(visibleName) : opt.label}</option>`).join('')}
                 </select>
                 <select class="form-control" name="health.effects.${index}.area" style="width:100%;" ${managedDisabled}>
                     ${[
@@ -2948,6 +3002,9 @@ function renderHealthTab(data, container = null) {
                         ['nose', 'Нос'], ['jaw', 'Челюсть'],
                         ['leftEar', 'Левое ухо'], ['rightEar', 'Правое ухо'],
                         ['leftEye', 'Левый глаз'], ['rightEye', 'Правый глаз'],
+                        ['heart', 'Сердце'], ['rightLung', 'Правое лёгкое'], ['leftLung', 'Левое лёгкое'],
+                        ['rightKidney', 'Правая почка'], ['leftKidney', 'Левая почка'],
+                        ['stomach', 'Желудок'], ['liver', 'Печень'], ['brain', 'Мозг'],
                         ['spine', 'Позвоночник'], ['internalOrgan', 'Внутренний орган']
                     ].map(([key, label]) => `<option value="${key}" ${key === (effect.area || '') ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
@@ -3111,7 +3168,6 @@ async function renderSkillsTab(data) {
         { key: 'strength', label: 'Сила' },
         { key: 'agility', label: 'Ловкость' },
         { key: 'will', label: 'Воля' },
-        { key: 'throwing', label: 'Метание' },
         { key: 'awareness', label: 'Внимательность' },
         { key: 'melee', label: 'Ближний бой' },
         { key: 'shooting', label: 'Стрельба' }
@@ -3386,6 +3442,7 @@ window.saveSpecialTraitTemplate = async function() {
 
 // ========== 5. ВКЛАДКА "ЭКИПИРОВКА" ==========
 async function renderEquipmentTab(data) {
+    const renderVersion = ++equipmentRenderVersion;
     const container = document.getElementById('sheet-tab-equipment');
     if (!container) return;
 
@@ -3421,6 +3478,8 @@ async function renderEquipmentTab(data) {
     } catch (e) {
         console.error('Failed to load templates', e);
     }
+    // A newer socket/local update may arrive while templates are loading.
+    if (renderVersion !== equipmentRenderVersion) return;
     const equippedHelmetTemplate = helmetTemplates.find(
         template => template.id == helmet.templateId
     );
@@ -4297,6 +4356,23 @@ window.cycleWeaponFromEquipment = async function(weaponIndex) {
     showNotification(cycleType === 'pump' ? 'Патрон дослан в патронник' : 'Затвор передёрнут', 'success');
 };
 
+function removeClearedWeaponJamLocally(weaponIndex) {
+    const weapon = currentCharacterData?.weapons?.[weaponIndex];
+    if (!weapon) return;
+
+    if (Array.isArray(weapon.jams) && weapon.jams.length) {
+        weapon.jams.pop();
+        if (weapon.jams.length) weapon.jam = weapon.jams[weapon.jams.length - 1];
+        else {
+            delete weapon.jams;
+            delete weapon.jam;
+        }
+        return;
+    }
+    delete weapon.jam;
+    delete weapon.jams;
+}
+
 window.clearWeaponJam = async function(weaponIndex, options = {}) {
     const weapon = currentCharacterData?.weapons?.[weaponIndex];
     const jamLabel = weapon?.jam?.label || 'оружие снова готово';
@@ -4329,6 +4405,8 @@ window.clearWeaponJam = async function(weaponIndex, options = {}) {
             showNotification('Устранение клина начато. Оставшиеся ОД спишутся в следующих ходах.', 'system');
             return;
         }
+        removeClearedWeaponJamLocally(weaponIndex);
+        await renderEquipmentTab(currentCharacterData);
         showNotification(`Клин устранён: ${jamLabel}`, 'success');
     } catch (error) {
         showNotification(error.message || 'Не удалось устранить клин', 'system');
@@ -4465,9 +4543,14 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     if (profile.supports_burst) {
         const machineGun = Boolean(profile.machine_gun_burst);
         const burstShots = Number(profile.burst_size) || 0;
-        const action = (mode, actionPoints = 3, volleyCount = 1) => machineGun
-            ? `chooseMachineGunBurst(${index}, '${mode}', ${actionPoints}, ${volleyCount})`
-            : `useWeaponFromEquipment(${index}, '${mode}', ${burstShots * volleyCount}, ${actionPoints}, ${volleyCount})`;
+        const action = (mode, actionPoints = 3, volleyCount = 1) => {
+            if (machineGun && mode === 'area') {
+                return `useWeaponFromEquipment(${index}, '${mode}', 10, ${actionPoints}, 2)`;
+            }
+            return machineGun
+                ? `chooseMachineGunBurst(${index}, '${mode}', ${actionPoints}, ${volleyCount})`
+                : `useWeaponFromEquipment(${index}, '${mode}', ${burstShots * volleyCount}, ${actionPoints}, ${volleyCount})`;
+        };
         const burstLabel = machineGun ? 'Пулемётная очередь' : `Очередь x${burstShots}`;
         buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('burst')}">${burstLabel} · 3 ОД</button>`);
         if (profile.supports_suppression) {
@@ -4475,8 +4558,8 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
             buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('suppression', 5, 2)}">Подавление (2 очереди) · 5 ОД</button>`);
         }
         if (profile.supports_area_fire) {
-            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('area', 5, 1)}">По области (1 очередь) · 5 ОД</button>`);
-            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('area', 5, 2)}">По области (2 очереди) · 5 ОД</button>`);
+            const areaShots = machineGun ? 10 : burstShots * 2;
+            buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('area', 5, 2)}">По области · ${areaShots} выстр. · 5 ОД</button>`);
         }
     }
     return buttons.join('');
@@ -4731,7 +4814,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
             const reduction = shooting >= 20 ? 2 : (shooting >= 15 ? 1 : 0);
             const clearCost = Math.max(0, Number(jam.fix_ap || 0) - reduction);
             const repairText = jam.repair_required === 'full'
-                ? 'Нужен ремонт до максимальной прочности'
+                ? 'Нужен ремонт до текущего максимума прочности с учётом штрафа ремонта'
                 : (jam.repair_required === 'increase'
                     ? 'Нужно восстановить хотя бы 1 прочность'
                     : `Устранение: ${clearCost} ОД`);
@@ -8498,6 +8581,8 @@ async function useItem(item, itemPath, options = {}) {
         return await useConsumable(item, itemPath, options);
     } else if (item.category === 'grenade') {
         return await useGrenade(item, itemPath, options);
+    } else if (item.category === 'tool' && item.attributes?.repair_profile) {
+        return await useRepairTool(item, itemPath);
     } else if (item.category === 'device') {
         // Если устройство имеет батарею и разряжено, предложить зарядить
         if (item.attributes?.power !== undefined && item.attributes.power < 100) {
@@ -8507,6 +8592,99 @@ async function useItem(item, itemPath, options = {}) {
         }
     } else {
         showNotification('Невозможно использовать этот предмет');
+    }
+}
+
+function getRepairTargetCategory(item) {
+    return String(item?.category || getInventoryItemTemplate(item)?.category || '').toLowerCase();
+}
+
+function getRepairTargetLabel(item, profile) {
+    const name = item?.name || getInventoryItemTemplate(item)?.name || 'Снаряжение';
+    if (profile.kind === 'restore_tool') {
+        const maximum = Number(item?.maxUses ?? item?.attributes?.uses ?? 0);
+        return `${name} · прочность ${Number(item?.uses ?? maximum)}/${maximum}`;
+    }
+    if (profile.kind === 'weapon') {
+        const maximum = Number(item?.maxDurability ?? item?.attributes?.max_durability ?? 100);
+        return `${name} · прочность ${Number(item?.durability ?? maximum)}/${maximum}`;
+    }
+    const stageNames = ['1. Целая', '2. Немного повреждена', '3. Повреждена', '4. Сильно повреждена', '5. Поломана'];
+    const stage = Math.max(1, Math.min(5, Number(item?.stage || 1)));
+    return `${name} · ${stageNames[stage - 1]}`;
+}
+
+async function useRepairTool(tool, toolPath) {
+    const profile = tool?.attributes?.repair_profile;
+    if (!profile || !['weapon', 'armor', 'armor_current_stage', 'restore_tool'].includes(profile.kind)) {
+        showNotification('Этот инструмент пока нельзя использовать для ремонта');
+        return false;
+    }
+    if (window.locationCombatState?.status === 'active') {
+        showNotification('Ремонт снаряжения доступен только вне боя');
+        return false;
+    }
+    const wantedCategories = profile.kind === 'weapon'
+        ? new Set(['weapon', 'melee_weapon'])
+        : (profile.kind === 'restore_tool'
+            ? new Set(['tool'])
+            : new Set(['armor', 'helmet', 'gas_mask']));
+    const choices = [];
+    const append = (item, path) => {
+        if (!item || !wantedCategories.has(getRepairTargetCategory(item))) return;
+        if (profile.kind === 'restore_tool') {
+            if (item === tool) return;
+            const maximum = Number(item.maxUses ?? item.attributes?.uses);
+            const current = Number(item.uses ?? maximum);
+            if (!Number.isFinite(maximum) || current >= maximum) return;
+        }
+        choices.push({
+            label: getRepairTargetLabel(item, profile),
+            item,
+            path,
+        });
+    };
+    (currentCharacterData.weapons || []).forEach((item, index) => append(item, ['weapons', index]));
+    const equipment = currentCharacterData.equipment || {};
+    append(equipment.armor, ['equipment', 'armor']);
+    append(equipment.helmet, ['equipment', 'helmet']);
+    append(equipment.gasMask, ['equipment', 'gasMask']);
+    collectInventoryEntries(currentCharacterData, item => wantedCategories.has(getRepairTargetCategory(item)))
+        .forEach(entry => append(entry.item, entry.path));
+    if (!choices.length) {
+        showNotification(profile.kind === 'weapon'
+            ? 'Нет оружия для ремонта'
+            : (profile.kind === 'restore_tool' ? 'Нет повреждённых наборов инструментов' : 'Нет брони для ремонта'));
+        return false;
+    }
+    const selected = await chooseConsumableApplication(
+        `Ремонт: ${tool.name}`,
+        choices,
+        { alwaysShow: true }
+    );
+    if (!selected) return false;
+    try {
+        const response = await Server.repairCharacterEquipment(
+            currentCharacterId,
+            toolPath,
+            selected.path
+        );
+        currentCharacterData = response.character_data || currentCharacterData;
+        await renderEquipmentTab(currentCharacterData);
+        renderInventoryTab(currentCharacterData);
+        const result = response.result || {};
+        const summary = ['weapon', 'restore_tool'].includes(result.kind)
+            ? `Прочность: ${result.before} → ${result.after}/${result.maximum_after}.${result.kind === 'weapon' ? ` Максимум −${result.maximum_penalty}.` : ''}`
+            : `Стадия: ${result.stage_before} → ${result.stage_after}. Прочность брони: ${result.durability_before} → ${result.durability_after}.`;
+        const duration = Number(result.duration_minutes || 0);
+        const timeNote = duration > 0
+            ? ` Длительность: ${duration} мин.; глобальное время изменяет ГМ.`
+            : '';
+        showNotification(`${response.message}. ${summary}${timeNote}`, 'success');
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось отремонтировать снаряжение');
+        return false;
     }
 }
 
@@ -8530,6 +8708,28 @@ function getEffectAreaLabel(area) {
         rightKidney: 'правая почка', leftKidney: 'левая почка',
         stomach: 'желудок', liver: 'печень', brain: 'мозг'
     })[area] || area || 'источник не указан';
+}
+
+function getEffectDisplayName(effect) {
+    const baseName = effect?.name || 'Эффект';
+    if (effect?.type === 'organ_loss' && effect.area) {
+        return `Повреждённый орган: ${getEffectAreaLabel(effect.area)}`;
+    }
+    if (effect?.type === 'organ_failure' && effect.area) {
+        return `Смертельное повреждение: ${getEffectAreaLabel(effect.area)}`;
+    }
+    return baseName;
+}
+
+function formatTreatmentWindow(seconds) {
+    const remaining = Math.max(0, Math.ceil(Number(seconds) || 0));
+    if (remaining <= 0) return 'окно лечения истекло';
+    const hours = Math.floor(remaining / 3600);
+    const minutes = Math.ceil((remaining % 3600) / 60);
+    if (hours && minutes) return `${hours} ч ${minutes} мин`;
+    if (hours) return `${hours} ч`;
+    if (minutes) return `${minutes} мин`;
+    return `${remaining} сек`;
 }
 
 function getFracturePenaltyText(area) {
@@ -8585,7 +8785,31 @@ function getMedicalApplicationCostLabel(actionPoints, costContext = null) {
     const baseCost = Math.max(0, Number(actionPoints) || 0);
     if (!costContext) return `${baseCost} ОД`;
     const useCost = Math.max(0, baseCost - Number(costContext.useActionDiscount || 0));
-    return `${Number(costContext.retrievalActionPoints || 0) + useCost} ОД всего`;
+    const retrievalCost = Number(costContext.retrievalActionPoints || 0);
+    const totalCost = retrievalCost + useCost;
+    if (!retrievalCost) return `${totalCost} ОД всего`;
+    return `${totalCost} ОД всего (лечение ${useCost} + достать ${retrievalCost})`;
+}
+
+function getMedicineSkillLevel() {
+    const medicine = currentCharacterData?.skills?.other?.medicine || {};
+    const base = Number(medicine.base ?? medicine.value ?? 5);
+    const bonus = Number(medicine.bonus || 0);
+    return Math.max(0, (Number.isFinite(base) ? base : 5) + (Number.isFinite(bonus) ? bonus : 0));
+}
+
+function getMedicalTreatmentActionPoints(direct, fallbackActionPoints) {
+    const configuredCost = Number(direct?.treatment_action_points);
+    const hasConfiguredCost = Number.isFinite(configuredCost);
+    let actionPoints = hasConfiguredCost
+        ? configuredCost
+        : Math.max(0, Number(fallbackActionPoints) || 0);
+    if (hasConfiguredCost && direct?.treatment_time_uses_medicine !== false) {
+        const medicineLevel = getMedicineSkillLevel();
+        if (medicineLevel >= 15) actionPoints -= 1;
+        else if (medicineLevel <= 5) actionPoints += 1;
+    }
+    return Math.max(0, actionPoints);
 }
 
 function getBleedingEffectLabel(effect, bleeding = getBleedingInfo(effect)) {
@@ -9226,7 +9450,10 @@ async function resolveMedicalApplication(direct, health, itemName, costContext =
                 const outcome = getBleedingTreatmentOutcome(effect, application);
                 if (!outcome) return;
                 if (direct.limb_only && !['leftArm', 'rightArm', 'leftLeg', 'rightLeg'].includes(effect.area)) return;
-                const actionPoints = Number(application.action_points || 1);
+                const actionPoints = getMedicalTreatmentActionPoints(
+                    direct,
+                    Number(application.action_points || 1)
+                );
                 const treatmentLabel = outcome.mode === 'weaken'
                     ? `ослабить до ${BLEEDING_STAGE_LABEL[outcome.resultStage]}`
                     : 'остановить';
@@ -9488,10 +9715,21 @@ async function useConsumable(item, itemPath, options = {}) {
         if (direct.intoxication_delta === undefined) direct.intoxication_delta = 1;
     }
     if (itemName.includes('бинт')) {
+        direct.treatment_action_points = 4;
+        direct.treatment_time_uses_medicine = true;
         if (direct.bleeding_stop_light_cost === undefined) {
             direct.bleeding_stop_light_cost = 1;
             direct.bleeding_stop_type = 'external';
         }
+    }
+    if (itemName.includes('антисептический тампон')) {
+        direct.treatment_action_points = 2;
+        direct.treatment_time_uses_medicine = true;
+    }
+    if ((itemName.includes('жгут') || itemName.includes('турникет'))
+        && !itemName.includes('шина шарнирова')) {
+        direct.treatment_action_points = 4;
+        direct.treatment_time_uses_medicine = true;
     }
     if (itemName.includes('губка коллагеновая')) {
         direct.bleeding_stop_light_cost = 1;
@@ -9552,7 +9790,8 @@ async function useConsumable(item, itemPath, options = {}) {
     }
     if (!application) return false;
     const requiredItemUses = Number(application.application?.item_uses || 1);
-    if (!direct.not_consumed && getInventoryItemAvailableUses(item) < requiredItemUses) {
+    if (!direct.not_consumed && !options.skipItemConsumption
+        && getInventoryItemAvailableUses(item) < requiredItemUses) {
         showNotification(`Недостаточно зарядов: требуется ${requiredItemUses}`);
         return false;
     }
@@ -9683,7 +9922,7 @@ async function useConsumable(item, itemPath, options = {}) {
     const needsMedicineCheck = direct.medical_difficulty !== undefined
         || ['bleeding', 'wound', 'injury'].includes(application.kind)
         || direct.requires_infusion_tool;
-    if (needsMedicineCheck) {
+    if (needsMedicineCheck && !options.skipMedicineCheck) {
         const medicine = currentCharacterData.skills?.other?.medicine || {};
         const medicineBase = Number.isFinite(Number(medicine.base)) ? Number(medicine.base) : 10;
         const medicineSkillBonus = Math.floor((medicineBase - 10) / 2) + Number(medicine.bonus || 0);
@@ -9706,14 +9945,55 @@ async function useConsumable(item, itemPath, options = {}) {
         const roll = Math.floor(Math.random() * 20) + 1;
         const checkDetails = `d20: ${roll}, СЛ: ${difficulty} (база ${baseDifficulty}, Медицина ${medicineSkillBonus >= 0 ? '+' : ''}${medicineSkillBonus}, медикамент ${medicationBonus >= 0 ? '+' : ''}${medicationBonus})`;
         if (roll < difficulty) {
+            const medicalRetry = {
+                actor_character_id: Number(currentCharacterId),
+                target_character_id: Number(options.targetCharacterId || currentCharacterId),
+                item_id: item.id ?? null,
+                item_path: Array.isArray(itemPath) ? [...itemPath] : [],
+                item_snapshot: JSON.parse(JSON.stringify(item)),
+                application: JSON.parse(JSON.stringify(application)),
+                interaction_context: options.interactionContext ? {
+                    actorLocationCharacterId: options.interactionContext.actorLocationCharacterId,
+                    lobbyId: options.interactionContext.lobbyId,
+                    locationId: options.interactionContext.locationId,
+                } : null,
+            };
             if (!direct.not_consumed) {
                 spendInventoryItemUses({ item, path: itemPath }, Number(application.application?.item_uses || 1));
             }
+            const actorHealth = currentCharacterData.health || (currentCharacterData.health = {});
+            const actorCombatMeta = actorHealth.combatMeta || (actorHealth.combatMeta = {});
+            actorCombatMeta.mustDoRetry = {
+                kind: 'medical',
+                name: `Применить ${item.name || 'медикамент'}`,
+                skill_path: 'skills.other.medicine',
+                skill_label: 'Медицина',
+                difficulty: Math.max(1, baseDifficulty - medicationBonus),
+                medical_retry: medicalRetry,
+            };
+            window.dispatchEvent(new CustomEvent('must-do-retry-registered', {
+                detail: {
+                    characterId: Number(currentCharacterId),
+                    retry: {
+                        kind: 'medical',
+                        name: actorCombatMeta.mustDoRetry.name,
+                        difficulty: actorCombatMeta.mustDoRetry.difficulty,
+                    },
+                },
+            }));
             showNotification(`Проверка Медицины провалена. ${checkDetails}. Расходник потрачен.`);
             if (options.render !== false) renderInventoryTab(currentCharacterData);
             if (options.save !== false) {
-                scheduleAutoSave();
-                forceSyncCharacter();
+                if (isCombatActive) {
+                    try {
+                        await Server.updateCharacter(currentCharacterId, { data: currentCharacterData });
+                    } catch (error) {
+                        showNotification(error.message || 'Не удалось сохранить повтор медицинской проверки');
+                    }
+                } else {
+                    scheduleAutoSave();
+                    forceSyncCharacter();
+                }
             }
             return true;
         }
@@ -10324,7 +10604,7 @@ async function useConsumable(item, itemPath, options = {}) {
         }
     }
 
-    if (!direct.not_consumed) {
+    if (!direct.not_consumed && !options.skipItemConsumption) {
         spendInventoryItemUses({ item, path: itemPath }, Number(application.application?.item_uses || 1));
     }
     if (isCombatActive && Number(direct.action_points_delta || 0) !== 0) {
@@ -10419,12 +10699,12 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
     const previousCharacterId = currentCharacterId;
     const previousCharacterData = currentCharacterData;
     const shouldRestorePreviousState = previousCharacterId !== characterId;
-    const activeData = !shouldRestorePreviousState && currentCharacterData
+    const activeData = !options.forceReload && !shouldRestorePreviousState && currentCharacterData
         ? currentCharacterData
         : null;
 
     try {
-        if (shouldRestorePreviousState || !currentCharacterData) {
+        if (options.forceReload || shouldRestorePreviousState || !currentCharacterData) {
             const loadedCharacter = await Server.getCharacter(characterId);
             currentCharacterId = characterId;
             currentCharacterData = loadedCharacter?.data || {};
@@ -10449,12 +10729,42 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
 
         const resolvedEntry = options.itemId ? findInventoryItemById(currentCharacterData, options.itemId) : null;
         const resolvedPath = resolvedEntry?.path || normalizedPath;
-        const item = resolvedEntry?.item || getItemByPath(resolvedPath);
+        const locatedItem = resolvedEntry?.item || getItemByPath(resolvedPath);
+        const retryItemMatches = !options.retryItem || (
+            locatedItem
+            && (
+                (options.retryItem.id != null && locatedItem.id == options.retryItem.id)
+                || (options.retryItem.id == null
+                    && locatedItem.templateId == options.retryItem.templateId
+                    && locatedItem.name === options.retryItem.name)
+            )
+        );
+        const item = retryItemMatches ? locatedItem : options.retryItem;
         if (!item) {
             throw new Error('Предмет не найден');
         }
 
-    const useOptions = { ...options, targetData, render: false, save: false };
+    let preselectedApplication = options.preselectedApplication;
+    if (preselectedApplication?.effect) {
+        const storedEffect = preselectedApplication.effect;
+        const currentEffect = (targetData.health?.effects || []).find(effect =>
+            (storedEffect.id && effect?.id === storedEffect.id)
+            || (!storedEffect.id
+                && effect?.type === storedEffect.type
+                && effect?.area === storedEffect.area
+                && effect?.source === storedEffect.source)
+        );
+        if (currentEffect) {
+            preselectedApplication = { ...preselectedApplication, effect: currentEffect };
+        }
+    }
+    const useOptions = {
+        ...options,
+        preselectedApplication,
+        targetData,
+        render: false,
+        save: false,
+    };
     const applied = await useItem(item, resolvedPath, useOptions);
     if (applied === false) return false;
     await Server.updateCharacter(characterId, { data: currentCharacterData });
@@ -10487,6 +10797,24 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
         }
     }
     return true;
+}
+
+export async function resolveMustDoMedicalRetry(retry, success) {
+    if (!success) return false;
+    if (!retry?.actor_character_id || !retry?.item_snapshot || !retry?.application) {
+        throw new Error('Не удалось восстановить применение медикамента');
+    }
+    return useCharacterInventoryItem(retry.actor_character_id, retry.item_path || [], {
+        targetCharacterId: retry.target_character_id || retry.actor_character_id,
+        itemId: retry.item_id,
+        retryItem: retry.item_snapshot,
+        preselectedApplication: retry.application,
+        interactionContext: retry.interaction_context || undefined,
+        forceReload: true,
+        skipCombatPayment: true,
+        skipMedicineCheck: true,
+        skipItemConsumption: true,
+    });
 }
 
 function rollBloodType() {
@@ -14213,8 +14541,10 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
                     normalizeCharacterEffects(currentCharacterData);
 
                     // Принудительно обновляем инвентарь и экипировку (они всегда в DOM)
-                    renderInventoryTab(currentCharacterData);
-                    renderEquipmentTab(currentCharacterData);
+                    await Promise.all([
+                        renderInventoryTab(currentCharacterData),
+                        renderEquipmentTab(currentCharacterData),
+                    ]);
 
                     // Обновляем активную вкладку для немедленного отображения
                     const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;

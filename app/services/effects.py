@@ -37,6 +37,7 @@ EFFECT_TYPE_META = {
     "mangled_limb": {"label": "Искореженная конечность", "group": "injury"},
     "temporary_limb_restoration": {"label": "Временное восстановление конечности", "group": "medical"},
     "delayed_limb_treatment": {"label": "Отложенное лечение конечности", "group": "medical"},
+    "organ_loss": {"label": "Повреждённый орган", "group": "injury"},
     "organ_failure": {"label": "Смертельное повреждение органа", "group": "critical"},
     "shock": {"label": "Шок", "group": "injury"},
     "unconsciousness": {"label": "Без сознания", "group": "critical"},
@@ -169,6 +170,14 @@ STATUS_EFFECT_TYPES = {
     "amputation", "organ_loss", "organ_failure", "mangled_limb",
     "bleeding_external_light", "bleeding_external_medium", "bleeding_external_severe", "bleeding_external_extreme",
     "bleeding_internal_light", "bleeding_internal_medium", "bleeding_internal_severe", "bleeding_internal_extreme",
+}
+
+ORGAN_LABELS = {
+    "heart": "Сердце", "rightLung": "Правое лёгкое", "leftLung": "Левое лёгкое",
+    "rightKidney": "Правая почка", "leftKidney": "Левая почка", "stomach": "Желудок",
+    "liver": "Печень", "brain": "Мозг", "spine": "Позвоночник",
+    "rightEye": "Правый глаз", "leftEye": "Левый глаз",
+    "rightEar": "Правое ухо", "leftEar": "Левое ухо", "nose": "Нос", "jaw": "Челюсть",
 }
 
 EFFECT_IMPACT_RULES = {
@@ -404,6 +413,9 @@ def normalize_effect(raw: Any) -> Dict[str, Any]:
     }
     if str(data.get("name") or "").strip().lower() in generic_names and effect_type != "generic":
         data["name"] = get_effect_meta(effect_type)["label"]
+    if effect_type == "organ_loss" and data.get("area"):
+        organ_label = ORGAN_LABELS.get(data["area"], data["area"])
+        data["name"] = f"Повреждённый орган: {organ_label}"
     max_hours = _to_int(data.get("max_hours"), 0)
     if data.get("remaining") is None and max_hours > 0:
         data["remaining"] = max_hours
