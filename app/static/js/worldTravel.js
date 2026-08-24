@@ -25,6 +25,7 @@ let worldTurn = { active_group_ids: [], submitted_group_ids: [], waiting_group_i
 let selectionMode = null;
 let contextMenu = null;
 let editingMembersGroupId = null;
+let activeAnomalyFieldGroup = null;
 
 function tileHeight(tileX, tileY) {
     const chunkX = Math.floor(tileX / CHUNK_SIZE);
@@ -251,6 +252,7 @@ function showGroupContextMenu(group, clientX, clientY) {
         <div class="world-group-context-speed">${escapeHtml(group.movement_speed_label)} · ${group.movement_distance} кл. / 10 мин.</div>
         <button type="button" data-context-move ${group.has_pending_event || !group.turn_active || group.turn_submitted || group.movement_distance <= 0 ? 'disabled' : ''}>Переместить</button>
         <button type="button" data-context-wait ${group.has_pending_event || !group.turn_active || group.turn_submitted ? 'disabled' : ''}>Ждать 10 минут</button>
+        ${group.anomaly_field ? `<button type="button" data-context-anomaly-field>Исследовать поле · ${escapeHtml(group.anomaly_field.name)}</button>` : ''}
         ${window.isGM && group.has_pending_event ? '<button type="button" data-context-event>Ожидающее событие</button>' : ''}
         ${window.isGM ? '<button type="button" data-context-delete>Удалить с карты</button>' : ''}
     `;
@@ -288,6 +290,10 @@ function showGroupContextMenu(group, clientX, clientY) {
             card?.classList.add('world-event-focus');
             setTimeout(() => card?.classList.remove('world-event-focus'), 1400);
         });
+    });
+    contextMenu.querySelector('[data-context-anomaly-field]')?.addEventListener('click', () => {
+        hideContextMenu();
+        openAnomalyFieldModal(group);
     });
     contextMenu.querySelector('[data-context-delete]')?.addEventListener('click', async () => {
         hideContextMenu();
@@ -339,6 +345,103 @@ function worldGroupMemberLabel(member) {
     return `${name} <span class="world-group-carry-state">(переносят, ${method}, штраф ${member.carry_penalty})</span>`;
 }
 
+function closeAnomalyFieldModal() {
+    activeAnomalyFieldGroup = null;
+    const modal = document.getElementById('anomaly-field-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function artifactClassLabel(value) {
+    return ({ trash: 'Мусор', 1: 'I класс', 2: 'II класс', 3: 'III класс', x: 'X класс' })[value] || value;
+}
+
+function renderAnomalyFieldResult(result) {
+    const field = result.field;
+    const character = result.character;
+    const title = document.getElementById('anomaly-field-title');
+    const summary = document.getElementById('anomaly-field-summary');
+    const results = document.getElementById('anomaly-field-results');
+    if (!title || !summary || !results) return;
+    title.textContent = `${field.name} · ранг ${field.rank}`;
+    summary.innerHTML = `
+        <span>${escapeHtml(field.field_type || 'Аномальное поле')}</span>
+        <span>${escapeHtml(field.hazard || 'Опасная среда')}</span>
+        <small>Выживание ${character.survival_bonus >= 0 ? '+' : ''}${character.survival_bonus} · Ловкость ${character.agility_bonus >= 0 ? '+' : ''}${character.agility_bonus} · генератор +${character.generator_bonus}</small>
+    `;
+    if (!field.untouched) {
+        results.innerHTML = '<div class="anomaly-field-empty">Поле уже было разграблено. Оно восстановится после следующего Выброса.</div>';
+        return;
+    }
+    if (!field.artifacts.length) {
+        results.innerHTML = '<div class="anomaly-field-empty">Артефактов обнаружить не удалось.</div>';
+        return;
+    }
+    const recovery = result.recovery;
+    const recoveryNotice = recovery ? `
+        <div class="anomaly-field-roll ${recovery.success ? 'success' : 'failure'}">
+            ${recovery.success ? 'Артефакт извлечён' : 'Извлечение провалено'}:
+            ${escapeHtml(recovery.artifact_name)} · ${recovery.rolls.join(', ')} → ${recovery.total} против СЛ ${recovery.difficulty}
+            ${recovery.field_exposures ? ` · воздействий поля: ${recovery.field_exposures}` : ''}
+        </div>` : '';
+    results.innerHTML = recoveryNotice + field.artifacts.map((artifact, index) => `
+        <div class="anomaly-field-artifact ${artifact.recovered ? 'recovered' : ''}">
+            <div>
+                <strong>${escapeHtml(artifact.name)}</strong>
+                <small>${artifactClassLabel(artifact.artifact_class)}${artifact.guaranteed ? ' · гарантированный' : ''}</small>
+            </div>
+            ${artifact.recovered ? '<span>Извлечён</span>' : `
+                <label>Доп. кубы
+                    <input type="number" min="0" max="${Math.max(0, character.survival_bonus)}" value="0" data-field-extra-dice="${index}">
+                </label>
+                <button type="button" class="btn btn-sm btn-primary" data-field-recover="${index}">Извлечь · 3 ОД</button>
+            `}
+        </div>
+    `).join('');
+}
+
+async function inspectAnomalyField() {
+    if (!activeAnomalyFieldGroup) return;
+    const characterId = Number(document.getElementById('anomaly-field-character')?.value);
+    try {
+        const result = await Server.useWorldAnomalyField(lobbyId, activeAnomalyFieldGroup.id, {
+            action: 'inspect', character_id: characterId,
+        });
+        renderAnomalyFieldResult(result);
+        await refreshWorldTravel();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function openAnomalyFieldModal(group) {
+    activeAnomalyFieldGroup = group;
+    const modal = document.getElementById('anomaly-field-modal');
+    const select = document.getElementById('anomaly-field-character');
+    if (!modal || !select || !(group.members || []).length) {
+        showNotification('В группе нет персонажей для исследования поля', 'error');
+        return;
+    }
+    select.innerHTML = group.members.map(member => `<option value="${member.id}">${escapeHtml(member.name)}</option>`).join('');
+    modal.style.display = 'flex';
+    await inspectAnomalyField();
+}
+
+async function recoverAnomalyFieldArtifact(index) {
+    if (!activeAnomalyFieldGroup) return;
+    const characterId = Number(document.getElementById('anomaly-field-character')?.value);
+    const extraDice = Number(document.querySelector(`[data-field-extra-dice="${index}"]`)?.value || 0);
+    try {
+        const result = await Server.useWorldAnomalyField(lobbyId, activeAnomalyFieldGroup.id, {
+            action: 'recover', character_id: characterId, artifact_index: index, extra_dice: extraDice,
+        });
+        renderAnomalyFieldResult(result);
+        showNotification(result.recovery?.success ? 'Артефакт добавлен в карманы' : 'Артефакт извлечь не удалось', result.recovery?.success ? 'success' : 'error');
+        await refreshWorldTravel();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
 function renderModal() {
     const list = document.getElementById('world-group-list');
     const events = document.getElementById('world-event-list');
@@ -355,6 +458,7 @@ function renderModal() {
                 <small>Клетка ${group.tile_x}, ${group.tile_y}${group.has_pending_event ? ' · ожидает решения ГМа' : ''}</small>
                 <small>Состав: ${group.members?.length ? group.members.map(worldGroupMemberLabel).join(', ') : 'не задан'}</small>
                 <small>Скорость: ${escapeHtml(group.movement_speed_label)} · штраф ${group.movement_penalty} · ${group.movement_distance} кл. за 10 минут</small>
+                ${group.anomaly_field ? `<small>Аномальное поле: ${escapeHtml(group.anomaly_field.name)}, ранг ${group.anomaly_field.rank}${group.anomaly_field.searched ? ` · осталось: ${group.anomaly_field.remaining_artifacts}` : ' · не исследовано'}</small>` : ''}
                 <small>${!group.turn_active ? 'Не участвует в ожидании мирового хода' : (group.turn_submitted ? 'Ход сделан · ожидает остальные группы' : 'Ожидается действие в текущем мировом ходе')}</small>
             </div>
             <div class="world-group-actions">
@@ -685,6 +789,12 @@ export function initWorldTravel(currentLobbyId, socket) {
         if (contextMenu && !contextMenu.contains(event.target)) hideContextMenu();
     });
     document.getElementById('world-travel-modal')?.addEventListener('click', handleModalClick);
+    document.querySelector('[data-anomaly-field-close]')?.addEventListener('click', closeAnomalyFieldModal);
+    document.getElementById('anomaly-field-character')?.addEventListener('change', inspectAnomalyField);
+    document.getElementById('anomaly-field-results')?.addEventListener('click', event => {
+        const button = event.target.closest('[data-field-recover]');
+        if (button) recoverAnomalyFieldArtifact(Number(button.dataset.fieldRecover));
+    });
     document.addEventListener('keydown', event => {
         if (event.key !== 'Escape' || !selectionMode) return;
         event.preventDefault();

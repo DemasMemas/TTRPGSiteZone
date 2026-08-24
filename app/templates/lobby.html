@@ -132,6 +132,7 @@
             </div>
             <div class="panel-content">
                 <button class="btn btn-primary btn-sm" onclick="showCreateCharacterForm()" style="margin-bottom: 10px;">+ Создать персонажа</button>
+                <button id="create-mutant-btn" class="btn btn-secondary btn-sm" onclick="showCreateMutantForm()" style="display:none;margin-bottom:10px;">+ Создать мутанта</button>
                 <div id="lobby-characters-list" class="characters-list"></div>
             </div>
         </div>
@@ -242,15 +243,56 @@
                     <button class="btn btn-primary" onclick="applyRadiationChange()">Сохранить радиацию</button>
                     <br><br>
 
+                    <label>Аномальное поле:</label>
+                    <select id="tile-edit-anomaly-field" onchange="updateAnomalyFieldRankOptions()">
+                        <option value="">Нет аномального поля</option>
+                    </select>
+                    <label>Ранг:</label>
+                    <select id="tile-edit-anomaly-rank" disabled><option value="">-</option></select>
+                    <button class="btn btn-primary" onclick="applyAnomalyFieldChange()">Сохранить поле</button>
+                    <br><br>
+
                     <label>Тип объекта:</label>
                     <select id="object-type-select">
                         <option value="tree">🌲 Дерево</option>
                         <option value="house">🏠 Дом</option>
                         <option value="fence">🚧 Забор</option>
-                        <option value="anomaly_electric">⚡ Электрическая аномалия</option>
-                        <option value="anomaly_fire">🔥 Огненная аномалия</option>
-                        <option value="anomaly_acid">🧪 Кислотная лужа</option>
-                        <option value="anomaly_void">🌀 Искажение</option>
+                        <optgroup label="Аномалии: гравитационные">
+                            <option value="anomaly_batut">Батут</option><option value="anomaly_otboynik">Отбойник</option>
+                            <option value="anomaly_kacheli">Качели</option><option value="anomaly_zybuchka">Зыбучка</option>
+                            <option value="anomaly_vozduhovorot">Воздуховорот</option><option value="anomaly_glukhar">Глухарь</option>
+                            <option value="anomaly_britva">Бритва</option><option value="anomaly_viselitsa">Виселица</option>
+                        </optgroup>
+                        <optgroup label="Аномалии: электрические">
+                            <option value="anomaly_vspishka">Вспышка</option><option value="anomaly_pautina">Паутина</option>
+                            <option value="anomaly_tesla">Тесла</option><option value="anomaly_katushka">Катушка</option>
+                            <option value="anomaly_kapkan">Капкан</option><option value="anomaly_paralizator">Парализатор</option>
+                            <option value="anomaly_akkumulyator">Аккумулятор</option><option value="anomaly_ionny_tuman">Ионный туман</option>
+                        </optgroup>
+                        <optgroup label="Аномалии: термические">
+                            <option value="anomaly_banya">Баня</option><option value="anomaly_parilka">Парилка</option>
+                            <option value="anomaly_mochalka">Мочалка</option><option value="anomaly_kipyatilnik">Кипятильник</option>
+                            <option value="anomaly_morozilnik">Морозильник</option><option value="anomaly_uley">Улей</option>
+                            <option value="anomaly_metelitsa">Метелица</option><option value="anomaly_gril">Гриль</option>
+                        </optgroup>
+                        <optgroup label="Аномалии: радиационные">
+                            <option value="anomaly_zarosli">Заросли</option><option value="anomaly_svetlyachki">Светлячки</option>
+                            <option value="anomaly_mor">Мор</option><option value="anomaly_zapovednik">Заповедник</option>
+                            <option value="anomaly_mertvy_koster">Мертвый костер</option><option value="anomaly_solyariy">Солярий</option>
+                            <option value="anomaly_radioaktivny_roy">Радиоактивный рой</option><option value="anomaly_bagrovaya_luna">Багровая луна</option>
+                        </optgroup>
+                        <optgroup label="Аномалии: химические">
+                            <option value="anomaly_varevo">Варево</option><option value="anomaly_soda">Сода</option>
+                            <option value="anomaly_ezhinoe_oblako">Ежиное облако</option><option value="anomaly_rzhavchina">Ржавчина</option>
+                            <option value="anomaly_mogilshchik">Могильщик</option><option value="anomaly_chuma">Чума</option>
+                            <option value="anomaly_myshelovka">Мышеловка</option><option value="anomaly_gniloy_razlom">Гнилой разлом</option>
+                        </optgroup>
+                        <optgroup label="Аномалии: псионические">
+                            <option value="anomaly_ekho">Эхо</option><option value="anomaly_mirazh">Мираж</option>
+                            <option value="anomaly_starshina">Старшина</option><option value="anomaly_tuman_poteryannykh">Туман потерянных</option>
+                            <option value="anomaly_tma">Тьма</option><option value="anomaly_piyavka">Пиявка</option>
+                            <option value="anomaly_kolodets">Колодец</option><option value="anomaly_mozgotrobilka">Мозгодробилка</option>
+                        </optgroup>
                     </select>
                     <label>Цвет:</label>
                     <input type="color" id="object-color" value="#2d5a27">
@@ -534,6 +576,31 @@
                 <h4>Ожидающие события</h4>
                 <div id="world-event-list" class="world-event-list"></div>
             </div>
+    </div>
+
+    <div id="anomaly-field-modal" class="modal" style="display:none;">
+        <div class="modal-content anomaly-field-content">
+            <span class="close" data-anomaly-field-close>&times;</span>
+            <h3 id="anomaly-field-title">Аномальное поле</h3>
+            <div id="anomaly-field-summary" class="anomaly-field-summary"></div>
+            <label class="anomaly-field-character-label">
+                Кто исследует
+                <select id="anomaly-field-character" class="form-control"></select>
+            </label>
+            <div id="anomaly-field-results" class="anomaly-field-results"></div>
+        </div>
+    </div>
+
+    <div id="mutant-create-modal" class="modal" style="display:none;">
+        <div class="modal-content mutant-create-content">
+            <span class="close" data-mutant-create-close>&times;</span>
+            <h3>Создание мутанта</h3>
+            <label>Вид<select id="mutant-create-type" class="form-control"></select></label>
+            <label>Вариация<select id="mutant-create-variant" class="form-control"></select></label>
+            <label>Имя<input id="mutant-create-name" class="form-control" maxlength="100"></label>
+            <div id="mutant-create-preview" class="mutant-create-preview"></div>
+            <button type="button" class="btn btn-primary" data-mutant-create-confirm>Создать</button>
+        </div>
     </div>
 
     <!-- Информация о тайле -->

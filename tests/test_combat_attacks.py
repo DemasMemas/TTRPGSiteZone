@@ -16,6 +16,18 @@ def test_ranged_hit_zone_boundaries_follow_rules():
     assert CombatService._random_hit_zone(20) == "head"
 
 
+def test_mutant_innate_protection_and_attack_cost_are_used():
+    data = {
+        'mutant': {'physical_protection': 35, 'anomaly_protection': 50},
+        'equipment': {},
+    }
+    protection, details = CombatService._target_armor(data, 'chest')
+    assert protection == 35
+    assert details[0]['slot'] == 'mutant'
+    assert CombatService._target_elemental_protection(data, 'thermal') == 50
+    assert CombatService._melee_action_cost({'action_points': 5}, 'Укус') == 5
+
+
 def test_aimed_shot_can_override_hit_zone():
     assert CombatService._random_hit_zone(1, "head") == "head"
 
@@ -2352,6 +2364,48 @@ def test_only_pistol_subcategory_gets_cheap_unaimed_shot():
     assert CombatService._is_pistol_weapon({"subcategory": "пистолеты-пулеметы"}) is False
 
 
+@pytest.mark.parametrize("subcategory", [
+    "Пистолеты", "Дробовики", "Пистолеты-пулеметы",
+])
+def test_close_range_bonus_applies_to_compact_weapon_classes(subcategory):
+    weapon = {"subcategory": subcategory}
+    assert CombatService._close_range_weapon_accuracy_bonus(weapon, 5) == 2
+    assert CombatService._close_range_weapon_accuracy_bonus(weapon, 6) == 0
+
+
+def test_sniper_close_range_penalty_grows_for_each_meter_and_short_barrel_ignores_it():
+    weapon = {"subcategory": "Снайперские винтовки"}
+    assert CombatService._sniper_close_range_penalty(weapon, 5) == 1
+    assert CombatService._sniper_close_range_penalty(weapon, 3) == 3
+    assert CombatService._sniper_close_range_penalty(weapon, 1) == 5
+    shortened = {
+        **weapon,
+        "modifications": [{"name": "Укорочение ствола"}],
+    }
+    assert CombatService._sniper_close_range_penalty(shortened, 1) == 0
+
+
+def test_submachine_gun_burst_costs_one_less_action_point():
+    assert CombatService._burst_action_points(
+        {"subcategory": "Пистолеты-пулеметы"}
+    ) == 2
+    assert CombatService._burst_action_points(
+        {"subcategory": "Штурмовые винтовки и карабины"}
+    ) == 3
+
+
+@pytest.mark.parametrize(("subcategory", "penalty"), [
+    ("Пистолеты-пулеметы", 2),
+    ("Штурмовые винтовки и карабины", 4),
+    ("Дробовики", 6),
+    ("Пулеметы", 0),
+])
+def test_burst_followup_penalty_depends_on_weapon_class(subcategory, penalty):
+    weapon = {"subcategory": subcategory}
+    assert CombatService._burst_followup_accuracy_penalty(weapon, 0) == 0
+    assert CombatService._burst_followup_accuracy_penalty(weapon, 1) == penalty
+
+
 def test_rapid_fire_adds_four_difficulty_except_for_12x70_buckshot(app):
     regular_weapon = {
         "installedMagazine": {
@@ -2830,6 +2884,47 @@ def test_machine_gun_burst_difficulty_increases_every_two_shots(monkeypatch):
     )
 
     assert observed_difficulties == [10, 10, 11, 11, 12, 12]
+
+
+@pytest.mark.parametrize(("subcategory", "expected"), [
+    ("Пистолеты-пулеметы", [10, 12, 12]),
+    ("Штурмовые винтовки и карабины", [10, 14, 14]),
+    ("Дробовики", [10, 16, 16]),
+])
+def test_regular_burst_applies_class_penalty_after_first_shot(
+    monkeypatch, subcategory, expected,
+):
+    observed_difficulties = []
+
+    def resolve_attack(_target, _attacker, details, **_kwargs):
+        observed_difficulties.append(details["hit_difficulty"])
+        return {"roll": 20, "hit": True}
+
+    monkeypatch.setattr(CombatService, "_resolve_attack", resolve_attack)
+    weapon = {
+        "durability": 100,
+        "maxDurability": 100,
+        "subcategory": subcategory,
+    }
+    attacker = SimpleNamespace(
+        character=SimpleNamespace(data={"weapons": [weapon]}),
+    )
+    attack_details = {
+        "weapon_index": 0,
+        "fire_mode": "burst",
+        "shot_count": 3,
+        "requested_shot_count": 3,
+        "hit_difficulty": 10,
+        "hit_difficulty_without_weapon_jam": 10,
+        "base_shooting_disadvantage": False,
+        "machine_gun_burst": False,
+    }
+
+    CombatService._resolve_shot_sequence(
+        [SimpleNamespace()], attacker, attack_details,
+    )
+
+    assert observed_difficulties == expected
 
 
 def test_weapon_wear_is_once_per_combat_plus_each_duplet():

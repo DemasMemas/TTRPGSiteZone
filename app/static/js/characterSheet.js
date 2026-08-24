@@ -462,11 +462,20 @@ function buildItemTooltipHtml(template) {
         ? Object.entries(protection).map(([key, value]) => `${key}: ${formatProtectionPercent(value)}`).join(' · ')
         : '';
     const description = template.description || attrs.raw_description || attrs.notes || '';
+    const artifactLines = template.category === 'artifact'
+        ? [
+            attrs.positive_effect ? `Положительный: ${attrs.positive_effect}` : null,
+            attrs.negative_effect ? `Отрицательный: ${attrs.negative_effect}` : null,
+            attrs.special_property && String(attrs.special_property).toLowerCase() !== 'нет'
+                ? `Особое свойство: ${attrs.special_property}` : null,
+        ].filter(Boolean)
+        : [];
     return `
         <div style="font-size:14px;font-weight:700;margin-bottom:5px;color:#e4d8a6;">${escapeHtml(template.name)}</div>
         <div style="display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;line-height:1.35;">${metrics.join('')}</div>
         ${protectionLine ? `<div style="margin-top:6px;font-size:12px;"><strong>Защита:</strong> ${escapeHtml(protectionLine)}</div>` : ''}
         ${description ? `<div style="margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,.12);font-size:12px;line-height:1.4;">${escapeHtml(description)}</div>` : ''}
+        ${artifactLines.length ? `<div style="margin-top:7px;font-size:12px;"><strong>Свойства:</strong><br>${artifactLines.map(line => `• ${escapeHtml(line)}`).join('<br>')}</div>` : ''}
         ${effectLines.length ? `<div style="margin-top:7px;font-size:12px;"><strong>Эффекты:</strong><br>${effectLines.map(line => `• ${escapeHtml(line)}`).join('<br>')}</div>` : ''}`;
 }
 
@@ -4232,6 +4241,22 @@ function getWeaponFireProfile(weapon, template) {
     };
 }
 
+function getWeaponClass(weapon, template = null) {
+    const raw = String(
+        template?.subcategory
+        || weapon?.subcategory
+        || weapon?.attributes?.subcategory
+        || ''
+    ).trim().toLowerCase().replaceAll('ё', 'е');
+    if (raw.includes('пистолет') && raw.includes('пулемет')) return 'submachine_gun';
+    if (raw.includes('пистолет')) return 'pistol';
+    if (raw.includes('дробовик')) return 'shotgun';
+    if (raw.includes('снайпер')) return 'sniper_rifle';
+    if (raw.includes('пулемет')) return 'machine_gun';
+    if (raw.includes('гранатомет')) return 'grenade_launcher';
+    return 'other';
+}
+
 function getWeaponAmmoCount(weapon) {
     if (Array.isArray(weapon.installedMagazine?.ammo)) {
         return weapon.installedMagazine.ammo.reduce(
@@ -4492,6 +4517,7 @@ window.aimWeaponFromEquipment = function(weaponIndex) {
 
 function renderRangedAttackButtons(weapon, template, index, disabled) {
     const profile = getWeaponFireProfile(weapon, template);
+    const weaponClass = getWeaponClass(weapon, template);
     const disabledAttr = disabled ? 'disabled' : '';
     const jamBlocksFire = Boolean(weapon?.jam?.blocks_fire);
     const firingDisabledAttr = disabled || jamBlocksFire ? 'disabled' : '';
@@ -4518,10 +4544,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
         const drawCost = ergonomics?.draw_action_points ?? 4;
         return `<button type="button" class="btn btn-sm btn-primary" ${disabledAttr} onclick="drawWeaponFromEquipment(${index})">Достать оружие · ${drawCost} ОД</button>`;
     }
-    const isGrenadeLauncher = String(template?.subcategory || weapon?.subcategory || '')
-        .trim()
-        .toLowerCase()
-        .includes('гранатом');
+    const isGrenadeLauncher = weaponClass === 'grenade_launcher';
     if (isGrenadeLauncher) {
         const inHands = isCombatActive && isSelectedWeaponIndex(drawnWeaponIndex, index)
             ? '<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>'
@@ -4556,8 +4579,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     const singleOptions = Array.isArray(profile.single_shot_options) && profile.single_shot_options.length
         ? profile.single_shot_options
         : [1];
-    const isPistol = String(template?.subcategory || '').trim().toLowerCase() === 'пистолеты';
-    const unaimedActionPoints = isPistol ? 1 : 2;
+    const unaimedActionPoints = weaponClass === 'pistol' ? 1 : 2;
 
     buttons.push(`<button type="button" class="btn btn-sm btn-aim-action" ${firingDisabledAttr} onclick="aimWeaponFromEquipment(${index})">Прицеливание · 1 ОД</button>`);
     singleOptions.forEach((shots) => {
@@ -4572,6 +4594,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
     if (profile.supports_burst) {
         const machineGun = Boolean(profile.machine_gun_burst);
         const burstShots = Number(profile.burst_size) || 0;
+        const burstActionPoints = weaponClass === 'submachine_gun' ? 2 : 3;
         const action = (mode, actionPoints = 3, volleyCount = 1) => {
             if (machineGun && mode === 'area') {
                 return `useWeaponFromEquipment(${index}, '${mode}', 10, ${actionPoints}, 2)`;
@@ -4581,7 +4604,7 @@ function renderRangedAttackButtons(weapon, template, index, disabled) {
                 : `useWeaponFromEquipment(${index}, '${mode}', ${burstShots * volleyCount}, ${actionPoints}, ${volleyCount})`;
         };
         const burstLabel = machineGun ? 'Пулемётная очередь' : `Очередь x${burstShots}`;
-        buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('burst')}">${burstLabel} · 3 ОД</button>`);
+        buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('burst', burstActionPoints)}">${burstLabel} · ${burstActionPoints} ОД</button>`);
         if (profile.supports_suppression) {
             buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('suppression', 3, 1)}">Подавление (1 очередь) · 3 ОД</button>`);
             buttons.push(`<button type="button" class="btn btn-sm btn-warning" ${firingDisabledAttr} onclick="${action('suppression', 5, 2)}">Подавление (2 очереди) · 5 ОД</button>`);
@@ -4667,12 +4690,12 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         const modifications = Array.isArray(weapon.modifications) ? weapon.modifications : [];
 
         const template = weapon.templateId ? (weaponTemplates.find(t => t.id == weapon.templateId) || (allTemplatesCache || []).find(t => t.id == weapon.templateId)) : null;
-        const isMelee = template?.category === 'melee_weapon';
+        const isMelee = template?.category === 'melee_weapon' || weapon.category === 'melee_weapon';
         const combatErgonomics = isMelee ? null : getCombatWeaponErgonomics(index);
 
         let fieldsHtml = '';
         if (isMelee) {
-            const attrs = template.attributes || {};
+            const attrs = template?.attributes || weapon.attributes || {};
             fieldsHtml = `
                 <div style="font-weight: bold; margin-bottom: 5px;">${escapeHtml(weapon.name)}</div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 10px; background: rgba(0,0,0,0.1); padding: 8px; border-radius: 4px;">
@@ -4861,16 +4884,20 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
 
         let attackButtonsHtml = '';
         if (isMelee) {
-            const allowedAttacks = template?.attributes?.allowed_attacks || [];
-            const weightClass = String(template?.attributes?.weight_class || weapon.weightClass || 'Тяжелое').toLowerCase();
+            const meleeAttributes = template?.attributes || weapon.attributes || {};
+            const allowedAttacks = meleeAttributes.allowed_attacks || [];
+            const weightClass = String(meleeAttributes.weight_class || weapon.weightClass || 'Тяжелое').toLowerCase();
             const drawnWeaponIndex = combatState?.current_character?.drawn_weapon_index;
             const activeWeaponIndex = isCombatActive ? drawnWeaponIndex : currentCharacterData?.activeWeaponIndex;
-            const handsButton = isSelectedWeaponIndex(activeWeaponIndex, index)
+            const naturalWeapon = Boolean(weapon.naturalWeapon || meleeAttributes.natural_weapon);
+            const handsButton = naturalWeapon
+                ? '<button type="button" class="btn btn-sm btn-secondary" disabled>Врожденная атака</button>'
+                : isSelectedWeaponIndex(activeWeaponIndex, index)
                 ? '<button type="button" class="btn btn-sm btn-secondary" disabled>В руках</button>'
                 : `<button type="button" class="btn btn-sm btn-primary" ${combatActionDisabled ? 'disabled' : ''} onclick="drawWeaponFromEquipment(${index})">${isCombatActive ? 'Достать оружие' : 'Взять в руки'}</button>`;
             const swingPrepared = combatState?.current_character?.melee_swing_round === combatState?.round_number;
             attackButtonsHtml = handsButton + allowedAttacks.map((attackType) => {
-                const meleeCost = getMeleeActionPointCost(weightClass, attackType);
+                const meleeCost = Number(meleeAttributes.action_points) || getMeleeActionPointCost(weightClass, attackType);
                 const circular = String(attackType).toLowerCase().includes('круг');
                 const aimedButton = circular
                     ? ''
@@ -4924,7 +4951,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                 <div style="margin-top:10px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
                     ${attackButtonsHtml}
                     ${grenadeLauncherHtml}
-                    <button type="button" class="btn btn-sm btn-danger" onclick="unequipWeapon(${index})" style="margin-left: auto;">Снять</button>
+                    ${weapon.naturalWeapon ? '' : `<button type="button" class="btn btn-sm btn-danger" onclick="unequipWeapon(${index})" style="margin-left: auto;">Снять</button>`}
                 </div>
                 ${!isMelee ? `
                 <div style="margin-top:10px;">
@@ -4935,7 +4962,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     <div id="modifications-${index}">${modificationsHtml}</div>
                 </div>
                 ` : ''}
-                <button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})" style="margin-top:10px;">Удалить оружие</button>
+                ${weapon.naturalWeapon ? '' : `<button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})" style="margin-top:10px;">Удалить оружие</button>`}
             </div>
         `);
     }
@@ -6810,7 +6837,82 @@ window.updateArmorStageFromSelect = function(select, type) {
     scheduleAutoSave();
 };
 
+async function refreshCharacterAfterEquipmentAction(data = null) {
+    if (data) {
+        currentCharacterData = data;
+    } else {
+        const character = await Server.getCharacter(currentCharacterId);
+        currentCharacterData = character.data || {};
+    }
+    await renderEquipmentTab(currentCharacterData);
+    await renderInventoryTab(currentCharacterData);
+    await renderSkillsTab(currentCharacterData);
+}
+
+async function runEquipmentAction(operation, slot, itemPath = null) {
+    const combatState = window.locationCombatState;
+    let result;
+    if (combatState?.status === 'active') {
+        const actor = combatState.current_character;
+        if (!actor || Number(actor.character_id) !== Number(currentCharacterId)) {
+            throw new Error('Сейчас не ход этого персонажа');
+        }
+        const item = itemPath ? getItemByPath(itemPath) : null;
+        const access = item
+            ? await calculateInventoryAccess(item, itemPath)
+            : { retrievalActionPoints: 0 };
+        const pendingActionId = `equipment-${actor.location_character_id}-${Date.now()}`;
+        const payload = {
+            location_character_id: actor.location_character_id,
+            action_key: 'change_equipment',
+            equipment_operation: operation,
+            equipment_slot: slot,
+            item_path: itemPath,
+            inventory_retrieval_action_points: access.retrievalActionPoints,
+            pending_action_id: pendingActionId,
+        };
+        result = await Server.performLocationCombatAction(
+            window.currentLobbyId,
+            window.currentLocationId,
+            payload,
+        );
+        if (result?.pending_action) {
+            const sceneModule = await import('./locationScene.js');
+            sceneModule.registerDeferredCombatAction(result.pending_action_id, payload);
+            showNotification('Смена экипировки начата и продолжится в следующем ходу', 'system');
+            return result;
+        }
+        await refreshCharacterAfterEquipmentAction();
+    } else {
+        result = await Server.changeCharacterEquipment(currentCharacterId, {
+            operation,
+            slot,
+            item_path: itemPath,
+        });
+        await refreshCharacterAfterEquipmentAction(result.data);
+    }
+    const details = result?.equipment_change || {};
+    const duration = Number(details.duration_minutes || 0);
+    const verb = operation === 'equip' ? 'надета' : 'снята';
+    showNotification(
+        duration
+            ? `Экипировка ${verb}. Длительность операции: ${duration} мин.`
+            : `Экипировка ${verb}`,
+        'success',
+    );
+    return result;
+}
+
 window.equipArmorFromInventory = async function(itemPath) {
+    try {
+        return await runEquipmentAction('equip', 'armor', itemPath);
+    } catch (error) {
+        showNotification(error.message || 'Не удалось надеть броню');
+        return;
+    }
+};
+
+async function legacyEquipArmorFromInventory(itemPath) {
     const item = getItemByPath(itemPath);
     if (!item || item.category !== 'armor') {
         showNotification('Этот предмет нельзя надеть как броню');
@@ -6902,6 +7004,15 @@ window.equipArmorFromInventory = async function(itemPath) {
 };
 
 window.equipHelmetFromInventory = async function(itemPath) {
+    try {
+        return await runEquipmentAction('equip', 'helmet', itemPath);
+    } catch (error) {
+        showNotification(error.message || 'Не удалось надеть шлем');
+        return;
+    }
+};
+
+async function legacyEquipHelmetFromInventory(itemPath) {
     const item = getItemByPath(itemPath);
     if (!item || item.category !== 'helmet') {
         showNotification('Этот предмет нельзя надеть как шлем');
@@ -6970,6 +7081,15 @@ window.equipHelmetFromInventory = async function(itemPath) {
 };
 
 window.equipGasMaskFromInventory = async function(itemPath) {
+    try {
+        return await runEquipmentAction('equip', 'gasMask', itemPath);
+    } catch (error) {
+        showNotification(error.message || 'Не удалось надеть противогаз');
+        return;
+    }
+};
+
+async function legacyEquipGasMaskFromInventory(itemPath) {
     const item = getItemByPath(itemPath);
     if (!item || item.category !== 'gas_mask') {
         showNotification('Этот предмет нельзя надеть как противогаз');
@@ -7917,6 +8037,15 @@ window.unequipFromBelt = async function() {
 };
 
 window.unequipArmor = async function() {
+    try {
+        return await runEquipmentAction('unequip', 'armor');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось снять броню');
+        return;
+    }
+};
+
+async function legacyUnequipArmor() {
     const armor = currentCharacterData.equipment?.armor;
     if (!armor || !armor.templateId) {
         showNotification('Броня не надета');
@@ -7962,6 +8091,15 @@ window.unequipArmor = async function() {
 };
 
 window.unequipHelmet = async function() {
+    try {
+        return await runEquipmentAction('unequip', 'helmet');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось снять шлем');
+        return;
+    }
+};
+
+async function legacyUnequipHelmet() {
     const helmet = currentCharacterData.equipment?.helmet;
     if (!helmet || !helmet.templateId) {
         showNotification('Шлем не надет');
@@ -8000,6 +8138,15 @@ window.unequipHelmet = async function() {
 };
 
 window.unequipGasMask = async function() {
+    try {
+        return await runEquipmentAction('unequip', 'gasMask');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось снять противогаз');
+        return;
+    }
+};
+
+async function legacyUnequipGasMask() {
     const gasMask = currentCharacterData.equipment?.gasMask;
     if (!gasMask || !gasMask.templateId) {
         showNotification('Противогаз не надет');

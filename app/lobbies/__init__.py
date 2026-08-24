@@ -16,11 +16,23 @@ from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
 from app.services.combat import CombatService
+from app.services.artifact_effects import apply_artifact_world_movement
 from app.services.character_interaction import CharacterInteractionService
-from app.services.health import apply_health_maximums
+from app.services.health import apply_health_maximums, health_zones_to_location
 from app.services.equipment_repair import repair_equipment, resolve_item_path
 from app.services.gas_mask_filters import consume_equipped_filter_charges
 from app.services.addictions import advance_addictions, record_exposure, withdrawal_check
+from app.services.world_rules import (
+    anomaly_field_catalog,
+    anomaly_field_profile,
+    artifact_catalog,
+    guaranteed_artifact_class,
+    mutant_catalog,
+    mutant_character_data,
+    mutant_profile,
+    random_artifact,
+    roll_artifact_class,
+)
 from app.services.effects import (
     advance_timed_effects,
     apply_effect_to_health,
@@ -74,6 +86,41 @@ from app.models.lobby_templates import LobbyItemTemplate
 from app.schemas.lobby_templates import LobbyItemTemplateSchema
 
 lobbies_bp = Blueprint('lobbies', __name__)
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-rules', methods=['GET'])
+@jwt_required()
+@requires_participant
+def get_world_rule_catalogs(lobby_id, lobby, participant):
+    return jsonify({
+        'anomaly_fields': anomaly_field_catalog(),
+        'artifacts': artifact_catalog(),
+        'mutants': mutant_catalog(),
+    }), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/mutants', methods=['POST'])
+@jwt_required()
+@requires_gm
+def create_mutant_character(lobby_id, lobby):
+    payload = request.get_json(silent=True) or {}
+    profile = mutant_profile(payload.get('mutant_type'))
+    if not profile:
+        return jsonify({'error': 'Unknown mutant type'}), 400
+    variant_name = str(payload.get('variant') or '').strip() or None
+    if variant_name and not any(
+        str(item.get('name') or '').casefold() == variant_name.casefold()
+        for item in (profile.get('variants') or [])
+    ):
+        return jsonify({'error': 'Unknown mutant variant'}), 400
+    name = str(payload.get('name') or variant_name or profile['name']).strip()[:100]
+    character = CharacterService.create_character(
+        lobby_id=lobby_id, owner_id=lobby.gm_id, name=name,
+        data=mutant_character_data(profile, variant_name),
+    )
+    response = CharacterSchema().dump(character)
+    socketio.emit('character_created', response, room=f'lobby_{lobby_id}')
+    return jsonify(response), 201
 
 WORLD_EVENT_CHANCE = 0.25
 BODY_CARRY_ROPE_NAME = 'канат для переноски'
@@ -233,6 +280,25 @@ def _serialize_world_group(group):
         group.turn_submitted_day == (group.lobby.game_day or 1)
         and group.turn_submitted_minutes == (group.lobby.game_time_minutes or 0)
     )
+    tile = MapService.get_tile_data(group.lobby_id, group.tile_x, group.tile_y)
+    field = tile.get('anomaly_field') if isinstance(tile.get('anomaly_field'), dict) else None
+    emission_generation = int(
+        ((group.lobby.weather_settings or {}).get('emission_generation') or 0)
+    )
+    field_payload = None
+    if field:
+        state = field.get('loot_state') if isinstance(field.get('loot_state'), dict) else {}
+        field_payload = {
+            'name': field.get('name'),
+            'rank': field.get('rank'),
+            'field_type': field.get('field_type'),
+            'hazard': field.get('hazard'),
+            'searched': state.get('generation') == emission_generation,
+            'remaining_artifacts': sum(
+                1 for item in (state.get('artifacts') or [])
+                if isinstance(item, dict) and not item.get('recovered')
+            ) if state.get('generation') == emission_generation else None,
+        }
     return {
         'id': group.id,
         'name': group.name,
@@ -261,7 +327,107 @@ def _serialize_world_group(group):
         'carry_assignments': carry_assignments,
         'turn_active': bool(group.turn_active),
         'turn_submitted': turn_submitted,
+        'anomaly_field': field_payload,
     }
+
+
+def _world_emission_generation(lobby):
+    return max(0, int(((lobby.weather_settings or {}).get('emission_generation') or 0)))
+
+
+def _world_character_generator_bonus(character_data):
+    bonus = 0
+    for item in _iter_carried_items(character_data):
+        attributes = item.get('attributes') if isinstance(item.get('attributes'), dict) else {}
+        bonus = max(
+            bonus,
+            CombatService._coerce_int(
+                attributes.get('artifact_generator_bonus', attributes.get('generator_bonus')),
+                0,
+            ),
+        )
+    return bonus
+
+
+def _artifact_inventory_item(template):
+    return {
+        'id': f'artifact-{template.id}-{random.randint(100000, 999999)}',
+        'templateId': template.id,
+        'name': template.name,
+        'category': template.category,
+        'subcategory': template.subcategory,
+        'quantity': 1,
+        'weight': template.weight or 0,
+        'volume': template.volume or 0,
+        'price': template.price or 0,
+        'attributes': deepcopy(template.attributes or {}),
+        'contents': [],
+        'installedModules': [],
+        'isStackable': True,
+    }
+
+
+def _field_loot_state(field, character_data, generation):
+    existing = field.get('loot_state') if isinstance(field.get('loot_state'), dict) else {}
+    if existing.get('generation') == generation:
+        return existing
+    rank = max(1, min(4, CombatService._coerce_int(field.get('rank'), 1)))
+    generator_bonus = _world_character_generator_bonus(character_data)
+    survival_bonus = CombatService._skill_modifier(
+        character_data, 'skills.other.survival',
+    )
+    untouched_roll = random.randint(1, 100)
+    state = {
+        'generation': generation,
+        'untouched_roll': untouched_roll,
+        'untouched': untouched_roll <= 50,
+        'artifacts': [],
+        'attempts_by_character': {},
+    }
+    if not state['untouched']:
+        return state
+    guaranteed = random_artifact(
+        guaranteed_artifact_class(rank), field.get('field_type'),
+    )
+    if guaranteed:
+        state['artifacts'].append({
+            'name': guaranteed['name'], 'artifact_class': guaranteed['artifact_class'],
+            'guaranteed': True, 'recovered': False,
+        })
+    random_slots = max(0, random.randint(1, 4) - 2)
+    detection_difficulty = max(1, 14 - generator_bonus - survival_bonus - rank)
+    state['random_slots'] = random_slots
+    state['detection_difficulty'] = detection_difficulty
+    state['detection_rolls'] = []
+    for _ in range(random_slots):
+        roll = random.randint(1, 20)
+        state['detection_rolls'].append(roll)
+        if roll < detection_difficulty:
+            continue
+        artifact_class = roll_artifact_class(rank)
+        artifact = random_artifact(artifact_class, field.get('field_type'))
+        if artifact:
+            state['artifacts'].append({
+                'name': artifact['name'], 'artifact_class': artifact_class,
+                'guaranteed': False, 'recovered': False,
+            })
+    return state
+
+
+def _anomaly_field_protection(character_data, field_type):
+    normalized = str(field_type or '').strip().casefold()
+    if normalized.startswith('радиоактив'):
+        return CombatService._equipped_radiation_protection(character_data)
+    damage_type = {
+        'гравитационное': 'physical',
+        'псионическое': 'psi',
+        'термический': 'thermal',
+        'химическое': 'chemical',
+        'электрическое': 'electric',
+    }.get(normalized)
+    return CombatService._target_elemental_protection(
+        character_data, damage_type,
+    ) if damage_type else 0
 
 
 def _world_group_speed(maximum_penalty):
@@ -271,9 +437,7 @@ def _world_group_speed(maximum_penalty):
         return 3, 'Без изменений'
     if maximum_penalty <= 6:
         return 2, 'На треть медленнее'
-    if maximum_penalty <= 7:
-        return 1, 'Вдвое медленнее'
-    return 1, 'Втрое медленнее'
+    return 1, 'Вдвое медленнее'
 
 
 def _serialize_world_event(event, *, reveal_description):
@@ -620,6 +784,164 @@ def wait_world_group(lobby_id, group_id, lobby, participant):
     }), 200
 
 
+@lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>/anomaly-field', methods=['POST'])
+@jwt_required()
+@requires_participant
+def search_world_anomaly_field(lobby_id, group_id, lobby, participant):
+    group = WorldGroup.query.filter_by(id=group_id, lobby_id=lobby_id).first()
+    if not group:
+        return jsonify({'error': 'World group not found'}), 404
+    tile = MapService.get_tile_data(lobby_id, group.tile_x, group.tile_y)
+    field = deepcopy(tile.get('anomaly_field')) if isinstance(tile.get('anomaly_field'), dict) else None
+    if not field:
+        return jsonify({'error': 'There is no anomaly field on this tile'}), 400
+    payload = request.get_json(silent=True) or {}
+    try:
+        character_id = int(payload.get('character_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Choose a group member'}), 400
+    member_ids = {
+        int(value) for value in (group.member_character_ids or [])
+        if str(value).isdigit()
+    }
+    if character_id not in member_ids:
+        return jsonify({'error': 'The character is not a member of this group'}), 400
+    character = LobbyCharacter.query.filter_by(id=character_id, lobby_id=lobby_id).first()
+    if not character:
+        return jsonify({'error': 'Character not found'}), 404
+    user_id = int(participant.user_id)
+    if not (
+        lobby.gm_id == user_id
+        or character.owner_id == user_id
+        or user_id in (character.editable_to or [])
+    ):
+        return jsonify({'error': 'You cannot act for this character'}), 403
+    character_data = deepcopy(character.data or {})
+    generation = _world_emission_generation(lobby)
+    state = _field_loot_state(field, character_data, generation)
+    field['loot_state'] = state
+
+    action = str(payload.get('action') or 'inspect').strip().lower()
+    recovery = None
+    if action == 'recover':
+        try:
+            artifact_index = int(payload.get('artifact_index'))
+            extra_dice = int(payload.get('extra_dice') or 0)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid artifact recovery parameters'}), 400
+        artifacts = state.get('artifacts') if isinstance(state.get('artifacts'), list) else []
+        if not 0 <= artifact_index < len(artifacts) or artifacts[artifact_index].get('recovered'):
+            return jsonify({'error': 'Artifact is no longer available'}), 409
+        survival_bonus = max(0, CombatService._skill_modifier(
+            character_data, 'skills.other.survival',
+        ))
+        if extra_dice < 0 or extra_dice > survival_bonus:
+            return jsonify({'error': f'You can add no more than {survival_bonus} dice'}), 400
+        agility_bonus = CombatService._skill_modifier(
+            character_data, 'skills.physical.agility',
+        )
+        generator_bonus = _world_character_generator_bonus(character_data)
+        base_difficulty = {
+            'trash': 5, '1': 10, '2': 15, '3': 20, 'x': 25,
+        }[artifacts[artifact_index]['artifact_class']]
+        difficulty = max(1, base_difficulty - generator_bonus - agility_bonus)
+        rolls = sorted(
+            (random.randint(1, 10) for _ in range(2 + extra_dice)), reverse=True,
+        )
+        total = sum(rolls[:2])
+        success = total >= difficulty
+        attempts = state.setdefault('attempts_by_character', {})
+        attempts[str(character_id)] = int(attempts.get(str(character_id), 0)) + 1
+        rank = max(1, min(4, CombatService._coerce_int(field.get('rank'), 1)))
+        field_exposures = (
+            extra_dice * 0.5
+            + (1 if attempts[str(character_id)] % 2 == 0 else 0)
+            + (0 if success else 1)
+        )
+        health = character_data.setdefault('health', {})
+        field_damage = 0
+        required_protection = 15 * rank
+        actual_protection = _anomaly_field_protection(
+            character_data, field.get('field_type'),
+        )
+        if field_exposures:
+            field_type = str(field.get('field_type') or '').casefold()
+            exposed = actual_protection < required_protection
+            if exposed and field_type.startswith('радиоактив'):
+                health['radiation'] = max(
+                    0, CombatService._coerce_float(health.get('radiation'), 0)
+                    + 5 * field_exposures,
+                )
+            elif exposed and field_type.startswith('псионичес'):
+                health['psiState'] = max(
+                    0, CombatService._coerce_float(health.get('psiState'), 0)
+                    + 5 * field_exposures,
+                )
+            elif exposed:
+                raw_damage = 50 * rank * field_exposures
+                field_damage = round(raw_damage)
+                health['current'] = max(
+                    0, CombatService._coerce_float(health.get('current'), 700) - field_damage,
+                )
+        if success:
+            template = ItemTemplate.query.filter_by(
+                category='artifact', name=artifacts[artifact_index]['name'],
+            ).first()
+            if not template:
+                return jsonify({'error': 'Artifact template is missing; run database migrations'}), 409
+            inventory = character_data.setdefault('inventory', {})
+            inventory.setdefault('pockets', []).append(_artifact_inventory_item(template))
+            artifacts[artifact_index]['recovered'] = True
+        recovery = {
+            'artifact_index': artifact_index,
+            'artifact_name': artifacts[artifact_index]['name'],
+            'rolls': rolls, 'total': total, 'difficulty': difficulty,
+            'success': success, 'extra_dice': extra_dice,
+            'field_exposures': field_exposures, 'field_damage': field_damage,
+            'required_protection': required_protection,
+            'actual_protection': actual_protection,
+        }
+        character.data = character_data
+        flag_modified(character, 'data')
+        sync_health_derived_statuses(health)
+
+    MapService.update_tile(
+        lobby_id, lobby.gm_id,
+        group.tile_x // 32, group.tile_y // 32,
+        group.tile_x % 32, group.tile_y % 32,
+        {'anomaly_field': field},
+    )
+    db.session.commit()
+    if action == 'recover':
+        socketio.emit(
+            'character_data_updated',
+            {'character_id': character.id, 'updates': {'data': character.data},
+             'updated_by': participant.user_id},
+            room=f'character_{character.id}',
+        )
+    return jsonify({
+        'field': {
+            'name': field.get('name'), 'rank': field.get('rank'),
+            'field_type': field.get('field_type'), 'hazard': field.get('hazard'),
+            'untouched': state.get('untouched'),
+            'artifacts': state.get('artifacts') or [],
+            'generation': generation,
+        },
+        'character': {
+            'id': character.id,
+            'name': character.name,
+            'survival_bonus': CombatService._skill_modifier(
+                character_data, 'skills.other.survival',
+            ),
+            'agility_bonus': CombatService._skill_modifier(
+                character_data, 'skills.physical.agility',
+            ),
+            'generator_bonus': _world_character_generator_bonus(character_data),
+        },
+        'recovery': recovery,
+    }), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/world-groups/<int:group_id>', methods=['DELETE'])
 @jwt_required()
 @requires_gm
@@ -718,6 +1040,11 @@ def move_world_group(lobby_id, group_id, lobby, participant):
             binary=True,
         )
         pain_recovery = CombatService._recover_world_travel_pain(character_data)
+        artifact_result = apply_artifact_world_movement(character_data)
+        if artifact_result['changed']:
+            health = character_data.setdefault('health', {})
+            CombatService._apply_radiation_threshold_states(health)
+            sync_health_derived_statuses(health)
         radiation_consequences.append({
             "character_id": character.id,
             "character_name": character.name,
@@ -727,6 +1054,7 @@ def move_world_group(lobby_id, group_id, lobby, participant):
             "character_id": character.id,
             "character_name": character.name,
             "pain_recovery": pain_recovery,
+            "artifact_effects": artifact_result,
             **radiation_result,
         })
         if (
@@ -734,6 +1062,7 @@ def move_world_group(lobby_id, group_id, lobby, participant):
             and not filter_result["changed"]
             and not radiation_result['changed']
             and not pain_recovery['changed']
+            and not artifact_result['changed']
         ):
             continue
         character.data = character_data
@@ -1386,6 +1715,70 @@ def update_character(character_id):
     return jsonify({'message': 'Character updated'}), 200
 
 
+@lobbies_bp.route('/characters/<int:character_id>/equipment-action', methods=['POST'])
+@jwt_required()
+def change_character_equipment_outside_combat(character_id):
+    user_id = int(get_jwt_identity())
+    character = db.session.get(LobbyCharacter, character_id)
+    if not character:
+        return jsonify({'error': 'Character not found'}), 404
+    if not _character_edit_allowed(character, user_id):
+        return jsonify({'error': 'You do not control this character'}), 403
+    active_location_character = (
+        LocationCharacter.query
+        .join(LocationCombatState, LocationCombatState.location_id == LocationCharacter.location_id)
+        .filter(
+            LocationCharacter.character_id == character_id,
+            LocationCombatState.status == 'active',
+        )
+        .first()
+    )
+    if active_location_character:
+        return jsonify({'error': 'Use the combat equipment action during combat'}), 409
+
+    payload = request.get_json(silent=True) or {}
+    character_data = deepcopy(character.data or {})
+    try:
+        details = CombatService.equipment_action_details(
+            character_data,
+            payload.get('operation'),
+            payload.get('slot'),
+            item_path=payload.get('item_path'),
+            retrieval_action_points=0,
+            in_combat=False,
+        )
+        result = CombatService.apply_equipment_action(character_data, details)
+    except (ValidationError, NotFoundError) as error:
+        return jsonify({'error': str(error)}), 400
+
+    health = apply_health_maximums(character_data)
+    character.data = character_data
+    flag_modified(character, 'data')
+    for loc_char in LocationCharacter.query.filter_by(character_id=character.id).all():
+        loc_char.hp_zones = health_zones_to_location(health)
+    db.session.commit()
+    socketio.emit(
+        'character_data_updated',
+        {
+            'character_id': character.id,
+            'updates': {'data': character.data},
+            'source': 'equipment_action',
+        },
+        room=f"character_{character.id}",
+    )
+    lobby = db.session.get(Lobby, character.lobby_id)
+    if lobby:
+        for location_id in {
+            row.location_id for row in LocationCharacter.query.filter_by(character_id=character.id).all()
+        }:
+            socketio.emit(
+                'combat_state_updated',
+                CombatService.get_state(location_id, lobby.gm_id),
+                room=f"location_{location_id}",
+            )
+    return jsonify({'equipment_change': result, 'data': character.data}), 200
+
+
 def _character_edit_allowed(character, user_id):
     lobby = db.session.get(Lobby, character.lobby_id)
     return bool(
@@ -1594,7 +1987,7 @@ def update_tile(lobby_id, lobby, chunk_x, chunk_y, tile_x, tile_y):
     schema = TileUpdateSchema()
     updates = schema.load(data)
     MapService.update_tile(lobby_id, lobby.gm_id, chunk_x, chunk_y, tile_x, tile_y, updates)
-    allowed_fields = ['terrain', 'height', 'objects']
+    allowed_fields = ['terrain', 'height', 'objects', 'name', 'radiation', 'anomaly_field']
     safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
     socketio.emit('tile_updated', {
         'chunk_x': chunk_x,
@@ -1654,6 +2047,13 @@ def export_lobby(lobby_id, lobby):
 @requires_gm
 def update_weather(lobby_id, lobby):
     data = request.get_json()
+    previous = lobby.weather_settings if isinstance(lobby.weather_settings, dict) else {}
+    previous_emission = bool((previous.get('emission') or {}).get('enabled'))
+    next_emission = bool((data.get('emission') or {}).get('enabled'))
+    generation = max(0, int(previous.get('emission_generation') or 0))
+    if next_emission and not previous_emission:
+        generation += 1
+    data['emission_generation'] = generation
     lobby.weather_settings = data
     db.session.commit()
 
@@ -2605,6 +3005,15 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
         participant.user_id,
         location_character_id=data.get('location_character_id'),
     )
+    anomaly = state.get('anomaly')
+    if isinstance(anomaly, dict):
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            f"{anomaly.get('name') or '\u0410\u043d\u043e\u043c\u0430\u043b\u0438\u044f'}: \u043f\u043e\u043b\u043d\u043e\u0435 \u0432\u043e\u0437\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0432 \u043a\u043e\u043d\u0446\u0435 \u0445\u043e\u0434\u0430, "
+            f"\u0443\u0440\u043e\u043d {anomaly.get('damage', 0)}.",
+            username='\u0410\u043d\u043e\u043c\u0430\u043b\u0438\u044f',
+        )
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     characters = LocationCharacter.query.filter_by(location_id=location_id).all()
     for loc_char in characters:
@@ -3017,6 +3426,8 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         explosive_source=data.get('explosive_source'),
         explosive_fire_mode=data.get('explosive_fire_mode'),
         explosive_fuse_mode=data.get('explosive_fuse_mode'),
+        equipment_operation=data.get('equipment_operation'),
+        equipment_slot=data.get('equipment_slot'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
@@ -3111,6 +3522,26 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             f"{'стресс снижен' if check.get('success') else 'проявление стресса'}.",
             username='Стресс',
         )
+    anomaly_action = result.get('anomaly')
+    if isinstance(anomaly_action, dict):
+        check = anomaly_action.get('check') or {}
+        exposure = anomaly_action.get('exposure') or {}
+        outcome_label = {
+            'success': '\u0443\u0441\u043f\u0435\u0445',
+            'partial_exit': '\u0432\u044b\u0445\u043e\u0434 \u0441 25% \u0443\u0440\u043e\u043d\u0430',
+            'failure': '\u043f\u0440\u043e\u0432\u0430\u043b, 50% \u0443\u0440\u043e\u043d\u0430',
+            'severe_failure': '\u043f\u0440\u043e\u0432\u0430\u043b, 100% \u0443\u0440\u043e\u043d\u0430',
+            'critical_failure': '\u043a\u0440\u0438\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u043f\u0440\u043e\u0432\u0430\u043b',
+        }.get(anomaly_action.get('outcome'), anomaly_action.get('outcome'))
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            f"{anomaly_action.get('name') or '\u0410\u043d\u043e\u043c\u0430\u043b\u0438\u044f'}: "
+            f"d20 {check.get('roll')} + {check.get('modifier', 0)} = {check.get('total')} "
+            f"\u043f\u0440\u043e\u0442\u0438\u0432 \u0421\u041b {check.get('difficulty')}; "
+            f"{outcome_label}, \u0443\u0440\u043e\u043d {exposure.get('damage', 0)}.",
+            username='\u0410\u043d\u043e\u043c\u0430\u043b\u0438\u044f',
+        )
     affected_character_ids = {
         character_id
         for character_id in (
@@ -3124,6 +3555,11 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         entry.get('character_id')
         for entry in (explosion.get('targets') or [])
         if entry.get('character_id')
+    )
+    affected_character_ids.update(
+        entry.get('target_character_id')
+        for entry in ((result.get('attack') or {}).get('results') or [])
+        if isinstance(entry, dict) and entry.get('target_character_id')
     )
     for character_id in affected_character_ids:
         target = db.session.get(LobbyCharacter, character_id)

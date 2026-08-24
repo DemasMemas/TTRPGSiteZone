@@ -100,7 +100,7 @@ def test_scatter_uses_failure_margin_and_stays_inside_location(monkeypatch):
     monkeypatch.setattr("app.services.combat.random.random", lambda: 0)
 
     assert CombatService._scatter_point(8, 8, 4, 10, 10) == (9, 8)
-    assert CombatService._scatter_point(3, 3, 99, 30, 30) == (13, 3)
+    assert CombatService._scatter_point(3, 3, 99, 30, 30) == (29, 3)
 
 
 def test_explosion_applies_blast_and_posture_reduced_fragments(app, monkeypatch):

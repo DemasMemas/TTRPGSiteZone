@@ -48,6 +48,18 @@ def has_mountain_background(character_data: Dict[str, Any]) -> bool:
 
 
 def get_health_maximums(character_data: Dict[str, Any]) -> Dict[str, Any]:
+    mutant = (character_data or {}).get('mutant')
+    health = (character_data or {}).get('health') or {}
+    if isinstance(mutant, dict):
+        zones = health.get('zones') if isinstance(health.get('zones'), dict) else {}
+        return {
+            'profile': f"mutant:{mutant.get('profile') or 'unknown'}",
+            'current': max(0, _number(health.get('max')) or 0),
+            'zones': {
+                key: max(0, _number((zones.get(key) or {}).get('max')) or 0)
+                for key in BASE_HEALTH_MAXIMUMS['zones']
+            },
+        }
     mountain = has_mountain_background(character_data)
     zones = dict(BASE_HEALTH_MAXIMUMS["zones"])
     if mountain:

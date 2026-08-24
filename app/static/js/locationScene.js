@@ -245,8 +245,16 @@ const interactionRequirements = {
 
 const LOW_CLIMB_OBJECT_TYPES = new Set(['table', 'chair', 'chest', 'box', 'barrier']);
 const HIGH_CLIMB_OBJECT_TYPES = new Set(['fence']);
-const TOO_HIGH_OBJECT_TYPES = new Set(['tree', 'rock', 'house', 'tent', 'wall', 'shelf', 'anomaly']);
-const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'ground_item']);
+const TOO_HIGH_OBJECT_TYPES = new Set(['tree', 'rock', 'house', 'tent', 'wall', 'shelf']);
+const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'ground_item', 'anomaly']);
+const ANOMALY_VISUAL_BY_KEY = {
+    batut: 'void', otboynik: 'void', kacheli: 'void', zybuchka: 'void', vozduhovorot: 'void', glukhar: 'void', britva: 'void', viselitsa: 'void',
+    vspishka: 'electric', pautina: 'electric', tesla: 'electric', katushka: 'electric', kapkan: 'electric', paralizator: 'electric', akkumulyator: 'electric', ionny_tuman: 'electric',
+    banya: 'fire', parilka: 'fire', mochalka: 'fire', kipyatilnik: 'fire', morozilnik: 'fire', uley: 'fire', metelitsa: 'fire', gril: 'fire',
+    zarosli: 'radiation', svetlyachki: 'radiation', mor: 'radiation', zapovednik: 'radiation', mertvy_koster: 'radiation', solyariy: 'radiation', radioaktivny_roy: 'radiation', bagrovaya_luna: 'radiation',
+    varevo: 'acid', soda: 'acid', ezhinoe_oblako: 'acid', rzhavchina: 'acid', mogilshchik: 'acid', chuma: 'acid', myshelovka: 'acid', gniloy_razlom: 'acid',
+    ekho: 'psi', mirazh: 'psi', starshina: 'psi', tuman_poteryannykh: 'psi', tma: 'psi', piyavka: 'psi', kolodets: 'psi', mozgotrobilka: 'psi',
+};
 const COVER_CLASS_DEFAULTS = {
     conditional: { label: 'Условное', maxHp: 25, protection: 0 },
     flimsy: { label: 'Хлипкое', maxHp: 50, protection: 5 },
@@ -567,6 +575,16 @@ function buildRoutePoints(startX, startY, endX, endY, movingCharacterId = null) 
     const path = findMovementPath(startX, startY, endX, endY, movingCharacterId);
     if (!path?.path?.length) return null;
 
+    let routePath = path.path;
+    if (combatState?.status === 'active') {
+        const anomalyIndex = routePath.findIndex(([x, y], index) => (
+            index > 0 && getLocationObjectsAtTile(x, y).some((object) => (
+                (object?.type || object?.object_type) === 'anomaly'
+            ))
+        ));
+        if (anomalyIndex > 0) routePath = routePath.slice(0, anomalyIndex + 1);
+    }
+
     const points = [];
     const pushPoint = (x, y, z) => {
         const last = points[points.length - 1];
@@ -575,20 +593,24 @@ function buildRoutePoints(startX, startY, endX, endY, movingCharacterId = null) 
         }
     };
 
-    path.path.forEach(([x, y]) => {
+    routePath.forEach(([x, y]) => {
         pushPoint(x + 0.5, getTileHeight(x, y) + 0.4, y + 0.5);
     });
 
-    const climbCost = path.path.slice(1).reduce((sum, [x, y]) => {
+    const climbCost = routePath.slice(1).reduce((sum, [x, y]) => {
         const profile = getTileMovementProfile(x, y, movingCharacterId);
         return sum + Math.max(0, Number(profile.climbCost) || 0);
     }, 0);
     return {
         points,
-        path: path.path,
-        cost: path.cost,
+        path: routePath,
+        cost: routePath.slice(1).reduce((sum, [x, y]) => {
+            const profile = getTileMovementProfile(x, y, movingCharacterId);
+            return sum + 1 + Math.max(0, Number(profile.climbCost) || 0);
+        }, 0),
         climbCost,
-        distance: Math.max(0, path.path.length - 1),
+        distance: Math.max(0, routePath.length - 1),
+        trappedByAnomaly: routePath.length < path.path.length,
     };
 }
 
@@ -1992,6 +2014,34 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     ];
 
     if (condition.state === 'active') {
+        if (isCurrentTurn && combatCharacter?.active_anomaly) {
+            menuItems.push({
+                label: '\u0412\u044b\u0440\u0432\u0430\u0442\u044c\u0441\u044f',
+                icon: '\u21f1',
+                title: `\u0412\u044b\u0439\u0442\u0438 \u0438\u0437 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438 \u00ab${combatCharacter.active_anomaly.name}\u00bb \u0437\u0430 3 \u041e\u0414`,
+                angle: 278,
+                ringRadius: 165,
+                requiresCombat: true,
+                action: () => {
+                    const anomalyKey = combatCharacter.active_anomaly.key;
+                    let attributeChoice = null;
+                    if (['ekho', 'starshina'].includes(anomalyKey)) {
+                        attributeChoice = window.confirm('Возле персонажа есть исходящий шум?')
+                            ? 'noise' : 'silence';
+                    } else if (anomalyKey === 'mozgotrobilka') {
+                        attributeChoice = window.confirm('Пытаться выбраться с закрытыми глазами?')
+                            ? 'eyes_closed' : 'eyes_open';
+                    }
+                    beginPendingCombatAction({
+                        actorCharacterId: characterId,
+                        actorLocationCharacterId: combatCharacter.location_character_id,
+                        actionKey: 'escape_anomaly',
+                        targetType: 'point',
+                        attributeChoice,
+                    });
+                },
+            });
+        }
         if (combatCharacter) {
             const retry = combatCharacter.must_do_retry;
             const { remaining, limit } = getMustDoUsage(combatCharacter);
@@ -2018,8 +2068,64 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             ringRadius: 165,
             action: () => showFacingMenu(characterId),
         });
+        if (
+            isCurrentTurn
+            && combatCharacter?.drawn_weapon_index !== null
+            && combatCharacter?.drawn_weapon_index !== undefined
+        ) {
+            menuItems.push({
+                label: 'Ствол в упор',
+                icon: '⊙',
+                title: 'Приставить ствол к выбранной части тела соседней цели',
+                angle: 302,
+                ringRadius: 165,
+                requiresCombat: true,
+                action: () => beginPendingCombatAction({
+                    actorCharacterId: characterId,
+                    actorLocationCharacterId: combatCharacter.location_character_id,
+                    actionKey: 'place_gunpoint',
+                    targetType: 'character',
+                    selectTargetZone: true,
+                }),
+            });
+        }
     }
     if (combatState?.status === 'active' && combatCharacter?.location_character_id) {
+        const gunpointTargetTurn = Boolean(
+            combatCharacter.gunpoint
+            && Number(combatCharacter.gunpoint.target_location_character_id)
+                === Number(combatState.current_location_character_id)
+        );
+        if (!isCurrentTurn && gunpointTargetTurn) {
+            menuItems.push({
+                label: 'Выстрелить',
+                icon: '✹',
+                title: `Выстрелить в упор в ${combatCharacter.gunpoint.target_name || 'цель'} за 1 ОД`,
+                angle: 302,
+                ringRadius: 165,
+                requiresCombat: true,
+                allowReaction: true,
+                action: async () => {
+                    try {
+                        const result = await Server.performLocationCombatAction(
+                            window.currentLobbyId,
+                            getCurrentLocationId(),
+                            {
+                                location_character_id: combatCharacter.location_character_id,
+                                action_key: 'gunpoint_shot',
+                            },
+                        );
+                        const hit = result?.attack?.results?.[0] || {};
+                        showNotification(
+                            `Выстрел в упор: d20 ${hit.roll ?? '—'}, урон ${Math.round(Number(hit.damage) || 0)}`,
+                            'success',
+                        );
+                    } catch (error) {
+                        showNotification(error.message || 'Не удалось выстрелить в упор', 'system');
+                    }
+                },
+            });
+        }
         const hasReserve = Boolean(combatCharacter.reaction_reserve);
         if (isCurrentTurn && !hasReserve) {
             menuItems.push({
@@ -3359,7 +3465,7 @@ async function resolveCombatTargetSelection(targetCharacterId) {
         attribute_choice: action.attributeChoice,
         pending_action_id: `combat-${action.actorLocationCharacterId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     };
-    if (action.fireMode === 'aimed' || action.meleeAimed) {
+    if (action.fireMode === 'aimed' || action.meleeAimed || action.selectTargetZone) {
         const zone = await selectAimedTargetZone(target.name);
         if (!zone) return false;
         payload.target_zone = zone;
@@ -3394,6 +3500,15 @@ async function resolveCombatTargetSelection(targetCharacterId) {
                 return true;
             }
             const attack = result?.attack;
+            const gunpoint = result?.gunpoint;
+            if (action.actionKey === 'place_gunpoint' && gunpoint) {
+                showNotification(
+                    gunpoint.success
+                        ? `Ствол приставлен: d20 ${gunpoint.roll} против СЛ ${gunpoint.difficulty}`
+                        : `Не удалось приставить ствол: d20 ${gunpoint.roll} против СЛ ${gunpoint.difficulty}`,
+                    gunpoint.success ? 'success' : 'system',
+                );
+            }
             if (attack?.results?.length) {
                 const hits = attack.results.filter(item => item.hit);
                 const damage = attack.damage_total || 0;
@@ -3603,6 +3718,7 @@ async function resolveCombatPointSelection(clientX, clientY) {
             explosive_fuse_mode: action.explosiveFuseMode,
             inventory_retrieval_action_points: action.inventoryRetrievalActionPoints,
             inventory_use_action_discount: action.inventoryUseActionDiscount,
+            attribute_choice: action.attributeChoice,
             target_x: targetX,
             target_y: targetY,
             pending_action_id: `combat-point-${action.actorLocationCharacterId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -3623,6 +3739,22 @@ async function resolveCombatPointSelection(clientX, clientY) {
         }
         if (typeof action.onResolve === 'function') {
             await action.onResolve({ targetX, targetY });
+        }
+        if (action.actionKey === 'escape_anomaly' && result?.anomaly) {
+            const check = result.anomaly.check || {};
+            const outcomes = {
+                success: '\u0443\u0441\u043f\u0435\u0445, \u0431\u0435\u0437 \u0443\u0440\u043e\u043d\u0430',
+                partial_exit: '\u0432\u044b\u0445\u043e\u0434 \u0441 25% \u0443\u0440\u043e\u043d\u0430',
+                failure: '\u043f\u0440\u043e\u0432\u0430\u043b, 50% \u0443\u0440\u043e\u043d\u0430',
+                severe_failure: '\u043f\u0440\u043e\u0432\u0430\u043b, 100% \u0443\u0440\u043e\u043d\u0430',
+                critical_failure: '\u043a\u0440\u0438\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u043f\u0440\u043e\u0432\u0430\u043b, 125% \u0443\u0440\u043e\u043d\u0430',
+            };
+            showNotification(
+                `${result.anomaly.name}: d20 ${check.roll} + ${check.modifier ?? 0} = ${check.total}, \u0421\u041b ${check.difficulty}. ${outcomes[result.anomaly.outcome] || result.anomaly.outcome}`,
+                result.anomaly.exits ? 'success' : 'system',
+            );
+            clearPendingCombatAction();
+            return true;
         }
         showNotification(
             `${action.actionKey === 'explosive_attack'
@@ -3729,6 +3861,34 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         line-height:1.2;
         white-space:nowrap;
     `;
+    const gunpointBadge = document.createElement('div');
+    gunpointBadge.style.cssText = `
+        display:none;
+        margin-top:3px;
+        padding:2px 6px;
+        border-radius:7px;
+        background:rgba(72,45,8,.94);
+        border:1px solid rgba(238,190,72,.9);
+        color:#ffe9a8;
+        font-size:10px;
+        font-weight:800;
+        line-height:1.2;
+        white-space:nowrap;
+    `;
+    const anomalyBadge = document.createElement('div');
+    anomalyBadge.style.cssText = `
+        display:none;
+        margin-top:3px;
+        padding:2px 6px;
+        border-radius:7px;
+        background:rgba(24,49,33,.94);
+        border:1px solid rgba(98,205,127,.9);
+        color:#caffd5;
+        font-size:10px;
+        font-weight:800;
+        line-height:1.2;
+        white-space:nowrap;
+    `;
     const teamBadge = document.createElement('div');
     teamBadge.style.cssText = `
         display:none;
@@ -3742,7 +3902,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         line-height:1.2;
         white-space:nowrap;
     `;
-    div.append(nameLine, teamBadge, grappleBadge);
+    div.append(nameLine, teamBadge, grappleBadge, gunpointBadge, anomalyBadge);
     div.style.color = 'white';
     div.style.fontSize = '14px';
     div.style.fontWeight = 'bold';
@@ -3770,6 +3930,8 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         posture: 'standing',
         controlledBy: resolvedControlledBy ?? fallbackOwnerId,
         grappleBadge,
+        gunpointBadge,
+        anomalyBadge,
         teamBadge,
         teamName: null,
         teamColor: null,
@@ -3781,6 +3943,8 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         applyCharacterPostureVisual(characterId, combatCharacter.posture);
     }
     applyCharacterGrappleVisual(characterId, combatCharacter);
+    applyCharacterGunpointVisual(characterId, combatCharacter);
+    applyCharacterAnomalyVisual(characterId, combatCharacter);
     invalidateMovementMapCache();
     applyFogOfWar();
 }
@@ -4543,6 +4707,29 @@ function applyCharacterGrappleVisual(characterId, combatCharacter = null) {
         : (character?.grappled_by_id ? 'captive' : null);
 }
 
+function applyCharacterGunpointVisual(characterId, combatCharacter = null) {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry?.gunpointBadge) return;
+    const character = combatCharacter || findCombatCharacterByCharacterId(characterId);
+    const gunpoint = character?.gunpoint;
+    const text = gunpoint
+        ? `Ствол к: ${gunpoint.target_name || 'цели'}`
+        : '';
+    entry.gunpointBadge.textContent = text;
+    entry.gunpointBadge.style.display = text ? 'block' : 'none';
+    entry.model.userData.gunpointTargetId = gunpoint?.target_character_id || null;
+}
+
+function applyCharacterAnomalyVisual(characterId, combatCharacter = null) {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry?.anomalyBadge) return;
+    const character = combatCharacter || findCombatCharacterByCharacterId(characterId);
+    const anomaly = character?.active_anomaly;
+    entry.anomalyBadge.textContent = anomaly ? `\u0410\u043d\u043e\u043c\u0430\u043b\u0438\u044f: ${anomaly.name}` : '';
+    entry.anomalyBadge.style.display = anomaly ? 'block' : 'none';
+    entry.model.userData.activeAnomaly = anomaly?.key || null;
+}
+
 export function updateCharacterPosition(characterId, posX, posY) {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
@@ -5141,6 +5328,8 @@ export function setCombatState(state) {
             character.facing_y,
         );
         applyCharacterGrappleVisual(character.character_id, character);
+        applyCharacterGunpointVisual(character.character_id, character);
+        applyCharacterAnomalyVisual(character.character_id, character);
     });
     applyFogOfWar();
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
@@ -7881,7 +8070,8 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                     };
                     if (brushObjectType.startsWith('anomaly_')) {
                         newObj.type = 'anomaly';
-                        newObj.anomalyType = brushObjectType.replace('anomaly_', '');
+                        newObj.anomalyKey = brushObjectType.replace('anomaly_', '');
+                        newObj.anomalyType = ANOMALY_VISUAL_BY_KEY[newObj.anomalyKey] || 'void';
                     }
                     tile.objects.push(newObj);
                     needUpdate = true;

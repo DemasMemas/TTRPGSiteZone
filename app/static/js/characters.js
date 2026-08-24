@@ -3,6 +3,7 @@ import { Server } from './api.js';
 import { showNotification } from './utils.js';
 
 let currentLobbyId;
+let mutantCatalog = [];
 
 export function initCharacters(lobbyId) {
     currentLobbyId = lobbyId;
@@ -73,4 +74,72 @@ export function showCreateCharacterForm() {
     const name = prompt('Введите имя персонажа:');
     if (!name) return;
     createCharacter(name, {});
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+function selectedMutant() {
+    const name = document.getElementById('mutant-create-type')?.value;
+    return mutantCatalog.find(item => item.name === name);
+}
+
+function updateMutantForm() {
+    const mutant = selectedMutant();
+    const variant = document.getElementById('mutant-create-variant');
+    const name = document.getElementById('mutant-create-name');
+    const preview = document.getElementById('mutant-create-preview');
+    if (!mutant || !variant || !name || !preview) return;
+    variant.innerHTML = '<option value="">Базовый вид</option>' + (mutant.variants || [])
+        .map(item => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`).join('');
+    name.value = mutant.name;
+    preview.innerHTML = `
+        <div><strong>ОЗ:</strong> ${mutant.health} · <strong>Перемещение:</strong> ${mutant.movement}</div>
+        <div><strong>Защита:</strong> физическая ${mutant.physical_protection}%, аномальная ${mutant.anomaly_protection}%</div>
+        <div><strong>Атаки:</strong> ${(mutant.attacks || []).map(item => `${escapeHtml(item.name)}: ${escapeHtml(item.effect)}`).join('<br>') || 'Нет'}</div>
+        <div><strong>Особенности:</strong><br>${(mutant.traits || []).map(escapeHtml).join('<br>') || 'Нет'}</div>
+    `;
+}
+
+export async function showCreateMutantForm() {
+    if (!window.isGM) return;
+    try {
+        if (!mutantCatalog.length) {
+            mutantCatalog = (await Server.getWorldRules(currentLobbyId)).mutants || [];
+        }
+        const select = document.getElementById('mutant-create-type');
+        select.innerHTML = mutantCatalog.map(item => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`).join('');
+        updateMutantForm();
+        document.getElementById('mutant-create-modal').style.display = 'flex';
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+export function initMutantForm() {
+    const modal = document.getElementById('mutant-create-modal');
+    document.getElementById('mutant-create-type')?.addEventListener('change', updateMutantForm);
+    document.getElementById('mutant-create-variant')?.addEventListener('change', event => {
+        const name = document.getElementById('mutant-create-name');
+        if (name) name.value = event.target.value || selectedMutant()?.name || '';
+    });
+    document.querySelector('[data-mutant-create-close]')?.addEventListener('click', () => {
+        modal.style.display = 'none';
+    });
+    document.querySelector('[data-mutant-create-confirm]')?.addEventListener('click', async () => {
+        try {
+            await Server.createMutant(currentLobbyId, {
+                mutant_type: document.getElementById('mutant-create-type').value,
+                variant: document.getElementById('mutant-create-variant').value || null,
+                name: document.getElementById('mutant-create-name').value,
+            });
+            modal.style.display = 'none';
+            await loadLobbyCharacters();
+            showNotification('Мутант создан', 'success');
+        } catch (error) {
+            showNotification(error.message, 'error');
+        }
+    });
 }

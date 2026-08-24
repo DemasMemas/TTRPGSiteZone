@@ -11,6 +11,8 @@ from app.models import Location, LocationCharacter, LocationCombatState, LobbyPa
 from app.models.templates import ItemTemplate
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 from app.services.effects import advance_timed_effects, apply_effect_to_health, apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
+from app.services.artifact_effects import artifact_passive_profile
+from app.services.anomaly_profiles import anomaly_profile
 from app.services.health import BASE_ORGAN_MAXIMUMS, apply_health_maximums
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -154,6 +156,10 @@ ACTION_CATALOG = [
     {'key': 'stow_weapon', 'label': 'Освободить руки', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'reload_weapon', 'label': 'Сменить магазин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'reload_underbarrel', 'label': 'Зарядить подствольник', 'action_points': 5, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'change_equipment', 'label': 'Сменить экипировку', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'place_gunpoint', 'label': 'Приставить ствол', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'gunpoint_shot', 'label': 'Выстрелить в упор', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'escape_anomaly', 'label': 'Вырваться из аномалии', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
     {'key': 'clear_weapon_jam', 'label': 'Устранить клин', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'narrative_action', 'label': 'Другое действие', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'must_do_it', 'label': 'Должен это сделать', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
@@ -683,12 +689,21 @@ class CombatService:
             if skill_path == 'skills.physical.strength'
             else 0
         )
+        artifact = artifact_passive_profile(character_data)
+        artifact_bonus = artifact['skill_physical'] if skill_path.startswith('skills.physical.') else artifact['skill_other']
+        artifact_bonus += {
+            'strength': artifact['skill_strength'],
+            'will': artifact['skill_will'],
+            'awareness': artifact['skill_awareness'],
+            'stealth': artifact['skill_stealth'],
+        }.get(stat_name, 0)
         return max(
             0,
             CombatService._coerce_int(current.get('base'), 0)
             + CombatService._coerce_int(current.get('bonus'), 0)
             + CombatService._consumable_stat_value_bonus(character_data, stat_name)
-            + equipment_bonus,
+            + equipment_bonus
+            + artifact_bonus,
         )
 
     @staticmethod
@@ -1177,6 +1192,7 @@ class CombatService:
                 fracture_penalty += 1
         limb_penalty += fracture_penalty
         intoxication_penalty = CombatService._intoxication_profile(data)['movement_penalty']
+        artifact_penalty = artifact_passive_profile(data)['movement_penalty']
         exoskeleton = CombatService._exoskeleton_power_profile(data)
         if exoskeleton['is_exoskeleton']:
             if exoskeleton['powered']:
@@ -1189,7 +1205,8 @@ class CombatService:
             + weight_penalty
             + temporary_penalty
             + limb_penalty
-            + intoxication_penalty,
+            + intoxication_penalty
+            + artifact_penalty,
         )
         return {
             'total': total,
@@ -1203,6 +1220,7 @@ class CombatService:
             'temporary': temporary_penalty,
             'injuries': limb_penalty,
             'intoxication': intoxication_penalty,
+            'artifacts': artifact_penalty,
             'is_exoskeleton': exoskeleton['is_exoskeleton'],
             'powered_exoskeleton': exoskeleton['powered'],
         }
@@ -2218,7 +2236,7 @@ class CombatService:
 
     @staticmethod
     def _is_pistol_weapon(item):
-        return CombatService._weapon_subcategory(item) == 'пистолеты'
+        return CombatService._weapon_class(item) == 'pistol'
 
     @staticmethod
     def _weapon_subcategory(item):
@@ -2235,6 +2253,78 @@ class CombatService:
                     template.subcategory or subcategory
                 ).strip().lower().replace('ё', 'е')
         return subcategory
+
+    @staticmethod
+    def _weapon_class(item):
+        subcategory = CombatService._weapon_subcategory(item)
+        if 'пистолет' in subcategory and 'пулемет' in subcategory:
+            return 'submachine_gun'
+        if 'пистолет' in subcategory:
+            return 'pistol'
+        if 'дробовик' in subcategory:
+            return 'shotgun'
+        if 'снайпер' in subcategory:
+            return 'sniper_rifle'
+        if 'пулемет' in subcategory:
+            return 'machine_gun'
+        if 'гранатомет' in subcategory:
+            return 'grenade_launcher'
+        return 'other'
+
+    @staticmethod
+    def _close_range_weapon_accuracy_bonus(weapon, distance):
+        distance = CombatService._coerce_float(distance, -1)
+        return 2 if (
+            0 <= distance <= 5
+            and CombatService._weapon_class(weapon) in {
+                'pistol', 'shotgun', 'submachine_gun',
+            }
+        ) else 0
+
+    @staticmethod
+    def _has_shortened_barrel(weapon):
+        attributes = CombatService._template_attributes(weapon)
+        if attributes.get('shortened_barrel') or attributes.get('short_barrel'):
+            return True
+        installed = list(weapon.get('installedModules') or [])
+        modifications = list(weapon.get('modifications') or [])
+        return any(
+            isinstance(item, dict)
+            and (
+                (item.get('attributes') or {}).get('shortened_barrel')
+                or 'укорочен' in str(item.get('name') or '').lower()
+            )
+            for item in installed + modifications
+        )
+
+    @staticmethod
+    def _sniper_close_range_penalty(weapon, distance):
+        distance = CombatService._coerce_float(distance, -1)
+        if (
+            CombatService._weapon_class(weapon) != 'sniper_rifle'
+            or distance < 0
+            or distance > 5
+            or CombatService._has_shortened_barrel(weapon)
+        ):
+            return 0
+        return max(1, 6 - math.floor(distance))
+
+    @staticmethod
+    def _burst_followup_accuracy_penalty(weapon, shot_index):
+        if CombatService._coerce_int(shot_index, 0) <= 0:
+            return 0
+        weapon_class = CombatService._weapon_class(weapon)
+        if weapon_class == 'machine_gun':
+            return 0
+        if weapon_class == 'shotgun':
+            return 6
+        if weapon_class == 'submachine_gun':
+            return 2
+        return 4
+
+    @staticmethod
+    def _burst_action_points(weapon):
+        return 2 if CombatService._weapon_class(weapon) == 'submachine_gun' else 3
 
     @staticmethod
     def _area_fire_accuracy_penalty(weapon):
@@ -2393,6 +2483,10 @@ class CombatService:
                 'weight_class',
                 weapon.get('weightClass', weapon.get('weight_class', 'heavy')),
             ),
+            'action_points': CombatService._coerce_int(
+                attributes.get('action_points'), 0,
+            ),
+            'skip_strength_scaling': bool(attributes.get('skip_strength_scaling')),
         }
 
     @staticmethod
@@ -2474,6 +2568,9 @@ class CombatService:
     @staticmethod
     def _melee_action_cost(profile, attack_type=None):
         profile = profile if isinstance(profile, dict) else {}
+        configured_cost = CombatService._coerce_int(profile.get('action_points'), 0)
+        if configured_cost > 0:
+            return configured_cost
         attack_key = str(attack_type or '').strip().lower().replace('ё', 'е')
         if attack_key == 'unarmed':
             return 2
@@ -2510,6 +2607,94 @@ class CombatService:
             abs(first.pos_x - second.pos_x),
             abs(first.pos_y - second.pos_y),
         ) == 1
+
+    @staticmethod
+    def _gunpoint_meta(loc_char):
+        data = (
+            loc_char.character.data
+            if loc_char and loc_char.character and isinstance(loc_char.character.data, dict)
+            else {}
+        )
+        health = data.setdefault('health', {})
+        return data, health.setdefault('combatMeta', {})
+
+    @staticmethod
+    def _gunpoint_weapon(loc_char, expected_index=None):
+        data, _ = CombatService._gunpoint_meta(loc_char)
+        weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+        index = CombatService._coerce_int(loc_char.drawn_weapon_index, -1)
+        if expected_index is not None and index != CombatService._coerce_int(expected_index, -2):
+            raise ValidationError('The weapon held at the target is no longer in hand')
+        if not 0 <= index < len(weapons) or not isinstance(weapons[index], dict):
+            raise ValidationError('Take a firearm in hand first')
+        weapon = weapons[index]
+        template = CombatService._weapon_template(weapon)
+        category = str(
+            (template.category if template else None) or weapon.get('category') or ''
+        ).strip().lower()
+        if category not in {'weapon', 'firearm'}:
+            raise ValidationError('Only a firearm can be pressed against a target')
+        if CombatService._weapon_jam_effects(weapon)['blocks_fire']:
+            raise ValidationError('Clear the weapon jam first')
+        if weapon.get('requiresManualCycle'):
+            raise ValidationError('Cycle the weapon action first')
+        return data, weapons, index, weapon
+
+    @staticmethod
+    def _weapon_loaded_shots(weapon):
+        magazine = weapon.get('installedMagazine')
+        stacks = magazine.get('ammo') if isinstance(magazine, dict) else None
+        if not isinstance(stacks, list):
+            stacks = weapon.get('fixedAmmo') if isinstance(weapon.get('fixedAmmo'), list) else None
+        if isinstance(stacks, list):
+            return sum(
+                max(0, CombatService._coerce_int(stack.get('quantity'), 0))
+                for stack in stacks if isinstance(stack, dict)
+            )
+        return max(0, CombatService._coerce_int(weapon.get('ammo'), 0))
+
+    @staticmethod
+    def _gunpoint_weapon_difficulty_modifier(weapon):
+        attributes = CombatService._template_attributes(weapon)
+        configured = attributes.get('gunpoint_difficulty_modifier')
+        if configured is not None:
+            return CombatService._coerce_int(configured, 0)
+        return -5 if CombatService._is_pistol_weapon(weapon) else 0
+
+    @staticmethod
+    def _clear_gunpoint(loc_char):
+        data, meta = CombatService._gunpoint_meta(loc_char)
+        removed = meta.pop('gunpoint', None)
+        if removed:
+            loc_char.character.data = data
+            flag_modified(loc_char.character, 'data')
+        return removed
+
+    @staticmethod
+    def _release_invalid_gunpoints(location_id):
+        holders = LocationCharacter.query.filter_by(location_id=location_id).all()
+        for holder in holders:
+            _, meta = CombatService._gunpoint_meta(holder)
+            gunpoint = meta.get('gunpoint')
+            if not isinstance(gunpoint, dict):
+                continue
+            target = db.session.get(
+                LocationCharacter,
+                CombatService._coerce_int(gunpoint.get('target_location_character_id'), 0),
+            )
+            invalid = bool(
+                not target
+                or target.location_id != location_id
+                or not CombatService._is_adjacent(holder, target)
+                or CombatService._location_character_condition(holder)['state'] != 'active'
+            )
+            try:
+                if not invalid:
+                    CombatService._gunpoint_weapon(holder, gunpoint.get('weapon_index'))
+            except ValidationError:
+                invalid = True
+            if invalid:
+                CombatService._clear_gunpoint(holder)
 
     @staticmethod
     def _is_behind(attacker, target):
@@ -2805,6 +2990,40 @@ class CombatService:
             basic.get('species'),
         )
         return any('мутант' in str(value or '').strip().lower() for value in labels)
+
+    @staticmethod
+    def _mutant_traits(character_data):
+        mutant = character_data.get('mutant') if isinstance(character_data, dict) else {}
+        if not isinstance(mutant, dict):
+            return []
+        traits = list(mutant.get('traits') or [])
+        variant = mutant.get('variant') if isinstance(mutant.get('variant'), dict) else {}
+        traits.extend(variant.get('traits') or [])
+        return [str(value) for value in traits]
+
+    @staticmethod
+    def _mutant_shooting_target_modifier(character_data):
+        for trait in CombatService._mutant_traits(character_data):
+            match = re.search(r'Точность при стрельбе\s*([+-]\d+)', trait, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        return 0
+
+    @staticmethod
+    def _mutant_pain_profile(character_data):
+        traits = CombatService._mutant_traits(character_data)
+        if any('Неуязвим к боли' in trait for trait in traits):
+            return {'immune': True, 'threshold_multiplier': 1}
+        multiplier = 1
+        for trait in traits:
+            match = re.search(
+                r'Урон, необходимый для получения уровня боли\s*(\d+)\s*[хx]',
+                trait,
+                re.IGNORECASE,
+            )
+            if match:
+                multiplier = max(multiplier, int(match.group(1)))
+        return {'immune': False, 'threshold_multiplier': multiplier}
 
     @staticmethod
     def _behind_armor_damage_multiplier(
@@ -3183,6 +3402,33 @@ class CombatService:
                     'protection': parsed,
                     'is_gas_mask': is_gas_mask,
                 })
+        mutant = target_data.get('mutant') if isinstance(target_data, dict) else None
+        if isinstance(mutant, dict):
+            innate = max(0, min(100, CombatService._coerce_float(
+                mutant.get('physical_protection'), 0,
+            )))
+            total = max(total, innate)
+            if innate:
+                details.append({
+                    'slot': 'mutant',
+                    'item': {'name': 'Природная защита'},
+                    'attributes': {'indestructible': True},
+                    'protection': innate,
+                    'is_gas_mask': False,
+                })
+        artifact_protection = max(
+            0,
+            artifact_passive_profile(target_data)['protection']['physical'],
+        )
+        if artifact_protection:
+            total = min(100, total + artifact_protection)
+            details.append({
+                'slot': 'artifact',
+                'item': {'name': 'Артефакты'},
+                'attributes': {'indestructible': True},
+                'protection': artifact_protection,
+                'is_gas_mask': False,
+            })
         return total, details
 
     @staticmethod
@@ -3212,6 +3458,14 @@ class CombatService:
                 best,
                 parsed,
             )
+        mutant = target_data.get('mutant') if isinstance(target_data, dict) else None
+        if isinstance(mutant, dict):
+            best = max(best, CombatService._coerce_float(
+                mutant.get('anomaly_protection'), 0,
+            ))
+        best += artifact_passive_profile(target_data)['protection'].get(
+            damage_type, 0,
+        )
         return max(0, min(100, best))
 
     @staticmethod
@@ -3248,6 +3502,10 @@ class CombatService:
             if not is_gas_mask:
                 value -= CombatService._armor_stage_penalty(item, 'radiation')
             total += max(0.0, value)
+        total += max(
+            0,
+            artifact_passive_profile(character_data)['protection']['radiation'],
+        )
         return total
 
     @staticmethod
@@ -4070,6 +4328,7 @@ class CombatService:
                 }
         meta = health.setdefault('combatMeta', {})
         current_round = max(0, CombatService._coerce_int(round_number, 0))
+        mutant_pain = CombatService._mutant_pain_profile(data)
         if damage > 0:
             meta['injuryRound'] = current_round
             if meta.get('damageStressRound') != current_round:
@@ -4084,7 +4343,14 @@ class CombatService:
                 meta['damagePainAppliedThisRound'] = 0
             accumulated = CombatService._coerce_float(meta.get('damageTakenThisRound'), 0) + damage
             previous_pain = CombatService._coerce_int(meta.get('damagePainAppliedThisRound'), 0)
-            required_pain = CombatService._damage_pain_requirement(accumulated, damage)
+            required_pain = (
+                0
+                if mutant_pain['immune']
+                else CombatService._damage_pain_requirement(
+                    accumulated / mutant_pain['threshold_multiplier'],
+                    damage / mutant_pain['threshold_multiplier'],
+                )
+            )
             pain_delta = max(0, required_pain - previous_pain)
             if pain_delta:
                 apply_effect_to_health(health, {
@@ -4100,7 +4366,7 @@ class CombatService:
                 'right_leg': 3,
                 'abdomen': 3,
             }.get(zone, 0)
-            if disabled_zone_pain:
+            if disabled_zone_pain and not mutant_pain['immune']:
                 apply_effect_to_health(health, {
                     'type': 'pain',
                     'value': disabled_zone_pain,
@@ -4368,7 +4634,7 @@ class CombatService:
 
     @staticmethod
     def _scatter_point(target_x, target_y, failure, width, height):
-        scatter = max(0, min(10, CombatService._coerce_int(failure, 0)))
+        scatter = max(0, CombatService._coerce_int(failure, 0))
         if scatter <= 0:
             return int(target_x), int(target_y)
         angle = random.random() * math.tau
@@ -5115,7 +5381,7 @@ class CombatService:
         return affected
 
     @staticmethod
-    def resolve_fall(target, height_meters, *, round_number=0):
+    def resolve_fall(target, height_meters, *, round_number=0, damage_multiplier=1.0):
         """Resolve impact damage from a fall using the table from the combat rules."""
         height = max(0.0, CombatService._coerce_float(height_meters, 0))
         fall_table = (
@@ -5140,7 +5406,9 @@ class CombatService:
         roll = random.randint(1, 20)
         total = roll + agility_bonus
         success = total >= difficulty
-        base_damage = success_damage if success else failure_damage
+        unscaled_damage = success_damage if success else failure_damage
+        multiplier = max(0.0, CombatService._coerce_float(damage_multiplier, 1))
+        base_damage = round(unscaled_damage * multiplier)
         profile = {
             'damage_type': 'crushing',
             'armor_piercing': 0,
@@ -5169,11 +5437,11 @@ class CombatService:
                     'leftLeg' if leg == 'left_leg' else 'rightLeg', {}
                 ).get('current'),
             })
-        shock = bool(success_shock if success else failure_shock)
+        shock = bool(success_shock if success else failure_shock) and multiplier >= 1
         fracture_both_legs = bool(
             (not success and failure_damage >= 80)
             or (success and success_damage >= 140)
-        )
+        ) and multiplier >= 1
         if shock or fracture_both_legs:
             data = target.character.data if isinstance(target.character.data, dict) else {}
             health = data.setdefault('health', {})
@@ -5202,6 +5470,8 @@ class CombatService:
             'total': total,
             'success': success,
             'base_damage': base_damage,
+            'unscaled_damage': unscaled_damage,
+            'damage_multiplier': multiplier,
             'legs': leg_results,
             'shock': shock,
             'fracture_both_legs': fracture_both_legs,
@@ -5307,6 +5577,16 @@ class CombatService:
                 CombatService._virtual_melee_profile(attack_type, weapon, attacker_data)
                 or CombatService._weapon_damage_profile(weapon, attack_type)
             )
+            profile = dict(profile)
+            artifact_melee_bonus = artifact_passive_profile(attacker_data)[
+                'melee_damage_percent'
+            ]
+            if artifact_melee_bonus:
+                profile['damage'] = max(
+                    0,
+                    CombatService._coerce_float(profile.get('damage'), 0)
+                    * (1 + artifact_melee_bonus / 100),
+                )
             skill = CombatService._skill_modifier(attacker_data, 'skills.physical.melee')
             stress_check_modifier = CombatService._consume_stress_check_modifier(
                 attacker_data, is_attack=True,
@@ -5442,7 +5722,8 @@ class CombatService:
                 roll = min(rolls)
             else:
                 roll = rolls[0]
-            hit = roll == 20 or (
+            automatic_hit = bool(attack_details.get('automatic_firearm_hit'))
+            hit = automatic_hit or roll == 20 or (
                 roll != 1 and roll + stress_check_modifier >= difficulty
             )
             result = {
@@ -5457,6 +5738,7 @@ class CombatService:
                 'target_character_id': target_character_id,
                 'target_name': target_name,
                 'stress_check_modifier': stress_check_modifier,
+                'automatic_hit': automatic_hit,
             }
             if not profile_adjusted:
                 if (
@@ -5635,6 +5917,9 @@ class CombatService:
             armor_target_data['_headProtectionZone'] = head_impact.get('armor_zone')
         armor, armor_layers = CombatService._target_armor(armor_target_data, zone)
         armor_damage = []
+        artifact_armor_reduction = artifact_passive_profile(target_data)[
+            'armor_damage_reduction'
+        ]
         for layer in armor_layers:
             if layer.get('is_gas_mask'):
                 damage_result = CombatService._damage_gas_mask(
@@ -5645,7 +5930,7 @@ class CombatService:
                 damage_result = CombatService._damage_armor_item(
                     layer['item'],
                     layer['attributes'],
-                    profile['damage'],
+                    max(0, profile['damage'] - artifact_armor_reduction),
                 )
             if damage_result:
                 armor_damage.append(damage_result)
@@ -5682,7 +5967,14 @@ class CombatService:
                 penetration_deficit=penetration_deficit,
             )
             damage_multiplier = behind_armor_multiplier
-        final_damage = max(0, round(profile['damage'] * damage_multiplier))
+        incoming_artifact_modifier = artifact_passive_profile(target_data)[
+            'incoming_physical_percent'
+        ]
+        final_damage = max(0, round(
+            profile['damage']
+            * damage_multiplier
+            * max(0, 1 + incoming_artifact_modifier / 100),
+        ))
         armor_penetrated = bool(
             armor <= 0 or profile['armor_piercing'] >= armor
         )
@@ -5910,11 +6202,20 @@ class CombatService:
                 if attack_details.get('machine_gun_burst')
                 else 0
             )
+            burst_followup_penalty = (
+                CombatService._burst_followup_accuracy_penalty(weapon, index)
+                if attack_details.get('fire_mode') == 'burst'
+                and not attack_details.get('machine_gun_burst')
+                and isinstance(weapon, dict)
+                else 0
+            )
             shot_details['machine_gun_burst_penalty'] = machine_gun_penalty
+            shot_details['burst_followup_accuracy_penalty'] = burst_followup_penalty
             shot_details['hit_difficulty'] = max(
                 1,
                 CombatService._coerce_int(shot_details.get('hit_difficulty'), 1)
-                + machine_gun_penalty,
+                + machine_gun_penalty
+                + burst_followup_penalty,
             )
             result = CombatService._resolve_attack(
                 target,
@@ -6003,6 +6304,7 @@ class CombatService:
             'brain': '\u043c\u043e\u0437\u0433',
         }
         mode_labels = {
+            'gunpoint': 'выстрел в упор',
             'melee': 'атака ближнего боя',
             'unaimed': 'неприцельный выстрел',
             'rapid': 'беглый выстрел',
@@ -6550,6 +6852,10 @@ class CombatService:
             bleeding.get('totalSeverity', health.get('bleedingSeverity', 0)),
             0,
         )
+        severity = max(
+            0,
+            severity + artifact_passive_profile(character_data)['bleeding_severity'],
+        )
         stage_penalty = CombatService._coerce_int(
             bleeding.get(
                 'stagePenalty',
@@ -6993,8 +7299,12 @@ class CombatService:
 
         low_climb_types = {'table', 'chair', 'chest', 'box', 'barrier'}
         high_climb_types = {'fence'}
-        too_high_types = {'tree', 'rock', 'house', 'tent', 'wall', 'shelf', 'anomaly'}
+        too_high_types = {'tree', 'rock', 'house', 'tent', 'wall', 'shelf'}
         height = CombatService._object_height(obj)
+
+        # Anomalies trap a character through combat rules, not collision.
+        if obj_type == 'anomaly':
+            return {'blocked': False, 'climb_cost': 0}
 
         if properties.get('passable') is True or obj_type == 'campfire':
             return {'blocked': False, 'climb_cost': 0}
@@ -7028,6 +7338,333 @@ class CombatService:
             return {'blocked': True, 'climb_cost': 0}
 
         return {'blocked': True, 'climb_cost': 0}
+
+    @staticmethod
+    def _anomaly_key_from_object(obj):
+        if isinstance(obj, dict):
+            properties = obj.get('properties') if isinstance(obj.get('properties'), dict) else {}
+            raw = (
+                obj.get('anomaly_key') or obj.get('anomalyKey')
+                or properties.get('anomaly_key') or properties.get('anomalyKey')
+                or obj.get('anomalyType') or properties.get('anomalyType')
+            )
+        else:
+            properties = getattr(obj, 'properties', {}) or {}
+            raw = properties.get('anomaly_key') or properties.get('anomalyKey') or properties.get('anomalyType')
+        raw = str(raw or '').strip().lower()
+        legacy = {
+            'fire': 'banya', 'electric': 'vspishka', 'acid': 'varevo',
+            'void': 'batut', 'radiation': 'zarosli', 'psi': 'ekho',
+        }
+        return raw if anomaly_profile(raw) else legacy.get(raw)
+
+    @staticmethod
+    def _anomalies_at_tile(location, tile_x, tile_y):
+        found = []
+        tiles = location.tiles_data if isinstance(location.tiles_data, list) else []
+        if 0 <= tile_y < len(tiles) and isinstance(tiles[tile_y], list) and 0 <= tile_x < len(tiles[tile_y]):
+            tile = tiles[tile_y][tile_x]
+            if isinstance(tile, dict):
+                for index, obj in enumerate(tile.get('objects') or []):
+                    if isinstance(obj, dict) and (obj.get('type') or obj.get('object_type')) == 'anomaly':
+                        key = CombatService._anomaly_key_from_object(obj)
+                        profile = anomaly_profile(key)
+                        if profile:
+                            found.append({'key': key, 'profile': profile, 'object_id': None, 'tile_object_index': index})
+        for obj in LocationObject.query.filter_by(
+            location_id=location.id, tile_x=tile_x, tile_y=tile_y, type='anomaly',
+        ).all():
+            key = CombatService._anomaly_key_from_object(obj)
+            profile = anomaly_profile(key)
+            if profile:
+                found.append({'key': key, 'profile': profile, 'object_id': obj.id})
+        return found
+
+    @staticmethod
+    def _active_anomaly(loc_char):
+        data = loc_char.character.data if loc_char.character and isinstance(loc_char.character.data, dict) else {}
+        health = data.setdefault('health', {})
+        meta = health.setdefault('combatMeta', {})
+        active = meta.get('activeAnomaly')
+        return data, health, meta, active if isinstance(active, dict) else None
+
+    @staticmethod
+    def _enter_anomaly(loc_char, anomaly, round_number, previous_position=None):
+        data, _, meta, _ = CombatService._active_anomaly(loc_char)
+        profile = anomaly['profile']
+        active = {
+            'key': anomaly['key'], 'name': profile['name'], 'category': profile['category'],
+            'dc': profile['dc'], 'tile_x': loc_char.pos_x, 'tile_y': loc_char.pos_y,
+            'object_id': anomaly.get('object_id'), 'entered_round': max(1, round_number or 1),
+            'rounds': 0,
+        }
+        if previous_position:
+            previous_x, previous_y = previous_position
+            active['entry_dx'] = 0 if loc_char.pos_x == previous_x else (1 if loc_char.pos_x > previous_x else -1)
+            active['entry_dy'] = 0 if loc_char.pos_y == previous_y else (1 if loc_char.pos_y > previous_y else -1)
+        meta['activeAnomaly'] = active
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        return active
+
+    @staticmethod
+    def _apply_anomaly_exposure(
+        loc_char, active, fraction=1.0, *, apply_category_effect=True,
+        round_number=0, exiting=False, escape_margin=None, condition=None,
+    ):
+        profile = anomaly_profile(active.get('key')) or {}
+        fraction = max(0.0, CombatService._coerce_float(fraction, 0))
+        rounds = max(0, CombatService._coerce_int(active.get('rounds'), 0))
+        damage = CombatService._coerce_float(profile.get('damage'), 0)
+        hit_count = None
+        if profile.get('unit_damage') and escape_margin is not None and fraction > 0:
+            hit_count = max(1, min(
+                CombatService._coerce_int(profile.get('max_hits'), 1),
+                max(1, CombatService._coerce_int(escape_margin, 1)),
+            ))
+            damage = CombatService._coerce_float(profile.get('unit_damage'), 0) * hit_count
+            fraction = 1.0
+        if exiting and profile.get('exit_damage'):
+            damage = CombatService._coerce_float(profile.get('exit_damage'), damage)
+            fraction = 1.0
+        elif active.get('key') == 'kapkan' and rounds >= 1:
+            damage = CombatService._coerce_float(
+                profile.get('secondary_damage'), damage,
+            )
+        elif active.get('key') == 'ionny_tuman' and escape_margin is not None:
+            damage = CombatService._coerce_float(
+                (profile.get('movement_damage') or {}).get('walk'), damage,
+            )
+        elif profile.get('doubling_damage') and rounds > 0:
+            damage *= 2 ** rounds
+        if profile.get('third_round_damage') and rounds >= 2:
+            damage = CombatService._coerce_float(profile.get('third_round_damage'), damage)
+        if profile.get('escalating_damage') and rounds > 0:
+            damage += CombatService._coerce_float(profile.get('escalating_damage'), 0) * rounds
+        result = {'name': profile.get('name'), 'fraction': fraction, 'damage': 0}
+        if hit_count is not None:
+            result['hit_count'] = hit_count
+        if profile.get('fall_height') and fraction > 0:
+            fall = CombatService.resolve_fall(
+                loc_char,
+                profile['fall_height'],
+                round_number=round_number,
+                damage_multiplier=fraction,
+            )
+            result['fall'] = fall
+            result['damage'] = sum(item.get('damage', 0) for item in fall.get('legs', []))
+        elif damage > 0 and fraction > 0:
+            character_data = (
+                loc_char.character.data
+                if loc_char.character and isinstance(loc_char.character.data, dict)
+                else {}
+            )
+            protection_type = {
+                'gravity': 'physical', 'electric': 'electric', 'thermal': 'thermal',
+                'chemical': 'chemical', 'psi': 'psi',
+            }.get(profile.get('category'))
+            protection = (
+                CombatService._target_elemental_protection(character_data, protection_type)
+                if protection_type else 0
+            )
+            if profile.get('zone'):
+                raw_damage = max(0, round(damage * fraction))
+                zone_health = CombatService._apply_attack_damage(
+                    loc_char,
+                    raw_damage,
+                    profile['zone'],
+                    {'damage_type': 'crushing', 'armor_piercing': 0, 'damage': raw_damage},
+                    round_number=round_number,
+                    allow_bleeding=False,
+                    trauma_checks=0,
+                    stress_trigger='anomaly',
+                )
+                result['damage'] = raw_damage
+                result['zone'] = profile['zone']
+                result['zone_health'] = (zone_health.get('zones') or {}).get(profile['zone'])
+            else:
+                damage_after_protection = damage * fraction * max(0, 100 - protection) / 100
+                result['damage_result'] = CombatService._apply_general_damage(
+                    loc_char, damage_after_protection, round_number=round_number, source='anomaly',
+                )
+                result['damage'] = result['damage_result']['damage']
+                result['protection'] = protection
+
+        data = loc_char.character.data if isinstance(loc_char.character.data, dict) else {}
+        health = data.setdefault('health', {})
+        radiation = CombatService._coerce_float(profile.get('radiation'), 0) * fraction
+        if radiation:
+            radiation_result = CombatService._apply_incoming_radiation(
+                data, radiation, binary=False,
+            )
+            health = data.setdefault('health', {})
+            result['radiation'] = radiation_result
+        psi_value = CombatService._coerce_float(profile.get('psi'), 0)
+        if condition == 'noise' and profile.get('psi_noisy') is not None:
+            psi_value = CombatService._coerce_float(profile.get('psi_noisy'), psi_value)
+        elif condition == 'eyes_closed' and profile.get('psi_eyes_closed') is not None:
+            psi_value = CombatService._coerce_float(profile.get('psi_eyes_closed'), psi_value)
+        psi = psi_value * fraction
+        if psi:
+            psi_protection = CombatService._target_elemental_protection(data, 'psi')
+            received_psi = psi * max(0, 100 - psi_protection) / 100
+            health['psiState'] = max(0, CombatService._coerce_float(health.get('psiState'), 0) + received_psi)
+            result['psi'] = received_psi
+            result['psi_protection'] = psi_protection
+        for effect_type, profile_key in (('pain', 'pain'), ('exhaustion', 'exhaustion')):
+            amount = CombatService._coerce_float(profile.get(profile_key), 0) * fraction
+            if amount:
+                apply_effect_to_health(health, {'type': effect_type, 'value': amount, 'source': 'anomaly'})
+                result[profile_key] = amount
+        if profile.get('temperature') and fraction:
+            delta = CombatService._coerce_float(profile['temperature'], 0) * fraction
+            health['temperature'] = CombatService._coerce_float(health.get('temperature'), 36) + delta
+            result['temperature'] = delta
+        bleeding = profile.get('bleeding') if isinstance(profile.get('bleeding'), dict) else None
+        if bleeding and apply_category_effect and fraction:
+            kind = bleeding.get('kind', 'external')
+            stage = bleeding.get('stage', 'light')
+            apply_effect_to_health(health, {
+                'type': f'bleeding_{kind}_{stage}', 'area': bleeding.get('area') or 'chest',
+                'source': 'anomaly',
+            })
+            result['bleeding'] = {'kind': kind, 'stage': stage}
+        if apply_category_effect and fraction:
+            category = profile.get('category')
+            if category == 'thermal':
+                apply_effect_to_health(health, {'type': 'burning', 'name': '\u0413\u043e\u0440\u0435\u043d\u0438\u0435', 'remaining': 2, 'tick': 'turn_end', 'source': 'anomaly'})
+            elif category == 'electric':
+                apply_effect_to_health(health, {'type': 'anomaly_electric_penalty', 'name': '\u042d\u043b\u0435\u043a\u0442\u0440\u043e\u0448\u043e\u043a', 'remaining': 2, 'tick': 'turn_end', 'roll_modifier': -2, 'source': 'anomaly'})
+            elif category == 'gravity' and not bleeding:
+                for area in ('left_leg', 'right_leg'):
+                    apply_effect_to_health(health, {'type': 'bleeding_external_light', 'area': area, 'source': 'anomaly'})
+            elif category == 'chemical' and not profile.get('pain'):
+                if random.randint(1, 100) <= 50:
+                    apply_effect_to_health(health, {'type': 'fracture', 'area': random.choice(('left_arm', 'right_arm', 'left_leg', 'right_leg')), 'source': 'anomaly'})
+                else:
+                    apply_effect_to_health(health, {'type': 'pain', 'value': 3, 'source': 'anomaly'})
+            elif category == 'radiation' and not profile.get('exhaustion'):
+                apply_effect_to_health(health, {'type': 'exhaustion', 'value': 1, 'source': 'anomaly'})
+            elif category == 'psi':
+                apply_effect_to_health(health, {'type': 'anomaly_will_penalty', 'name': '\u041f\u0441\u0438-\u0432\u043e\u0437\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435', 'remaining': 2, 'tick': 'turn_end', 'will_modifier': -2, 'source': 'anomaly'})
+            if profile.get('will_penalty'):
+                apply_effect_to_health(health, {
+                    'type': 'anomaly_will_penalty',
+                    'name': '\u041f\u043e\u0434\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0432\u043e\u043b\u0438',
+                    'remaining': 2, 'tick': 'turn_end',
+                    'will_modifier': -abs(CombatService._coerce_int(profile['will_penalty'], 0)),
+                    'source': profile.get('name') or 'anomaly',
+                })
+        equipment_damage = CombatService._apply_anomaly_equipment_damage(
+            data,
+            damage * fraction,
+            profile,
+        )
+        if equipment_damage:
+            result['equipment_damage'] = equipment_damage
+            if profile.get('blindness'):
+                apply_effect_to_health(health, {
+                    'type': 'blindness', 'value': profile['blindness'],
+                    'source': profile.get('name') or 'anomaly',
+                })
+            if profile.get('harmful_action_on_failure') and escape_margin is not None and escape_margin > 0:
+                apply_effect_to_health(health, {
+                    'type': 'anomaly_compulsion',
+                    'name': 'Приказ Старшины',
+                    'source': profile.get('name') or 'anomaly',
+                    'tick': 'manual',
+                    'description': 'Персонаж должен совершить действие, вредящее себе.',
+                })
+                result['harmful_action_required'] = True
+        sync_health_derived_statuses(health)
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        CombatService._sync_location_effects_from_character(loc_char)
+        return result
+
+    @staticmethod
+    def _apply_anomaly_equipment_damage(character_data, damage, profile):
+        equipment = character_data.get('equipment') if isinstance(character_data, dict) else {}
+        equipment = equipment if isinstance(equipment, dict) else {}
+        results = []
+        armor_multiplier = max(
+            1,
+            CombatService._coerce_float(profile.get('armor_damage_multiplier'), 1),
+        )
+        for slot in ('armor', 'helmet', 'gasMask'):
+            item = equipment.get(slot)
+            if not isinstance(item, dict):
+                continue
+            attributes = CombatService._template_attributes(item)
+            if CombatService._is_gas_mask_item(slot, item, attributes):
+                result = CombatService._damage_gas_mask(item, 'anomaly')
+            elif armor_multiplier > 1:
+                result = CombatService._damage_armor_item(
+                    item, attributes, damage * armor_multiplier,
+                )
+            else:
+                result = None
+            if result:
+                result['slot'] = slot
+                results.append(result)
+        weapon_multiplier = max(
+            1,
+            CombatService._coerce_float(profile.get('weapon_damage_multiplier'), 1),
+        )
+        if weapon_multiplier > 1:
+            weapons = character_data.get('weapons') or []
+            active_index = CombatService._coerce_int(
+                character_data.get('activeWeaponIndex'), -1,
+            )
+            if 0 <= active_index < len(weapons) and isinstance(weapons[active_index], dict):
+                weapon_result = CombatService._apply_weapon_wear(
+                    weapons[active_index],
+                    math.ceil(max(0, damage) * weapon_multiplier / 20),
+                )
+                weapon_result.update({
+                    'slot': 'weapon',
+                    'name': weapons[active_index].get('name'),
+                })
+                results.append(weapon_result)
+        return results
+
+    @staticmethod
+    def _resolve_anomaly_end_turn(loc_char, round_number):
+        _, _, _, active = CombatService._active_anomaly(loc_char)
+        if not active:
+            return None
+        result = CombatService._apply_anomaly_exposure(
+            loc_char, active, 1.0, apply_category_effect=True, round_number=round_number,
+        )
+        data, _, meta, _ = CombatService._active_anomaly(loc_char)
+        profile = anomaly_profile(active.get('key')) or {}
+        if profile.get('ejects') or profile.get('fall_height'):
+            location = CombatService._get_location(loc_char.location_id)
+            dx = CombatService._coerce_int(active.get('entry_dx'), 0)
+            dy = CombatService._coerce_int(active.get('entry_dy'), 0)
+            if not dx and not dy:
+                dx = 1
+            target_x, target_y = loc_char.pos_x + dx, loc_char.pos_y + dy
+            blocked, climb = CombatService._build_movement_map(
+                location, loc_char.character_id,
+            )
+            if (
+                0 <= target_x < location.grid_width
+                and 0 <= target_y < location.grid_height
+                and (target_x, target_y) not in blocked
+                and not climb.get((target_x, target_y), 0)
+            ):
+                loc_char.pos_x, loc_char.pos_y = target_x, target_y
+                result['ejected_to'] = {'x': target_x, 'y': target_y}
+            meta.pop('activeAnomaly', None)
+            loc_char.character.data = data
+            flag_modified(loc_char.character, 'data')
+            return result
+        active['rounds'] = max(0, CombatService._coerce_int(active.get('rounds'), 0)) + 1
+        meta['activeAnomaly'] = active
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        return result
 
     @staticmethod
     def _build_movement_map(
@@ -7193,13 +7830,13 @@ class CombatService:
             (1, 1), (1, -1), (-1, 1), (-1, -1),
         ]
 
-        open_heap = [(0, 0, start_x, start_y)]
+        open_heap = [(0, 0, 0, start_x, start_y)]
         came_from = {}
         best_cost = {(start_x, start_y): 0}
         counter = 1
 
         while open_heap:
-            _, current_cost, x, y = heapq.heappop(open_heap)
+            _, _, current_cost, x, y = heapq.heappop(open_heap)
             if current_cost != best_cost.get((x, y)):
                 continue
             if x == end_x and y == end_y:
@@ -7230,7 +7867,10 @@ class CombatService:
 
                 best_cost[(nx, ny)] = new_cost
                 came_from[(nx, ny)] = (x, y)
-                heapq.heappush(open_heap, (new_cost + heuristic(nx, ny), new_cost, nx, ny))
+                heapq.heappush(open_heap, (
+                    new_cost + heuristic(nx, ny), counter, new_cost, nx, ny,
+                ))
+                counter += 1
 
         return None
 
@@ -7393,6 +8033,18 @@ class CombatService:
             'help_advantage': help_advantage if isinstance(help_advantage, dict) else None,
             'must_do_retry': must_do_retry if isinstance(must_do_retry, dict) else None,
             'must_do_usage': must_do_usage,
+            'gunpoint': (
+                deepcopy(health.get('combatMeta', {}).get('gunpoint'))
+                if isinstance(health.get('combatMeta'), dict)
+                and isinstance(health.get('combatMeta', {}).get('gunpoint'), dict)
+                else None
+            ),
+            'active_anomaly': (
+                deepcopy(health.get('combatMeta', {}).get('activeAnomaly'))
+                if isinstance(health.get('combatMeta'), dict)
+                and isinstance(health.get('combatMeta', {}).get('activeAnomaly'), dict)
+                else None
+            ),
             'stress_effects': stress_effects,
             'completed_pending_action_id': (
                 health.get('combatMeta', {}).get('completedPendingActionId')
@@ -7597,6 +8249,330 @@ class CombatService:
         if not isinstance(current, dict):
             raise NotFoundError("Item not found")
         return current
+
+    @staticmethod
+    def _equipment_template(item):
+        if not isinstance(item, dict):
+            return None
+        template_id = CombatService._coerce_int(item.get('templateId'), 0)
+        return db.session.get(ItemTemplate, template_id) if template_id else None
+
+    @staticmethod
+    def _is_exoskeleton_item(item, template=None):
+        attributes = CombatService._template_attributes(item)
+        if template and isinstance(template.attributes, dict):
+            attributes = {**template.attributes, **attributes}
+        name = str((template.name if template else item.get('name')) or '').strip().lower().replace('ё', 'е')
+        return bool(item.get('isExoskeleton') or attributes.get('is_exoskeleton')) or name == 'экзоскелет'
+
+    @staticmethod
+    def _equipment_action_points(item, slot, operation, template=None):
+        if slot in {'helmet', 'gasMask'}:
+            weight = CombatService._coerce_float(
+                item.get('weight') if isinstance(item, dict) else 0,
+                0,
+            )
+            return (2 if weight <= 2 else 4) if operation == 'equip' else (1 if weight <= 2 else 3)
+        if slot != 'armor':
+            raise ValidationError('Unsupported equipment slot')
+        category = str(
+            (template.subcategory if template else None)
+            or item.get('subcategory')
+            or ''
+        ).strip().lower().replace('ё', 'е')
+        if 'легк' in category:
+            base = 10
+        elif 'средн' in category:
+            base = 20
+        else:
+            base = 30
+        return base if operation == 'equip' else base // 2
+
+    @staticmethod
+    def _iter_inventory_items_with_paths(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        inventory = data.get('inventory') if isinstance(data.get('inventory'), dict) else {}
+        equipment = data.get('equipment') if isinstance(data.get('equipment'), dict) else {}
+        pending = []
+        for key in ('backpack', 'pockets'):
+            items = inventory.get(key)
+            if isinstance(items, list):
+                pending.extend((item, ['inventory', key, index]) for index, item in enumerate(items))
+        for group_name in ('belt', 'vest'):
+            container = equipment.get(group_name)
+            pouches = container.get('pouches') if isinstance(container, dict) else []
+            for pouch_index, pouch in enumerate(pouches if isinstance(pouches, list) else []):
+                contents = pouch.get('contents') if isinstance(pouch, dict) else []
+                if isinstance(contents, list):
+                    pending.extend(
+                        (item, ['equipment', group_name, 'pouches', pouch_index, 'contents', index])
+                        for index, item in enumerate(contents)
+                    )
+        while pending:
+            item, path = pending.pop()
+            if not isinstance(item, dict):
+                continue
+            yield item, path
+            contents = item.get('contents')
+            if isinstance(contents, list):
+                pending.extend(
+                    (child, [*path, 'contents', index])
+                    for index, child in enumerate(contents)
+                )
+
+    @staticmethod
+    def _exoskeleton_tool_profile(character_data, *, removal=False):
+        best = None
+        for item, path in CombatService._iter_inventory_items_with_paths(character_data):
+            attributes = CombatService._template_attributes(item)
+            profile = attributes.get('repair_profile') if isinstance(attributes.get('repair_profile'), dict) else {}
+            if profile.get('kind') != 'armor':
+                continue
+            max_class = profile.get('max_item_class')
+            is_extended = max_class in {None, ''} and CombatService._coerce_int(
+                profile.get('engineering_min'), 0,
+            ) >= 17
+            if removal and not is_extended:
+                continue
+            rank = 3 if is_extended else max(1, CombatService._coerce_int(max_class, 1))
+            if not best or rank > best['rank']:
+                best = {'item': item, 'path': path, 'rank': rank}
+        return best
+
+    @staticmethod
+    def _integrated_helmet_from_armor(armor, template):
+        attributes = dict(template.attributes or {}) if template else {}
+        profile = dict(attributes.get('integrated_helmet_profile') or {})
+        if not profile and not attributes.get('integrated_helmet'):
+            return None
+        physical = CombatService._coerce_float(profile.get('physical'), 0)
+        if physical > 1:
+            physical /= 100
+        return {
+            'templateId': f"integrated:{armor.get('templateId') or 'armor'}",
+            'integratedWithArmor': True,
+            'sourceArmorTemplateId': armor.get('templateId'),
+            'name': attributes.get('integrated_helmet_name') or f"{armor.get('name')} · встроенный шлем",
+            'material': armor.get('material'),
+            'protection': {
+                'physical': physical,
+                'chemical': 0,
+                'thermal': 0,
+                'electric': 0,
+                'radiation': 0,
+            },
+            'durability': armor.get('durability'),
+            'maxDurability': armor.get('maxDurability'),
+            'stage': armor.get('stage'),
+            'condition': armor.get('condition'),
+            'stageDurability': armor.get('stageDurability'),
+            'currentStageDurability': armor.get('currentStageDurability'),
+            'accuracyPenalty': CombatService._coerce_int(profile.get('accuracyPenalty'), 0),
+            'ergonomicsPenalty': 0,
+            'charismaBonus': -CombatService._coerce_float(profile.get('charismaPenalty'), 0),
+            'modifications': [],
+            'installedModules': [],
+        }
+
+    @staticmethod
+    def _prepare_equipped_item(item, slot, template=None):
+        equipped = deepcopy(item)
+        attributes = dict(template.attributes or {}) if template else {}
+        stored_attributes = equipped.get('attributes') if isinstance(equipped.get('attributes'), dict) else {}
+        attributes.update(stored_attributes)
+        if template:
+            equipped['templateId'] = template.id
+            equipped['name'] = template.name
+            equipped['weight'] = template.weight
+            equipped['volume'] = template.volume
+            equipped['subcategory'] = template.subcategory
+            equipped['itemClass'] = template.item_class
+        equipped['quantity'] = 1
+        equipped['attributes'] = attributes
+        equipped.setdefault('protection', deepcopy(attributes.get('protection') or {}))
+        equipped.setdefault('durability', attributes.get('max_durability', 0))
+        equipped.setdefault('maxDurability', attributes.get('max_durability', equipped.get('durability', 0)))
+        equipped.setdefault('installedModules', [])
+        equipped.setdefault('modifications', [])
+        if slot == 'armor':
+            equipped.setdefault('movementPenalty', attributes.get('movement_penalty', 0))
+            equipped.setdefault('protectionZones', deepcopy(attributes.get('protection_zones') or []))
+            equipped['integratedHelmet'] = bool(attributes.get('integrated_helmet'))
+            equipped['isExoskeleton'] = CombatService._is_exoskeleton_item(equipped, template)
+            equipped['requiresExoskeletonBattery'] = bool(
+                attributes.get('requires_exoskeleton_battery') or equipped['isExoskeleton']
+            )
+        elif slot in {'helmet', 'gasMask'}:
+            equipped.setdefault('accuracyPenalty', attributes.get('accuracy_penalty', 0))
+            equipped.setdefault('ergonomicsPenalty', attributes.get('ergonomics_penalty', 0))
+            equipped.setdefault('charismaBonus', attributes.get('charisma_bonus', 0))
+            equipped.setdefault('movementPenalty', attributes.get('movement_penalty', 0))
+        return equipped
+
+    @staticmethod
+    def _helmet_blocks_gas_mask(item, template=None):
+        if not isinstance(item, dict):
+            return False
+        attributes = dict(template.attributes or {}) if template else {}
+        attributes.update(
+            item.get('attributes') if isinstance(item.get('attributes'), dict) else {}
+        )
+        slots = attributes.get('slots') if isinstance(attributes.get('slots'), list) else []
+        zones = attributes.get('protection_zones')
+        zones = zones if isinstance(zones, list) else item.get('protectionZones') or []
+        modules = item.get('installedModules') if isinstance(item.get('installedModules'), list) else []
+        name = str((template.name if template else None) or item.get('name') or '').lower()
+        return bool(
+            item.get('integratedWithArmor')
+            or attributes.get('integrated_visor')
+            or attributes.get('requires_filter')
+            or 'face' in zones
+            or any(isinstance(slot, dict) and slot.get('type') == 'visor' for slot in slots)
+            or any(
+                isinstance(module, dict) and module.get('slotType') == 'visor'
+                for module in modules
+            )
+            or 'противогазо-шлем' in name
+        )
+
+    @staticmethod
+    def equipment_action_details(
+        character_data,
+        operation,
+        slot,
+        *,
+        item_path=None,
+        retrieval_action_points=0,
+        in_combat=False,
+    ):
+        operation = str(operation or '').strip().lower()
+        slot = str(slot or '').strip()
+        if operation not in {'equip', 'unequip'}:
+            raise ValidationError('Unknown equipment operation')
+        if slot not in {'armor', 'helmet', 'gasMask'}:
+            raise ValidationError('Unsupported equipment slot')
+        equipment = character_data.setdefault('equipment', {})
+        if operation == 'equip':
+            if equipment.get(slot, {}).get('templateId'):
+                raise ValidationError('Remove the currently equipped item first')
+            item = CombatService._inventory_item_at_path(character_data, item_path)
+            expected_category = {'armor': 'armor', 'helmet': 'helmet', 'gasMask': 'gas_mask'}[slot]
+            if str(item.get('category') or '').lower() != expected_category:
+                raise ValidationError('The selected item does not fit this equipment slot')
+        else:
+            item = equipment.get(slot)
+            if not isinstance(item, dict) or not item.get('templateId'):
+                raise ValidationError('Nothing is equipped in this slot')
+            if item.get('integratedWithArmor'):
+                raise ValidationError('The integrated helmet is removed together with the armor')
+        template = CombatService._equipment_template(item)
+        if operation == 'equip':
+            if slot == 'armor' and CombatService._integrated_helmet_from_armor(item, template):
+                current_helmet = equipment.get('helmet')
+                if isinstance(current_helmet, dict) and current_helmet.get('templateId'):
+                    raise ValidationError('Remove the helmet before equipping this armor')
+                current_mask = equipment.get('gasMask')
+                if isinstance(current_mask, dict) and current_mask.get('templateId'):
+                    raise ValidationError('Remove the gas mask before equipping this armor')
+            elif slot == 'helmet':
+                current_mask = equipment.get('gasMask')
+                if (
+                    isinstance(current_mask, dict)
+                    and current_mask.get('templateId')
+                    and CombatService._helmet_blocks_gas_mask(item, template)
+                ):
+                    raise ValidationError('This helmet cannot be worn with a gas mask')
+            elif slot == 'gasMask':
+                current_helmet = equipment.get('helmet')
+                helmet_template = CombatService._equipment_template(current_helmet)
+                if (
+                    isinstance(current_helmet, dict)
+                    and current_helmet.get('templateId')
+                    and CombatService._helmet_blocks_gas_mask(
+                        current_helmet, helmet_template,
+                    )
+                ):
+                    raise ValidationError('This gas mask cannot be worn with the current helmet')
+        is_exoskeleton = slot == 'armor' and CombatService._is_exoskeleton_item(item, template)
+        if is_exoskeleton:
+            if in_combat:
+                raise ValidationError('The exoskeleton cannot be equipped or removed during combat')
+            tool = CombatService._exoskeleton_tool_profile(
+                character_data,
+                removal=operation == 'unequip',
+            )
+            if not tool:
+                raise ValidationError(
+                    'Equipping requires armorer tools; removal requires advanced armorer tools'
+                )
+            if operation == 'unequip':
+                engineering = CombatService._skill_value(
+                    character_data,
+                    'skills.other.engineering',
+                )
+                if engineering < 18:
+                    raise ValidationError('Engineering 18 is required to remove the exoskeleton')
+            duration_minutes = 10 if operation == 'equip' else 60
+            action_points = 0
+        else:
+            duration_minutes = 0
+            action_points = CombatService._equipment_action_points(
+                item, slot, operation, template,
+            )
+            if operation == 'equip':
+                action_points += max(
+                    0,
+                    min(20, CombatService._coerce_int(retrieval_action_points, 0)),
+                )
+        return {
+            'operation': operation,
+            'slot': slot,
+            'item_path': list(item_path or []),
+            'item': item,
+            'template': template,
+            'is_exoskeleton': is_exoskeleton,
+            'action_points': action_points,
+            'duration_minutes': duration_minutes,
+        }
+
+    @staticmethod
+    def apply_equipment_action(character_data, details):
+        equipment = character_data.setdefault('equipment', {})
+        slot = details['slot']
+        if details['operation'] == 'equip':
+            item = CombatService._take_inventory_item(
+                character_data,
+                details['item_path'],
+                1,
+            )
+            equipped = CombatService._prepare_equipped_item(
+                item,
+                slot,
+                details.get('template'),
+            )
+            equipment[slot] = equipped
+            if slot == 'armor':
+                integrated = CombatService._integrated_helmet_from_armor(
+                    equipped,
+                    details.get('template'),
+                )
+                if integrated:
+                    equipment['helmet'] = integrated
+        else:
+            equipped = equipment.pop(slot)
+            inventory = character_data.setdefault('inventory', {})
+            inventory.setdefault('backpack', []).append(deepcopy(equipped))
+            if slot == 'armor' and isinstance(equipment.get('helmet'), dict):
+                if equipment['helmet'].get('integratedWithArmor'):
+                    equipment.pop('helmet', None)
+        return {
+            'operation': details['operation'],
+            'slot': slot,
+            'item_name': details['item'].get('name'),
+            'action_points': details['action_points'],
+            'duration_minutes': details['duration_minutes'],
+            'is_exoskeleton': details['is_exoskeleton'],
+        }
 
     @staticmethod
     def loot_incapacitated_character(
@@ -7885,6 +8861,7 @@ class CombatService:
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
         CombatService._release_invalid_grapples(location_id)
+        CombatService._release_invalid_gunpoints(location_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
         if not state:
             raise ValidationError("Combat is not active")
@@ -7983,6 +8960,9 @@ class CombatService:
         )
         CombatService._tick_character_effects(current_character, phase='turn_end')
         CombatService._apply_periodic_health_effects(current_character, phase='turn_end')
+        anomaly_result = CombatService._resolve_anomaly_end_turn(
+            current_character, ending_round,
+        )
         radiation_result = CombatService._apply_location_end_turn_radiation(
             location,
             current_character,
@@ -8097,6 +9077,7 @@ class CombatService:
 
         payload = CombatService._serialize_state(location, state)
         payload['radiation'] = radiation_result
+        payload['anomaly'] = anomaly_result
         payload['pain_shock_check'] = pain_shock_check
         payload['detonations'] = detonations
         payload['area_updates'] = area_updates
@@ -8251,6 +9232,12 @@ class CombatService:
             ).first()
             if not help_target or help_target.id == character.id:
                 raise ValidationError("Choose another character to help")
+            _, _, _, target_anomaly = CombatService._active_anomaly(help_target)
+            target_anomaly_profile = anomaly_profile(
+                target_anomaly.get('key') if target_anomaly else None,
+            ) or {}
+            if target_anomaly_profile.get('cannot_help'):
+                raise ValidationError("This anomaly does not allow outside help")
             help_action_label = ' '.join(str(help_action_label or '').split())
             if not help_action_label or len(help_action_label) > 200:
                 raise ValidationError("Describe the action being helped")
@@ -8486,6 +9473,111 @@ class CombatService:
         return CombatService._serialize_character(character, current_turn_id=state.current_location_character_id)
 
     @staticmethod
+    def _perform_gunpoint_shot(location, state, character, user_id, is_gm):
+        if not CombatService._can_end_turn_for_character(character, user_id, is_gm=is_gm):
+            raise PermissionDenied('You do not control this character')
+        CombatService.ensure_character_can_act(character, 'gunpoint_shot')
+        data, combat_meta = CombatService._gunpoint_meta(character)
+        gunpoint = combat_meta.get('gunpoint')
+        if not isinstance(gunpoint, dict):
+            raise ValidationError('No weapon is currently pressed against a target')
+        target = db.session.get(
+            LocationCharacter,
+            CombatService._coerce_int(gunpoint.get('target_location_character_id'), 0),
+        )
+        if not target or target.location_id != location.id:
+            CombatService._clear_gunpoint(character)
+            raise ValidationError('The gunpoint target is no longer in this location')
+        if state.current_location_character_id != target.id:
+            raise ValidationError('This reaction is available only during the target turn')
+        if not CombatService._is_adjacent(character, target):
+            CombatService._clear_gunpoint(character)
+            raise ValidationError('The target is no longer adjacent')
+        if character.action_points_current < 1:
+            raise ValidationError('Not enough action points')
+
+        data, weapons, weapon_index, weapon = CombatService._gunpoint_weapon(
+            character, gunpoint.get('weapon_index'),
+        )
+        if CombatService._weapon_loaded_shots(weapon) <= 0:
+            raise ValidationError('The weapon is not loaded')
+        current_round = max(1, state.round_number or 1)
+        CombatService._validate_weapon_fire_rate(
+            combat_meta, current_round, weapon_index, weapon, 1,
+        )
+        target_zone = gunpoint.get('target_zone')
+        if target_zone not in HIT_ZONES:
+            CombatService._clear_gunpoint(character)
+            raise ValidationError('The selected body part is no longer valid')
+
+        attack_details = {
+            'weapon_index': weapon_index,
+            'fire_mode': 'gunpoint',
+            'shot_count': 1,
+            'requested_shot_count': 1,
+            'volley_count': 1,
+            'action_points': 1,
+            'target_character_id': target.character_id,
+            'target_zone': target_zone,
+            'target_distance': CombatService._point_distance(
+                character.pos_x, character.pos_y, target.pos_x, target.pos_y,
+            ),
+            'hit_difficulty': 1,
+            'automatic_firearm_hit': True,
+            'shooting_disadvantage': False,
+            'gunpoint': True,
+        }
+        result = CombatService._resolve_attack(
+            target,
+            character,
+            attack_details,
+            aimed_zone=target_zone,
+            ignore_cover=True,
+            ignore_live_shield=True,
+        )
+        jam = CombatService._roll_weapon_jam(weapon, result.get('roll'))
+        result['weapon_jam_after_shot'] = deepcopy(jam)
+        attack_details.update({
+            'results': [result],
+            'hits': 1 if result.get('hit') else 0,
+            'damage_total': result.get('combined_damage', result.get('damage', 0)),
+            'weapon_jam': jam,
+            'weapon_jams': [jam] if isinstance(jam, dict) and jam.get('triggered') else [],
+        })
+        CombatService._consume_weapon_ammo(weapon, 1)
+        CombatService._record_weapon_shots(combat_meta, current_round, weapon_index, 1)
+        ammo_profile, _ = CombatService._ranged_damage_profile(weapon)
+        attack_details['weapon_wear'] = CombatService._weapon_use_wear(
+            weapon,
+            fire_mode='gunpoint',
+            shot_count=1,
+            ammo_profile=ammo_profile,
+        )
+        if CombatService._manual_cycle_type(weapon):
+            weapon['requiresManualCycle'] = True
+        attack_details['ammo_remaining'] = CombatService._weapon_loaded_shots(weapon)
+        combat_meta['firedRound'] = current_round
+        combat_meta.pop('gunpoint', None)
+        character.action_points_current -= 1
+        character.character.data = data
+        flag_modified(character.character, 'data')
+        character.last_action = db.func.now()
+        CombatService._release_invalid_gunpoints(location.id)
+        db.session.commit()
+        serialized_state = CombatService._serialize_state(location, state)
+        return {
+            'character': CombatService._serialize_character(
+                character,
+                current_turn_id=state.current_location_character_id,
+                combat_state=state,
+            ),
+            'state': serialized_state,
+            'action': 'gunpoint_shot',
+            'attack': attack_details,
+            'gunpoint': {'released': True, 'target_character_id': target.character_id},
+        }
+
+    @staticmethod
     def perform_action(
         location_id,
         user_id,
@@ -8523,6 +9615,8 @@ class CombatService:
         explosive_source=None,
         explosive_fire_mode=None,
         explosive_fuse_mode=None,
+        equipment_operation=None,
+        equipment_slot=None,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -8543,6 +9637,11 @@ class CombatService:
             if character.character and isinstance(character.character.data, dict)
             else {}
         )
+
+        if action_key == 'gunpoint_shot':
+            return CombatService._perform_gunpoint_shot(
+                location, state, character, user_id, is_gm,
+            )
 
         if state.current_location_character_id != character.id:
             raise PermissionDenied("It is not this character's turn")
@@ -8580,11 +9679,125 @@ class CombatService:
         explosive_module = None
         explosive_fire_rate_state = None
         melee_action_details = None
+        equipment_action_details = None
+        gunpoint_details = None
+        anomaly_details = None
         special_action_cost = None
         resolved_hits = []
         single_fire = False
         current_round = max(1, state.round_number or 1)
-        if action_key == 'explosive_attack':
+        if action_key == 'escape_anomaly':
+            _, _, _, active_anomaly = CombatService._active_anomaly(character)
+            if not active_anomaly:
+                raise ValidationError('The character is not trapped in an anomaly')
+            target_x = CombatService._coerce_int(target_x, -1)
+            target_y = CombatService._coerce_int(target_y, -1)
+            if max(abs(target_x - character.pos_x), abs(target_y - character.pos_y)) != 1:
+                raise ValidationError('Choose an adjacent exit tile')
+            if not (0 <= target_x < location.grid_width and 0 <= target_y < location.grid_height):
+                raise ValidationError('Choose a valid exit tile')
+            blocked_tiles, climb_tiles = CombatService._build_movement_map(
+                location, character.character_id,
+            )
+            if (target_x, target_y) in blocked_tiles or climb_tiles.get((target_x, target_y), 0) > 0:
+                raise ValidationError('The exit tile is blocked')
+            if CombatService._anomalies_at_tile(location, target_x, target_y):
+                raise ValidationError('Choose a tile outside an anomaly')
+            profile = anomaly_profile(active_anomaly.get('key')) or {}
+            skill_path = (
+                'skills.physical.will'
+                if profile.get('category') == 'psi'
+                else 'skills.physical.agility'
+            )
+            check = CombatService._narrative_skill_check(data, skill_path)
+            difficulty_key = (
+                'secondary_dc'
+                if active_anomaly.get('key') == 'kapkan'
+                and CombatService._coerce_int(active_anomaly.get('rounds'), 0) >= 1
+                else 'dc'
+            )
+            difficulty = max(1, CombatService._coerce_int(
+                profile.get(difficulty_key), active_anomaly.get('dc', 10),
+            ))
+            margin = difficulty - check['total']
+            success = check['roll'] == 20 or (check['roll'] != 1 and margin <= 0)
+            if success:
+                fraction, exits, outcome = 0.0, True, 'success'
+            elif check['roll'] == 1:
+                fraction, exits, outcome = 1.25, False, 'critical_failure'
+            elif margin < 4:
+                fraction, exits, outcome = 0.25, True, 'partial_exit'
+            elif margin < 6:
+                fraction, exits, outcome = 0.5, False, 'failure'
+            else:
+                fraction, exits, outcome = 1.0, False, 'severe_failure'
+            check.update({'difficulty': difficulty, 'success': success, 'margin': margin})
+            anomaly_details = {
+                'key': active_anomaly.get('key'), 'name': active_anomaly.get('name'),
+                'category': profile.get('category'), 'check': check, 'outcome': outcome,
+                'fraction': fraction, 'exits': exits, 'target_x': target_x, 'target_y': target_y,
+                'condition': str(attribute_choice or '').strip().lower() or None,
+            }
+            special_action_cost = 3
+        elif action_key == 'place_gunpoint':
+            if not CombatService._can_end_turn_for_character(
+                character, user_id, is_gm=is_gm,
+            ):
+                raise PermissionDenied('You do not control this character')
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError('Choose another character')
+            if not CombatService._is_adjacent(character, target):
+                raise ValidationError('The target must be on an adjacent tile')
+            if target_zone not in HIT_ZONES:
+                raise ValidationError('Choose a body part')
+            _, _, gunpoint_weapon_index, gunpoint_weapon = CombatService._gunpoint_weapon(
+                character,
+            )
+            if CombatService._weapon_loaded_shots(gunpoint_weapon) <= 0:
+                raise ValidationError('The weapon is not loaded')
+            failed_round = CombatService._coerce_int(
+                combat_meta.get('gunpointFailedRound'), 0,
+            )
+            if failed_round == current_round:
+                raise ValidationError('A failed gunpoint attempt cannot be repeated this round')
+            agility_bonus = CombatService._skill_modifier(
+                data, 'skills.physical.agility',
+            )
+            melee_bonus = CombatService._skill_modifier(
+                data, 'skills.physical.melee',
+            )
+            weapon_modifier = CombatService._gunpoint_weapon_difficulty_modifier(
+                gunpoint_weapon,
+            )
+            base_difficulty = 15 if target_zone == 'head' else 12
+            difficulty = max(
+                1,
+                base_difficulty - agility_bonus - melee_bonus + weapon_modifier,
+            )
+            roll = random.randint(1, 20)
+            success = roll == 20 or (roll != 1 and roll >= difficulty)
+            special_action_cost = 3 if target_zone == 'head' else 2
+            gunpoint_details = {
+                'target_location_character_id': target.id,
+                'target_character_id': target.character_id,
+                'target_name': target.character.name if target.character else None,
+                'target_zone': target_zone,
+                'weapon_index': gunpoint_weapon_index,
+                'weapon_name': gunpoint_weapon.get('name'),
+                'round': current_round,
+                'roll': roll,
+                'difficulty': difficulty,
+                'success': success,
+                'agility_bonus': agility_bonus,
+                'melee_bonus': melee_bonus,
+                'weapon_difficulty_modifier': weapon_modifier,
+                'action_points': special_action_cost,
+            }
+        elif action_key == 'explosive_attack':
             source = str(explosive_source or '').strip().lower()
             mode = str(explosive_fire_mode or 'unaimed').strip().lower()
             fuse_mode = str(explosive_fuse_mode or 'normal').strip().lower()
@@ -8714,7 +9927,12 @@ class CombatService:
                 character.pos_y,
                 target_x,
                 target_y,
-                explosive_profile.get('projectile_range'),
+                CombatService._coerce_float(
+                    explosive_profile.get('projectile_range'), 0,
+                ) + (
+                    artifact_passive_profile(data)['throw_range_bonus']
+                    if source == 'hand' else 0
+                ),
             )
             target_proxy = type('PointTarget', (), {
                 'pos_x': impact_x, 'pos_y': impact_y, 'posture': 'standing',
@@ -8793,7 +10011,7 @@ class CombatService:
             rolls = [random.randint(1, 20) for _ in range(2 if disadvantage else 1)]
             roll = min(rolls) if disadvantage else rolls[0]
             success = roll == 20 or (roll != 1 and roll >= difficulty)
-            failure = 0 if success else min(10, max(1, difficulty - roll))
+            failure = 0 if success else max(1, difficulty - roll)
             if not success:
                 impact_x, impact_y = CombatService._scatter_point(
                     impact_x, impact_y, failure, location.grid_width, location.grid_height,
@@ -8827,6 +10045,16 @@ class CombatService:
                     obstacle_difficulty if source == 'hand' else 0
                 ),
             }
+        elif action_key == 'change_equipment':
+            equipment_action_details = CombatService.equipment_action_details(
+                data,
+                equipment_operation,
+                equipment_slot,
+                item_path=item_path,
+                retrieval_action_points=inventory_retrieval_action_points,
+                in_combat=True,
+            )
+            special_action_cost = equipment_action_details['action_points']
         elif action_key == 'narrative_action':
             action_name = ' '.join(str(narrative_action_name or '').split())
             if not action_name or len(action_name) > 200:
@@ -9706,7 +10934,10 @@ class CombatService:
                 if weapon_index < 0 or weapon_index >= len(weapons):
                     raise ValidationError("Weapon not found")
                 weapon = weapons[weapon_index] or {}
-                if weapon_index != character.drawn_weapon_index:
+                if (
+                    weapon_index != character.drawn_weapon_index
+                    and not CombatService._template_attributes(weapon).get('natural_weapon')
+                ):
                     raise ValidationError("Draw this weapon first")
                 if attack_type_key == 'firearm_butt':
                     template = (
@@ -9741,6 +10972,14 @@ class CombatService:
             paid_automatic_back_attack = 'back_auto' in payment_tokens
             if circular_attack and aimed_melee:
                 raise ValidationError("A circular attack cannot be aimed")
+            mutant_profile_data = (
+                data.get('mutant') if isinstance(data.get('mutant'), dict) else {}
+            )
+            if aimed_melee and any(
+                str(trait).startswith('Неприцельные атаки')
+                for trait in (mutant_profile_data.get('traits') or [])
+            ):
+                raise ValidationError("This mutant cannot make aimed attacks")
             swing_prepared = character.melee_swing_round == current_round
             if aimed_melee and not swing_prepared:
                 raise ValidationError("Prepare a swing before an aimed melee attack")
@@ -9779,6 +11018,7 @@ class CombatService:
                 'target_unconscious': target_profile['target_unconscious'],
                 'automatic_hit': bool(
                     target_profile['automatic_hit'] or paid_automatic_back_attack
+                    or mutant_profile_data.get('automatic_attacks')
                 ),
                 'paid_automatic_back_attack': paid_automatic_back_attack,
                 'block_penalty': target_profile['block_penalty'],
@@ -9846,7 +11086,7 @@ class CombatService:
                 'unaimed': 1 if CombatService._is_pistol_weapon(weapon) else 2,
                 'rapid': 1,
                 'aimed': ergonomics_profile['aimed_shot_action_points'],
-                'burst': 3,
+                'burst': CombatService._burst_action_points(weapon),
                 'area': 5,
             }.get(fire_mode)
             if fire_mode == 'suppression':
@@ -9980,6 +11220,12 @@ class CombatService:
                 and weapon_range > 0
                 and target_distance <= weapon_range
             )
+            close_range_accuracy_bonus = CombatService._close_range_weapon_accuracy_bonus(
+                weapon, target_distance,
+            )
+            sniper_close_range_penalty = CombatService._sniper_close_range_penalty(
+                weapon, target_distance,
+            )
             target_movement_mode = (
                 range_target.movement_mode_this_turn if range_target else None
             )
@@ -10033,11 +11279,15 @@ class CombatService:
                 'strength_requirement': strength_profile,
                 'target_distance': target_distance,
                 'weapon_range': weapon_range,
+                'weapon_class': CombatService._weapon_class(weapon),
+                'close_range_accuracy_bonus': close_range_accuracy_bonus,
+                'sniper_close_range_penalty': sniper_close_range_penalty,
                 'ergonomics_accuracy_applied': (
                     ergonomics_profile['accuracy_modifier']
                     if accuracy_in_range
                     else 0
                 ),
+                'artifact_accuracy_bonus': artifact_passive_profile(data)['accuracy'],
                 'shooting_roll_modifier': CombatService._health_roll_modifier(
                     data,
                     'skills.physical.shooting',
@@ -10101,6 +11351,7 @@ class CombatService:
             hit_difficulty += strength_profile['accuracy_penalty']
             hit_difficulty += attack_details['weapon_jam_accuracy_penalty']
             hit_difficulty -= attack_details['ergonomics_accuracy_applied']
+            hit_difficulty -= attack_details['artifact_accuracy_bonus']
             hit_difficulty -= attack_details['posture_shooting_bonus']
             hit_difficulty += CombatService._coerce_int(
                 attack_details['aim_accuracy_bonus'] * -1, 0
@@ -10108,12 +11359,19 @@ class CombatService:
             hit_difficulty += movement_modifiers['difficulty_penalty']
             hit_difficulty += rapid_fire_accuracy_penalty
             hit_difficulty += area_fire_accuracy_penalty
+            hit_difficulty -= close_range_accuracy_bonus
+            hit_difficulty += sniper_close_range_penalty
             if target_distance is not None and weapon_range and target_distance > weapon_range:
                 hit_difficulty += 2
                 if target_distance > weapon_range + 10:
                     attack_details['shooting_disadvantage'] = True
                     attack_details['base_shooting_disadvantage'] = True
             if range_target:
+                mutant_target_modifier = CombatService._mutant_shooting_target_modifier(
+                    range_target.character.data if range_target.character else {},
+                )
+                hit_difficulty -= mutant_target_modifier
+                attack_details['mutant_target_accuracy_modifier'] = mutant_target_modifier
                 cover_analysis = CombatService._cover_analysis(
                     location_id,
                     character,
@@ -10237,6 +11495,7 @@ class CombatService:
                     'cover': None,
                     'brace_weapon': None,
                     'melee_action': None,
+                    'equipment_change': None,
                 }
             if not resumed_paid_action:
                 character.action_points_current -= action_point_cost
@@ -10263,6 +11522,67 @@ class CombatService:
                 grenade['quantity'] = 1
                 launcher['loaded'] = True
                 launcher['loadedGrenade'] = grenade
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            if action_key == 'change_equipment' and equipment_action_details:
+                equipment_action_details = CombatService.apply_equipment_action(
+                    data,
+                    equipment_action_details,
+                )
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            if action_key == 'place_gunpoint' and gunpoint_details:
+                combat_meta.pop('gunpoint', None)
+                if gunpoint_details['success']:
+                    combat_meta.pop('gunpointFailedRound', None)
+                    combat_meta['gunpoint'] = {
+                        key: deepcopy(gunpoint_details[key])
+                        for key in (
+                            'target_location_character_id',
+                            'target_character_id',
+                            'target_name',
+                            'target_zone',
+                            'weapon_index',
+                            'weapon_name',
+                            'round',
+                        )
+                    }
+                else:
+                    combat_meta['gunpointFailedRound'] = current_round
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            if action_key == 'escape_anomaly' and anomaly_details:
+                exposure = CombatService._apply_anomaly_exposure(
+                    character,
+                    active_anomaly,
+                    anomaly_details['fraction'],
+                    apply_category_effect=anomaly_details['fraction'] >= 0.5,
+                    round_number=current_round,
+                    exiting=anomaly_details['exits'],
+                    escape_margin=max(0, anomaly_details['check']['margin']),
+                    condition=anomaly_details.get('condition'),
+                )
+                anomaly_details['exposure'] = exposure
+                data, _, combat_meta, _ = CombatService._active_anomaly(character)
+                if anomaly_details['exits']:
+                    character.pos_x = anomaly_details['target_x']
+                    character.pos_y = anomaly_details['target_y']
+                    combat_meta.pop('activeAnomaly', None)
+                    health = data.setdefault('health', {})
+                    health['effects'] = [
+                        effect for effect in normalize_effect_list(health.get('effects') or [])
+                        if not (
+                            effect.get('type') == 'blindness'
+                            and str(effect.get('source') or '') == str(active_anomaly.get('name') or '')
+                        )
+                    ]
+                    sync_health_derived_statuses(health)
+                    CombatService._clear_aim(character)
+                else:
+                    active_anomaly['rounds'] = max(
+                        0, CombatService._coerce_int(active_anomaly.get('rounds'), 0),
+                    ) + 1
+                    combat_meta['activeAnomaly'] = active_anomaly
                 character.character.data = data
                 flag_modified(character.character, 'data')
             if action_key == 'narrative_action' and narrative_action_details:
@@ -10869,6 +12189,7 @@ class CombatService:
                 flag_modified(character.character, 'data')
 
         CombatService._release_invalid_grapples(location_id)
+        CombatService._release_invalid_gunpoints(location_id)
         if resumed_paid_action:
             combat_meta.pop('completedPendingActionId', None)
             character.character.data = data
@@ -10900,6 +12221,7 @@ class CombatService:
                 'cover': None,
                 'brace_weapon': None,
                 'melee_action': melee_action_details,
+                'equipment_change': equipment_action_details,
             }
         return {
             'character': CombatService._serialize_character(character, current_turn_id=state.current_location_character_id),
@@ -10920,6 +12242,9 @@ class CombatService:
             'cover': cover_details,
             'brace_weapon': brace_details,
             'melee_action': melee_action_details,
+            'equipment_change': equipment_action_details,
+            'gunpoint': gunpoint_details,
+            'anomaly': anomaly_details,
         }
 
     @staticmethod
@@ -10975,6 +12300,10 @@ class CombatService:
         if state and state.status == 'active' and not is_gm and state.current_location_character_id != character.id:
             raise PermissionDenied("It is not this character's turn")
 
+        _, _, _, active_anomaly = CombatService._active_anomaly(character)
+        if state and state.status == 'active' and active_anomaly and special_action != 'climb':
+            raise ValidationError("Use the anomaly escape action to move")
+
         if special_action == 'climb':
             if grapple_captive:
                 raise ValidationError("A character cannot climb while holding a grapple")
@@ -11010,6 +12339,7 @@ class CombatService:
             character.last_action = db.func.now()
             CombatService._apply_periodic_health_effects(character, phase='movement_end')
             CombatService._sync_location_effects_from_character(character)
+            CombatService._release_invalid_gunpoints(location_id)
             db.session.commit()
             state_payload = CombatService._serialize_state(location, state) if state else None
             return character, climb_cost, state_payload
@@ -11049,6 +12379,28 @@ class CombatService:
         if not path:
             raise ValidationError("Path is blocked")
 
+        entered_anomaly = None
+        if state and state.status == 'active':
+            for step_x, step_y in (path.get('path') or [])[1:]:
+                anomalies = CombatService._anomalies_at_tile(location, step_x, step_y)
+                if not anomalies:
+                    continue
+                entered_anomaly = anomalies[0]
+                new_x, new_y = step_x, step_y
+                path = CombatService._find_movement_path(
+                    location,
+                    character.pos_x,
+                    character.pos_y,
+                    new_x,
+                    new_y,
+                    character.character_id,
+                    ignored_character_ids=ignored_character_ids,
+                    companion_offset=companion_offset,
+                )
+                if not path:
+                    raise ValidationError("Path to the anomaly is blocked")
+                break
+
         cost = path['cost']
         climb_cost = path.get('climb_cost', 0)
         if state and state.status == 'active':
@@ -11087,6 +12439,9 @@ class CombatService:
                 raise ValidationError("Movement modes cannot be mixed in one turn")
             selecting_mode = not used_mode
             mode_action_points = mode['action_points'] if selecting_mode else 0
+            artifact_profile = artifact_passive_profile(character_data)
+            if selecting_mode and movement_mode in {'run', 'sprint'}:
+                mode_action_points += artifact_profile['strenuous_action_cost']
             mode_free_actions = mode['free_actions'] if selecting_mode else 0
             if movement_mode == 'correction':
                 used_distance = character.correction_distance_this_turn or 0
@@ -11133,18 +12488,25 @@ class CombatService:
             if movement_mode == 'run':
                 character.strenuous_movement_blocked_until_round = max(
                     character.strenuous_movement_blocked_until_round or 0,
-                    current_round + 1,
+                    current_round + 1 + artifact_profile['breath_duration_bonus'],
                 )
             elif movement_mode == 'sprint':
                 character.strenuous_movement_blocked_until_round = max(
                     character.strenuous_movement_blocked_until_round or 0,
-                    current_round + 2,
+                    current_round + 2 + artifact_profile['breath_duration_bonus'],
                 )
             cost = movement_cost
 
         previous_x, previous_y = character.pos_x, character.pos_y
         character.pos_x = new_x
         character.pos_y = new_y
+        if entered_anomaly:
+            CombatService._enter_anomaly(
+                character,
+                entered_anomaly,
+                max(1, state.round_number or 1),
+                previous_position=(previous_x, previous_y),
+            )
         if grapple_captive and companion_offset:
             grapple_captive.pos_x = new_x + companion_offset[0]
             grapple_captive.pos_y = new_y + companion_offset[1]
@@ -11168,6 +12530,7 @@ class CombatService:
         character.last_action = db.func.now()
         CombatService._apply_periodic_health_effects(character, phase='movement_end')
         CombatService._sync_location_effects_from_character(character)
+        CombatService._release_invalid_gunpoints(location_id)
         db.session.commit()
 
         state_payload = CombatService._serialize_state(location, state) if state else None
@@ -11243,6 +12606,8 @@ class CombatService:
                 meta.pop('injuryRound', None)
                 meta.pop('reactionReserve', None)
                 meta.pop('reactionActive', None)
+                meta.pop('gunpoint', None)
+                meta.pop('gunpointFailedRound', None)
                 sync_health_derived_statuses(health)
                 data['health'] = health
                 character.data = data

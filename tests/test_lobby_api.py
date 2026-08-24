@@ -17,6 +17,7 @@ from app.models import (
     WorldTravelEvent,
 )
 from app.models.templates import ItemTemplate
+from app.services.map import MapService
 
 
 def create_lobby(client, user, auth_headers, name="Rookie camp"):
@@ -511,8 +512,8 @@ def test_only_gm_can_use_quick_stress_buttons_and_decrease_expires_effects(
         (5, 2, "На треть медленнее"),
         (6, 2, "На треть медленнее"),
         (7, 1, "Вдвое медленнее"),
-        (8, 1, "Втрое медленнее"),
-        (9, 1, "Втрое медленнее"),
+        (8, 1, "Вдвое медленнее"),
+        (9, 1, "Вдвое медленнее"),
         (10, 0, "Группа не может идти"),
     ],
 )
@@ -666,6 +667,103 @@ def test_world_group_creation_is_gm_only_and_validates_map_bounds(
     assert created.status_code == 201
     assert created.get_json()["name"] == "Rookies"
     assert WorldGroup.query.filter_by(lobby_id=lobby["id"]).count() == 1
+
+
+def test_world_anomaly_field_can_be_searched_and_looted(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user('field-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers, data={
+        'health': {'current': 700},
+        'skills': {'other': {'survival': 5}, 'physical': {'agility': 5}},
+        'inventory': {'pockets': []},
+    })
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={'name': 'Field party', 'tile_x': 2, 'tile_y': 2},
+    ).get_json()
+    client.patch(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members",
+        headers=auth_headers(gm),
+        json={'character_ids': [character['id']]},
+    )
+    MapService.update_tile(
+        lobby['id'], gm['id'], 0, 0, 2, 2,
+        {'anomaly_field': {
+            'name': 'Батутный комплекс', 'field_type': 'Гравитационное',
+            'hazard': 'Повышенное давление', 'rank': 1,
+        }},
+    )
+    template = ItemTemplate(
+        name='Камень проверки', category='artifact', subcategory='Гравитационное',
+        item_class='trash', attributes={'artifact_class': 'trash'},
+    )
+    db.session.add(template)
+    db.session.commit()
+    artifact = {
+        'name': template.name, 'artifact_class': 'trash',
+        'anomaly_type': 'Гравитационное',
+    }
+    monkeypatch.setattr('app.lobbies.random_artifact', lambda *_args, **_kwargs: artifact)
+
+    def fixed_randint(low, high):
+        if high == 100:
+            return 1
+        if high == 4:
+            return 2
+        if high == 10:
+            return 10
+        return low
+
+    monkeypatch.setattr('app.lobbies.random.randint', fixed_randint)
+    endpoint = f"/lobbies/{lobby['id']}/world-groups/{group['id']}/anomaly-field"
+    inspected = client.post(
+        endpoint, headers=auth_headers(gm),
+        json={'action': 'inspect', 'character_id': character['id']},
+    )
+    recovered = client.post(
+        endpoint, headers=auth_headers(gm),
+        json={
+            'action': 'recover', 'character_id': character['id'],
+            'artifact_index': 0, 'extra_dice': 0,
+        },
+    )
+
+    assert inspected.status_code == 200
+    assert inspected.get_json()['field']['untouched'] is True
+    assert len(inspected.get_json()['field']['artifacts']) == 1
+    assert recovered.status_code == 200
+    assert recovered.get_json()['recovery']['success'] is True
+    stored = db.session.get(LobbyCharacter, character['id'])
+    assert stored.data['inventory']['pockets'][0]['name'] == 'Камень проверки'
+
+
+def test_gm_can_create_mutant_from_world_rule_catalog(
+    client, create_user, auth_headers
+):
+    gm = create_user('mutant-gm')
+    player = create_user('mutant-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    endpoint = f"/lobbies/{lobby['id']}/mutants"
+
+    forbidden = client.post(
+        endpoint, headers=auth_headers(player),
+        json={'mutant_type': 'Собака'},
+    )
+    created = client.post(
+        endpoint, headers=auth_headers(gm),
+        json={'mutant_type': 'Собака', 'variant': 'Матерый пёс', 'name': 'Клык'},
+    )
+
+    assert forbidden.status_code == 403
+    assert created.status_code == 201
+    stored = db.session.get(LobbyCharacter, created.get_json()['id'])
+    assert stored.name == 'Клык'
+    assert stored.data['basic']['mutant_variant'] == 'Матерый пёс'
+    assert stored.data['health']['max'] == 200
 
 
 def test_world_movement_takes_ten_minutes_and_respects_group_distance(

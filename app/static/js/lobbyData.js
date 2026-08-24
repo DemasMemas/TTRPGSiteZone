@@ -89,6 +89,8 @@ export async function loadLobbyInfo() {
             document.getElementById('lobby-rest-btn').style.display = 'inline-block';
             document.getElementById('edit-toggle').style.display = 'inline-block';
             document.getElementById('templates-manager-btn').style.display = 'inline-block';
+            const mutantButton = document.getElementById('create-mutant-btn');
+            if (mutantButton) mutantButton.style.display = 'inline-block';
             const codeElement = document.getElementById('gm-invite-code');
             const codeSpan = document.getElementById('invite-code-value');
             if (codeElement && codeSpan) {

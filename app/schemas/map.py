@@ -17,3 +17,4 @@ class TileUpdateSchema(Schema):
     objects = fields.List(fields.Dict(), allow_none=True)
     name = fields.Str(allow_none=True)
     radiation = fields.Float(allow_none=True)
+    anomaly_field = fields.Dict(allow_none=True)

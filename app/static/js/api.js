@@ -59,6 +59,26 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}/world-groups`);
     },
 
+    async getWorldRules(lobbyId) {
+        return apiFetch(`/lobbies/${lobbyId}/world-rules`);
+    },
+
+    async createMutant(lobbyId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/mutants`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async useWorldAnomalyField(lobbyId, groupId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/world-groups/${groupId}/anomaly-field`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
     async createWorldGroup(lobbyId, payload) {
         return apiFetch(`/lobbies/${lobbyId}/world-groups`, {
             method: 'POST',
@@ -364,6 +384,14 @@ export const Server = {
 
     async deleteLocation(lobbyId, locationId) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`, { method: 'DELETE' });
+    },
+
+    async changeCharacterEquipment(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/equipment-action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
     },
 
     async registerCharacterAddictionExposure(characterId, payload) {

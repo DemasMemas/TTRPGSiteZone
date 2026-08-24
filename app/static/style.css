@@ -829,6 +829,92 @@ input[type="number"] {
   overflow-y: auto;
 }
 
+.anomaly-field-content {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(82vh, 780px);
+  overflow-y: auto;
+}
+
+.anomaly-field-summary {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #9a7138;
+  background: rgba(118, 91, 41, 0.12);
+}
+
+.anomaly-field-summary small,
+.anomaly-field-artifact small {
+  color: var(--text-muted, #aaa58f);
+}
+
+.anomaly-field-character-label {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.anomaly-field-results {
+  display: grid;
+  gap: 8px;
+}
+
+.anomaly-field-artifact {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(184, 154, 85, 0.28);
+  background: rgba(13, 17, 12, 0.72);
+}
+
+.anomaly-field-artifact > div,
+.anomaly-field-artifact label {
+  display: grid;
+  gap: 3px;
+}
+
+.anomaly-field-artifact input {
+  width: 64px;
+}
+
+.anomaly-field-artifact.recovered {
+  opacity: 0.55;
+}
+
+.anomaly-field-roll,
+.anomaly-field-empty {
+  padding: 10px 12px;
+  border: 1px solid rgba(184, 154, 85, 0.28);
+}
+
+.anomaly-field-roll.success { border-color: rgba(103, 145, 81, 0.75); }
+.anomaly-field-roll.failure { border-color: rgba(166, 75, 56, 0.75); }
+
+.mutant-create-content {
+  width: min(700px, calc(100vw - 32px));
+  max-height: min(84vh, 820px);
+  overflow-y: auto;
+}
+
+.mutant-create-content > label {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+.mutant-create-preview {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid rgba(184, 154, 85, 0.28);
+  background: rgba(13, 17, 12, 0.72);
+  line-height: 1.45;
+}
+
 .world-travel-note {
   margin: 0 0 14px;
   color: var(--text-muted, #aaa58f);

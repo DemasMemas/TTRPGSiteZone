@@ -1,6 +1,6 @@
 // static/js/main.js
 import { initSocket } from './socketHandlers.js';
-import { initCharacters, loadLobbyCharacters, showCreateCharacterForm } from './characters.js';
+import { initCharacters, initMutantForm, loadLobbyCharacters, showCreateCharacterForm, showCreateMutantForm } from './characters.js';
 import { initLobbyData, loadLobbyInfo, loadAllChunks } from './lobbyData.js';
 import { setCurrentLobbyId, toggleParticipants, toggleSettings, showSettingsTab, closeVisibilityModal,
 saveVisibility, unbanUserHandler, closeSettings, openSettings, updateParticipantsList } from './ui.js';
@@ -8,7 +8,8 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
  applyTerrainChange, applyHeightChange, addObjectToTile, clearObjectsFromTile, removeObjectFromTile, highlightObject,
  getEditMode, setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, updateTileEditHeight,
  updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
- applyNameChange, applyRadiationChange, updateTileEditRadiation} from './mapEdit.js';
+ applyNameChange, applyRadiationChange, updateTileEditRadiation, applyAnomalyFieldChange,
+ updateAnomalyFieldRankOptions} from './mapEdit.js';
 import { hideObjectHighlight, camera, getHoveredTile } from './lobby3d.js';
 import { hideGlobalCanvas, showGlobalCanvas, controls as globalControls } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
@@ -75,6 +76,7 @@ setCurrentLobbyId(currentLobbyId);
 setCharLobbyId(currentLobbyId);
 initLobbyData(currentLobbyId);
 initCharacters(currentLobbyId, token);
+initMutantForm();
 initMapEdit(currentLobbyId, token);
 const socket = initSocket(currentLobbyId, token);
 
@@ -916,6 +918,8 @@ window.applyTerrainChange = applyTerrainChange;
 window.applyHeightChange = applyHeightChange;
 window.applyNameChange = applyNameChange;
 window.applyRadiationChange = applyRadiationChange;
+window.applyAnomalyFieldChange = applyAnomalyFieldChange;
+window.updateAnomalyFieldRankOptions = updateAnomalyFieldRankOptions;
 window.addObjectToTile = addObjectToTile;
 window.clearObjectsFromTile = clearObjectsFromTile;
 window.removeObjectFromTile = removeObjectFromTile;
@@ -932,6 +936,7 @@ window.exportCharacter = exportCharacter;
 window.importCharacter = importCharacter;
 
 window.showCreateCharacterForm = showCreateCharacterForm;
+window.showCreateMutantForm = showCreateMutantForm;
 window.openLobbyRestModal = openLobbyRestModal;
 window.closeLobbyRestModal = closeLobbyRestModal;
 window.saveLobbyTimeActivity = saveLobbyTimeActivity;

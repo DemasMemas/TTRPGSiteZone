@@ -22,10 +22,12 @@ let token;
 let currentEditTile = null;
 let pendingTileUpdates = [];
 let batchUpdateTimeout = null;
+let anomalyFieldCatalog = [];
 
 export function initMapEdit(lobbyId, authToken) {
     currentLobbyId = lobbyId;
     token = authToken;
+    loadAnomalyFieldCatalog();
 
     const typeSelect = document.getElementById('tile-type-select');
     if (typeSelect) {
@@ -51,6 +53,36 @@ export function initMapEdit(lobbyId, authToken) {
             }
         }
     });
+}
+
+async function loadAnomalyFieldCatalog() {
+    const select = document.getElementById('tile-edit-anomaly-field');
+    if (!select) return;
+    try {
+        const rules = await Server.getWorldRules(currentLobbyId);
+        anomalyFieldCatalog = rules.anomaly_fields || [];
+        select.innerHTML = '<option value="">Нет аномального поля</option>'
+            + anomalyFieldCatalog.map(field => (
+                `<option value="${field.source_order}">${field.name} (${field.rank_min}-${field.rank_max})</option>`
+            )).join('');
+        updateAnomalyFieldRankOptions();
+    } catch (error) {
+        showNotification(`Не удалось загрузить аномальные поля: ${error.message}`, 'error');
+    }
+}
+
+export function updateAnomalyFieldRankOptions() {
+    const fieldSelect = document.getElementById('tile-edit-anomaly-field');
+    const rankSelect = document.getElementById('tile-edit-anomaly-rank');
+    if (!fieldSelect || !rankSelect) return;
+    const field = anomalyFieldCatalog.find(item => String(item.source_order) === fieldSelect.value);
+    rankSelect.disabled = !field;
+    rankSelect.innerHTML = field
+        ? Array.from(
+            { length: field.rank_max - field.rank_min + 1 },
+            (_, index) => field.rank_min + index,
+        ).map(rank => `<option value="${rank}">${rank}</option>`).join('')
+        : '<option value="">-</option>';
 }
 
 export function setEditMode(enabled) {
@@ -172,7 +204,7 @@ export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-    const allowedFields = ['terrain', 'height', 'objects', 'name', 'radiation'];
+    const allowedFields = ['terrain', 'height', 'objects', 'name', 'radiation', 'anomaly_field'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
         if (updates[key] !== undefined) {
@@ -251,6 +283,35 @@ function updateTileEditModal() {
     document.getElementById('tile-edit-name').value = tileData.name || '';
     document.getElementById('tile-edit-radiation').value = tileData.radiation !== undefined ? tileData.radiation : 0;
     document.getElementById('tile-edit-radiation-value').textContent = (tileData.radiation !== undefined ? tileData.radiation : 0).toFixed(1);
+    const fieldSelect = document.getElementById('tile-edit-anomaly-field');
+    const selectedField = anomalyFieldCatalog.find(field => field.name === tileData.anomaly_field?.name);
+    if (fieldSelect) fieldSelect.value = selectedField ? String(selectedField.source_order) : '';
+    updateAnomalyFieldRankOptions();
+    const rankSelect = document.getElementById('tile-edit-anomaly-rank');
+    if (rankSelect && selectedField) rankSelect.value = String(tileData.anomaly_field?.rank || selectedField.rank_min);
+}
+
+export async function applyAnomalyFieldChange() {
+    if (!currentEditTile) return;
+    const sourceOrder = document.getElementById('tile-edit-anomaly-field')?.value;
+    const profile = anomalyFieldCatalog.find(field => String(field.source_order) === sourceOrder);
+    const rank = Number(document.getElementById('tile-edit-anomaly-rank')?.value || 0);
+    const anomalyField = profile ? {
+        name: profile.name,
+        field_type: profile.field_type,
+        hazard: profile.hazard,
+        rank: Math.max(profile.rank_min, Math.min(profile.rank_max, rank)),
+    } : null;
+    await handleTileUpdate(
+        currentEditTile.chunkX,
+        currentEditTile.chunkY,
+        currentEditTile.tileX,
+        currentEditTile.tileY,
+        { anomaly_field: anomalyField },
+    );
+    currentEditTile.tileData.anomaly_field = anomalyField;
+    updateTileEditModal();
+    showNotification(anomalyField ? 'Аномальное поле сохранено' : 'Аномальное поле удалено', 'success');
 }
 
 export async function applyTerrainChange() {
@@ -300,11 +361,12 @@ export async function addObjectToTile() {
     const rotation = parseInt(document.getElementById('object-rotation').value) || 0;
 
     let newObject;
-    const anomalyType = getAnomalyTypeFromSelect(selectValue);
-    if (anomalyType) {
+    const anomaly = getAnomalyTypeFromSelect(selectValue);
+    if (anomaly) {
         newObject = {
             type: 'anomaly',
-            anomalyType: anomalyType,
+            anomalyType: anomaly.visual,
+            anomalyKey: anomaly.key,
             x: offsetX,
             z: offsetZ,
             scale: scale,
@@ -400,7 +462,20 @@ function getAnomalyTypeFromSelect(value) {
         'anomaly_acid': 'acid',
         'anomaly_void': 'void'
     };
-    return map[value] || null;
+    if (map[value]) return { visual: map[value], key: null };
+    if (!String(value).startsWith('anomaly_')) return null;
+    const key = String(value).slice('anomaly_'.length);
+    const electric = ['vspishka', 'pautina', 'tesla', 'katushka', 'kapkan', 'paralizator', 'akkumulyator', 'ionny_tuman'];
+    const thermal = ['banya', 'parilka', 'mochalka', 'kipyatilnik', 'morozilnik', 'uley', 'metelitsa', 'gril'];
+    const radiation = ['zarosli', 'svetlyachki', 'mor', 'zapovednik', 'mertvy_koster', 'solyariy', 'radioaktivny_roy', 'bagrovaya_luna'];
+    const chemical = ['varevo', 'soda', 'ezhinoe_oblako', 'rzhavchina', 'mogilshchik', 'chuma', 'myshelovka', 'gniloy_razlom'];
+    const psi = ['ekho', 'mirazh', 'starshina', 'tuman_poteryannykh', 'tma', 'piyavka', 'kolodets', 'mozgotrobilka'];
+    const visual = electric.includes(key) ? 'electric'
+        : thermal.includes(key) ? 'fire'
+            : radiation.includes(key) ? 'radiation'
+                : chemical.includes(key) ? 'acid'
+                    : psi.includes(key) ? 'psi' : 'void';
+    return { visual, key };
 }
 
 export function setBrushRadiusFromInput(value) {
