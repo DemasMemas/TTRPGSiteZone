@@ -3627,6 +3627,7 @@ async function renderEquipmentTab(data) {
             </div>
             ${renderSlotsUniversal(helmet, ['equipment', 'helmet']) ? `
                 <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
+                    ${hasFilterSlot(helmet) ? `<label style="display:flex;align-items:center;gap:7px;margin-bottom:8px;cursor:pointer;"><input type="checkbox" name="equipment.helmet.autoReplaceFilters" ${helmet.autoReplaceFilters === true ? 'checked' : ''}> Автозамена фильтров</label>` : ''}
                     ${renderSlotsUniversal(helmet, ['equipment', 'helmet'])}
                 </div>
             ` : ''}
@@ -3674,6 +3675,7 @@ async function renderEquipmentTab(data) {
             </div>
             ${renderSlotsUniversal(gasMask, ['equipment', 'gasMask']) ? `
                 <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.1); border-radius:4px;">
+                    ${hasFilterSlot(gasMask) ? `<label style="display:flex;align-items:center;gap:7px;margin-bottom:8px;cursor:pointer;"><input type="checkbox" name="equipment.gasMask.autoReplaceFilters" ${gasMask.autoReplaceFilters === true ? 'checked' : ''}> Автозамена фильтров</label>` : ''}
                     ${renderSlotsUniversal(gasMask, ['equipment', 'gasMask'])}
                 </div>
             ` : ''}
@@ -3939,6 +3941,11 @@ async function renderEquipmentTab(data) {
  * @param {number} depth - уровень вложенности (для отступов)
  * @returns {string} HTML
  */
+function hasFilterSlot(item) {
+    return getItemSlots(item).some(slot => slot?.type === 'filter')
+        || (item?.installedModules || []).some(module => module?.slotType === 'filter');
+}
+
 function renderSlotsUniversal(item, itemPath, depth = 0) {
     if (!item) return '';
     const slots = getItemSlots(item);

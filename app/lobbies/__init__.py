@@ -19,6 +19,7 @@ from app.services.combat import CombatService
 from app.services.character_interaction import CharacterInteractionService
 from app.services.health import apply_health_maximums
 from app.services.equipment_repair import repair_equipment, resolve_item_path
+from app.services.gas_mask_filters import consume_equipped_filter_charges
 from app.services.addictions import advance_addictions, record_exposure, withdrawal_check
 from app.services.effects import (
     advance_timed_effects,
@@ -554,6 +555,28 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     actual_tile_x = placed_event.tile_x if placed_event else tile_x
     actual_tile_y = placed_event.tile_y if placed_event else tile_y
     group.tile_x, group.tile_y = actual_tile_x, actual_tile_y
+    filter_updates = []
+    member_ids = {
+        int(value) for value in (group.member_character_ids or [])
+        if str(value).isdigit()
+    }
+    group_characters = (
+        LobbyCharacter.query.filter(
+            LobbyCharacter.lobby_id == lobby_id,
+            LobbyCharacter.id.in_(member_ids),
+        ).all()
+        if member_ids else []
+    )
+    filter_updated_characters = []
+    for character in group_characters:
+        character_data = deepcopy(character.data or {})
+        filter_result = consume_equipped_filter_charges(character_data, 1)
+        if not filter_result["changed"]:
+            continue
+        character.data = character_data
+        flag_modified(character, 'data')
+        filter_updated_characters.append(character)
+        filter_updates.append({"character_id": character.id, **filter_result})
     _submit_world_group_turn(group, lobby)
     event = None
     if placed_event:
@@ -585,10 +608,25 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     db.session.commit()
 
     group_payload = _serialize_world_group(group)
+    all_updated_characters = {
+        character.id: character
+        for character in [*updated_characters, *filter_updated_characters]
+    }
     time_payload = (
-        _emit_world_time_updates(lobby, updated_characters)
+        _emit_world_time_updates(lobby, all_updated_characters.values())
         if time_advanced else None
     )
+    if not time_advanced:
+        for character in filter_updated_characters:
+            socketio.emit(
+                'character_data_updated',
+                {
+                    'character_id': character.id,
+                    'updates': {'data': character.data},
+                    'updated_by': participant.user_id,
+                },
+                room=f"character_{character.id}",
+            )
     socketio.emit('world_group_moved', group_payload, room=f"lobby_{lobby_id}")
     if event:
         socketio.emit(
@@ -607,6 +645,7 @@ def move_world_group(lobby_id, group_id, lobby, participant):
         'world_turn': _serialize_world_turn(lobby),
         'time_advanced': time_advanced,
         'time': time_payload,
+        'filter_updates': filter_updates,
         'event_pending': event is not None,
         'placed_event_triggered': placed_event is not None,
     }), 200

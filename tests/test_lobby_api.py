@@ -701,6 +701,70 @@ def test_world_movement_takes_ten_minutes_and_respects_group_distance(
     assert (group.tile_x, group.tile_y) == (13, 13)
 
 
+def test_world_movement_spends_and_auto_replaces_equipped_gas_mask_filter(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("world-filter-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers, data={
+        "equipment": {"gasMask": {
+            "name": "Противогаз",
+            "autoReplaceFilters": True,
+            "installedModules": [{
+                "name": "Старый фильтр",
+                "category": "gas_mask_module",
+                "subcategory": "filter",
+                "slotType": "filter",
+                "durability": 1,
+                "maxDurability": 10,
+                "attributes": {"slot_type": "filter", "durability": 1, "max_durability": 10},
+            }],
+        }},
+        "inventory": {"backpack": [{
+            "name": "Запасной фильтр",
+            "category": "gas_mask_module",
+            "subcategory": "filter",
+            "quantity": 2,
+            "durability": 10,
+            "maxDurability": 10,
+            "attributes": {"slot_type": "filter", "durability": 10, "max_durability": 10},
+        }]},
+    })
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Filtered party", "tile_x": 2, "tile_y": 2},
+    ).get_json()
+    members = client.patch(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members",
+        headers=auth_headers(gm),
+        json={"character_ids": [character["id"]]},
+    )
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+
+    moved = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/move",
+        headers=auth_headers(gm),
+        json={"tile_x": 3, "tile_y": 2},
+    )
+
+    assert members.status_code == 200
+    assert moved.status_code == 200
+    assert moved.get_json()["filter_updates"] == [{
+        "character_id": character["id"],
+        "changed": True,
+        "consumed": 1,
+        "removed": 1,
+        "replaced": 1,
+        "empty": 1,
+    }]
+    stored = db.session.get(LobbyCharacter, character["id"]).data
+    installed = stored["equipment"]["gasMask"]["installedModules"][0]
+    assert installed["name"] == "Запасной фильтр"
+    assert installed["durability"] == 10
+    assert stored["inventory"]["backpack"][0]["quantity"] == 1
+
+
 def test_parallel_world_groups_advance_time_only_after_every_active_group_acts(
     client, create_user, auth_headers, monkeypatch
 ):
