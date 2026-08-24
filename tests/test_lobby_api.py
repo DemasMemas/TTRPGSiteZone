@@ -12,6 +12,7 @@ from app.models import (
     LocationCombatState,
     Location,
     LocationCharacter,
+    LocationObject,
     WorldGroup,
     WorldMapEvent,
     WorldTravelEvent,
@@ -748,6 +749,10 @@ def test_gm_can_create_mutant_from_world_rule_catalog(
     lobby = create_lobby(client, gm, auth_headers)
     join_lobby(client, lobby, player, auth_headers)
     endpoint = f"/lobbies/{lobby['id']}/mutants"
+    catalogs = client.get(
+        f"/lobbies/{lobby['id']}/world-rules",
+        headers=auth_headers(gm),
+    )
 
     forbidden = client.post(
         endpoint, headers=auth_headers(player),
@@ -759,6 +764,8 @@ def test_gm_can_create_mutant_from_world_rule_catalog(
     )
 
     assert forbidden.status_code == 403
+    assert catalogs.status_code == 200
+    assert len(catalogs.get_json()['anomalies']) == 48
     assert created.status_code == 201
     stored = db.session.get(LobbyCharacter, created.get_json()['id'])
     assert stored.name == 'Клык'
@@ -1796,6 +1803,7 @@ def test_gm_can_delete_character_owned_by_player(
     client,
     create_user,
     auth_headers,
+    monkeypatch,
 ):
     gm = create_user("character-delete-gm")
     player = create_user("character-delete-player")
@@ -1815,6 +1823,11 @@ def test_gm_can_delete_character_owned_by_player(
         character_id=character["id"],
     ))
     db.session.commit()
+    emitted = []
+    monkeypatch.setattr(
+        'app.lobbies.socketio.emit',
+        lambda event, payload, **kwargs: emitted.append((event, payload, kwargs)),
+    )
 
     response = client.delete(
         f"/lobbies/characters/{character['id']}",
@@ -1824,6 +1837,11 @@ def test_gm_can_delete_character_owned_by_player(
     assert response.status_code == 200
     assert db.session.get(LobbyCharacter, character["id"]) is None
     assert LocationCharacter.query.filter_by(character_id=character["id"]).count() == 0
+    removed = [payload for event, payload, _ in emitted if event == 'location_character_removed']
+    assert removed == [{
+        'location_id': location.id,
+        'character_id': character['id'],
+    }]
 
 
 def test_only_gm_can_remove_character_model_from_location(
@@ -1864,6 +1882,67 @@ def test_only_gm_can_remove_character_model_from_location(
         location_id=location.id,
         character_id=character["id"],
     ).count() == 0
+
+
+def test_location_edit_can_delete_structures_without_deleting_ground_items(
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user("clear-structures-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Rebuild test",
+        world_tile_x=0,
+        world_tile_z=0,
+        tiles_data=[],
+    )
+    db.session.add(location)
+    db.session.flush()
+    wall = LocationObject(
+        location_id=location.id,
+        name="Wall",
+        type="wall",
+        tile_x=2,
+        tile_y=2,
+        properties={"cover_enabled": True},
+    )
+    ground_item = LocationObject(
+        location_id=location.id,
+        name="Пол",
+        type="ground_item",
+        tile_x=3,
+        tile_y=3,
+        properties={"is_ground_item": True, "contents": [{"name": "Бинт"}]},
+    )
+    db.session.add_all([wall, ground_item])
+    db.session.flush()
+    location_character = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        cover_object_id=wall.id,
+        weapon_braced=True,
+        braced_weapon_index=0,
+    )
+    db.session.add(location_character)
+    db.session.commit()
+
+    response = client.put(
+        f"/lobbies/{lobby['id']}/locations/{location.id}",
+        headers=auth_headers(gm),
+        json={"delete_structures": True},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["deleted_structure_count"] == 1
+    assert db.session.get(LocationObject, wall.id) is None
+    assert db.session.get(LocationObject, ground_item.id) is not None
+    db.session.refresh(location_character)
+    assert location_character.cover_object_id is None
+    assert location_character.weapon_braced is False
+    assert location_character.braced_weapon_index is None
 
 
 def test_location_join_lookup_does_not_spawn_selected_character(
@@ -2623,6 +2702,65 @@ def test_must_do_it_allows_gm_approved_manual_check_without_stored_failure(
     assert actor_loc_char.character.data["health"]["stress"] == 1
 
 
+def test_mutant_cannot_use_must_do_it(
+    client, create_user, auth_headers,
+):
+    gm = create_user("mutant-must-do-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers, data={
+        "is_mutant": True,
+        "basic": {"species": "Мутант", "is_mutant": True},
+        "health": {"effects": [], "stress": 0},
+    })
+    location = Location(
+        lobby_id=lobby["id"], name="Mutant must do", world_tile_x=0, world_tile_z=0,
+    )
+    db.session.add(location)
+    db.session.flush()
+    actor = LocationCharacter(
+        location_id=location.id,
+        character_id=character["id"],
+        controlled_by=gm["id"],
+        action_points_current=5,
+        action_points_max=5,
+    )
+    db.session.add(actor)
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[actor.id],
+        current_location_character_id=actor.id,
+    ))
+    db.session.commit()
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action",
+        headers=auth_headers(gm),
+        json={
+            "location_character_id": actor.id,
+            "action_key": "must_do_it",
+            "narrative_action_name": "Невозможный повтор",
+            "narrative_skill_path": "skills.physical.will",
+            "narrative_difficulty": 10,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Мутанты не могут" in response.get_json()["error"]["message"]
+
+    state = client.get(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat",
+        headers=auth_headers(gm),
+    ).get_json()
+    serialized = next(item for item in state["characters"] if item["character_id"] == character["id"])
+    assert serialized["is_mutant"] is True
+    assert serialized["must_do_usage"] is None
+    assert serialized["must_do_retry"] is None
+
+
 def test_consolation_costs_three_ap_reduces_stress_and_is_limited_per_game_hour(
     client, create_user, auth_headers, monkeypatch
 ):
@@ -2866,6 +3004,80 @@ def test_weapon_fire_rate_rejects_excess_shots_without_spending_ammo_or_ap(
     }
 
 
+def test_leaving_melee_reach_offers_one_opportunity_attack_per_round(
+    client, create_user, auth_headers, monkeypatch,
+):
+    gm = create_user("opportunity-attack-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    mover = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"effects": []},
+    })
+    defender = create_character(client, lobby, gm, auth_headers, data={
+        "weapons": [{
+            "name": "Test sword",
+            "category": "melee_weapon",
+            "attributes": {
+                "damage": 20,
+                "armor_piercing": 0,
+                "allowed_attacks": ["slashing"],
+                "weight_class": "light",
+            },
+        }],
+        "health": {"effects": []},
+    })
+    location = Location(
+        lobby_id=lobby["id"], name="Opportunity arena",
+        world_tile_x=0, world_tile_z=0, grid_width=10, grid_height=10,
+    )
+    db.session.add(location)
+    db.session.flush()
+    mover_location = LocationCharacter(
+        location_id=location.id, character_id=mover["id"],
+        pos_x=2, pos_y=1, movement_points_current=10,
+        movement_points_max=10, team_name="Blue",
+    )
+    defender_location = LocationCharacter(
+        location_id=location.id, character_id=defender["id"],
+        pos_x=1, pos_y=1, facing_x=1, facing_y=0,
+        drawn_weapon_index=0, team_name="Red",
+    )
+    db.session.add_all([mover_location, defender_location])
+    db.session.flush()
+    state = LocationCombatState(
+        location_id=location.id, status="active", round_number=1,
+        turn_index=0, turn_order=[mover_location.id, defender_location.id],
+        current_location_character_id=mover_location.id,
+    )
+    db.session.add(state)
+    db.session.commit()
+
+    CombatService.move_character(
+        location.id, gm["id"], mover["id"], 4, 1, movement_mode="walk",
+    )
+    db.session.refresh(defender_location.character)
+    pending = defender_location.character.data["health"]["combatMeta"]["opportunityAttacks"]
+    assert len(pending) == 1
+    assert pending[0]["target_character_id"] == mover["id"]
+
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/opportunity-attack",
+        headers=auth_headers(gm),
+        json={
+            "location_character_id": defender_location.id,
+            "opportunity_id": pending[0]["id"],
+            "accept": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["attack"]["results"][0]["opportunity_attack"] is True
+    db.session.refresh(defender_location.character)
+    meta = defender_location.character.data["health"]["combatMeta"]
+    assert meta["opportunityAttackUsedRound"] == 1
+    assert meta["opportunityAttacks"] == []
+
+
 def test_area_fire_uses_two_bursts_and_applies_weapon_class_penalty(
     client, create_user, auth_headers, monkeypatch,
 ):
@@ -2978,7 +3190,148 @@ def test_area_fire_uses_two_bursts_and_applies_weapon_class_penalty(
     assert retry.status_code == 200
     retry_payload = retry.get_json()
     assert retry_payload["must_do_it"]["check"]["success"] is True
+    assert retry_payload["must_do_it"]["check"]["total"] == 20
     assert retry_payload["attack"]["hits"] >= 1
     db.session.refresh(actor_location.character)
     assert actor_location.character.data["weapons"][0]["ammo"] == 12
     assert actor_location.character.data["health"]["stress"] == 1
+
+
+def test_new_burst_replaces_stale_must_do_target(
+    client, create_user, auth_headers, monkeypatch,
+):
+    gm = create_user("must-do-burst-target-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    actor = create_character(client, lobby, gm, auth_headers, data={
+        "weapons": [{
+            "name": "Test rifle",
+            "subcategory": "Штурмовые винтовки и карабины",
+            "fireRate": 20,
+            "fireModes": {
+                "single_shot_options": [1],
+                "burst_size": 2,
+                "supports_burst": True,
+            },
+            "accuracy": 0,
+            "range": 20,
+            "durability": 100,
+            "installedMagazine": {
+                "ammo": [{
+                    "name": "5.45x39",
+                    "category": "ammo",
+                    "quantity": 20,
+                    "attributes": {
+                        "caliber": "5.45x39", "damage": 0,
+                        "armor_piercing": 0,
+                    },
+                }],
+            },
+        }],
+        "health": {"effects": [], "stress": 0},
+    })
+    player_target = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"effects": []},
+    })
+    mutant_target = create_character(client, lobby, gm, auth_headers, data={
+        "is_mutant": True,
+        "basic": {"species": "Мутант", "is_mutant": True},
+        "health": {"effects": []},
+    })
+    location = Location(
+        lobby_id=lobby["id"], name="Must do burst targets",
+        world_tile_x=0, world_tile_z=0, grid_width=10, grid_height=10,
+    )
+    db.session.add(location)
+    db.session.flush()
+    actor_location = LocationCharacter(
+        location_id=location.id, character_id=actor["id"],
+        pos_x=1, pos_y=1, facing_x=0, facing_y=1,
+        drawn_weapon_index=0, action_points_current=10, action_points_max=10,
+    )
+    player_location = LocationCharacter(
+        location_id=location.id, character_id=player_target["id"], pos_x=1, pos_y=3,
+    )
+    mutant_location = LocationCharacter(
+        location_id=location.id, character_id=mutant_target["id"], pos_x=2, pos_y=3,
+    )
+    db.session.add_all([actor_location, player_location, mutant_location])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id, status="active", round_number=1,
+        turn_index=0,
+        turn_order=[actor_location.id, player_location.id, mutant_location.id],
+        current_location_character_id=actor_location.id,
+    ))
+    db.session.commit()
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/action"
+
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 1)
+    first = client.post(url, headers=auth_headers(gm), json={
+        "location_character_id": actor_location.id,
+        "action_key": "attack",
+        "weapon_index": 0,
+        "fire_mode": "unaimed",
+        "shot_count": 1,
+        "volley_count": 1,
+        "action_points": 2,
+        "target_character_id": player_target["id"],
+    })
+    assert first.status_code == 200
+    assert first.get_json()["character"]["must_do_retry"]["name"].endswith(player_target["name"])
+
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+    successful = client.post(url, headers=auth_headers(gm), json={
+        "location_character_id": actor_location.id,
+        "action_key": "attack",
+        "weapon_index": 0,
+        "fire_mode": "unaimed",
+        "shot_count": 1,
+        "volley_count": 1,
+        "action_points": 2,
+        "target_character_id": mutant_target["id"],
+    })
+    assert successful.status_code == 200
+    assert successful.get_json()["character"]["must_do_retry"] is None
+
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 1)
+    stale = client.post(url, headers=auth_headers(gm), json={
+        "location_character_id": actor_location.id,
+        "action_key": "attack",
+        "weapon_index": 0,
+        "fire_mode": "unaimed",
+        "shot_count": 1,
+        "volley_count": 1,
+        "action_points": 2,
+        "target_character_id": player_target["id"],
+    })
+    assert stale.status_code == 200
+    assert stale.get_json()["character"]["must_do_retry"]["name"].endswith(player_target["name"])
+
+    burst = client.post(url, headers=auth_headers(gm), json={
+        "location_character_id": actor_location.id,
+        "action_key": "attack",
+        "weapon_index": 0,
+        "fire_mode": "burst",
+        "shot_count": 2,
+        "volley_count": 1,
+        "action_points": 3,
+        "target_character_id": mutant_target["id"],
+    })
+    assert burst.status_code == 200
+    retry = burst.get_json()["character"]["must_do_retry"]
+    assert retry["name"].endswith(mutant_target["name"])
+
+    db.session.refresh(actor_location.character)
+    stored_retry = actor_location.character.data["health"]["combatMeta"]["mustDoRetry"]
+    assert stored_retry["attack_details"]["target_character_id"] == mutant_target["id"]
+
+    monkeypatch.setattr("app.services.combat.random.randint", lambda *_: 20)
+    repeated = client.post(url, headers=auth_headers(gm), json={
+        "location_character_id": actor_location.id,
+        "action_key": "must_do_it",
+    })
+    assert repeated.status_code == 200
+    assert {
+        result["target_character_id"]
+        for result in repeated.get_json()["attack"]["results"]
+    } == {mutant_target["id"]}

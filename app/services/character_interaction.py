@@ -45,7 +45,7 @@ class CharacterInteractionService:
         if state and state.status == 'active' and state.current_location_character_id != actor.id:
             raise PermissionDenied("It is not this character's turn")
         if state and state.status == 'active' and not CombatService._is_adjacent(actor, target):
-            raise ValidationError('The target must be in an adjacent tile')
+            raise ValidationError('Цель должна находиться на соседней клетке')
         return location, actor, target
 
     @staticmethod

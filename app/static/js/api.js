@@ -586,6 +586,14 @@ export const Server = {
         });
     },
 
+    async resolveLocationOpportunityAttack(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/opportunity-attack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
     async adjustLocationCombatResources(lobbyId, locationId, payload) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/adjust`, {
             method: 'POST',

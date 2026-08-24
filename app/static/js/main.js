@@ -40,6 +40,29 @@ import {
     initWorldTravel,
     openWorldTravelModal,
 } from './worldTravel.js';
+
+function buildLocationAnomalyOptions(anomalies) {
+    const categoryMeta = {
+        gravity: ['Гравитационные', '◌'],
+        electric: ['Электрические', '⚡'],
+        thermal: ['Термические', '🔥'],
+        radiation: ['Радиационные', '☢'],
+        chemical: ['Химические', '⌁'],
+        psi: ['Псионические', '◉'],
+    };
+    const groups = new Map();
+    (Array.isArray(anomalies) ? anomalies : []).forEach(anomaly => {
+        const category = anomaly.category || 'other';
+        if (!groups.has(category)) groups.set(category, []);
+        groups.get(category).push(anomaly);
+    });
+    return [...groups.entries()].map(([category, entries]) => {
+        const [label, icon] = categoryMeta[category] || ['Прочие', '◆'];
+        return `<optgroup label="Аномалии: ${label}">${entries.map(anomaly =>
+            `<option value="anomaly_${anomaly.key}" data-anomaly-name="${anomaly.name}" data-anomaly-visual="${anomaly.visual || 'void'}">${icon} ${anomaly.name} · ранг ${anomaly.rank}</option>`
+        ).join('')}</optgroup>`;
+    }).join('');
+}
 import * as THREE from 'three';
 
 initWeather();
@@ -193,6 +216,8 @@ window.enterLocation = async function(locationId) {
         }
 
         if (window.isGM) {
+            const locationWorldRules = await Server.getWorldRules(currentLobbyId).catch(() => ({ anomalies: [] }));
+            window.locationAnomalyCatalog = locationWorldRules.anomalies || [];
             // Кнопки удаления и редактирования параметров
             addDeleteLocationButton(async () => { await deleteCurrentLocation(locationId); });
             setDeleteButtonVisible(true);
@@ -283,10 +308,8 @@ window.enterLocation = async function(locationId) {
                         <div style="display: flex; align-items: center; gap: 5px;">
                             <select id="loc-obj-type" class="form-control" style="width: auto;">
                                 <option value="tree">🌲 Дерево</option>
-                                <option value="anomaly_electric">⚡ Электрическая аномалия</option>
-                                <option value="anomaly_fire">🔥 Огненная аномалия</option>
-                                <option value="anomaly_acid">🧪 Кислотная лужа</option>
-                                <option value="anomaly_void">🌀 Искажение</option>
+                                <option value="rock">🪨 Камень</option>
+                                ${buildLocationAnomalyOptions(locationWorldRules.anomalies)}
                             </select>
                             <input type="color" id="loc-obj-color" value="#2d5a27">
                         </div>
@@ -688,6 +711,15 @@ function openLocationEditModal(locationData) {
             <div class="form-group">
                 <button id="regenerate-loc-btn" class="btn btn-secondary">🔄 Перегенерировать ландшафт</button>
             </div>
+            <div class="form-group" style="padding:10px 12px;border:1px solid rgba(172,75,57,.45);background:rgba(91,31,23,.16);border-radius:7px;">
+                <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;">
+                    <input type="checkbox" id="edit-loc-delete-structures" style="margin-top:3px;">
+                    <span>
+                        <strong>Удалить все созданные структуры</strong><br>
+                        <small style="opacity:.75;">Будут удалены стены, полы, двери, мебель и контейнеры. Декор, аномалии и предметы на земле сохранятся.</small>
+                    </span>
+                </label>
+            </div>
             <div class="form-actions">
                 <button id="save-loc-changes" class="btn btn-primary">Сохранить</button>
                 <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
@@ -711,6 +743,10 @@ function openLocationEditModal(locationData) {
         const newName = document.getElementById('edit-loc-name').value;
         let newWidth = parseInt(document.getElementById('edit-loc-width').value);
         let newHeight = parseInt(document.getElementById('edit-loc-height').value);
+        const deleteStructures = document.getElementById('edit-loc-delete-structures').checked;
+        if (deleteStructures && !window.confirm('Удалить все созданные структуры этой локации? Отменить это действие после сохранения будет нельзя.')) {
+            return;
+        }
         let finalTiles = tempTiles;
         if (!finalTiles) finalTiles = locationData.tiles_data;
         if (newWidth !== locationData.grid_width || newHeight !== locationData.grid_height) {
@@ -721,7 +757,8 @@ function openLocationEditModal(locationData) {
                 name: newName,
                 grid_width: newWidth,
                 grid_height: newHeight,
-                tiles_data: finalTiles
+                tiles_data: finalTiles,
+                delete_structures: deleteStructures,
             });
             showNotification('Локация обновлена', 'success');
             modal.remove();

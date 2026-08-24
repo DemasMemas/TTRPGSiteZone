@@ -102,18 +102,17 @@ def mutant_character_data(profile, variant_name=None):
             re.IGNORECASE,
         )
     )
-    attack_cost_reduction = 1 if 'занимает на 1 ОД меньше' in variant_text else 0
     attacks = []
     for index, attack in enumerate(profile.get('attacks') or []):
         parsed = _mutant_attack_profile(attack)
-        parsed['damage'] += damage_bonus
-        parsed['armor_piercing'] += penetration_bonus
-        parsed['action_points'] = max(
-            0, parsed['action_points'] - attack_cost_reduction,
-        )
+        is_battle_cry = 'клич' in str(attack.get('name') or '').casefold()
+        if not is_battle_cry:
+            parsed['damage'] += damage_bonus
+            parsed['armor_piercing'] += penetration_bonus
         attacks.append({
             'id': f"mutant-attack-{profile['source_order']}-{index}",
-            'name': attack['name'], 'category': 'melee_weapon',
+            'name': 'Боевой клич' if is_battle_cry else attack['name'],
+            'category': 'melee_weapon',
             'naturalWeapon': True, 'weight': 0,
             'durability': 100, 'maxDurability': 100,
             'attributes': {
@@ -125,6 +124,7 @@ def mutant_character_data(profile, variant_name=None):
                 'skip_strength_scaling': True,
                 'natural_weapon': True,
                 'raw_effect': attack.get('effect') or '',
+                'special_action': 'mutant_battle_cry' if is_battle_cry else None,
             },
         })
     return {

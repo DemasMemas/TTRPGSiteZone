@@ -22,6 +22,7 @@ from app.services.health import apply_health_maximums, health_zones_to_location
 from app.services.equipment_repair import repair_equipment, resolve_item_path
 from app.services.gas_mask_filters import consume_equipped_filter_charges
 from app.services.addictions import advance_addictions, record_exposure, withdrawal_check
+from app.services.anomaly_profiles import anomaly_catalog
 from app.services.world_rules import (
     anomaly_field_catalog,
     anomaly_field_profile,
@@ -93,6 +94,7 @@ lobbies_bp = Blueprint('lobbies', __name__)
 @requires_participant
 def get_world_rule_catalogs(lobby_id, lobby, participant):
     return jsonify({
+        'anomalies': anomaly_catalog(),
         'anomaly_fields': anomaly_field_catalog(),
         'artifacts': artifact_catalog(),
         'mutants': mutant_catalog(),
@@ -1952,8 +1954,74 @@ def check_character_addiction_withdrawal(character_id, addiction_key):
 def delete_character(character_id):
     user_id = int(get_jwt_identity())
     character = CharacterService.get_character(character_id, user_id)
+    lobby_id = character.lobby_id
+    placements = LocationCharacter.query.filter_by(character_id=character_id).all()
+    placements_by_location = {}
+    for placement in placements:
+        placements_by_location.setdefault(placement.location_id, set()).add(placement.id)
+
+    combat_states = {}
+    for location_id, removed_ids in placements_by_location.items():
+        combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not combat_state:
+            continue
+        old_order = list(dict.fromkeys(combat_state.turn_order or []))
+        removed_current = combat_state.current_location_character_id in removed_ids
+        current_index = (
+            old_order.index(combat_state.current_location_character_id)
+            if removed_current and combat_state.current_location_character_id in old_order
+            else 0
+        )
+        new_order = [item_id for item_id in old_order if item_id not in removed_ids]
+        combat_state.turn_order = new_order
+        if combat_state.reaction_pending_location_character_id in removed_ids:
+            combat_state.reaction_pending_location_character_id = None
+        if combat_state.reaction_return_location_character_id in removed_ids:
+            combat_state.reaction_return_location_character_id = None
+        if not new_order:
+            combat_state.current_location_character_id = None
+            combat_state.turn_index = 0
+            if combat_state.status == 'active':
+                combat_state.status = 'idle'
+        elif removed_current:
+            next_index = min(current_index, len(new_order) - 1)
+            combat_state.current_location_character_id = new_order[next_index]
+            combat_state.turn_index = next_index
+            if combat_state.status == 'active':
+                next_character = db.session.get(
+                    LocationCharacter,
+                    combat_state.current_location_character_id,
+                )
+                if next_character:
+                    CombatService._prepare_character_for_turn(next_character)
+        elif combat_state.current_location_character_id in new_order:
+            combat_state.turn_index = new_order.index(
+                combat_state.current_location_character_id
+            )
+        combat_states[location_id] = combat_state
+
+    # Clear combat-state foreign keys before deleting the location entries.
+    if combat_states:
+        db.session.commit()
     CharacterService.delete_character(character_id, user_id)
-    socketio.emit('character_deleted', {'id': character_id}, room=f"lobby_{character.lobby_id}")
+    socketio.emit('character_deleted', {'id': character_id}, room=f"lobby_{lobby_id}")
+    for location_id in placements_by_location:
+        socketio.emit(
+            'location_character_removed',
+            {
+                'location_id': location_id,
+                'character_id': character_id,
+            },
+            room=f"location_{location_id}",
+        )
+        combat_state = combat_states.get(location_id)
+        if combat_state:
+            location = db.session.get(Location, location_id)
+            socketio.emit(
+                'combat_state_updated',
+                CombatService._serialize_state(location, combat_state),
+                room=f"location_{location_id}",
+            )
     return jsonify({'message': 'Character deleted'}), 200
 
 @lobbies_bp.route('/characters/<int:character_id>/visibility', methods=['PUT'])
@@ -2236,11 +2304,33 @@ def update_location(lobby_id, location_id, lobby):
     if location.lobby_id != lobby_id:
         return jsonify({'error': 'Access denied'}), 403
 
-    data = request.get_json()
+    data = request.get_json() or {}
+    delete_structures = data.get('delete_structures') is True
     allowed = ['name', 'description', 'type', 'grid_width', 'grid_height', 'tiles_data', 'spawn_points', 'world_radius']
     for field in allowed:
         if field in data:
             setattr(location, field, data[field])
+
+    deleted_structure_ids = []
+    if delete_structures:
+        location_objects = LocationObject.query.filter_by(location_id=location.id).all()
+        structures = [
+            obj for obj in location_objects
+            if str(obj.type or '').lower() != 'ground_item'
+            and not bool((obj.properties or {}).get('is_ground_item'))
+        ]
+        deleted_structure_ids = [obj.id for obj in structures]
+        if deleted_structure_ids:
+            LocationCharacter.query.filter(
+                LocationCharacter.location_id == location.id,
+                LocationCharacter.cover_object_id.in_(deleted_structure_ids),
+            ).update({
+                LocationCharacter.cover_object_id: None,
+                LocationCharacter.weapon_braced: False,
+                LocationCharacter.braced_weapon_index: None,
+            }, synchronize_session=False)
+            for structure in structures:
+                db.session.delete(structure)
     db.session.commit()
 
     all_updates = []
@@ -2264,7 +2354,16 @@ def update_location(lobby_id, location_id, lobby):
         'updates': {k: data[k] for k in allowed if k in data}
     }, room=f"lobby_{lobby_id}")
 
-    return jsonify({'message': 'Location updated'}), 200
+    for object_id in deleted_structure_ids:
+        socketio.emit('location_object_deleted', {
+            'location_id': location.id,
+            'object_id': object_id,
+        }, room=f"location_{location.id}")
+
+    return jsonify({
+        'message': 'Location updated',
+        'deleted_structure_count': len(deleted_structure_ids),
+    }), 200
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>', methods=['DELETE'])
@@ -3309,6 +3408,47 @@ def resolve_location_combat_reaction(lobby_id, location_id, lobby):
     return jsonify(state), 200
 
 
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/combat/opportunity-attack',
+    methods=['POST'],
+)
+@jwt_required()
+@requires_participant
+def resolve_location_opportunity_attack(lobby_id, location_id, lobby, participant):
+    data = request.get_json() or {}
+    result = CombatService.resolve_opportunity_attack(
+        location_id,
+        participant.user_id,
+        data.get('location_character_id'),
+        data.get('opportunity_id'),
+        data.get('accept') is True,
+        weapon_index=data.get('weapon_index'),
+        attack_type=data.get('attack_type'),
+    )
+    socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
+    if result.get('target'):
+        socketio.emit('combat_character_updated', result['target'], room=f"location_{location_id}")
+    socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
+    for serialized in (result.get('character'), result.get('target')):
+        character_id = serialized.get('character_id') if isinstance(serialized, dict) else None
+        character = db.session.get(LobbyCharacter, character_id) if character_id else None
+        if character:
+            socketio.emit(
+                'character_data_updated',
+                {
+                    'character_id': character.id,
+                    'updates': {'data': character.data},
+                    'source': 'opportunity_attack',
+                },
+                room=f"character_{character.id}",
+            )
+    if result.get('attack'):
+        summary = CombatService.format_attack_summary(result)
+        if summary:
+            _emit_lobby_chat_message(lobby_id, participant.user_id, summary)
+    return jsonify(result), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/end', methods=['POST'])
 @jwt_required()
 @requires_gm
@@ -3475,6 +3615,35 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             },
             room=f"character_{actor.id}",
         )
+    mutant_action = result.get('mutant_action')
+    if isinstance(mutant_action, dict) and mutant_action.get('kind') == 'battle_cry':
+        for target_result in mutant_action.get('targets') or []:
+            target_character = db.session.get(
+                LobbyCharacter, target_result.get('character_id'),
+            )
+            if not target_character:
+                continue
+            socketio.emit(
+                'character_data_updated',
+                {
+                    'character_id': target_character.id,
+                    'updates': {'data': target_character.data},
+                    'source': 'mutant_battle_cry',
+                },
+                room=f"character_{target_character.id}",
+            )
+        checks = '; '.join(
+            f"{item.get('name')}: d20 {item.get('roll')} "
+            f"{item.get('modifier', 0):+d} = {item.get('total')} против СЛ 15 - "
+            f"{'успех' if item.get('success') else 'провал, стресс +1'}"
+            for item in mutant_action.get('targets') or []
+        ) or 'подходящих целей нет'
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            f"Боевой клич. {checks}.",
+            username='Мутант',
+        )
     attack_summary = CombatService.format_attack_summary(result)
     if attack_summary:
         _emit_lobby_chat_message(
@@ -3505,10 +3674,13 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
     must_do = result.get('must_do_it')
     if isinstance(must_do, dict) and isinstance(must_do.get('check'), dict):
         check = must_do['check']
+        total = check.get('total')
+        if total is None and check.get('roll') is not None:
+            total = check.get('roll')
         _emit_lobby_chat_message(
             lobby_id, participant.user_id,
             f"Должен это сделать: {must_do.get('name')}. d20 {check.get('roll')}, "
-            f"итог {check.get('total')} против СЛ {check.get('difficulty')}: "
+            f"итог {total} против СЛ {check.get('difficulty')}: "
             f"{'успех' if check.get('success') else 'провал'}.",
             username='Стресс',
         )

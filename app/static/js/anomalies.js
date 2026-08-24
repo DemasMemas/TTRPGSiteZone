@@ -4,6 +4,48 @@ function material(color, opacity = 1) {
     return new THREE.MeshBasicMaterial({ color, transparent: opacity < 1, opacity, blending: THREE.AdditiveBlending, depthWrite: false });
 }
 
+function anomalyLabel(text) {
+    if (!text) return null;
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    context.font = '700 30px Georgia, serif';
+    const width = Math.min(620, Math.ceil(context.measureText(text).width + 38));
+    canvas.width = Math.max(160, width);
+    canvas.height = 58;
+    context.font = '700 30px Georgia, serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillStyle = 'rgba(10, 12, 9, 0.78)';
+    context.fillRect(0, 4, canvas.width, 50);
+    context.strokeStyle = 'rgba(191, 167, 111, 0.72)';
+    context.strokeRect(1, 5, canvas.width - 2, 48);
+    context.fillStyle = '#e8dfc6';
+    context.fillText(text, canvas.width / 2, 30, canvas.width - 24);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(canvas),
+        transparent: true,
+        depthTest: false,
+    }));
+    sprite.scale.set(Math.max(1.2, canvas.width / 150), 0.38, 1);
+    sprite.position.y = 2.25;
+    sprite.renderOrder = 20;
+    return sprite;
+}
+
+function anomalyKeyMarker(key, color) {
+    if (!key) return null;
+    const hash = [...key].reduce((value, char) => ((value * 31) + char.charCodeAt(0)) >>> 0, 7);
+    const sides = 3 + (hash % 6);
+    const marker = new THREE.Mesh(
+        new THREE.TorusGeometry(0.5 + ((hash >> 3) % 4) * 0.04, 0.025, 5, sides),
+        material(color, 0.7),
+    );
+    marker.rotation.x = Math.PI / 2;
+    marker.position.y = 0.12 + ((hash >> 6) % 4) * 0.08;
+    marker.userData.anomalyMarkerSpeed = 0.25 + ((hash >> 8) % 7) * 0.08;
+    return marker;
+}
+
 function createLightningLine(color, seed) {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(7 * 3), 3));
@@ -27,7 +69,7 @@ function updateLightning(line, time, index) {
     positions.needsUpdate = true;
 }
 
-export function createAnomalyEffect(type = 'electric', color = '#00ffff', scale = 1) {
+export function createAnomalyEffect(type = 'electric', color = '#00ffff', scale = 1, key = '', name = '') {
     const group = new THREE.Group();
     group.userData.anomalyEffect = { type, phase: Math.random() * Math.PI * 2, scale };
     const tint = new THREE.Color(color);
@@ -67,6 +109,24 @@ export function createAnomalyEffect(type = 'electric', color = '#00ffff', scale 
             vapor.userData.vapor = { index, phase: Math.random() * Math.PI * 2, radius: 0.15 + Math.random() * 0.25 };
             group.add(vapor);
         }
+    } else if (type === 'radiation') {
+        const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.3, 1), material(0xb8e336, 0.35));
+        core.position.y = 0.65;
+        group.add(core);
+        for (let index = 0; index < 3; index++) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(0.35 + index * 0.12, 0.018, 6, 28), material(0xd9ff61, 0.45));
+            ring.position.y = 0.65;
+            ring.rotation.set(index * 0.7, index * 1.1, index * 0.45);
+            ring.userData.radiationRing = index;
+            group.add(ring);
+        }
+    } else if (type === 'psi') {
+        for (let index = 0; index < 4; index++) {
+            const shell = new THREE.Mesh(new THREE.SphereGeometry(0.2 + index * 0.11, 16, 10), material(0x68a0ff, 0.12));
+            shell.position.y = 0.7;
+            shell.userData.psiShell = index;
+            group.add(shell);
+        }
     } else {
         const bubble = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 14), material(tint, 0.22));
         bubble.position.y = 0.68;
@@ -80,6 +140,10 @@ export function createAnomalyEffect(type = 'electric', color = '#00ffff', scale 
             group.add(ring);
         }
     }
+    const marker = anomalyKeyMarker(key, tint);
+    if (marker) group.add(marker);
+    const label = anomalyLabel(name);
+    if (label) group.add(label);
     group.scale.setScalar(scale);
     return group;
 }
@@ -90,6 +154,9 @@ export function animateAnomalyEffects(roots, time) {
         if (!effect || !node.visible) return;
         if (node.parent?.isLOD && typeof node.parent.getCurrentLevel === 'function' && node.parent.levels?.[node.parent.getCurrentLevel()]?.object !== node) return;
         const t = time * 0.001 + effect.phase;
+        node.children.forEach(child => {
+            if (child.userData.anomalyMarkerSpeed) child.rotation.z = t * child.userData.anomalyMarkerSpeed;
+        });
         if (effect.type === 'fire') {
             const burst = Math.max(0.035, Math.max(0, Math.sin(t * 0.62)) ** 10);
             node.children.forEach(child => {
@@ -123,6 +190,18 @@ export function animateAnomalyEffects(roots, time) {
                     child.scale.setScalar(0.7 + rise * 1.4);
                     child.material.opacity = 0.18 * (1 - rise);
                 }
+            });
+        } else if (effect.type === 'radiation') {
+            node.children.forEach(child => {
+                if (child.userData.radiationRing === undefined) return;
+                child.rotation.x += 0.004 * (child.userData.radiationRing + 1);
+                child.rotation.y += 0.006 * (child.userData.radiationRing + 1);
+            });
+        } else if (effect.type === 'psi') {
+            node.children.forEach(child => {
+                if (child.userData.psiShell === undefined) return;
+                const pulse = 0.8 + ((Math.sin(t * 2 + child.userData.psiShell) + 1) * 0.18);
+                child.scale.setScalar(pulse);
             });
         } else {
             const pulse = 1 + Math.sin(t * 2.5) * 0.16;

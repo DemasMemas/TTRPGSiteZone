@@ -23,6 +23,19 @@ let currentEditTile = null;
 let pendingTileUpdates = [];
 let batchUpdateTimeout = null;
 let anomalyFieldCatalog = [];
+let anomalyCatalog = [];
+
+const ANOMALY_TYPE_LABELS = {
+    void: 'гравитационная',
+    gravity: 'гравитационная',
+    electric: 'электрическая',
+    fire: 'термическая',
+    thermal: 'термическая',
+    radiation: 'радиационная',
+    acid: 'химическая',
+    chemical: 'химическая',
+    psi: 'псионическая',
+};
 
 export function initMapEdit(lobbyId, authToken) {
     currentLobbyId = lobbyId;
@@ -61,6 +74,7 @@ async function loadAnomalyFieldCatalog() {
     try {
         const rules = await Server.getWorldRules(currentLobbyId);
         anomalyFieldCatalog = rules.anomaly_fields || [];
+        anomalyCatalog = rules.anomalies || [];
         select.innerHTML = '<option value="">Нет аномального поля</option>'
             + anomalyFieldCatalog.map(field => (
                 `<option value="${field.source_order}">${field.name} (${field.rank_min}-${field.rank_max})</option>`
@@ -262,7 +276,15 @@ function updateTileEditModal() {
         tileData.objects.forEach((obj, index) => {
             let typeDisplay = obj.type;
             if (obj.type === 'anomaly' && obj.anomalyType) {
-                typeDisplay = `аномалия (${obj.anomalyType})`;
+                const anomalyName = obj.anomalyName || anomalyCatalog.find(
+                    anomaly => anomaly.key === obj.anomalyKey
+                )?.name;
+                const anomalyType = ANOMALY_TYPE_LABELS[obj.anomalyCategory]
+                    || ANOMALY_TYPE_LABELS[obj.anomalyType]
+                    || 'неизвестного типа';
+                typeDisplay = anomalyName
+                    ? `аномалия «${anomalyName}» · ${anomalyType}`
+                    : `аномалия · ${anomalyType}`;
             }
             listHtml += `
                 <li style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; padding: 3px; background: rgba(255,255,255,0.1); border-radius: 4px;"
@@ -367,6 +389,9 @@ export async function addObjectToTile() {
             type: 'anomaly',
             anomalyType: anomaly.visual,
             anomalyKey: anomaly.key,
+            anomalyName: anomaly.name || anomaly.key,
+            anomalyRank: anomaly.rank || null,
+            anomalyCategory: anomaly.category || null,
             x: offsetX,
             z: offsetZ,
             scale: scale,
@@ -475,7 +500,14 @@ function getAnomalyTypeFromSelect(value) {
             : radiation.includes(key) ? 'radiation'
                 : chemical.includes(key) ? 'acid'
                     : psi.includes(key) ? 'psi' : 'void';
-    return { visual, key };
+    const profile = anomalyCatalog.find(anomaly => anomaly.key === key);
+    return {
+        visual: profile?.visual || visual,
+        key,
+        name: profile?.name || key,
+        rank: profile?.rank || null,
+        category: profile?.category || null,
+    };
 }
 
 export function setBrushRadiusFromInput(value) {
@@ -572,7 +604,7 @@ function updatePreviewFromModal() {
     const anomalyTypeFromSelect = getAnomalyTypeFromSelect(selectValue);
     if (anomalyTypeFromSelect) {
         type = 'anomaly';
-        anomalyType = anomalyTypeFromSelect;
+        anomalyType = anomalyTypeFromSelect.visual;
     } else {
         type = selectValue;
         anomalyType = null;

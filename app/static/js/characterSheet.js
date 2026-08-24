@@ -35,6 +35,7 @@ const pendingManualFieldPaths = new Set();
 const AUTO_SAVE_DELAY = 500;
 const pendingConsumableActions = new Map();
 const pendingReloadActions = new Map();
+const pendingMagazineLoadingActions = new Map();
 const pendingWeaponJamActions = new Map();
 let equipmentRenderVersion = 0;
 
@@ -4705,8 +4706,8 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
                     <div><strong>Кровотечение:</strong> ${attrs.bleeding || 'Нет'}</div>
                     <div><strong>Класс веса:</strong> ${attrs.weight_class || '—'}</div>
                     <div><strong>Размер:</strong> ${attrs.size || '—'}</div>
-                    <div><strong>Вес:</strong> ${weapon.weight || template.weight || 0} кг</div>
-                    <div><strong>Прочность:</strong> ${weapon.durability || template.attributes?.durability || 100}</div>
+                    <div><strong>Вес:</strong> ${weapon.weight || template?.weight || 0} кг</div>
+                    <div><strong>Прочность:</strong> ${weapon.durability || template?.attributes?.durability || 100}</div>
                 </div>
             `;
         } else {
@@ -5722,36 +5723,66 @@ window.reloadFixedMagazine = async function(weaponIndex) {
             paymentGroups.push(await inventoryItemPreparationPayments(selected.item, selected.path, 'ammo'));
         }
         paymentGroups.push(plan.payments);
+        let payment;
         try {
-            if (!await chooseAndSpendCombatPayment('Оплата перезарядки', paymentGroups)) return;
+            payment = await chooseAndSpendDeferredCombatPayment(
+                'Оплата перезарядки',
+                paymentGroups,
+                `Зарядка: ${weapon.name || weaponTemplate.name || 'оружие'}`,
+            );
+            if (!payment) return;
         } catch (error) {
             showNotification(error.message || 'Не хватает ОД или СД', 'system');
             return;
         }
 
-        const fixedMagazine = { ammo: Array.isArray(weapon.fixedAmmo) ? weapon.fixedAmmo : [] };
-        transferAmmoFromSource(fixedMagazine, selected.item, plan.quantity);
-        weapon.fixedAmmo = fixedMagazine.ammo;
-        weapon.ammo = currentAmmo + plan.quantity;
-        if (ammoLoadingKind(selected.item) === 'loose') {
-            if (selected.item.quantity <= 0) removeItemByPath(selected.path);
-            else updateAmmoWeight(selected.item);
-        }
-        currentCharacterData.combatMagazineLoading = {
-            targetType: 'fixed',
-            weaponIndex,
-            sourceId: sourceKey,
+        const completeLoading = async () => {
+            const liveWeapon = currentCharacterData?.weapons?.[weaponIndex];
+            const sourceEntry = resolveInventoryEntry(selected.item.id, selected.path);
+            if (!liveWeapon || !sourceEntry?.item) {
+                showNotification('Зарядка оплачена, но оружие или патроны больше не найдены', 'system');
+                return;
+            }
+            const liveSource = sourceEntry.item;
+            const liveMagazine = { ammo: Array.isArray(liveWeapon.fixedAmmo) ? liveWeapon.fixedAmmo : [] };
+            const availableSpace = Math.max(0, maxAmmo - getMagazineAmmoCount(liveMagazine));
+            const quantity = Math.min(plan.quantity, ammoSourceCount(liveSource), availableSpace);
+            if (quantity <= 0) {
+                showNotification('Зарядка оплачена, но заряжать уже нечего', 'system');
+                return;
+            }
+            transferAmmoFromSource(liveMagazine, liveSource, quantity);
+            liveWeapon.fixedAmmo = liveMagazine.ammo;
+            liveWeapon.ammo = getMagazineAmmoCount(liveMagazine);
+            if (ammoLoadingKind(liveSource) === 'loose') {
+                if (liveSource.quantity <= 0) removeItemByPath(sourceEntry.path);
+                else updateAmmoWeight(liveSource);
+            }
+            currentCharacterData.combatMagazineLoading = {
+                targetType: 'fixed',
+                weaponIndex,
+                sourceId: sourceKey,
+            };
+            if (liveWeapon.ammo >= maxAmmo || ammoSourceCount(liveSource) <= 0) {
+                delete currentCharacterData.combatMagazineLoading;
+            }
+            modal.remove();
+            renderEquipmentTab(currentCharacterData);
+            renderInventoryTab(currentCharacterData);
+            scheduleAutoSave();
+            forceSyncCharacter();
+            showNotification(`Заряжено ${quantity} патронов (${liveSource.name})`, 'success');
         };
-        if (weapon.ammo >= maxAmmo || ammoSourceCount(selected.item) <= 0) {
-            delete currentCharacterData.combatMagazineLoading;
+        if (payment.deferred) {
+            pendingMagazineLoadingActions.set(payment.pendingActionId, {
+                characterId: currentCharacterId,
+                complete: completeLoading,
+            });
+            modal.remove();
+            showNotification('Зарядка начата. Остаток ОД спишется в следующих ходах.', 'system');
+            return;
         }
-
-        modal.remove();
-        renderEquipmentTab(currentCharacterData);
-        renderInventoryTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification(`Заряжено ${plan.quantity} патронов (${selected.item.name})`, 'success');
+        await completeLoading();
     };
 
     modal.style.display = 'flex';
@@ -6307,39 +6338,69 @@ window.confirmReloadMagazine = async function(pathStr) {
         paymentGroups.push(await inventoryItemPreparationPayments(feederTool.item, feederTool.path, 'ammo'));
     }
     paymentGroups.push(plan.payments);
+    let payment;
     try {
-        if (!await chooseAndSpendCombatPayment('Оплата зарядки магазина', paymentGroups)) return;
+        payment = await chooseAndSpendDeferredCombatPayment(
+            'Оплата зарядки магазина',
+            paymentGroups,
+            `Зарядка магазина: ${mag.name || 'магазин'}`,
+        );
+        if (!payment) return;
     } catch (error) {
         showNotification(error.message || 'Не хватает ОД или СД');
         return;
     }
-    if (!sameMagazine) await stowActiveWeaponForLoading();
-
-    transferAmmoFromSource(mag, ammoItem, plan.quantity);
-    if (!getItemCaliber(mag)) {
-        mag.attributes = mag.attributes || {};
-        mag.attributes.caliber = getItemCaliber(ammoItem);
-    }
-    if (ammoLoadingKind(ammoItem) === 'loose') {
-        if (ammoItem.quantity <= 0) removeItemByPath(selected.path);
-        else updateAmmoWeight(ammoItem);
-    }
-    updateMagazineWeight(mag);
-    currentCharacterData.combatMagazineLoading = {
-        targetType: 'inventory',
-        targetId: targetKey,
-        sourceId: sourceKey,
-        feederId: feederKey,
+    const completeLoading = async () => {
+        const targetEntry = resolveInventoryEntry(mag.id, targetPath);
+        const sourceEntry = resolveInventoryEntry(ammoItem.id, selected.path);
+        if (!targetEntry?.item || !sourceEntry?.item) {
+            showNotification('Зарядка оплачена, но магазин или патроны больше не найдены', 'system');
+            return;
+        }
+        const liveMagazine = targetEntry.item;
+        const liveSource = sourceEntry.item;
+        const availableSpace = Math.max(0, cap - getMagazineAmmoCount(liveMagazine));
+        const quantity = Math.min(plan.quantity, ammoSourceCount(liveSource), availableSpace);
+        if (quantity <= 0) {
+            showNotification('Зарядка оплачена, но заряжать уже нечего', 'system');
+            return;
+        }
+        if (!sameMagazine) await stowActiveWeaponForLoading();
+        transferAmmoFromSource(liveMagazine, liveSource, quantity);
+        if (!getItemCaliber(liveMagazine)) {
+            liveMagazine.attributes = liveMagazine.attributes || {};
+            liveMagazine.attributes.caliber = getItemCaliber(liveSource);
+        }
+        if (ammoLoadingKind(liveSource) === 'loose') {
+            if (liveSource.quantity <= 0) removeItemByPath(sourceEntry.path);
+            else updateAmmoWeight(liveSource);
+        }
+        updateMagazineWeight(liveMagazine);
+        currentCharacterData.combatMagazineLoading = {
+            targetType: 'inventory',
+            targetId: targetKey,
+            sourceId: sourceKey,
+            feederId: feederKey,
+        };
+        if (getMagazineAmmoCount(liveMagazine) >= cap || ammoSourceCount(liveSource) <= 0) {
+            delete currentCharacterData.combatMagazineLoading;
+        }
+        modal.style.display = 'none';
+        renderInventoryTab(currentCharacterData);
+        scheduleAutoSave();
+        forceSyncCharacter();
+        showNotification(`Заряжено ${quantity} патронов (${liveSource.name})`, 'success');
     };
-    if (getMagazineAmmoCount(mag) >= cap || ammoSourceCount(ammoItem) <= 0) {
-        delete currentCharacterData.combatMagazineLoading;
+    if (payment.deferred) {
+        pendingMagazineLoadingActions.set(payment.pendingActionId, {
+            characterId: currentCharacterId,
+            complete: completeLoading,
+        });
+        modal.style.display = 'none';
+        showNotification('Зарядка начата. Остаток ОД спишется в следующих ходах.', 'system');
+        return;
     }
-
-    modal.style.display = 'none';
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification(`Заряжено ${plan.quantity} патронов (${ammoItem.name})`, 'success');
+    await completeLoading();
 };
 
 async function returnAmmoStacksToInventory(ammoStacks, targetArray) {
@@ -9224,6 +9285,51 @@ async function chooseAndSpendCombatPayment(title, groups) {
     return true;
 }
 
+async function chooseAndSpendDeferredCombatPayment(title, groups, pendingLabel) {
+    const combatState = window.locationCombatState;
+    if (!combatState || combatState.status !== 'active') {
+        return { deferred: false, pendingActionId: null };
+    }
+    const actor = combatState.current_character;
+    if (!actor || actor.character_id !== currentCharacterId) {
+        throw new Error('Сейчас не ход этого персонажа');
+    }
+
+    const currentActionPoints = Number(actor.action_points_current || 0);
+    const currentFreeActions = Number(actor.free_actions_current || 0);
+    const choices = combineCombatPayments(groups)
+        // Deferred actions may owe AP, but free actions cannot be borrowed from a later turn.
+        .filter(option => option.freeActions <= currentFreeActions)
+        .map(option => {
+            const remaining = Math.max(0, option.actionPoints - currentActionPoints);
+            return {
+                ...option,
+                label: [
+                    option.actionPoints ? `${option.actionPoints} ОД` : '',
+                    option.freeActions ? `${option.freeActions} СД` : '',
+                    remaining ? `останется ${remaining} ОД` : '',
+                ].filter(Boolean).join(' + ') || '0 ОД',
+            };
+        });
+    if (!choices.length) throw new Error('Не хватает СД');
+
+    const selected = await chooseConsumableApplication(title, choices);
+    if (!selected) return null;
+    const pendingActionId = `magazine-loading-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const payment = await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
+        location_character_id: actor.location_character_id,
+        action_points: selected.actionPoints,
+        free_actions: selected.freeActions,
+        allow_deferred: true,
+        pending_action_id: pendingActionId,
+        pending_action_label: pendingLabel,
+    });
+    return {
+        deferred: payment?.payment_complete === false,
+        pendingActionId,
+    };
+}
+
 async function stowActiveWeaponForLoading() {
     const combatState = window.locationCombatState;
     if (combatState?.status === 'active') {
@@ -9495,6 +9601,19 @@ window.calculateInventoryAccess = calculateInventoryAccess;
 function findInventoryItemById(data, itemId) {
     if (!itemId) return null;
     return collectInventoryEntries(data, item => item?.id === itemId)[0] || null;
+}
+
+function resolveInventoryEntry(itemId, itemPath) {
+    const path = Array.isArray(itemPath) ? itemPath : [];
+    const atPath = getInventoryValueByPath(currentCharacterData, path);
+    if (atPath && (itemId == null || String(atPath.id) === String(itemId))) {
+        return { item: atPath, path };
+    }
+    if (itemId == null) return null;
+    return collectInventoryEntries(
+        currentCharacterData,
+        item => item?.id != null && String(item.id) === String(itemId),
+    )[0] || null;
 }
 
 function spendInventoryItemUses(entry, amount = 1) {
@@ -14702,6 +14821,14 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
     localStorage.setItem('currentCharacterId', String(characterId));
     try {
         const character = await Server.getCharacter(characterId);
+        if (character.data?.is_mutant || character.data?.basic?.is_mutant) {
+            currentCharacterId = null;
+            window.currentCharacterId = null;
+            localStorage.removeItem('currentCharacterId');
+            const characters = await import('./characters.js');
+            await characters.openMutantCard(characterId, character);
+            return;
+        }
         currentCharacterCanEdit = character.can_edit === true;
         currentCharacterData = character.data || {};
         normalizeCharacterEffects(currentCharacterData);
@@ -15506,6 +15633,16 @@ window.addEventListener('combat-state-updated', async (event) => {
             );
         } catch (error) {
             showNotification(error.message || 'Не удалось завершить перезарядку', 'system');
+        }
+        return;
+    }
+    const pendingMagazineLoading = actionId ? pendingMagazineLoadingActions.get(actionId) : null;
+    if (pendingMagazineLoading && pendingMagazineLoading.characterId === currentCharacterId) {
+        pendingMagazineLoadingActions.delete(actionId);
+        try {
+            await pendingMagazineLoading.complete();
+        } catch (error) {
+            showNotification(error.message || 'Не удалось завершить зарядку', 'system');
         }
         return;
     }

@@ -85,6 +85,8 @@ let brushObjectRotation = 0;
 let raycaster = new THREE.Raycaster();
 let mouse = new THREE.Vector2();
 let hoveredTileCoords = null;
+let pendingCharacterPlacement = null;
+let pendingCharacterPlacementQueue = [];
 let highlightBox = null;
 let locationActive = false;
 let eventCleanup = null;
@@ -128,6 +130,8 @@ let facingMenu = null;
 let pendingFacingSelection = null;
 let combatParticipantMenu = null;
 let teamManagementModal = null;
+let opportunityAttackModal = null;
+let activeOpportunityAttackId = null;
 let aimedZoneMenu = null;
 let aimedZoneMenuResolve = null;
 let movementPreviewGhost = null;
@@ -1968,9 +1972,9 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         },
         {
             label: 'Атака',
-            title: 'Открыть экипировку для выбора оружия и типа атаки',
+            title: 'Выбрать оружие или природную атаку',
             angle: -38,
-            action: () => import('./characterSheet.js').then(module => module.openCharacterSheet(characterId, 'equipment')),
+            action: () => openCharacterAttackSelection(characterId),
         },
         {
             label: 'Положение',
@@ -2042,17 +2046,19 @@ function showCombatActionMenu(clientX, clientY, characterId) {
                 },
             });
         }
-        if (combatCharacter) {
+        if (combatCharacter && !combatCharacter.is_mutant) {
             const retry = combatCharacter.must_do_retry;
             const { remaining, limit } = getMustDoUsage(combatCharacter);
-            menuItems.push({
-                label: `Должен ${remaining}/${limit}`, icon: '!',
-                title: retry
-                    ? `Повторить проверку «${retry.name || 'действие'}», получить 1 стресс. Осталось применений: ${remaining}/${limit}`
-                    : `Выполнить разрешённый ГМом повтор, получить 1 стресс. Осталось применений: ${remaining}/${limit}`,
-                angle: 194, ringRadius: 165, requiresCombat: true,
-                action: () => performMustDoRetry(combatCharacter),
-            });
+            if (remaining > 0) {
+                menuItems.push({
+                    label: `Должен ${remaining}/${limit}`, icon: '!',
+                    title: retry
+                        ? `Повторить проверку «${retry.name || 'действие'}», получить 1 стресс. Осталось применений: ${remaining}/${limit}`
+                        : `Выполнить разрешённый ГМом повтор, получить 1 стресс. Осталось применений: ${remaining}/${limit}`,
+                    angle: 194, ringRadius: 165, requiresCombat: true,
+                    action: () => performMustDoRetry(combatCharacter),
+                });
+            }
         }
         menuItems.push({
             label: 'Утешить', icon: '♡',
@@ -2344,6 +2350,134 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     if (top < rect.height / 2 + 10) top = rect.height / 2 + 10;
     combatActionMenu.style.left = `${left}px`;
     combatActionMenu.style.top = `${top}px`;
+}
+
+async function openCharacterAttackSelection(characterId) {
+    try {
+        const character = await Server.getCharacter(characterId);
+        const data = character?.data || {};
+        if (!data.is_mutant && !data.basic?.is_mutant) {
+            const sheet = await import('./characterSheet.js');
+            await sheet.openCharacterSheet(characterId, 'equipment');
+            return;
+        }
+        const actor = findCombatCharacterByCharacterId(characterId);
+        if (combatState?.status === 'active' && !actor?.location_character_id) {
+            showNotification('Мутант не участвует в текущем бою', 'system');
+            return;
+        }
+        const weapons = Array.isArray(data.weapons) ? data.weapons : [];
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.style.display = 'flex';
+        modal.innerHTML = `
+            <div class="modal-content" style="width:min(520px,calc(100vw - 28px));">
+                <button type="button" class="close mutant-attack-close">&times;</button>
+                <h3>Атаки: ${escapeHtml(character.name)}</h3>
+                <div class="mutant-attack-options" style="display:grid;gap:8px;"></div>
+            </div>
+        `;
+        const options = modal.querySelector('.mutant-attack-options');
+        const mutantTraits = [
+            ...(Array.isArray(data.mutant?.traits) ? data.mutant.traits : []),
+            ...(Array.isArray(data.mutant?.variant?.traits) ? data.mutant.variant.traits : []),
+        ];
+        const hasTrait = (text) => mutantTraits.some((trait) => String(trait).includes(text));
+        const performMutantAction = async (actionKey) => {
+            try {
+                const result = await Server.performLocationCombatAction(
+                    window.currentLobbyId,
+                    getCurrentLocationId(),
+                    {
+                        location_character_id: actor.location_character_id,
+                        action_key: actionKey,
+                        pending_action_id: `mutant-${actionKey}-${actor.location_character_id}-${Date.now()}`,
+                    },
+                );
+                if (result?.pending_action) {
+                    showNotification('Действие начато и завершится после оплаты оставшихся ОД.', 'system');
+                    return;
+                }
+                if (actionKey === 'mutant_battle_cry') {
+                    const targets = result?.mutant_action?.targets || [];
+                    const failed = targets.filter((entry) => !entry.success).length;
+                    showNotification(`Боевой клич: проверок ${targets.length}, провалов ${failed}.`, 'success');
+                } else {
+                    showNotification('Жмурка затаилась: Скрытность +5.', 'success');
+                }
+            } catch (error) {
+                showNotification(error.message || 'Не удалось выполнить действие мутанта', 'system');
+            }
+        };
+        weapons.forEach((weapon, index) => {
+            const attrs = weapon?.attributes || {};
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-secondary';
+            const rawCost = Number(String(attrs.raw_effect || '').match(/(\d+)\s*ОД/i)?.[1]);
+            const baseCost = Number.isFinite(rawCost) ? rawCost : (Number(attrs.action_points) || 0);
+            const firstAttackNote = hasTrait('Улучшенные рефлексы') ? ` · первая атака ${Math.max(0, baseCost - 1)} ОД` : '';
+            const isBattleCry = attrs.special_action === 'mutant_battle_cry'
+                || String(weapon.name || '').toLowerCase().includes('клич');
+            button.textContent = isBattleCry
+                ? `${weapon.name} · ${baseCost} ОД${firstAttackNote} · Воля СЛ 15`
+                : `${weapon.name} · ${baseCost} ОД${firstAttackNote} · урон ${Number(attrs.damage) || 0} · пробитие ${Number(attrs.armor_piercing) || 0}%`;
+            button.onclick = () => {
+                modal.remove();
+                if (combatState?.status !== 'active') {
+                    showNotification(`${weapon.name}: урон ${Number(attrs.damage) || 0}, пробитие ${Number(attrs.armor_piercing) || 0}%`, 'system');
+                    return;
+                }
+                if (isBattleCry) {
+                    performMutantAction('mutant_battle_cry');
+                    return;
+                }
+                beginPendingCombatAction({
+                    actorCharacterId: characterId,
+                    actorLocationCharacterId: actor.location_character_id,
+                    actionKey: 'attack',
+                    weaponIndex: index,
+                    attackType: weapon.name,
+                    targetType: 'character',
+                    source: 'mutant-card',
+                });
+            };
+            options.appendChild(button);
+        });
+        if (hasTrait('Прыгун')) {
+            const jumpButton = document.createElement('button');
+            jumpButton.type = 'button';
+            jumpButton.className = 'btn btn-secondary';
+            jumpButton.textContent = 'Прыжок · 4 ОД · выбрать клетку до 15 м';
+            jumpButton.onclick = () => {
+                modal.remove();
+                beginPendingCombatAction({
+                    actorCharacterId: characterId,
+                    actorLocationCharacterId: actor.location_character_id,
+                    actionKey: 'mutant_jump',
+                    targetType: 'point',
+                    source: 'mutant-card',
+                });
+            };
+            options.appendChild(jumpButton);
+        }
+        if (hasTrait('Засада')) {
+            const ambushButton = document.createElement('button');
+            ambushButton.type = 'button';
+            ambushButton.className = 'btn btn-secondary';
+            ambushButton.textContent = 'Засада · Скрытность +5 · требуется куст';
+            ambushButton.onclick = () => {
+                modal.remove();
+                performMutantAction('mutant_ambush');
+            };
+            options.appendChild(ambushButton);
+        }
+        if (!weapons.length) options.textContent = 'У этого мутанта нет атак.';
+        modal.querySelector('.mutant-attack-close').onclick = () => modal.remove();
+        document.body.appendChild(modal);
+    } catch (error) {
+        showNotification(error.message || 'Не удалось открыть атаки мутанта', 'system');
+    }
 }
 
 function showMeleeCombatMenu(characterId) {
@@ -3490,6 +3624,7 @@ async function resolveCombatTargetSelection(targetCharacterId) {
             }
         } else {
             const result = await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload);
+            if (result?.state) setCombatState(result.state);
             if (result?.pending_action) {
                 deferredCombatActions.set(result.pending_action_id, { ...payload });
                 showNotification(
@@ -3739,6 +3874,9 @@ async function resolveCombatPointSelection(clientX, clientY) {
         }
         if (typeof action.onResolve === 'function') {
             await action.onResolve({ targetX, targetY });
+        }
+        if (action.actionKey === 'mutant_jump') {
+            showNotification(`Прыжок завершён: клетка ${targetX}, ${targetY}.`, 'success');
         }
         if (action.actionKey === 'escape_anomaly' && result?.anomaly) {
             const check = result.anomaly.check || {};
@@ -4730,7 +4868,7 @@ function applyCharacterAnomalyVisual(characterId, combatCharacter = null) {
     entry.model.userData.activeAnomaly = anomaly?.key || null;
 }
 
-export function updateCharacterPosition(characterId, posX, posY) {
+export function updateCharacterPosition(characterId, posX, posY, options = {}) {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
     const tileHeight = getTileHeight(posX, posY);
@@ -4739,8 +4877,10 @@ export function updateCharacterPosition(characterId, posX, posY) {
     entry.label.position.set(posX + 0.5, tileHeight + labelOffset, posY + 0.5);
     entry.posX = posX;
     entry.posY = posY;
-    invalidateMovementMapCache();
-    applyFogOfWar();
+    if (!options.deferRefresh) {
+        invalidateMovementMapCache();
+        applyFogOfWar();
+    }
 }
 
 export function removeCharacterFromLocation(characterId) {
@@ -5136,7 +5276,7 @@ function renderCombatHud() {
             ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong> · Точность +${combatState.current_character?.aim_accuracy_bonus || 0}</div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
             <div>Кровопотеря: ${currentBloodLabel} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>
-            ${combatState.status === 'active' && combatState.current_character ? `<div style="margin-top:6px;padding:7px 8px;border-radius:7px;background:rgba(190,143,72,.16);border:1px solid rgba(190,143,72,.28);"><button type="button" class="btn btn-sm btn-secondary combat-must-do-btn" style="width:100%;">Должен это сделать · ${currentMustDoUsage.remaining}/${currentMustDoUsage.limit}</button><div style="margin-top:5px;font-size:12px;opacity:.8;">${currentMustDoRetry ? `Сохранённый провал: ${escapeHtml(currentMustDoRetry.name || 'повторная проверка')}` : 'Ручной повтор по разрешению ГМа'}</div></div>` : ''}
+            ${combatState.status === 'active' && combatState.current_character && !combatState.current_character.is_mutant && currentMustDoUsage.remaining > 0 ? `<div style="margin-top:6px;padding:7px 8px;border-radius:7px;background:rgba(190,143,72,.16);border:1px solid rgba(190,143,72,.28);"><button type="button" class="btn btn-sm btn-secondary combat-must-do-btn" style="width:100%;">Должен это сделать · ${currentMustDoUsage.remaining}/${currentMustDoUsage.limit}</button><div style="margin-top:5px;font-size:12px;opacity:.8;">${currentMustDoRetry ? `Сохранённый провал: ${escapeHtml(currentMustDoRetry.name || 'повторная проверка')}` : 'Ручной повтор по разрешению ГМа'}</div></div>` : ''}
             ${combatState.current_character?.help_advantage ? `<div style="margin-top:6px;padding:6px 8px;border-radius:7px;background:rgba(92,154,110,.16);">Помощь: преимущество${combatState.current_character.help_advantage.action_label ? `, ${escapeHtml(combatState.current_character.help_advantage.action_label)}` : ''}${combatState.current_character.help_advantage.source_name ? ` (${escapeHtml(combatState.current_character.help_advantage.source_name)})` : ''}</div>` : ''}
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
             <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
@@ -5320,6 +5460,7 @@ export function setCombatState(state) {
     window.locationCombatState = combatState;
     syncCombatAreaVisuals(combatState);
     (combatState?.characters || []).forEach((character) => {
+        updateCharacterPosition(character.character_id, character.x, character.y, { deferRefresh: true });
         updateCharacterTeamVisual(character.character_id, character.team_name, character.team_color);
         applyCharacterPostureVisual(character.character_id, character.posture);
         applyCharacterFacingVisual(
@@ -5331,11 +5472,90 @@ export function setCombatState(state) {
         applyCharacterGunpointVisual(character.character_id, character);
         applyCharacterAnomalyVisual(character.character_id, character);
     });
+    invalidateMovementMapCache();
     applyFogOfWar();
+    showAvailableOpportunityAttack();
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
     resumeCompletedCombatAction(combatState);
     renderCombatHud();
     void autoEndBlockedCombatTurn();
+}
+
+function showAvailableOpportunityAttack() {
+    const myId = getCurrentUserId();
+    const available = (combatState?.characters || []).flatMap((character) => {
+        const controllerId = Number(character.controlled_by ?? character.owner_id) || null;
+        const canRespond = controllerId === myId || (window.isGM && (!controllerId || controllerId === myId));
+        if (!canRespond) return [];
+        return (character.opportunity_attacks || []).map(opportunity => ({ character, opportunity }));
+    })[0];
+    if (!available) {
+        opportunityAttackModal?.remove();
+        opportunityAttackModal = null;
+        activeOpportunityAttackId = null;
+        return;
+    }
+    if (activeOpportunityAttackId === available.opportunity.id && opportunityAttackModal?.isConnected) {
+        return;
+    }
+    opportunityAttackModal?.remove();
+    activeOpportunityAttackId = available.opportunity.id;
+    const reason = available.opportunity.reason === 'opponent_moved_behind'
+        ? 'пытается зайти за спину'
+        : 'выходит из зоны ближнего боя';
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.style.cssText = 'display:flex;z-index:12550;align-items:center;justify-content:center;';
+    modal.innerHTML = `
+        <div class="modal-content" style="width:min(460px,calc(100vw - 24px));">
+            <h3 style="margin-top:0;">Атака по возможности</h3>
+            <p><strong>${escapeHtml(available.opportunity.target_name)}</strong> ${reason}.</p>
+            <p style="opacity:.76;">Можно провести неприцельную атаку оружием ближнего боя. Лимит: одна цель за раунд.</p>
+            ${(available.opportunity.attack_options || []).length > 1 ? `
+                <label style="display:grid;gap:5px;margin-bottom:12px;">
+                    <span>Атака</span>
+                    <select class="opportunity-attack-type">
+                        ${(available.opportunity.attack_options || []).map((option, index) => `
+                            <option value="${index}">${escapeHtml(option.label || option.attack_type || 'Атака')}</option>
+                        `).join('')}
+                    </select>
+                </label>
+            ` : ''}
+            <div class="form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
+                <button type="button" class="btn btn-secondary opportunity-skip">Пропустить</button>
+                <button type="button" class="btn btn-primary opportunity-attack">Атаковать</button>
+            </div>
+        </div>
+    `;
+    const resolve = async (accept) => {
+        modal.querySelectorAll('button').forEach(button => { button.disabled = true; });
+        try {
+            const options = available.opportunity.attack_options || [];
+            const selectedIndex = Number(modal.querySelector('.opportunity-attack-type')?.value || 0);
+            const selectedAttack = options[selectedIndex] || options[0] || null;
+            await Server.resolveLocationOpportunityAttack(
+                window.currentLobbyId,
+                getCurrentLocationId(),
+                {
+                    location_character_id: available.character.location_character_id,
+                    opportunity_id: available.opportunity.id,
+                    accept,
+                    weapon_index: selectedAttack?.weapon_index,
+                    attack_type: selectedAttack?.attack_type,
+                },
+            );
+            modal.remove();
+            opportunityAttackModal = null;
+            activeOpportunityAttackId = null;
+        } catch (error) {
+            showNotification(error.message || 'Не удалось выполнить атаку по возможности', 'system');
+            modal.querySelectorAll('button').forEach(button => { button.disabled = false; });
+        }
+    };
+    modal.querySelector('.opportunity-skip').onclick = () => resolve(false);
+    modal.querySelector('.opportunity-attack').onclick = () => resolve(true);
+    document.body.appendChild(modal);
+    opportunityAttackModal = modal;
 }
 
 window.addEventListener('must-do-retry-registered', event => {
@@ -7962,7 +8182,13 @@ function rebuildTileObjects(tileX, tileZ) {
                 yOffset = 0.05;
                 break;
             case 'anomaly':
-                mesh = createAnomalyEffect(obj.anomalyType || 'electric', obj.color || '#00ffff', obj.scale || 1);
+                mesh = createAnomalyEffect(
+                    obj.anomalyType || 'electric',
+                    obj.color || '#00ffff',
+                    obj.scale || 1,
+                    obj.anomalyKey || '',
+                    obj.anomalyName || obj.anomalyKey || '',
+                );
                 yOffset = 0;
                 isAnomalyEffect = true;
                 break;
@@ -8071,7 +8297,13 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                     if (brushObjectType.startsWith('anomaly_')) {
                         newObj.type = 'anomaly';
                         newObj.anomalyKey = brushObjectType.replace('anomaly_', '');
-                        newObj.anomalyType = ANOMALY_VISUAL_BY_KEY[newObj.anomalyKey] || 'void';
+                        const profile = (window.locationAnomalyCatalog || []).find(
+                            anomaly => anomaly.key === newObj.anomalyKey
+                        );
+                        newObj.anomalyName = profile?.name || newObj.anomalyKey;
+                        newObj.anomalyRank = profile?.rank || null;
+                        newObj.anomalyCategory = profile?.category || null;
+                        newObj.anomalyType = profile?.visual || ANOMALY_VISUAL_BY_KEY[newObj.anomalyKey] || 'void';
                     }
                     tile.objects.push(newObj);
                     needUpdate = true;
@@ -8442,17 +8674,16 @@ function setupCharacterDragging() {
     // contextmenu
     const onContextMenu = (e) => {
         e.preventDefault();
+        e.stopImmediatePropagation();
         if (window.locationEditMode) return;
         if (pendingCombatAction) {
             showNotification('Выберите цель левой кнопкой мыши или нажмите Esc для отмены', 'system');
             return;
         }
         const obj = getCharacterAtScreen(e.clientX, e.clientY);
-        if (obj) {
-            const charId = obj.userData.characterId;
-            if (charId) {
-                showCombatActionMenu(e.clientX, e.clientY, charId);
-            }
+        const charId = obj?.userData?.characterId || hoveredCharacterId;
+        if (charId) {
+            showCombatActionMenu(e.clientX, e.clientY, charId);
             return;
         }
         const locationObject = getLocationObjectAtScreen(e.clientX, e.clientY);
@@ -8484,6 +8715,14 @@ function setupCharacterDragging() {
             return;
         }
         if (e.key !== 'Escape') return;
+        if (pendingCharacterPlacement) {
+            e.preventDefault();
+            pendingCharacterPlacement = null;
+            pendingCharacterPlacementQueue = [];
+            canvas.style.cursor = 'default';
+            showNotification('Размещение персонажа отменено', 'system');
+            return;
+        }
         if (movementTypeMenu && movementTypeMenu.style.display !== 'none') {
             e.preventDefault();
             closeMovementTypeMenu();
@@ -8587,6 +8826,25 @@ export function setupLocationEditing() {
         if (e.button !== 0) return;
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
+        if (pendingCharacterPlacement) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const placement = pendingCharacterPlacement;
+            pendingCharacterPlacement = null;
+            canvas.style.cursor = 'default';
+            const { x, z } = hoveredTileCoords;
+            openOwnerSelectionModal(
+                placement.characterId,
+                x,
+                z,
+                placement.ownerId,
+                {
+                    onSuccess: activateNextCharacterPlacement,
+                    onCancel: cancelCharacterPlacement,
+                },
+            );
+            return;
+        }
         if (pendingObjectMoveId) {
             commitStructureMovePreview(e.clientX, e.clientY);
             return;
@@ -8805,7 +9063,7 @@ export function setupLocationEditing() {
 }
 
 // ========== Модальное окно выбора владельца ==========
-export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDataOwnerId) {
+export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDataOwnerId, callbacks = {}) {
     const lobbyParticipants = window.lobbyParticipants || [];
     const currentUserId = parseInt(localStorage.getItem('user_id'));
     const isGM = window.isGM;
@@ -8840,18 +9098,24 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
     modal.style.display = 'flex';
     modal.innerHTML = `
         <div class="modal-content">
-            <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
+            <span class="close owner-selection-close">&times;</span>
             <h3>Выберите владельца персонажа</h3>
             <select id="owner-select" class="form-control">
-                ${options.map(opt => `<option value="${opt.id}">${opt.name}</option>`).join('')}
+                ${options.map(opt => `<option value="${opt.id}" ${Number(opt.id) === Number(characterOwner) ? 'selected' : ''}>${opt.name}</option>`).join('')}
             </select>
             <div class="form-actions">
                 <button id="confirm-spawn" class="btn btn-primary">Поместить</button>
-                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+                <button class="btn btn-secondary owner-selection-cancel">Отмена</button>
             </div>
         </div>
     `;
     document.body.appendChild(modal);
+    const cancel = () => {
+        modal.remove();
+        callbacks.onCancel?.();
+    };
+    modal.querySelector('.owner-selection-close').onclick = cancel;
+    modal.querySelector('.owner-selection-cancel').onclick = cancel;
     document.getElementById('confirm-spawn').onclick = async () => {
         const assignToUserId = parseInt(document.getElementById('owner-select').value);
         modal.remove();
@@ -8874,10 +9138,51 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
                 throw new Error(err.error || 'Failed to spawn character');
             }
             showNotification('Персонаж появился в локации', 'success');
+            callbacks.onSuccess?.();
         } catch (err) {
             showNotification(err.message);
+            callbacks.onCancel?.();
         }
     };
+}
+
+function cancelCharacterPlacement() {
+    pendingCharacterPlacement = null;
+    pendingCharacterPlacementQueue = [];
+    if (renderer) renderer.domElement.style.cursor = 'default';
+}
+
+function activateNextCharacterPlacement() {
+    pendingCharacterPlacement = pendingCharacterPlacementQueue.shift() || null;
+    if (!pendingCharacterPlacement) {
+        if (renderer) renderer.domElement.style.cursor = 'default';
+        return;
+    }
+    renderer.domElement.style.cursor = 'crosshair';
+    const remaining = pendingCharacterPlacementQueue.length;
+    showNotification(
+        `Выберите клетку для ${pendingCharacterPlacement.name}${remaining ? ` · затем ещё ${remaining}` : ''}. Esc отменяет размещение.`,
+        'system',
+    );
+}
+
+export function beginCharacterPlacement(characterOrCharacters) {
+    const characters = Array.isArray(characterOrCharacters) ? characterOrCharacters : [characterOrCharacters];
+    if (!locationActive || !currentLocationData || !renderer) {
+        return false;
+    }
+    pendingCharacterPlacementQueue = characters.map(character => {
+        const characterId = Number(character?.id ?? character?.characterId);
+        if (!characterId) return null;
+        return {
+            characterId,
+            ownerId: Number(character?.owner_id ?? character?.ownerId) || null,
+            name: character?.name || `#${characterId}`,
+        };
+    }).filter(Boolean);
+    if (!pendingCharacterPlacementQueue.length) return false;
+    activateNextCharacterPlacement();
+    return true;
 }
 
 // ========== Управляющие функции для UI ==========

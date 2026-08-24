@@ -418,6 +418,180 @@ body {
   margin-bottom: 5px;
   cursor: pointer;
 }
+.character-list-heading {
+  margin-top: 4px;
+  color: var(--text-muted, #aaa58f);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.mutant-list-heading { margin-top: 10px; }
+.mutant-group {
+  border: 1px solid rgba(167, 115, 68, 0.35);
+  border-radius: 8px;
+  background: rgba(33, 25, 18, 0.55);
+  overflow: hidden;
+}
+.mutant-group > summary {
+  padding: 9px 10px;
+  cursor: pointer;
+  color: #d5bd91;
+  font-weight: 700;
+}
+.mutant-group-members { border-top: 1px solid rgba(167, 115, 68, 0.22); }
+.mutant-instance-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 9px;
+  align-items: center;
+  padding: 7px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  cursor: grab;
+  font-size: 0.78rem;
+}
+.mutant-instance-row:last-child { border-bottom: 0; }
+.mutant-instance-open {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-primary, #e5e0d2);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mutant-drag-hint { color: var(--text-muted, #8f8a79); font-size: 0.68rem; }
+.modal .modal-content.mutant-card-content {
+  position: relative;
+  width: min(980px, calc(100vw - 28px));
+  max-width: 980px;
+  max-height: min(88vh, 900px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+.mutant-card-close {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  float: right;
+  width: 32px;
+  height: 32px;
+  margin: -4px -4px 0 12px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(184, 154, 85, 0.38);
+  border-radius: 5px;
+  background: rgba(25, 28, 22, 0.96);
+  color: var(--text-primary, #e5e0d2);
+  font: 700 1.25rem/1 Georgia, serif;
+  cursor: pointer;
+  appearance: none;
+}
+.mutant-card-close:hover {
+  border-color: rgba(205, 174, 102, 0.72);
+  background: rgba(49, 51, 39, 0.98);
+}
+.mutant-card-close:focus-visible {
+  outline: 2px solid rgba(205, 174, 102, 0.72);
+  outline-offset: 2px;
+}
+.mutant-card-kicker {
+  color: #b99a66;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.mutant-card-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+.mutant-card-stats span {
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+  border: 1px solid rgba(184, 154, 85, 0.25);
+  background: rgba(0, 0, 0, 0.16);
+}
+.mutant-card-stats strong { color: var(--text-muted, #aaa58f); font-size: 0.7rem; }
+.mutant-health-zones {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 6px 0 16px;
+}
+.mutant-health-zone {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 9px 10px 12px;
+  overflow: hidden;
+  border: 1px solid rgba(184, 154, 85, 0.2);
+  background: rgba(0, 0, 0, 0.16);
+}
+.mutant-health-zone span { color: var(--text-muted, #aaa58f); }
+.mutant-health-zone i {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #66763d var(--health-percent), rgba(255,255,255,.07) var(--health-percent));
+}
+.mutant-health-zone.is-disabled { border-color: rgba(150, 54, 42, 0.55); }
+.mutant-health-zone.is-disabled i { background: #7f3028; }
+.mutant-health-effects {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 18px;
+  margin: 6px 0 16px;
+  padding: 0;
+  list-style: none;
+}
+.mutant-health-effects li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-left: 3px solid #8d4938;
+  background: rgba(104, 42, 31, 0.16);
+}
+.mutant-health-effects li span { color: var(--text-muted, #aaa58f); text-align: right; }
+.mutant-health-effects .is-empty { border-left-color: #556039; color: var(--text-muted, #aaa58f); }
+.mutant-card-attacks { display: grid; gap: 8px; margin-bottom: 14px; }
+.mutant-card-line {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.55fr) minmax(0, 2.45fr);
+  gap: 16px;
+  align-items: start;
+  padding: 8px 10px;
+  border: 1px solid rgba(184, 154, 85, 0.18);
+  background: rgba(0, 0, 0, 0.12);
+  line-height: 1.4;
+}
+.mutant-card-line span { min-width: 0; overflow-wrap: anywhere; }
+.mutant-card-traits {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 28px;
+  margin: 6px 0 16px;
+  padding-left: 22px;
+}
+.mutant-card-traits li { padding-right: 10px; line-height: 1.4; }
+@media (max-width: 760px) {
+  .mutant-card-stats { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
+  .mutant-health-zones { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+  .mutant-health-effects { grid-template-columns: 1fr; }
+  .mutant-card-line { grid-template-columns: 1fr; gap: 2px; }
+  .mutant-card-traits { grid-template-columns: 1fr; }
+}
 
 /* Меню лобби */
 .lobby-menu {

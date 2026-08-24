@@ -28,6 +28,150 @@ def test_mutant_innate_protection_and_attack_cost_are_used():
     assert CombatService._melee_action_cost({'action_points': 5}, 'Укус') == 5
 
 
+def test_mutant_traits_modify_additional_trauma_difficulty():
+    data = {
+        'is_mutant': True,
+        'mutant': {
+            'traits': ['Двужильность. Сложность для получения Доп. травмы +25'],
+        },
+    }
+
+    assert CombatService._mutant_trauma_difficulty_modifier(data) == 25
+
+
+def test_zhmerka_back_protection_is_exact_and_includes_mature_bonus():
+    data = {
+        'mutant': {
+            'physical_protection': 60,
+            'traits': [
+                'Уязвимая спина. Физ.защита при атаках со спины по торсу - 25%',
+            ],
+            'variant': {
+                'traits': [
+                    'Матерый. Физическая защита увеличена на 10%.',
+                ],
+            },
+        },
+        'equipment': {},
+    }
+
+    front, _ = CombatService._target_armor(data, 'chest')
+
+    assert front == 60
+    assert CombatService._mutant_back_torso_protection(data) == 35
+
+
+def test_improved_reflexes_only_discount_first_attack_of_round(monkeypatch):
+    monkeypatch.setattr(combat_module, 'flag_modified', lambda *args, **kwargs: None)
+    data = {
+        'health': {'combatMeta': {}},
+        'mutant': {
+            'traits': [],
+            'variant': {'traits': ['Улучшенные рефлексы. Первая атака дешевле на 1 ОД']},
+        },
+    }
+    loc_char = SimpleNamespace(character=SimpleNamespace(data=data))
+    profile = {'action_points': 1, 'raw_effect': '220 урона. 2 ОД'}
+
+    assert CombatService._mutant_first_attack_cost(loc_char, profile, 3) == 1
+    CombatService._mark_mutant_attack_used(loc_char, 3)
+    assert CombatService._mutant_first_attack_cost(loc_char, profile, 3) == 2
+    assert CombatService._mutant_first_attack_cost(loc_char, profile, 4) == 1
+
+
+def test_ugly_appearance_and_ambush_modify_matching_skills_only():
+    data = {
+        'skills': {
+            'physical': {'will': {'base': 10, 'bonus': 0}},
+            'other': {'stealth': {'base': 10, 'bonus': 0}},
+        },
+        'health': {'combatMeta': {
+            'uglyAppearanceWillPenalty': 4,
+            'mutantAmbushActive': True,
+        }},
+    }
+
+    assert CombatService._skill_modifier(data, 'skills.physical.will') == -4
+    assert CombatService._skill_modifier(data, 'skills.other.stealth') == 5
+
+
+def test_mutants_are_immune_to_stress_and_legacy_stress_is_removed(monkeypatch):
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            'is_mutant': True,
+            'health': {
+                'stress': 4,
+                'effects': [
+                    {'type': 'stress_effect', 'active': True},
+                    {'type': 'bleeding_external_light', 'active': True},
+                ],
+            },
+        }),
+    )
+
+    result = CombatService.apply_stress_trigger(target, 1, trigger='damage')
+
+    assert result['immune'] is True
+    assert result['after'] == 0
+    assert target.character.data['health']['stress'] == 0
+    assert [
+        effect['type'] for effect in target.character.data['health']['effects']
+    ] == ['bleeding_external_light']
+
+
+def test_battle_cry_deafness_threshold_is_90():
+    assert CombatService._deafness_level({
+        'health': {'effects': [{'type': 'deafness', 'value': 89, 'active': True}]},
+    }) == 89
+    assert CombatService._deafness_level({
+        'health': {'effects': [{'type': 'deafness', 'value': 90, 'active': True}]},
+    }) == 90
+    assert CombatService._deafness_level({
+        'health': {'effects': [{'type': 'deafness', 'value': 100, 'active': False}]},
+    }) == 0
+
+
+def test_mutant_natural_hit_and_bite_are_opportunity_attack_options():
+    mutant = SimpleNamespace(
+        drawn_weapon_index=None,
+        character=SimpleNamespace(data={
+            'basic': {'is_mutant': True},
+            'weapons': [
+                {
+                    'name': 'Удар',
+                    'category': 'melee_weapon',
+                    'attributes': {
+                        'natural_weapon': True,
+                        'allowed_attacks': ['Удар'],
+                    },
+                },
+                {
+                    'name': 'Укус',
+                    'category': 'melee_weapon',
+                    'attributes': {
+                        'natural_weapon': True,
+                        'allowed_attacks': ['Укус'],
+                    },
+                },
+                {
+                    'name': 'Боевое действие',
+                    'category': 'melee_weapon',
+                    'attributes': {
+                        'natural_weapon': True,
+                        'allowed_attacks': ['Боевой клич'],
+                    },
+                },
+            ],
+        }),
+    )
+
+    assert CombatService._opportunity_attack_options(mutant) == [
+        {'weapon_index': 0, 'attack_type': 'Удар', 'label': 'Удар'},
+        {'weapon_index': 1, 'attack_type': 'Укус', 'label': 'Укус'},
+    ]
+
+
 def test_aimed_shot_can_override_hit_zone():
     assert CombatService._random_hit_zone(1, "head") == "head"
 
@@ -1420,6 +1564,7 @@ def test_buckshot_deals_half_damage_to_mutant_on_large_non_penetration():
 
 
 def test_full_non_penetration_applies_behind_armor_damage(monkeypatch):
+    captured = {}
     monkeypatch.setattr(
         CombatService,
         "_ranged_damage_profile",
@@ -1432,16 +1577,20 @@ def test_full_non_penetration_applies_behind_armor_damage(monkeypatch):
         }, None),
     )
     monkeypatch.setattr(CombatService, "_target_armor", lambda data, zone: (100, []))
-    monkeypatch.setattr(
-        CombatService,
-        "_apply_attack_damage",
-        lambda *args, **kwargs: {
+    def capture_damage(*args, **kwargs):
+        captured.update(kwargs)
+        return {
             "current": 680,
             "zones": {"chest": {"current": 130}},
-        },
-    )
+        }
+    monkeypatch.setattr(CombatService, "_apply_attack_damage", capture_damage)
     attacker = SimpleNamespace(character=SimpleNamespace(data={"weapons": [{}]}))
-    target = SimpleNamespace(character=SimpleNamespace(data={}), hp_zones={})
+    target = SimpleNamespace(character=SimpleNamespace(data={
+        "is_mutant": True,
+        "mutant": {
+            "traits": ["Двужильность. Сложность для получения Доп. травмы +25"],
+        },
+    }), hp_zones={})
 
     result = CombatService._resolve_attack(
         target,
@@ -1459,6 +1608,7 @@ def test_full_non_penetration_applies_behind_armor_damage(monkeypatch):
     assert result["full_non_penetration"] is True
     assert result["behind_armor_multiplier"] == 0.20
     assert result["damage"] == 20
+    assert captured["trauma_difficulty_modifier"] == 25
 
 
 def test_127x55_full_penetration_checks_additional_trauma_twice(monkeypatch):

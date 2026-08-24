@@ -58,3 +58,25 @@ def test_mature_mutant_variant_changes_protection_zones_and_attacks():
     assert mature['health']['zones']['head']['max'] == base['health']['zones']['head']['max'] + 15
     assert mature['weapons'][0]['attributes']['damage'] == base['weapons'][0]['attributes']['damage'] + 10
     assert mature['weapons'][0]['attributes']['armor_piercing'] == base['weapons'][0]['attributes']['armor_piercing'] + 10
+
+
+def test_mature_zhmerka_keeps_base_attack_cost_in_catalog():
+    profile = mutant_profile('Жмурка')
+    base = mutant_character_data(profile)
+    mature = mutant_character_data(profile, 'Матерая Жмурка')
+
+    assert mature['weapons'][0]['attributes']['action_points'] == base['weapons'][0]['attributes']['action_points']
+
+
+def test_mutant_battle_cry_is_not_modified_as_a_damage_attack():
+    profile = mutant_profile('Жмурка')
+    mature = mutant_character_data(profile, 'Матерая Жмурка')
+    battle_cry = next(
+        weapon for weapon in mature['weapons']
+        if 'боевой клич' in weapon['name'].casefold()
+    )
+
+    assert battle_cry['attributes']['special_action'] == 'mutant_battle_cry'
+    assert battle_cry['attributes']['damage'] == 0
+    assert battle_cry['attributes']['armor_piercing'] == 0
+    assert battle_cry['attributes']['action_points'] == 2

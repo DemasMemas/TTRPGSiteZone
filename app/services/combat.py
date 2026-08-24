@@ -184,6 +184,9 @@ ACTION_CATALOG = [
     {'key': 'grapple_desperate_attack', 'label': 'Отчаянная атака', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
     {'key': 'grapple_live_shield', 'label': 'Живой щит', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
     {'key': 'recover_from_shock', 'label': 'Попытаться очнуться', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_jump', 'label': 'Прыжок', 'action_points': 4, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_ambush', 'label': 'Засада', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_battle_cry', 'label': 'Боевой клич', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
 ]
 
 
@@ -1118,6 +1121,13 @@ class CombatService:
         free_actions = combat_data.get('free_actions', data.get('free_actions', DEFAULT_FREE_ACTIONS))
         movement_penalty = CombatService._movement_penalty(loc_char)
         movement_gain = max(0, DEFAULT_CONVERSION_BASE - movement_penalty)
+        health = data.get('health') if isinstance(data.get('health'), dict) else {}
+        combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+        if (
+            combat_meta.get('mutantAccelerationActive')
+            and CombatService._mutant_has_trait(data, 'Возможность разгона')
+        ):
+            movement_gain += 2
 
         return {
             'initiative_bonus': CombatService._coerce_int(initiative_bonus, 0),
@@ -1473,6 +1483,17 @@ class CombatService:
         if include_psy and skill_path == 'skills.physical.will':
             psy_state = CombatService._coerce_int(health.get('psyState', health.get('psy_state')), 0)
             modifier -= 1 if psy_state >= 10 else 0
+            combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+            modifier -= max(
+                0,
+                CombatService._coerce_int(
+                    combat_meta.get('uglyAppearanceWillPenalty'), 0,
+                ),
+            )
+        if skill_path == 'skills.other.stealth':
+            combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+            if combat_meta.get('mutantAmbushActive'):
+                modifier += 5
         return modifier
 
     @staticmethod
@@ -1558,6 +1579,20 @@ class CombatService:
         return False
 
     @staticmethod
+    def _deafness_level(character_data):
+        health = character_data.get('health') if isinstance(character_data, dict) else {}
+        if not isinstance(health, dict):
+            return 0
+        values = [CombatService._coerce_float(health.get('deafness'), 0)]
+        values.extend(
+            CombatService._coerce_float(effect.get('value'), 0)
+            for effect in normalize_effect_list(health.get('effects') or [])
+            if effect.get('active', True)
+            and str(effect.get('type') or '').casefold() == 'deafness'
+        )
+        return max(values, default=0)
+
+    @staticmethod
     def _has_roll_advantage(character_data, skill_path, consume=False):
         health = character_data.get('health') if isinstance(character_data, dict) else {}
         effects = normalize_effect_list((health or {}).get('effects') or [])
@@ -1618,6 +1653,26 @@ class CombatService:
         """Raise stress and resolve its manifestation table when the rules require it."""
         data = loc_char.character.data if loc_char and loc_char.character else {}
         health = data.setdefault('health', {})
+        if CombatService._is_mutant_character(data):
+            # Mutants do not use the human stress system. Clean up stress that
+            # may have been added to an older mutant before this rule existed.
+            health['stress'] = 0
+            health['effects'] = [
+                effect for effect in normalize_effect_list(health.get('effects') or [])
+                if effect.get('type') not in {
+                    'stress', 'stress_effect', 'stress_stupor', 'phobia',
+                }
+            ]
+            sync_health_derived_statuses(health)
+            loc_char.character.data = data
+            flag_modified(loc_char.character, 'data')
+            return {
+                'before': 0,
+                'after': 0,
+                'trigger': trigger,
+                'blocked': True,
+                'immune': True,
+            }
         meta = health.setdefault('combatMeta', {})
         before = max(0, CombatService._coerce_int(health.get('stress'), 0))
         amount = CombatService._coerce_int(amount, 0)
@@ -3024,6 +3079,182 @@ class CombatService:
             if match:
                 multiplier = max(multiplier, int(match.group(1)))
         return {'immune': False, 'threshold_multiplier': multiplier}
+
+    @staticmethod
+    def _mutant_trauma_difficulty_modifier(character_data):
+        modifier = 0
+        for trait in CombatService._mutant_traits(character_data):
+            match = re.search(
+                r'Сложность\s+для\s+получения\s+Доп\.?\s*травмы\s*([+-]?\d+)',
+                trait,
+                re.IGNORECASE,
+            )
+            if match:
+                modifier += int(match.group(1))
+        return modifier
+
+    @staticmethod
+    def _mutant_has_trait(character_data, fragment):
+        needle = str(fragment or '').strip().casefold()
+        return bool(needle) and any(
+            needle in trait.casefold()
+            for trait in CombatService._mutant_traits(character_data)
+        )
+
+    @staticmethod
+    def _mutant_back_torso_protection(character_data):
+        """Return the exact innate torso protection used for attacks from behind."""
+        base = None
+        variant_bonus = 0
+        mutant = character_data.get('mutant') if isinstance(character_data, dict) else {}
+        mutant = mutant if isinstance(mutant, dict) else {}
+        for trait in mutant.get('traits') or []:
+            match = re.search(
+                r'защит\w*\s+при\s+атаках\s+со\s+спины\s+по\s+торсу\s*-\s*(\d+)\s*%',
+                str(trait), re.IGNORECASE,
+            )
+            if match:
+                base = int(match.group(1))
+                break
+        variant = mutant.get('variant') if isinstance(mutant.get('variant'), dict) else {}
+        for trait in variant.get('traits') or []:
+            match = re.search(
+                r'физическ\w*\s+защит\w*\s+увеличен\w*\s+на\s*(\d+)\s*%',
+                str(trait), re.IGNORECASE,
+            )
+            if match:
+                variant_bonus += int(match.group(1))
+        return None if base is None else min(100, base + variant_bonus)
+
+    @staticmethod
+    def _mutant_attack_base_cost(profile):
+        profile = profile if isinstance(profile, dict) else {}
+        raw_effect = str(profile.get('raw_effect') or '')
+        match = re.search(r'(\d+)\s*ОД', raw_effect, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return max(0, CombatService._coerce_int(profile.get('action_points'), 0))
+
+    @staticmethod
+    def _mutant_first_attack_cost(loc_char, profile, round_number):
+        data = (
+            loc_char.character.data
+            if loc_char and loc_char.character and isinstance(loc_char.character.data, dict)
+            else {}
+        )
+        base_cost = CombatService._mutant_attack_base_cost(profile)
+        if not CombatService._mutant_has_trait(data, 'Улучшенные рефлексы'):
+            return base_cost
+        health = data.get('health') if isinstance(data.get('health'), dict) else {}
+        meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+        if CombatService._coerce_int(meta.get('mutantAttackUsedRound'), 0) == round_number:
+            return base_cost
+        return max(0, base_cost - 1)
+
+    @staticmethod
+    def _mark_mutant_attack_used(loc_char, round_number):
+        if not loc_char or not loc_char.character or not isinstance(loc_char.character.data, dict):
+            return
+        data = loc_char.character.data
+        if not CombatService._mutant_has_trait(data, 'Улучшенные рефлексы'):
+            return
+        data.setdefault('health', {}).setdefault('combatMeta', {})[
+            'mutantAttackUsedRound'
+        ] = round_number
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+
+    @staticmethod
+    def _is_zhmerka(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        basic = data.get('basic') if isinstance(data.get('basic'), dict) else {}
+        mutant = data.get('mutant') if isinstance(data.get('mutant'), dict) else {}
+        labels = (
+            basic.get('mutant_type'), basic.get('mutant_variant'),
+            mutant.get('profile'), (mutant.get('variant') or {}).get('name')
+            if isinstance(mutant.get('variant'), dict) else None,
+        )
+        return any('жмурк' in str(value or '').casefold() for value in labels)
+
+    @staticmethod
+    def _can_see_location_character(observer, target, max_distance=25):
+        if not observer or not target or observer.id == target.id:
+            return False
+        distance = max(
+            abs(observer.pos_x - target.pos_x),
+            abs(observer.pos_y - target.pos_y),
+        )
+        if distance > max_distance:
+            return False
+        if not CombatService._is_in_facing_arc(observer, target.pos_x, target.pos_y):
+            return False
+        return CombatService._cover_analysis(
+            observer.location_id, observer, target,
+        ).get('grade') != 'full'
+
+    @staticmethod
+    def _refresh_ugly_appearance_penalties(location_id):
+        characters = CombatService._unique_location_characters(
+            LocationCharacter.query.filter_by(location_id=location_id).all()
+        )
+        zhmerkas = []
+        for loc_char in characters:
+            data = (
+                loc_char.character.data
+                if loc_char.character and isinstance(loc_char.character.data, dict)
+                else {}
+            )
+            if (
+                CombatService._is_zhmerka(data)
+                and CombatService._mutant_has_trait(data, 'Уродливый вид')
+            ):
+                zhmerkas.append(loc_char)
+        for loc_char in characters:
+            if not loc_char.character or not isinstance(loc_char.character.data, dict):
+                continue
+            data = loc_char.character.data
+            penalty = 0
+            if not CombatService._is_zhmerka(data) and any(
+                CombatService._can_see_location_character(loc_char, zhmerka)
+                for zhmerka in zhmerkas
+            ):
+                penalty = 4
+            meta = data.setdefault('health', {}).setdefault('combatMeta', {})
+            if CombatService._coerce_int(meta.get('uglyAppearanceWillPenalty'), 0) == penalty:
+                continue
+            if penalty:
+                meta['uglyAppearanceWillPenalty'] = penalty
+            else:
+                meta.pop('uglyAppearanceWillPenalty', None)
+            loc_char.character.data = data
+            flag_modified(loc_char.character, 'data')
+
+    @staticmethod
+    def _tile_has_bush(location, tile_x, tile_y):
+        def is_bush(value):
+            if not isinstance(value, dict):
+                return False
+            properties = value.get('properties') if isinstance(value.get('properties'), dict) else {}
+            labels = (
+                value.get('type'), value.get('object_type'), value.get('name'),
+                properties.get('type'), properties.get('name'), properties.get('model'),
+            )
+            return any(
+                token in str(label or '').casefold()
+                for label in labels for token in ('куст', 'bush', 'shrub')
+            )
+
+        tiles = location.tiles_data if isinstance(location.tiles_data, list) else []
+        if 0 <= tile_y < len(tiles) and isinstance(tiles[tile_y], list) and 0 <= tile_x < len(tiles[tile_y]):
+            tile = tiles[tile_y][tile_x]
+            if isinstance(tile, dict) and any(is_bush(obj) for obj in tile.get('objects') or []):
+                return True
+        return any(
+            is_bush({'type': obj.type, 'name': obj.name, 'properties': obj.properties or {}})
+            for obj in LocationObject.query.filter_by(
+                location_id=location.id, tile_x=tile_x, tile_y=tile_y,
+            ).all()
+        )
 
     @staticmethod
     def _behind_armor_damage_multiplier(
@@ -5478,14 +5709,22 @@ class CombatService:
         }
 
     @staticmethod
-    def _resolve_block_counterattack(blocker, original_attacker, round_number):
+    def _resolve_block_counterattack(
+        blocker, original_attacker, round_number, *, weapon_index_override=None,
+        attack_type_override=None,
+    ):
         blocker_data = (
             blocker.character.data
             if blocker.character and isinstance(blocker.character.data, dict)
             else {}
         )
         weapons = blocker_data.get('weapons') if isinstance(blocker_data.get('weapons'), list) else []
-        weapon_index = CombatService._coerce_int(getattr(blocker, 'drawn_weapon_index', -1), -1)
+        weapon_index = CombatService._coerce_int(
+            weapon_index_override
+            if weapon_index_override is not None
+            else getattr(blocker, 'drawn_weapon_index', -1),
+            -1,
+        )
         attack_type = 'unarmed'
         if 0 <= weapon_index < len(weapons):
             weapon = weapons[weapon_index] or {}
@@ -5496,7 +5735,7 @@ class CombatService:
             weapon_category = template.category if template else weapon.get('category')
             if weapon_category == 'melee_weapon':
                 allowed = CombatService._template_attributes(weapon).get('allowed_attacks') or []
-                attack_type = allowed[0] if allowed else 'slashing'
+                attack_type = attack_type_override or (allowed[0] if allowed else 'slashing')
             elif weapon_category == 'weapon':
                 attack_type = 'firearm_butt'
             else:
@@ -5542,8 +5781,251 @@ class CombatService:
             melee=True,
             attack_type=attack_type,
         )
+        result['attack_type'] = attack_type
         result['block_counterattack'] = True
         return result
+
+    @staticmethod
+    def _drawn_melee_weapon(loc_char):
+        data = (
+            loc_char.character.data
+            if loc_char.character and isinstance(loc_char.character.data, dict)
+            else {}
+        )
+        weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+        weapon_index = CombatService._coerce_int(loc_char.drawn_weapon_index, -1)
+        if not 0 <= weapon_index < len(weapons) or not isinstance(weapons[weapon_index], dict):
+            return None
+        weapon = weapons[weapon_index]
+        template = CombatService._weapon_template(weapon)
+        category = str(
+            (template.category if template else None) or weapon.get('category') or ''
+        ).strip().lower()
+        return (weapon_index, weapon) if category == 'melee_weapon' else None
+
+    @staticmethod
+    def _opportunity_attack_options(loc_char):
+        data = (
+            loc_char.character.data
+            if loc_char.character and isinstance(loc_char.character.data, dict)
+            else {}
+        )
+        weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+        drawn = CombatService._drawn_melee_weapon(loc_char)
+        if drawn:
+            weapon_index, weapon = drawn
+            allowed = CombatService._template_attributes(weapon).get('allowed_attacks') or []
+            attack_type = str(allowed[0] if allowed else 'slashing')
+            return [{
+                'weapon_index': weapon_index,
+                'attack_type': attack_type,
+                'label': attack_type,
+            }]
+        if not CombatService._is_mutant_character(data):
+            return []
+        options = []
+        for weapon_index, weapon in enumerate(weapons):
+            if not isinstance(weapon, dict):
+                continue
+            attributes = CombatService._template_attributes(weapon)
+            if not attributes.get('natural_weapon'):
+                continue
+            allowed = attributes.get('allowed_attacks') or []
+            attack_type = str(allowed[0] if allowed else weapon.get('name') or '').strip()
+            if attack_type.casefold() not in {'удар', 'укус'}:
+                continue
+            options.append({
+                'weapon_index': weapon_index,
+                'attack_type': attack_type,
+                'label': attack_type,
+            })
+        return options
+
+    @staticmethod
+    def _position_is_behind(defender, x, y):
+        facing_x = CombatService._coerce_int(defender.facing_x, 0)
+        facing_y = CombatService._coerce_int(defender.facing_y, 1)
+        relative_x = CombatService._coerce_int(x, 0) - defender.pos_x
+        relative_y = CombatService._coerce_int(y, 0) - defender.pos_y
+        return facing_x * relative_x + facing_y * relative_y < 0
+
+    @staticmethod
+    def _queue_opportunity_attacks(location_id, mover, path_tiles, state):
+        if not state or state.status != 'active' or len(path_tiles or []) < 2:
+            return
+        if mover.grapple_target_id or mover.grappled_by_id:
+            return
+        current_round = max(1, state.round_number or 1)
+        for defender in CombatService._unique_location_characters(
+            LocationCharacter.query.filter_by(location_id=location_id).all()
+        ):
+            if (
+                defender.id == mover.id
+                or defender.grapple_target_id
+                or defender.grappled_by_id
+                or not defender.character
+                or not CombatService._are_opponents(defender, mover)
+                or CombatService._location_character_condition(defender)['state']
+                in {'dead', 'critical', 'unconscious', 'pain_shock'}
+                or not CombatService._opportunity_attack_options(defender)
+            ):
+                continue
+            defender_data = (
+                defender.character.data
+                if isinstance(defender.character.data, dict) else {}
+            )
+            meta = defender_data.setdefault('health', {}).setdefault('combatMeta', {})
+            if CombatService._coerce_int(meta.get('opportunityAttackUsedRound'), 0) == current_round:
+                continue
+            triggered = False
+            reason = None
+            trigger_position = None
+            for before, after in zip(path_tiles, path_tiles[1:]):
+                before_distance = max(abs(before[0] - defender.pos_x), abs(before[1] - defender.pos_y))
+                after_distance = max(abs(after[0] - defender.pos_x), abs(after[1] - defender.pos_y))
+                if before_distance == 1 and after_distance > 1:
+                    triggered = True
+                    reason = 'opponent_left_reach'
+                    trigger_position = before
+                    break
+                if (
+                    after_distance == 1
+                    and not CombatService._position_is_behind(defender, before[0], before[1])
+                    and CombatService._position_is_behind(defender, after[0], after[1])
+                ):
+                    triggered = True
+                    reason = 'opponent_moved_behind'
+                    trigger_position = after
+                    break
+            if not triggered:
+                continue
+            pending = meta.setdefault('opportunityAttacks', [])
+            if any(
+                CombatService._coerce_int(item.get('target_location_character_id'), 0) == mover.id
+                and CombatService._coerce_int(item.get('round'), 0) == current_round
+                for item in pending if isinstance(item, dict)
+            ):
+                continue
+            pending.append({
+                'id': f'opportunity-{defender.id}-{mover.id}-{current_round}',
+                'round': current_round,
+                'target_location_character_id': mover.id,
+                'target_character_id': mover.character_id,
+                'target_name': mover.character.name if mover.character else 'цель',
+                'reason': reason,
+                'trigger_x': trigger_position[0],
+                'trigger_y': trigger_position[1],
+                'attack_options': CombatService._opportunity_attack_options(defender),
+            })
+            defender.character.data = defender_data
+            flag_modified(defender.character, 'data')
+
+    @staticmethod
+    def resolve_opportunity_attack(
+        location_id, user_id, location_character_id, opportunity_id, accept,
+        weapon_index=None, attack_type=None,
+    ):
+        location = CombatService._get_location(location_id)
+        is_gm = CombatService._ensure_access(location, user_id)
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not state or state.status != 'active':
+            raise ValidationError('Combat is not active')
+        defender = LocationCharacter.query.filter_by(
+            id=location_character_id, location_id=location_id,
+        ).first()
+        if not defender:
+            raise NotFoundError('Character not found')
+        if not CombatService._can_end_turn_for_character(defender, user_id, is_gm=is_gm):
+            raise PermissionDenied('You do not control this character')
+        defender_data = (
+            defender.character.data
+            if defender.character and isinstance(defender.character.data, dict)
+            else {}
+        )
+        meta = defender_data.setdefault('health', {}).setdefault('combatMeta', {})
+        pending = meta.get('opportunityAttacks')
+        if not isinstance(pending, list):
+            raise ValidationError('Opportunity attack is no longer available')
+        opportunity = next(
+            (item for item in pending if isinstance(item, dict) and item.get('id') == opportunity_id),
+            None,
+        )
+        if not opportunity:
+            raise ValidationError('Opportunity attack is no longer available')
+        pending.remove(opportunity)
+        attack = None
+        target = None
+        if accept:
+            current_round = max(1, state.round_number or 1)
+            if CombatService._coerce_int(opportunity.get('round'), 0) != current_round:
+                raise ValidationError('Opportunity attack has expired')
+            if CombatService._coerce_int(meta.get('opportunityAttackUsedRound'), 0) == current_round:
+                raise ValidationError('Opportunity attack has already been used this round')
+            options = CombatService._opportunity_attack_options(defender)
+            selected = next((
+                option for option in options
+                if (
+                    weapon_index is not None
+                    and CombatService._coerce_int(option.get('weapon_index'), -1)
+                    == CombatService._coerce_int(weapon_index, -2)
+                    and str(option.get('attack_type') or '') == str(attack_type or '')
+                )
+            ), None)
+            if selected is None and weapon_index is None and options:
+                selected = options[0]
+            if selected is None:
+                raise ValidationError('Выбранная атака ближнего боя недоступна')
+            target = db.session.get(
+                LocationCharacter,
+                CombatService._coerce_int(opportunity.get('target_location_character_id'), 0),
+            )
+            if not target or target.location_id != location_id:
+                raise ValidationError('The departing target is no longer available')
+            CombatService.ensure_character_can_act(defender)
+            original_position = (target.pos_x, target.pos_y)
+            target.pos_x = CombatService._coerce_int(
+                opportunity.get('trigger_x'), target.pos_x,
+            )
+            target.pos_y = CombatService._coerce_int(
+                opportunity.get('trigger_y'), target.pos_y,
+            )
+            try:
+                result = CombatService._resolve_block_counterattack(
+                    defender, target, current_round,
+                    weapon_index_override=selected['weapon_index'],
+                    attack_type_override=selected['attack_type'],
+                )
+            finally:
+                target.pos_x, target.pos_y = original_position
+            result.pop('block_counterattack', None)
+            result['opportunity_attack'] = True
+            attack = {
+                'melee': True,
+                'fire_mode': 'opportunity',
+                'attack_type': 'Атака по возможности',
+                'results': [result],
+                'damage_total': CombatService._coerce_float(result.get('damage'), 0),
+            }
+            meta['opportunityAttackUsedRound'] = current_round
+            meta['opportunityAttacks'] = []
+        defender.character.data = defender_data
+        flag_modified(defender.character, 'data')
+        db.session.commit()
+        return {
+            'character': CombatService._serialize_character(
+                defender, current_turn_id=state.current_location_character_id,
+                combat_state=state,
+            ),
+            'target': (
+                CombatService._serialize_character(
+                    target, current_turn_id=state.current_location_character_id,
+                    combat_state=state,
+                ) if target else None
+            ),
+            'state': CombatService._serialize_state(location, state),
+            'attack': attack,
+            'accepted': bool(accept),
+        }
 
     @staticmethod
     def _resolve_attack(
@@ -5633,6 +6115,7 @@ class CombatService:
             result = {
                 'roll': roll,
                 'rolls': rolls,
+                'total': None if roll is None else roll + stress_check_modifier,
                 'difficulty': difficulty,
                 'hit': hit,
                 'mode': 'melee',
@@ -5729,6 +6212,7 @@ class CombatService:
             result = {
                 'roll': roll,
                 'rolls': rolls,
+                'total': None if automatic_hit else roll + stress_check_modifier,
                 'difficulty': difficulty,
                 'hit': hit,
                 'mode': attack_details['fire_mode'],
@@ -5916,6 +6400,16 @@ class CombatService:
             armor_target_data = dict(target_data)
             armor_target_data['_headProtectionZone'] = head_impact.get('armor_zone')
         armor, armor_layers = CombatService._target_armor(armor_target_data, zone)
+        back_protection = (
+            CombatService._mutant_back_torso_protection(armor_target_data)
+            if zone in {'chest', 'abdomen'}
+            else None
+        )
+        if back_protection is not None and CombatService._is_behind(attacker, target):
+            armor = back_protection
+            for layer in armor_layers:
+                if layer.get('slot') == 'mutant':
+                    layer['protection'] = back_protection
         armor_damage = []
         artifact_armor_reduction = artifact_passive_profile(target_data)[
             'armor_damage_reduction'
@@ -5989,10 +6483,12 @@ class CombatService:
             else CombatService._roll_firearm_bleeding(profile, armor)
         )
         trauma_checks = 1
-        trauma_difficulty_modifier = 0
+        trauma_difficulty_modifier = CombatService._mutant_trauma_difficulty_modifier(
+            target_data,
+        )
         if not melee and CombatService._is_buckshot_profile(profile):
             trauma_checks = math.floor(final_damage / 50)
-            trauma_difficulty_modifier = -20
+            trauma_difficulty_modifier -= 20
         elif (
             not melee
             and CombatService._caliber_key(profile.get('caliber')) == '127x55'
@@ -7876,6 +8372,21 @@ class CombatService:
 
     @staticmethod
     def _prepare_character_for_turn(loc_char):
+        if getattr(loc_char, 'character', None) and isinstance(loc_char.character.data, dict):
+            turn_data = loc_char.character.data
+            if CombatService._mutant_has_trait(turn_data, 'Возможность разгона'):
+                turn_meta = turn_data.setdefault('health', {}).setdefault('combatMeta', {})
+                previous = turn_meta.get('mutantTurnActivity')
+                if isinstance(previous, dict) and previous.get('moved') and not previous.get('other'):
+                    turn_meta['mutantAccelerationActive'] = True
+                state = LocationCombatState.query.filter_by(location_id=loc_char.location_id).first()
+                turn_meta['mutantTurnActivity'] = {
+                    'round': max(1, getattr(state, 'round_number', 1) or 1),
+                    'moved': False,
+                    'other': False,
+                }
+                loc_char.character.data = turn_data
+                flag_modified(loc_char.character, 'data')
         profile = CombatService._combat_profile(loc_char)
         condition = CombatService._location_character_condition(loc_char)
         loc_char.initiative_bonus = profile['initiative_bonus']
@@ -7973,6 +8484,18 @@ class CombatService:
             if isinstance(health.get('combatMeta'), dict)
             else None
         )
+        opportunity_attacks = (
+            health.get('combatMeta', {}).get('opportunityAttacks')
+            if isinstance(health.get('combatMeta'), dict)
+            else None
+        )
+        if isinstance(opportunity_attacks, list) and combat_state is not None:
+            opportunity_attacks = [
+                item for item in opportunity_attacks
+                if isinstance(item, dict)
+                and CombatService._coerce_int(item.get('round'), 0)
+                == max(1, combat_state.round_number or 1)
+            ]
         help_advantage = (
             health.get('combatMeta', {}).get('helpAdvantage')
             if isinstance(health.get('combatMeta'), dict)
@@ -7987,8 +8510,15 @@ class CombatService:
             must_do_retry = deepcopy(must_do_retry)
             must_do_retry.pop('attack_details', None)
             must_do_retry.pop('medical_retry', None)
+        is_mutant = CombatService._is_mutant_character(data)
+        if is_mutant:
+            must_do_retry = None
         must_do_usage = None
-        if combat_state is not None and combat_state.status == 'active':
+        if (
+            not is_mutant
+            and combat_state is not None
+            and combat_state.status == 'active'
+        ):
             usage_profile = CombatService._must_do_usage_profile(
                 data, combat_state, initialize=False,
             )
@@ -8006,6 +8536,7 @@ class CombatService:
             'location_character_id': loc_char.id,
             'character_id': character.id if character else None,
             'name': character.name if character else None,
+            'is_mutant': is_mutant,
             'owner_id': character.owner_id if character else None,
             'owner_username': character.owner.username if character and character.owner else None,
             'controlled_by': loc_char.controlled_by,
@@ -8030,6 +8561,9 @@ class CombatService:
                 else None
             ),
             'reaction_reserve': reaction_reserve if isinstance(reaction_reserve, dict) else None,
+            'opportunity_attacks': (
+                deepcopy(opportunity_attacks) if isinstance(opportunity_attacks, list) else []
+            ),
             'help_advantage': help_advantage if isinstance(help_advantage, dict) else None,
             'must_do_retry': must_do_retry if isinstance(must_do_retry, dict) else None,
             'must_do_usage': must_do_usage,
@@ -8151,7 +8685,7 @@ class CombatService:
         ):
             raise PermissionDenied("It is not this character's turn")
         if not CombatService._is_adjacent(actor, target):
-            raise ValidationError("The target must be in an adjacent tile")
+            raise ValidationError("Цель должна находиться на соседней клетке")
         condition = CombatService._location_character_condition(target)
         if condition['state'] == 'active':
             raise ValidationError("Only an incapacitated character can be searched or examined")
@@ -9196,6 +9730,8 @@ class CombatService:
         ).first()
         if not character:
             raise NotFoundError("Character not found")
+
+        CombatService._refresh_ugly_appearance_penalties(location_id)
         if state.current_location_character_id != character.id:
             raise PermissionDenied("A reaction can be reserved only during your turn")
         if not CombatService._can_end_turn_for_character(character, user_id, is_gm=is_gm):
@@ -9622,15 +10158,45 @@ class CombatService:
         is_gm = CombatService._ensure_access(location, user_id)
         CombatService._release_invalid_grapples(location_id)
         state = LocationCombatState.query.filter_by(location_id=location_id).first()
-        if not state or state.status != 'active':
-            raise ValidationError("Combat is not active")
-
         character = LocationCharacter.query.filter_by(
             id=location_character_id,
             location_id=location_id,
         ).first()
         if not character:
             raise NotFoundError("Character not found")
+
+        if (not state or state.status != 'active') and action_key == 'mutant_ambush':
+            if not CombatService._can_end_turn_for_character(
+                character, user_id, is_gm=is_gm,
+            ):
+                raise PermissionDenied('Вы не управляете этой Жмуркой')
+            data = (
+                character.character.data
+                if character.character and isinstance(character.character.data, dict)
+                else {}
+            )
+            CombatService.ensure_character_can_act(character, action_key)
+            if not CombatService._mutant_has_trait(data, 'Засада'):
+                raise ValidationError('Этому мутанту недоступна засада')
+            if not CombatService._tile_has_bush(location, character.pos_x, character.pos_y):
+                raise ValidationError('Для засады Жмурка должна находиться в кусте')
+            data.setdefault('health', {}).setdefault('combatMeta', {})[
+                'mutantAmbushActive'
+            ] = True
+            character.character.data = data
+            flag_modified(character.character, 'data')
+            state = state or CombatService._get_or_create_state(location_id)
+            db.session.commit()
+            return {
+                'character': CombatService._serialize_character(character),
+                'state': CombatService._serialize_state(location, state),
+                'action': action_key,
+                'mutant_action': {'kind': 'ambush', 'stealth_bonus': 5},
+            }
+        if not state or state.status != 'active':
+            raise ValidationError("Combat is not active")
+
+        CombatService._refresh_ugly_appearance_penalties(location_id)
 
         data = (
             character.character.data
@@ -9682,10 +10248,52 @@ class CombatService:
         equipment_action_details = None
         gunpoint_details = None
         anomaly_details = None
+        mutant_action_details = None
         special_action_cost = None
         resolved_hits = []
         single_fire = False
         current_round = max(1, state.round_number or 1)
+        if action_key == 'mutant_jump':
+            if not CombatService._mutant_has_trait(data, 'Прыгун'):
+                raise ValidationError('Этому мутанту недоступен прыжок')
+            target_x = CombatService._coerce_int(target_x, -1)
+            target_y = CombatService._coerce_int(target_y, -1)
+            if not (0 <= target_x < location.grid_width and 0 <= target_y < location.grid_height):
+                raise ValidationError('Выберите клетку на карте')
+            distance = math.hypot(target_x - character.pos_x, target_y - character.pos_y)
+            if distance <= 0 or distance > 15:
+                raise ValidationError('Дальность прыжка ограничена 15 метрами')
+            blocked_tiles, climb_tiles = CombatService._build_movement_map(
+                location, character.character_id,
+            )
+            if (target_x, target_y) in blocked_tiles:
+                raise ValidationError('Клетка приземления занята')
+            special_action_cost = 4
+            mutant_action_details = {
+                'kind': 'jump', 'target_x': target_x, 'target_y': target_y,
+                'distance': round(distance, 2), 'action_points': 4,
+            }
+        elif action_key == 'mutant_ambush':
+            if not CombatService._mutant_has_trait(data, 'Засада'):
+                raise ValidationError('Этому мутанту недоступна засада')
+            if not CombatService._tile_has_bush(location, character.pos_x, character.pos_y):
+                raise ValidationError('Для засады Жмурка должна находиться в кусте')
+            special_action_cost = 0
+            mutant_action_details = {'kind': 'ambush', 'stealth_bonus': 5}
+        elif action_key == 'mutant_battle_cry':
+            if not any(
+                CombatService._template_attributes(weapon).get('special_action') == 'mutant_battle_cry'
+                or 'клич' in str(weapon.get('name') or '').casefold()
+                for weapon in (data.get('weapons') or []) if isinstance(weapon, dict)
+            ):
+                raise ValidationError('Этому мутанту недоступен боевой клич')
+            special_action_cost = CombatService._mutant_first_attack_cost(
+                character, {'action_points': 2, 'raw_effect': '2 ОД'}, current_round,
+            )
+            mutant_action_details = {
+                'kind': 'battle_cry', 'difficulty': 15,
+                'action_points': special_action_cost, 'targets': [],
+            }
         if action_key == 'escape_anomaly':
             _, _, _, active_anomaly = CombatService._active_anomaly(character)
             if not active_anomaly:
@@ -9751,7 +10359,7 @@ class CombatService:
             if not target or target.id == character.id:
                 raise ValidationError('Choose another character')
             if not CombatService._is_adjacent(character, target):
-                raise ValidationError('The target must be on an adjacent tile')
+                raise ValidationError('Цель должна находиться на соседней клетке')
             if target_zone not in HIT_ZONES:
                 raise ValidationError('Choose a body part')
             _, _, gunpoint_weapon_index, gunpoint_weapon = CombatService._gunpoint_weapon(
@@ -10080,6 +10688,9 @@ class CombatService:
                 'check': None,
             }
         elif action_key == 'must_do_it':
+            if CombatService._is_mutant_character(data):
+                combat_meta.pop('mustDoRetry', None)
+                raise ValidationError("Мутанты не могут использовать «Должен это сделать»")
             retry = combat_meta.get('mustDoRetry')
             if not isinstance(retry, dict):
                 action_name = str(narrative_action_name or '').strip()
@@ -10132,7 +10743,7 @@ class CombatService:
                 raise ValidationError("Choose another character")
             CombatService.ensure_character_can_act(target)
             if not CombatService._is_adjacent(character, target):
-                raise ValidationError("The ally must be on an adjacent tile")
+                raise ValidationError("Союзник должен находиться на соседней клетке")
             target_data = target.character.data if isinstance(target.character.data, dict) else {}
             target_health = target_data.setdefault('health', {})
             target_meta = target_health.setdefault('combatMeta', {})
@@ -10247,7 +10858,7 @@ class CombatService:
             if not target or target.id == character.id:
                 raise ValidationError("Target character not found")
             if not CombatService._is_adjacent(character, target):
-                raise ValidationError("Melee target must be in an adjacent tile")
+                raise ValidationError("Цель атаки ближнего боя должна находиться на соседней клетке")
             character.facing_x = 0 if target.pos_x == character.pos_x else (1 if target.pos_x > character.pos_x else -1)
             character.facing_y = 0 if target.pos_y == character.pos_y else (1 if target.pos_y > character.pos_y else -1)
             CombatService._sync_grapple_facing(character)
@@ -10373,6 +10984,13 @@ class CombatService:
                 melee_action_details['attacker_fell'] = True
 
         if action_key == 'grapple':
+            target_data = (
+                target.character.data
+                if target.character and isinstance(target.character.data, dict)
+                else {}
+            )
+            if CombatService._mutant_has_trait(target_data, 'Не может быть целью Захвата'):
+                raise ValidationError('Жмурка не может быть целью захвата')
             if not CombatService._has_usable_free_hand(character):
                 raise ValidationError("At least one free hand is required for a grapple")
             if character.grapple_target_id or character.grappled_by_id:
@@ -10948,7 +11566,7 @@ class CombatService:
                         raise ValidationError("Only a firearm can use a butt attack")
             distance = max(abs(character.pos_x - target.pos_x), abs(character.pos_y - target.pos_y))
             if not circular_attack and distance != 1:
-                raise ValidationError("Melee target must be in an adjacent tile")
+                raise ValidationError("Цель атаки ближнего боя должна находиться на соседней клетке")
             character.facing_x = 0 if target.pos_x == character.pos_x else (1 if target.pos_x > character.pos_x else -1)
             character.facing_y = 0 if target.pos_y == character.pos_y else (1 if target.pos_y > character.pos_y else -1)
             profile = (
@@ -10999,6 +11617,19 @@ class CombatService:
             ):
                 raise ValidationError("Automatic melee hit is only available against a target from behind")
             melee_cost = CombatService._melee_action_cost(profile, attack_type_key)
+            if CombatService._template_attributes(weapon).get('natural_weapon'):
+                cost_profile = {
+                    **profile,
+                    'action_points': CombatService._template_attributes(weapon).get(
+                        'action_points', profile.get('action_points'),
+                    ),
+                    'raw_effect': CombatService._template_attributes(weapon).get(
+                        'raw_effect', '',
+                    ),
+                }
+                melee_cost = CombatService._mutant_first_attack_cost(
+                    character, cost_profile, current_round,
+                )
             if paid_automatic_back_attack:
                 melee_cost += 2
             attack_details = {
@@ -11499,6 +12130,67 @@ class CombatService:
                 }
             if not resumed_paid_action:
                 character.action_points_current -= action_point_cost
+            if CombatService._mutant_has_trait(data, 'Возможность разгона'):
+                activity = combat_meta.setdefault('mutantTurnActivity', {
+                    'round': current_round, 'moved': False, 'other': False,
+                })
+                activity['other'] = True
+                combat_meta.pop('mutantAccelerationActive', None)
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            if action_key != 'mutant_ambush' and combat_meta.pop('mutantAmbushActive', None):
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            if action_key == 'mutant_jump' and mutant_action_details:
+                character.pos_x = mutant_action_details['target_x']
+                character.pos_y = mutant_action_details['target_y']
+                character.cover_object_id = None
+                character.weapon_braced = False
+                character.braced_weapon_index = None
+                CombatService._clear_aim(character)
+            elif action_key == 'mutant_ambush' and mutant_action_details:
+                combat_meta['mutantAmbushActive'] = True
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            elif action_key == 'mutant_battle_cry' and mutant_action_details:
+                for opponent in CombatService._unique_location_characters(
+                    LocationCharacter.query.filter_by(location_id=location_id).all()
+                ):
+                    if (
+                        opponent.id == character.id
+                        or not opponent.character
+                        or not CombatService._are_opponents(character, opponent)
+                        or math.hypot(
+                            opponent.pos_x - character.pos_x,
+                            opponent.pos_y - character.pos_y,
+                        ) > 15
+                        or CombatService._location_character_condition(opponent)['state'] == 'dead'
+                    ):
+                        continue
+                    opponent_data = (
+                        opponent.character.data
+                        if isinstance(opponent.character.data, dict) else {}
+                    )
+                    if CombatService._deafness_level(opponent_data) >= 90:
+                        continue
+                    modifier = CombatService._skill_modifier(
+                        opponent_data, 'skills.physical.will',
+                    )
+                    roll = random.randint(1, 20)
+                    total = roll + modifier
+                    success = roll == 20 or (roll != 1 and total >= 15)
+                    stress = None
+                    if not success:
+                        stress = CombatService.apply_stress_trigger(
+                            opponent, 1, trigger='mutant_battle_cry',
+                        )
+                    mutant_action_details['targets'].append({
+                        'character_id': opponent.character_id,
+                        'name': opponent.character.name,
+                        'roll': roll, 'modifier': modifier, 'total': total,
+                        'difficulty': 15, 'success': success, 'stress': stress,
+                    })
+                CombatService._mark_mutant_attack_used(character, current_round)
             if action_key == 'clear_weapon_jam' and clear_jam_details:
                 weapons = data.get('weapons') or []
                 cleared_weapon = weapons[clear_jam_details['weapon_index']]
@@ -11605,7 +12297,10 @@ class CombatService:
                     CombatService._apply_stress_check_consequences(
                         data, narrative_action_details['skill_path'], check['success'],
                     )
-                    if not check['success']:
+                    if (
+                        not check['success']
+                        and not CombatService._is_mutant_character(data)
+                    ):
                         usage_profile = CombatService._must_do_usage_profile(data, state)
                         combat_meta['mustDoRetry'] = {
                             'name': narrative_action_details['name'],
@@ -11782,6 +12477,10 @@ class CombatService:
             CombatService._clear_aim(character)
 
         if attack_details:
+            if action_key == 'attack':
+                # A retry belongs only to the most recent failed check. A new
+                # attack replaces the previous opportunity even when it hits.
+                combat_meta.pop('mustDoRetry', None)
             if not attack_details.get('melee'):
                 attack_details['requested_shot_count'] = max(
                     1, CombatService._coerce_int(
@@ -12024,12 +12723,19 @@ class CombatService:
                     ))
             attack_details['results'] = resolved_hits
             attack_details['hits'] = sum(1 for item in resolved_hits if item.get('hit'))
+            if action_key == 'attack':
+                CombatService._mark_mutant_attack_used(character, current_round)
             attack_details['damage_total'] = sum(
                 item.get('combined_damage', item.get('damage', 0))
                 for item in resolved_hits
             )
-            if action_key == 'attack' and resolved_hits and not any(
+            if (
+                action_key == 'attack'
+                and not CombatService._is_mutant_character(data)
+                and resolved_hits
+                and not any(
                 item.get('hit') for item in resolved_hits
+                )
             ):
                 retryable_attack = bool(
                     (
@@ -12038,12 +12744,17 @@ class CombatService:
                     )
                     or (
                         attack_details.get('fire_mode')
-                        in {'unaimed', 'rapid', 'aimed', 'area'}
+                        in {'unaimed', 'rapid', 'aimed', 'burst', 'area'}
                         and not attack_details.get('direct_cover_attack')
                     )
                 )
                 if retryable_attack:
                     retry_attack_details = deepcopy(attack_details)
+                    if attack_details.get('fire_mode') != 'area':
+                        retry_attack_details['target_character_id'] = (
+                            resolved_hits[0].get('target_character_id')
+                        )
+                        retry_attack_details['target_character_ids'] = None
                     retry_attack_details['_must_do_replaced_jams'] = [
                         {
                             'id': jam.get('id'),
@@ -12081,6 +12792,9 @@ class CombatService:
                         'uses_remaining': usage_profile['remaining'],
                         'attack_details': retry_attack_details,
                     }
+            if action_key == 'attack':
+                character.character.data = data
+                flag_modified(character.character, 'data')
             if (
                 action_key == 'must_do_it'
                 and must_do_details
@@ -12113,6 +12827,7 @@ class CombatService:
                 must_do_details['check'] = {
                     'roll': first_result.get('roll'),
                     'rolls': first_result.get('rolls'),
+                    'total': first_result.get('total'),
                     'difficulty': first_result.get(
                         'difficulty', must_do_details.get('difficulty'),
                     ),
@@ -12245,6 +12960,7 @@ class CombatService:
             'equipment_change': equipment_action_details,
             'gunpoint': gunpoint_details,
             'anomaly': anomaly_details,
+            'mutant_action': mutant_action_details,
         }
 
     @staticmethod
@@ -12486,10 +13202,18 @@ class CombatService:
                 character.movement_distance_this_turn = used_distance + distance
 
             if movement_mode == 'run':
-                character.strenuous_movement_blocked_until_round = max(
-                    character.strenuous_movement_blocked_until_round or 0,
-                    current_round + 1 + artifact_profile['breath_duration_bonus'],
+                superior_runner = CombatService._mutant_has_trait(
+                    character_data, 'Превосходный бегун',
                 )
+                receives_breathlessness = (
+                    not superior_runner
+                    or (selecting_mode and random.randint(1, 100) <= 50)
+                )
+                if receives_breathlessness:
+                    character.strenuous_movement_blocked_until_round = max(
+                        character.strenuous_movement_blocked_until_round or 0,
+                        current_round + 1 + artifact_profile['breath_duration_bonus'],
+                    )
             elif movement_mode == 'sprint':
                 character.strenuous_movement_blocked_until_round = max(
                     character.strenuous_movement_blocked_until_round or 0,
@@ -12527,6 +13251,30 @@ class CombatService:
         character.weapon_braced = False
         character.braced_weapon_index = None
         CombatService._clear_aim(character)
+        moved_data = (
+            character.character.data
+            if character.character and isinstance(character.character.data, dict)
+            else {}
+        )
+        moved_meta = moved_data.setdefault('health', {}).setdefault('combatMeta', {})
+        if state and state.status == 'active' and CombatService._mutant_has_trait(
+            moved_data, 'Возможность разгона',
+        ):
+            activity = moved_meta.setdefault('mutantTurnActivity', {
+                'round': max(1, state.round_number or 1),
+                'moved': False,
+                'other': False,
+            })
+            activity['moved'] = True
+            character.character.data = moved_data
+            flag_modified(character.character, 'data')
+        if moved_meta.pop('mutantAmbushActive', None):
+            character.character.data = moved_data
+            flag_modified(character.character, 'data')
+        CombatService._queue_opportunity_attacks(
+            location_id, character, path_tiles, state,
+        )
+        CombatService._refresh_ugly_appearance_penalties(location_id)
         character.last_action = db.func.now()
         CombatService._apply_periodic_health_effects(character, phase='movement_end')
         CombatService._sync_location_effects_from_character(character)
