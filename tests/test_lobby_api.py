@@ -3,6 +3,7 @@ import pytest
 from app.extensions import db
 from app.lobbies import _world_group_speed
 from app.services import addictions
+from app.services.combat import CombatService
 from app.models import (
     ChatMessage,
     Lobby,
@@ -765,6 +766,305 @@ def test_world_movement_spends_and_auto_replaces_equipped_gas_mask_filter(
     assert stored["inventory"]["backpack"][0]["quantity"] == 1
 
 
+def test_world_movement_applies_binary_radiation_per_group_member(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("world-radiation-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    protected = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"radiation": 1},
+        "equipment": {
+            "armor": {"protection": {"radiation": 0.3}},
+            "helmet": {"protection": {"radiation": 0.2}},
+        },
+    })
+    exposed = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"radiation": 1},
+        "equipment": {"armor": {"protection": {"radiation": 0.49}}},
+    })
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Radiation party", "tile_x": 2, "tile_y": 2},
+    ).get_json()
+    client.patch(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members",
+        headers=auth_headers(gm),
+        json={"character_ids": [protected["id"], exposed["id"]]},
+    )
+    client.get(
+        f"/lobbies/{lobby['id']}/chunks",
+        headers=auth_headers(gm),
+        query_string={
+            "min_chunk_x": 0,
+            "max_chunk_x": 0,
+            "min_chunk_y": 0,
+            "max_chunk_y": 0,
+        },
+    )
+    client.patch(
+        f"/lobbies/{lobby['id']}/chunks/0/0/tile/3/2",
+        headers=auth_headers(gm),
+        json={"radiation": 5},
+    )
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+
+    moved = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/move",
+        headers=auth_headers(gm),
+        json={"tile_x": 3, "tile_y": 2},
+    )
+
+    assert moved.status_code == 200
+    updates = {
+        item["character_id"]: item
+        for item in moved.get_json()["radiation_updates"]
+    }
+    assert updates[protected["id"]]["protection"] == 50
+    assert updates[protected["id"]]["received"] == 0
+    assert updates[exposed["id"]]["protection"] == 49
+    assert updates[exposed["id"]]["received"] == 5
+    assert db.session.get(LobbyCharacter, protected["id"]).data["health"]["radiation"] == 1
+    assert db.session.get(LobbyCharacter, exposed["id"]).data["health"]["radiation"] == 6
+
+
+@pytest.mark.parametrize(
+    (
+        "radiation", "damage", "bleeding_stage", "bleeding_count",
+        "critical", "death",
+    ),
+    [
+        (20, 0, None, 0, False, False),
+        (21, 20, "light", 1, False, False),
+        (31, 50, "light", 2, False, False),
+        (51, 100, "medium", 1, False, False),
+        (61, 200, "medium", 2, False, False),
+        (76, 200, "severe", 1, True, False),
+        (100, 0, None, 0, False, True),
+    ],
+)
+def test_world_radiation_consequence_bands(
+    radiation, damage, bleeding_stage, bleeding_count, critical, death
+):
+    data = {
+        "health": {
+            "radiation": radiation,
+            "current": 700,
+            "max": 700,
+            "effects": [],
+        },
+    }
+
+    result = CombatService._apply_world_radiation_consequences(data)
+
+    assert result["damage"] == damage
+    assert result["health_after"] == 700 - damage
+    assert len(result["bleedings"]) == bleeding_count
+    assert {item["stage"] for item in result["bleedings"]} == (
+        {bleeding_stage} if bleeding_stage else set()
+    )
+    assert result["critical"] is critical
+    assert result["death"] is death
+
+
+def test_radist_and_tarpaulin_reduce_world_incoming_radiation_and_spend_capacity():
+    radist_data = {"health": {"radiation": 10, "effects": [{
+        "type": "radiation_filter",
+        "name": "Радист-Л",
+        "value": 100,
+        "capacity": 50,
+        "remaining_capacity": 50,
+        "remaining": 24,
+        "time_unit": "hour",
+        "tick": "time_elapsed",
+    }]}}
+    tarpaulin_data = {"health": {"radiation": 10, "effects": [{
+        "type": "radiation_filter",
+        "name": "Брезент-ПБ",
+        "value": 50,
+        "capacity": 100,
+        "remaining_capacity": 100,
+        "remaining": 24,
+        "time_unit": "hour",
+        "tick": "time_elapsed",
+    }]}}
+
+    radist = CombatService._apply_incoming_radiation(radist_data, 5, binary=True)
+    tarpaulin = CombatService._apply_incoming_radiation(tarpaulin_data, 5, binary=True)
+
+    assert radist["received"] == 0
+    assert radist["filtered"] == 5
+    assert radist_data["health"]["radiation"] == 10
+    assert radist_data["health"]["effects"][0]["remaining_capacity"] == 45
+    assert tarpaulin["received"] == 2.5
+    assert tarpaulin["filtered"] == 2.5
+    assert tarpaulin_data["health"]["radiation"] == 12.5
+    assert tarpaulin_data["health"]["effects"][0]["remaining_capacity"] == 97.5
+
+
+@pytest.mark.parametrize(
+    ("starting_radiation", "incoming", "effect_type"),
+    [
+        (75, 1, "critical_condition"),
+        (99, 1, "death"),
+    ],
+)
+def test_incoming_radiation_immediately_applies_terminal_thresholds(
+    starting_radiation, incoming, effect_type
+):
+    data = {"health": {"radiation": starting_radiation, "effects": []}}
+
+    result = CombatService._apply_incoming_radiation(data, incoming, binary=False)
+
+    assert result["after"] == starting_radiation + incoming
+    assert any(
+        effect.get("type") == effect_type
+        and effect.get("source") == "radiation_sickness"
+        for effect in data["health"]["effects"]
+    )
+
+
+def test_world_radiation_damage_uses_starting_dose_before_new_exposure(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user("world-radiation-order-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers, data={
+        "health": {
+            "radiation": 25,
+            "current": 100,
+            "max": 700,
+            "painLevel": 7,
+            "effects": [],
+        },
+    })
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Irradiated party", "tile_x": 2, "tile_y": 2},
+    ).get_json()
+    client.patch(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members",
+        headers=auth_headers(gm),
+        json={"character_ids": [character["id"]]},
+    )
+    client.get(
+        f"/lobbies/{lobby['id']}/chunks",
+        headers=auth_headers(gm),
+        query_string={
+            "min_chunk_x": 0,
+            "max_chunk_x": 0,
+            "min_chunk_y": 0,
+            "max_chunk_y": 0,
+        },
+    )
+    client.patch(
+        f"/lobbies/{lobby['id']}/chunks/0/0/tile/3/2",
+        headers=auth_headers(gm),
+        json={"radiation": 5},
+    )
+    monkeypatch.setattr("app.lobbies.random.random", lambda: 1.0)
+
+    moved = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/move",
+        headers=auth_headers(gm),
+        json={"tile_x": 3, "tile_y": 2},
+    )
+
+    assert moved.status_code == 200
+    assert moved.get_json()["radiation_consequences"][0]["damage"] == 20
+    stored_health = db.session.get(LobbyCharacter, character["id"]).data["health"]
+    assert stored_health["current"] == 80
+    assert stored_health["radiation"] == 30
+    assert stored_health["painLevel"] == 0
+    radiation_bleedings = [
+        effect for effect in stored_health["effects"]
+        if effect.get("source") == "radiation_sickness"
+        and str(effect.get("type", "")).startswith("bleeding_")
+    ]
+    assert len(radiation_bleedings) == 1
+
+
+def test_location_end_turn_subtracts_radiation_protection(
+    client, create_user, auth_headers
+):
+    gm = create_user("location-radiation-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    exposed = create_character(client, lobby, gm, auth_headers, data={
+        "health": {"radiation": 74},
+        "equipment": {
+            "armor": {"protection": {"radiation": 0.2}},
+            "helmet": {"protection": {"radiation": 0.1}},
+        },
+    })
+    next_character = create_character(client, lobby, gm, auth_headers)
+    location = Location(
+        lobby_id=lobby["id"],
+        name="Radiation arena",
+        world_tile_x=0,
+        world_tile_z=0,
+        grid_width=2,
+        grid_height=2,
+        tiles_data=[
+            [{"radiation": 5}, {"radiation": 0}],
+            [{"radiation": 0}, {"radiation": 0}],
+        ],
+    )
+    db.session.add(location)
+    db.session.flush()
+    exposed_loc = LocationCharacter(
+        location_id=location.id,
+        character_id=exposed["id"],
+        controlled_by=gm["id"],
+        pos_x=0,
+        pos_y=0,
+    )
+    next_loc = LocationCharacter(
+        location_id=location.id,
+        character_id=next_character["id"],
+        controlled_by=gm["id"],
+        pos_x=1,
+        pos_y=1,
+    )
+    db.session.add_all([exposed_loc, next_loc])
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id,
+        status="active",
+        round_number=1,
+        turn_index=0,
+        turn_order=[exposed_loc.id, next_loc.id],
+        current_location_character_id=exposed_loc.id,
+    ))
+    db.session.commit()
+
+    ended = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(gm),
+        json={},
+    )
+
+    assert ended.status_code == 200
+    radiation_result = ended.get_json()["radiation"]
+    assert radiation_result["incoming"] == 5
+    assert radiation_result["protection"] == 30
+    assert radiation_result["required_protection"] == 50
+    assert radiation_result["received"] == 2
+    assert radiation_result["before"] == 74
+    assert radiation_result["after"] == 76
+    assert radiation_result["critical"] is True
+    stored = db.session.get(LobbyCharacter, exposed["id"])
+    assert stored.data["health"]["radiation"] == 76
+    assert any(
+        effect.get("type") == "critical_condition"
+        and effect.get("source") == "radiation_sickness"
+        for effect in stored.data["health"]["effects"]
+    )
+    assert db.session.get(LocationCharacter, exposed_loc.id).posture == "prone"
+
+
+
+
 def test_parallel_world_groups_advance_time_only_after_every_active_group_acts(
     client, create_user, auth_headers, monkeypatch
 ):
@@ -903,6 +1203,108 @@ def test_gm_configures_persisted_world_group_members(
         gm_character["id"],
         player_character["id"],
     ]
+
+
+def test_world_group_carries_incapacitated_member_and_uses_available_rope(
+    client, create_user, auth_headers
+):
+    gm = create_user("world-carry-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    carrier = create_character(client, lobby, gm, auth_headers)
+    body = create_character(
+        client,
+        lobby,
+        gm,
+        auth_headers,
+        data={
+            "health": {
+                "effects": [{"type": "critical_condition", "active": True}],
+            },
+            "inventory": {
+                "backpack": [{"name": "Heavy load", "weight": 25, "quantity": 1}],
+                "pockets": [],
+            },
+        },
+    )
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Rescue party", "tile_x": 3, "tile_y": 3},
+    ).get_json()
+    endpoint = f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members"
+
+    without_rope = client.patch(
+        endpoint,
+        headers=auth_headers(gm),
+        json={"character_ids": [carrier["id"], body["id"]]},
+    ).get_json()
+
+    carried = next(member for member in without_rope["members"] if member["id"] == body["id"])
+    assert carried["requires_carry"] is True
+    assert carried["uses_carry_rope"] is False
+    assert carried["carry_penalty"] == 7
+    assert without_rope["movement_penalty"] == 7
+    assert without_rope["movement_distance"] == 1
+
+    stored_carrier = db.session.get(LobbyCharacter, carrier["id"])
+    stored_carrier.data = {
+        **(stored_carrier.data or {}),
+        "inventory": {
+            "backpack": [],
+            "pockets": [{
+                "name": "Канат для переноски",
+                "category": "tool",
+                "weight": 0.5,
+                "volume": 4,
+                "quantity": 1,
+            }],
+        },
+    }
+    db.session.commit()
+
+    with_rope = client.get(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+    ).get_json()["groups"][0]
+    carried = next(member for member in with_rope["members"] if member["id"] == body["id"])
+    assert carried["uses_carry_rope"] is True
+    assert carried["carry_penalty"] == 3.5
+    assert with_rope["carry_rope_count"] == 1
+    assert with_rope["movement_penalty"] == 3.5
+    assert with_rope["movement_distance"] == 2
+
+
+def test_world_group_with_only_incapacitated_members_cannot_move(
+    client, create_user, auth_headers
+):
+    gm = create_user("world-no-carrier-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    body = create_character(
+        client,
+        lobby,
+        gm,
+        auth_headers,
+        data={
+            "health": {
+                "effects": [{"type": "death", "active": True}],
+            },
+        },
+    )
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "No carriers", "tile_x": 3, "tile_y": 3},
+    ).get_json()
+
+    updated = client.patch(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members",
+        headers=auth_headers(gm),
+        json={"character_ids": [body["id"]]},
+    ).get_json()
+
+    assert updated["carried_member_count"] == 1
+    assert updated["movement_penalty"] == 10
+    assert updated["movement_distance"] == 0
 
 
 def test_random_world_event_blocks_travel_until_gm_resolves_it(

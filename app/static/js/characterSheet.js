@@ -9735,6 +9735,46 @@ async function useConsumable(item, itemPath, options = {}) {
         return !directEffectTypes.has(type);
     });
 
+    effects.forEach(effect => {
+        if (String(effect?.type || '').toLowerCase() !== 'radiation_filter') return;
+        effect.tick = 'time_elapsed';
+        effect.remaining = 24;
+        effect.duration = 24;
+        effect.time_unit = 'hour';
+        effect.remaining_seconds = 24 * 60 * 60;
+        effect.capacity = Number(effect.capacity ?? direct.radiation_filter_capacity ?? 0);
+        effect.remaining_capacity = Number(
+            effect.remaining_capacity ?? effect.capacity ?? direct.radiation_filter_capacity ?? 0
+        );
+    });
+    if (Number(direct.radiation_filter_percent) > 0
+        && !effects.some(effect => effect?.type === 'radiation_filter')) {
+        effects.push({
+            type: 'radiation_filter',
+            name: `Выведение входящей радиации ${Number(direct.radiation_filter_percent)}%`,
+            value: Number(direct.radiation_filter_percent),
+            remaining: 24,
+            duration: 24,
+            tick: 'time_elapsed',
+            time_unit: 'hour',
+            remaining_seconds: 24 * 60 * 60,
+            capacity: Number(direct.radiation_filter_capacity || 0),
+            remaining_capacity: Number(direct.radiation_filter_capacity || 0),
+            max_hours: 24,
+        });
+    }
+    const isFullRadist = itemName.includes('радист') && !itemName.includes('радист"-л')
+        && !itemName.includes('радист-л');
+    if (isFullRadist && !effects.some(effect => effect?.type === 'temporary_exhaustion')) {
+        effects.push({
+            type: 'temporary_exhaustion',
+            name: 'Радист: истощение',
+            remaining: 3,
+            tick: 'turn_end',
+            onExpire: [{ field: 'exhaustion', delta: -1, min: 0, max: 10 }],
+        });
+    }
+
     if (itemName.includes('самогон')) {
         direct.radiation_delta = -2.5;
         direct.intoxication_delta = 25;
@@ -9778,6 +9818,23 @@ async function useConsumable(item, itemPath, options = {}) {
             item.maxUses = 3;
             item.attributes = item.attributes || {};
             item.attributes.uses_remaining = 3;
+        }
+    }
+    if (Number(direct.radiation_delta) < 0) {
+        const currentRadiation = Number(health.radiation || 0);
+        const isWeakRadiationCleaner = [
+            'самокрут',
+            'сигарет',
+            'пиво',
+            'водк',
+        ].some(name => itemName.includes(name));
+        const isFoodProduct = direct.nutrition !== undefined || direct.satisfy_food;
+        if (currentRadiation > 50 && isWeakRadiationCleaner) {
+            delete direct.radiation_delta;
+            showNotification('Эта вещь не выводит радиацию при накопленной дозе выше 50', 'system');
+        } else if (currentRadiation > 75 && isFoodProduct) {
+            delete direct.radiation_delta;
+            showNotification('Продукты не выводят радиацию при накопленной дозе выше 75', 'system');
         }
     }
     if (itemName.includes('физраств') || itemName.includes('соляной раствор')) {

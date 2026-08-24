@@ -332,6 +332,13 @@ function escapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+function worldGroupMemberLabel(member) {
+    const name = escapeHtml(member?.name || 'Без имени');
+    if (!member?.requires_carry) return name;
+    const method = member.uses_carry_rope ? 'канат' : 'без каната';
+    return `${name} <span class="world-group-carry-state">(переносят, ${method}, штраф ${member.carry_penalty})</span>`;
+}
+
 function renderModal() {
     const list = document.getElementById('world-group-list');
     const events = document.getElementById('world-event-list');
@@ -346,7 +353,7 @@ function renderModal() {
             <div>
                 <strong>${escapeHtml(group.name)}</strong>
                 <small>Клетка ${group.tile_x}, ${group.tile_y}${group.has_pending_event ? ' · ожидает решения ГМа' : ''}</small>
-                <small>Состав: ${group.members?.length ? group.members.map(member => escapeHtml(member.name)).join(', ') : 'не задан'}</small>
+                <small>Состав: ${group.members?.length ? group.members.map(worldGroupMemberLabel).join(', ') : 'не задан'}</small>
                 <small>Скорость: ${escapeHtml(group.movement_speed_label)} · штраф ${group.movement_penalty} · ${group.movement_distance} кл. за 10 минут</small>
                 <small>${!group.turn_active ? 'Не участвует в ожидании мирового хода' : (group.turn_submitted ? 'Ход сделан · ожидает остальные группы' : 'Ожидается действие в текущем мировом ходе')}</small>
             </div>
@@ -530,6 +537,30 @@ async function handleTileSelection({ tile }) {
             showNotification('Событие размещено на карте', 'success');
         } else {
             const result = await Server.moveWorldGroup(lobbyId, mode.groupId, tileX, tileY);
+            const exposureByCharacter = new Map(
+                (result.radiation_updates || []).map(item => [Number(item.character_id), item])
+            );
+            const radiationMessages = (result.radiation_consequences || []).flatMap(consequence => {
+                const exposure = exposureByCharacter.get(Number(consequence.character_id)) || {};
+                const details = [];
+                if (Number(consequence.damage || 0) > 0) {
+                    details.push(`урон ${consequence.damage}`);
+                }
+                if ((consequence.bleedings || []).length) {
+                    details.push(`кровотечения: ${consequence.bleedings.length}`);
+                }
+                if (consequence.critical) details.push('критическое состояние');
+                if (consequence.death) details.push('смерть');
+                if (Number(exposure.received || 0) > 0) {
+                    details.push(`радиация +${exposure.received}`);
+                }
+                return details.length
+                    ? [`${consequence.character_name || `#${consequence.character_id}`}: ${details.join(', ')}`]
+                    : [];
+            });
+            if (radiationMessages.length) {
+                showNotification(radiationMessages.join('\n'), 'error');
+            }
             showNotification(
                 result.event_pending
                     ? 'Группа перемещена. Событие ожидает решения ГМа.'

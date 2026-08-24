@@ -3215,6 +3215,308 @@ class CombatService:
         return max(0, min(100, best))
 
     @staticmethod
+    def _equipped_radiation_protection(character_data):
+        """Sum ambient radiation protection from all worn protective equipment."""
+        equipment = character_data.get('equipment') if isinstance(character_data, dict) else {}
+        equipment = equipment if isinstance(equipment, dict) else {}
+        total = 0.0
+        for slot in ('armor', 'helmet', 'gasMask'):
+            item = equipment.get(slot)
+            if not isinstance(item, dict) or item.get('protectionDisabled'):
+                continue
+            attributes = CombatService._template_attributes(item)
+            is_gas_mask = CombatService._is_gas_mask_item(slot, item, attributes)
+            if is_gas_mask and CombatService._coerce_float(
+                item.get(
+                    'durability',
+                    item.get(
+                        'maxDurability',
+                        attributes.get('max_durability', attributes.get('durability', 0)),
+                    ),
+                ),
+                0,
+            ) <= 0:
+                continue
+            protection = item.get('protection')
+            if not isinstance(protection, dict):
+                protection = (
+                    attributes.get('protection')
+                    if isinstance(attributes.get('protection'), dict)
+                    else {}
+                )
+            value = CombatService._protection_percent(protection.get('radiation'), 0)
+            if not is_gas_mask:
+                value -= CombatService._armor_stage_penalty(item, 'radiation')
+            total += max(0.0, value)
+        return total
+
+    @staticmethod
+    def _apply_incoming_radiation(character_data, incoming, *, binary=False):
+        incoming = max(0.0, CombatService._coerce_float(incoming, 0))
+        protection = CombatService._equipped_radiation_protection(character_data)
+        required_protection = incoming * 10
+        equipment_received = (
+            incoming if protection < required_protection else 0.0
+        ) if binary else max(0.0, incoming - protection / 10)
+        health = character_data.setdefault('health', {})
+        filter_result = CombatService._apply_world_radiation_filters(
+            health,
+            equipment_received,
+        ) if binary else {
+            'received': equipment_received,
+            'prevented': 0.0,
+            'effects': [],
+            'changed': False,
+        }
+        received = filter_result['received']
+        before = max(0.0, CombatService._coerce_float(health.get('radiation'), 0))
+        after = before + received
+        if received:
+            health['radiation'] = after
+        threshold_result = CombatService._apply_radiation_threshold_states(health)
+        return {
+            'incoming': incoming,
+            'protection': protection,
+            'required_protection': required_protection,
+            'equipment_received': equipment_received,
+            'filtered': filter_result['prevented'],
+            'radiation_filters': filter_result['effects'],
+            'received': received,
+            'before': before,
+            'after': after,
+            'critical': threshold_result['critical'],
+            'death': threshold_result['death'],
+            'changed': bool(
+                received or filter_result['changed'] or threshold_result['changed']
+            ),
+        }
+
+    @staticmethod
+    def _apply_world_radiation_filters(health, incoming):
+        remaining_dose = max(0.0, CombatService._coerce_float(incoming, 0))
+        active_effects = normalize_effect_list(health.get('effects') or [])
+        updated_effects = []
+        applications = []
+        prevented_total = 0.0
+        changed = False
+        for effect in active_effects:
+            if (
+                effect.get('type') != 'radiation_filter'
+                or not effect.get('active', True)
+                or remaining_dose <= 0
+            ):
+                updated_effects.append(effect)
+                continue
+            capacity = max(
+                0.0,
+                CombatService._coerce_float(
+                    effect.get('remaining_capacity', effect.get('capacity', 0)),
+                    0,
+                ),
+            )
+            if capacity <= 0:
+                changed = True
+                continue
+            percent = max(
+                0.0,
+                min(100.0, CombatService._coerce_float(effect.get('value'), 0)),
+            )
+            potential_prevented = remaining_dose * percent / 100
+            prevented = min(potential_prevented, capacity)
+            remaining_dose = max(0.0, remaining_dose - prevented)
+            remaining_capacity = max(0.0, capacity - prevented)
+            prevented_total += prevented
+            changed = True
+            applications.append({
+                'name': effect.get('name'),
+                'percent': percent,
+                'prevented': prevented,
+                'remaining_capacity': remaining_capacity,
+            })
+            if remaining_capacity > 0:
+                effect['remaining_capacity'] = remaining_capacity
+                updated_effects.append(effect)
+        if changed:
+            health['effects'] = updated_effects
+            sync_health_derived_statuses(health)
+        return {
+            'received': remaining_dose,
+            'prevented': prevented_total,
+            'effects': applications,
+            'changed': changed,
+        }
+
+    @staticmethod
+    def _apply_radiation_threshold_states(health):
+        radiation = max(0.0, CombatService._coerce_float(health.get('radiation'), 0))
+        active_effects = normalize_effect_list(health.get('effects') or [])
+        had_critical = any(
+            effect.get('type') == 'critical_condition'
+            and effect.get('source') == 'radiation_sickness'
+            and effect.get('active', True)
+            for effect in active_effects
+        )
+        had_death = any(
+            effect.get('type') == 'death'
+            and effect.get('source') == 'radiation_sickness'
+            and effect.get('active', True)
+            for effect in active_effects
+        )
+        if radiation >= 100 and not had_death:
+            apply_effect_to_health(health, {
+                'type': 'death',
+                'name': 'Смерть от радиации',
+                'area': 'whole_body',
+                'source': 'radiation_sickness',
+                'tick': 'manual',
+            })
+        elif radiation >= 76 and not had_critical:
+            apply_effect_to_health(health, {
+                'type': 'critical_condition',
+                'name': 'Критическое состояние от радиации',
+                'area': 'whole_body',
+                'source': 'radiation_sickness',
+                'tick': 'manual',
+            })
+        return {
+            'critical': radiation >= 76 and radiation < 100,
+            'death': radiation >= 100,
+            'changed': bool(
+                (radiation >= 100 and not had_death)
+                or (76 <= radiation < 100 and not had_critical)
+            ),
+        }
+
+    @staticmethod
+    def _recover_world_travel_pain(character_data):
+        health = character_data.get('health') if isinstance(character_data, dict) else None
+        if not isinstance(health, dict):
+            return {'before': 0, 'after': 0, 'changed': False}
+        before = max(0.0, CombatService._coerce_float(health.get('painLevel'), 0))
+        if before <= 0:
+            return {'before': before, 'after': before, 'changed': False}
+        health['painLevel'] = 0
+        meta = health.get('combatMeta')
+        if isinstance(meta, dict):
+            meta.pop('painIncreased', None)
+        return {'before': before, 'after': 0, 'changed': True}
+
+    @staticmethod
+    def _apply_world_radiation_consequences(character_data):
+        """Apply one ten-minute radiation sickness interval before world travel."""
+        health = apply_health_maximums(character_data)
+        radiation = max(0.0, CombatService._coerce_float(health.get('radiation'), 0))
+        damage = 0
+        bleeding_stage = None
+        bleeding_count = 0
+        critical = False
+        death = radiation >= 100
+        if 21 <= radiation <= 30:
+            damage, bleeding_stage, bleeding_count = 20, 'light', 1
+        elif 31 <= radiation <= 50:
+            damage, bleeding_stage, bleeding_count = 50, 'light', 2
+        elif 51 <= radiation <= 60:
+            damage, bleeding_stage, bleeding_count = 100, 'medium', 1
+        elif 61 <= radiation <= 75:
+            damage, bleeding_stage, bleeding_count = 200, 'medium', 2
+        elif 76 <= radiation < 100:
+            damage, bleeding_stage, bleeding_count = 200, 'severe', 1
+            critical = True
+
+        before_health = max(
+            0.0,
+            CombatService._coerce_float(health.get('current'), health.get('max', 700)),
+        )
+        if damage:
+            health['current'] = max(0.0, before_health - damage)
+        created_bleedings = []
+        for index in range(bleeding_count):
+            apply_effect_to_health(health, {
+                'id': uuid.uuid4().hex,
+                'type': f'bleeding_external_{bleeding_stage}',
+                'name': 'Кровотечение от радиации',
+                'area': 'whole_body',
+                'value': 1,
+                'source': 'radiation_sickness',
+                'tick': 'manual',
+            })
+            created_bleedings.append({
+                'kind': 'external',
+                'stage': bleeding_stage,
+                'area': 'whole_body',
+                'index': index + 1,
+            })
+        if critical:
+            apply_effect_to_health(health, {
+                'type': 'critical_condition',
+                'name': 'Критическое состояние от радиации',
+                'area': 'whole_body',
+                'source': 'radiation_sickness',
+                'tick': 'manual',
+            })
+        if death:
+            apply_effect_to_health(health, {
+                'type': 'death',
+                'name': 'Смерть от радиации',
+                'area': 'whole_body',
+                'source': 'radiation_sickness',
+                'tick': 'manual',
+            })
+        sync_health_derived_statuses(health)
+        active_effects = normalize_effect_list(health.get('effects') or [])
+        return {
+            'radiation_at_start': radiation,
+            'damage': damage,
+            'health_before': before_health,
+            'health_after': max(
+                0.0,
+                CombatService._coerce_float(health.get('current'), before_health),
+            ),
+            'bleedings': created_bleedings,
+            'critical': critical,
+            'death': death or any(
+                effect.get('type') == 'death' and effect.get('active', True)
+                for effect in active_effects
+            ),
+            'applied': bool(damage or created_bleedings or critical or death),
+        }
+
+    @staticmethod
+    def _location_tile_radiation(location, tile_x, tile_y):
+        tiles = location.tiles_data if isinstance(location.tiles_data, list) else []
+        try:
+            tile = tiles[int(tile_y)][int(tile_x)]
+        except (IndexError, TypeError, ValueError):
+            return 0.0
+        if not isinstance(tile, dict):
+            return 0.0
+        return max(0.0, CombatService._coerce_float(tile.get('radiation'), 0))
+
+    @staticmethod
+    def _apply_location_end_turn_radiation(location, location_character):
+        character = getattr(location_character, 'character', None)
+        if not character or not isinstance(character.data, dict):
+            return None
+        incoming = CombatService._location_tile_radiation(
+            location,
+            location_character.pos_x,
+            location_character.pos_y,
+        )
+        result = CombatService._apply_incoming_radiation(
+            character.data,
+            incoming,
+            binary=False,
+        )
+        if result['critical'] or result['death']:
+            location_character.posture = 'prone'
+            location_character.cover_object_id = None
+            location_character.weapon_braced = False
+            location_character.braced_weapon_index = None
+        if result['changed']:
+            flag_modified(character, 'data')
+        return result
+
+    @staticmethod
     def _normalize_caliber(value):
         return (
             str(value or '').strip().lower()
@@ -7681,6 +7983,10 @@ class CombatService:
         )
         CombatService._tick_character_effects(current_character, phase='turn_end')
         CombatService._apply_periodic_health_effects(current_character, phase='turn_end')
+        radiation_result = CombatService._apply_location_end_turn_radiation(
+            location,
+            current_character,
+        )
         CombatService._resolve_bleeding_check(current_character)
         pain_shock_check = CombatService._resolve_pain_shock_check(
             current_character,
@@ -7790,6 +8096,7 @@ class CombatService:
             return payload
 
         payload = CombatService._serialize_state(location, state)
+        payload['radiation'] = radiation_result
         payload['pain_shock_check'] = pain_shock_check
         payload['detonations'] = detonations
         payload['area_updates'] = area_updates

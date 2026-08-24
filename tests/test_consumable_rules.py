@@ -454,3 +454,33 @@ def test_pain_block_returns_accumulated_pain_on_expiry():
     assert health["painLevel"] == 4
     assert health["exhaustion"] == 1
     assert "blockedPain" not in health["combatMeta"]
+
+
+def test_world_radiation_drugs_keep_percent_capacity_and_day_duration():
+    cases = [
+        ('Препарат "Радист"-Л. Ампула.', 100, 50),
+        ('Препарат "Радист". Ампула.', 100, 100),
+        ('Противорадиационное "Брезент"-ПБ. Ампула.', 50, 100),
+    ]
+
+    for description, percent, capacity in cases:
+        profile = parse_consumable_effects(description)
+        effect = next(
+            item for item in profile["effects"]
+            if item["type"] == "radiation_filter"
+        )
+        assert profile["direct"]["exhaustion_delta"] == 1
+        assert effect["value"] == percent
+        assert effect["capacity"] == capacity
+        assert effect["remaining_capacity"] == capacity
+        assert effect["remaining"] == 24
+        assert effect["time_unit"] == "hour"
+        assert effect["remaining_seconds"] == 24 * 60 * 60
+
+    radist = parse_consumable_effects('Препарат "Радист". Ампула.')
+    temporary_exhaustion = next(
+        item for item in radist["effects"]
+        if item["type"] == "temporary_exhaustion"
+    )
+    assert temporary_exhaustion["remaining"] == 3
+    assert temporary_exhaustion["tick"] == "turn_end"

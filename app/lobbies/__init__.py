@@ -76,6 +76,7 @@ from app.schemas.lobby_templates import LobbyItemTemplateSchema
 lobbies_bp = Blueprint('lobbies', __name__)
 
 WORLD_EVENT_CHANCE = 0.25
+BODY_CARRY_ROPE_NAME = 'канат для переноски'
 WORLD_EVENT_DESCRIPTIONS = (
     'На пути обнаружены свежие следы неизвестной группы.',
     'Вдалеке слышны выстрелы. Источник звука находится неподалёку от маршрута.',
@@ -83,6 +84,111 @@ WORLD_EVENT_DESCRIPTIONS = (
     'Группа замечает заброшенный тайник у дороги.',
     'Путь пересекает след недавно прошедших мутантов.',
 )
+
+
+def _iter_carried_items(character_data):
+    data = character_data if isinstance(character_data, dict) else {}
+    inventory = data.get('inventory') if isinstance(data.get('inventory'), dict) else {}
+    equipment = data.get('equipment') if isinstance(data.get('equipment'), dict) else {}
+    roots = []
+    for key in ('backpack', 'pockets'):
+        if isinstance(inventory.get(key), list):
+            roots.extend(inventory[key])
+    for group_name in ('belt', 'vest'):
+        container = equipment.get(group_name)
+        pouches = container.get('pouches') if isinstance(container, dict) else []
+        for pouch in pouches if isinstance(pouches, list) else []:
+            if isinstance(pouch, dict) and isinstance(pouch.get('contents'), list):
+                roots.extend(pouch['contents'])
+
+    pending = list(roots)
+    while pending:
+        item = pending.pop()
+        if not isinstance(item, dict):
+            continue
+        yield item
+        contents = item.get('contents')
+        if isinstance(contents, list):
+            pending.extend(contents)
+
+
+def _body_carry_profile(member_ids, characters_by_id):
+    profiles = {}
+    rope_count = 0
+    for character_id in member_ids:
+        character = characters_by_id.get(character_id)
+        if character is None:
+            continue
+        data = character.data if isinstance(character.data, dict) else {}
+        breakdown = CombatService._movement_penalty_breakdown(data)
+        condition = CombatService._character_condition(data)
+        profiles[character_id] = {
+            'breakdown': breakdown,
+            'condition': condition,
+            'requires_carry': not condition['can_act'],
+            'uses_carry_rope': False,
+            'carry_penalty': 0,
+            'carried_by': None,
+        }
+        for item in _iter_carried_items(data):
+            normalized_name = ' '.join(
+                str(item.get('name') or '').strip().lower().replace('ё', 'е').split()
+            )
+            attributes = item.get('attributes') if isinstance(item.get('attributes'), dict) else {}
+            if normalized_name == BODY_CARRY_ROPE_NAME or attributes.get('body_carry_rope'):
+                rope_count += max(0, CombatService._coerce_int(item.get('quantity'), 1))
+
+    carriers = [
+        character_id for character_id in member_ids
+        if character_id in profiles and not profiles[character_id]['requires_carry']
+    ]
+    bodies = [
+        character_id for character_id in member_ids
+        if character_id in profiles and profiles[character_id]['requires_carry']
+    ]
+    if not bodies:
+        return profiles, rope_count, []
+    if not carriers:
+        return profiles, rope_count, []
+
+    bodies_by_weight = sorted(
+        bodies,
+        key=lambda character_id: profiles[character_id]['breakdown']['weight'],
+        reverse=True,
+    )
+    for character_id in bodies_by_weight[:rope_count]:
+        profiles[character_id]['uses_carry_rope'] = True
+    for character_id in bodies:
+        weight_penalty = profiles[character_id]['breakdown']['weight']
+        profiles[character_id]['carry_penalty'] = (
+            1 + weight_penalty / 2
+            if profiles[character_id]['uses_carry_rope']
+            else 2 + weight_penalty
+        )
+
+    carrier_loads = {
+        character_id: float(profiles[character_id]['breakdown']['total'])
+        for character_id in carriers
+    }
+    assignments = []
+    for body_id in sorted(
+        bodies,
+        key=lambda character_id: profiles[character_id]['carry_penalty'],
+        reverse=True,
+    ):
+        carrier_id = min(carriers, key=lambda character_id: carrier_loads[character_id])
+        carry_penalty = profiles[body_id]['carry_penalty']
+        carrier_loads[carrier_id] += carry_penalty
+        profiles[body_id]['carried_by'] = carrier_id
+        assignments.append({
+            'body_id': body_id,
+            'carrier_id': carrier_id,
+            'penalty': carry_penalty,
+            'uses_carry_rope': profiles[body_id]['uses_carry_rope'],
+        })
+    for carrier_id, total in carrier_loads.items():
+        profiles[carrier_id]['effective_movement_penalty'] = total
+    return profiles, rope_count, assignments
 
 
 def _serialize_world_group(group):
@@ -101,14 +207,27 @@ def _serialize_world_group(group):
             LobbyCharacter.id.in_(member_ids),
         ).all()
     } if member_ids else {}
+    carry_profiles, rope_count, carry_assignments = _body_carry_profile(
+        member_ids,
+        characters_by_id,
+    )
     member_penalties = {
-        character_id: CombatService._movement_penalty_breakdown(
-            characters_by_id[character_id].data or {}
-        )['total']
-        for character_id in member_ids
-        if character_id in characters_by_id
+        character_id: profile['breakdown']['total']
+        for character_id, profile in carry_profiles.items()
     }
-    maximum_penalty = max(member_penalties.values(), default=0)
+    carried_member_count = sum(
+        1 for profile in carry_profiles.values() if profile['requires_carry']
+    )
+    capable_member_count = len(carry_profiles) - carried_member_count
+    if carried_member_count and not capable_member_count:
+        maximum_penalty = 10
+    else:
+        effective_penalties = [
+            profile.get('effective_movement_penalty', profile['breakdown']['total'])
+            for profile in carry_profiles.values()
+            if not profile['requires_carry']
+        ]
+        maximum_penalty = max(effective_penalties, default=0)
     movement_distance, speed_label = _world_group_speed(maximum_penalty)
     turn_submitted = bool(
         group.turn_submitted_day == (group.lobby.game_day or 1)
@@ -125,6 +244,11 @@ def _serialize_world_group(group):
                 'id': character_id,
                 'name': characters_by_id[character_id].name,
                 'movement_penalty': member_penalties[character_id],
+                'condition': carry_profiles[character_id]['condition'],
+                'requires_carry': carry_profiles[character_id]['requires_carry'],
+                'carry_penalty': carry_profiles[character_id]['carry_penalty'],
+                'uses_carry_rope': carry_profiles[character_id]['uses_carry_rope'],
+                'carried_by': carry_profiles[character_id]['carried_by'],
             }
             for character_id in member_ids
             if character_id in characters_by_id
@@ -132,6 +256,9 @@ def _serialize_world_group(group):
         'movement_penalty': maximum_penalty,
         'movement_distance': movement_distance,
         'movement_speed_label': speed_label,
+        'carried_member_count': carried_member_count,
+        'carry_rope_count': rope_count,
+        'carry_assignments': carry_assignments,
         'turn_active': bool(group.turn_active),
         'turn_submitted': turn_submitted,
     }
@@ -555,7 +682,18 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     actual_tile_x = placed_event.tile_x if placed_event else tile_x
     actual_tile_y = placed_event.tile_y if placed_event else tile_y
     group.tile_x, group.tile_y = actual_tile_x, actual_tile_y
+    destination_tile = MapService.get_tile_data(
+        lobby_id,
+        actual_tile_x,
+        actual_tile_y,
+    )
+    destination_radiation = max(
+        0.0,
+        CombatService._coerce_float(destination_tile.get('radiation'), 0),
+    )
     filter_updates = []
+    radiation_updates = []
+    radiation_consequences = []
     member_ids = {
         int(value) for value in (group.member_character_ids or [])
         if str(value).isdigit()
@@ -567,16 +705,42 @@ def move_world_group(lobby_id, group_id, lobby, participant):
         ).all()
         if member_ids else []
     )
-    filter_updated_characters = []
+    travel_updated_characters = []
     for character in group_characters:
         character_data = deepcopy(character.data or {})
+        consequence_result = CombatService._apply_world_radiation_consequences(
+            character_data,
+        )
         filter_result = consume_equipped_filter_charges(character_data, 1)
-        if not filter_result["changed"]:
+        radiation_result = CombatService._apply_incoming_radiation(
+            character_data,
+            destination_radiation,
+            binary=True,
+        )
+        pain_recovery = CombatService._recover_world_travel_pain(character_data)
+        radiation_consequences.append({
+            "character_id": character.id,
+            "character_name": character.name,
+            **consequence_result,
+        })
+        radiation_updates.append({
+            "character_id": character.id,
+            "character_name": character.name,
+            "pain_recovery": pain_recovery,
+            **radiation_result,
+        })
+        if (
+            not consequence_result['applied']
+            and not filter_result["changed"]
+            and not radiation_result['changed']
+            and not pain_recovery['changed']
+        ):
             continue
         character.data = character_data
         flag_modified(character, 'data')
-        filter_updated_characters.append(character)
-        filter_updates.append({"character_id": character.id, **filter_result})
+        travel_updated_characters.append(character)
+        if filter_result["changed"]:
+            filter_updates.append({"character_id": character.id, **filter_result})
     _submit_world_group_turn(group, lobby)
     event = None
     if placed_event:
@@ -610,14 +774,14 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     group_payload = _serialize_world_group(group)
     all_updated_characters = {
         character.id: character
-        for character in [*updated_characters, *filter_updated_characters]
+        for character in [*updated_characters, *travel_updated_characters]
     }
     time_payload = (
         _emit_world_time_updates(lobby, all_updated_characters.values())
         if time_advanced else None
     )
     if not time_advanced:
-        for character in filter_updated_characters:
+        for character in travel_updated_characters:
             socketio.emit(
                 'character_data_updated',
                 {
@@ -646,6 +810,8 @@ def move_world_group(lobby_id, group_id, lobby, participant):
         'time_advanced': time_advanced,
         'time': time_payload,
         'filter_updates': filter_updates,
+        'radiation_updates': radiation_updates,
+        'radiation_consequences': radiation_consequences,
         'event_pending': event is not None,
         'placed_event_triggered': placed_event is not None,
     }), 200

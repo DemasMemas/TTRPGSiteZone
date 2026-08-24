@@ -841,7 +841,12 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
             direct.update({"radiation_filter_percent": percent, "radiation_filter_capacity": capacity,
                            "exhaustion_delta": 1})
             effect("radiation_filter", percent, name=f"Выведение входящей радиации {percent}%",
-                   tick="movement_end", capacity=capacity, remaining_capacity=capacity, max_hours=24)
+                   tick="time_elapsed", remaining=24, time_unit="hour", remaining_seconds=86400,
+                   capacity=capacity, remaining_capacity=capacity, max_hours=24)
+            if name == 'препарат "радист"':
+                effect("temporary_exhaustion", 0, name="Радист: истощение",
+                       remaining=3, tick="turn_end",
+                       onExpire=[{"field": "exhaustion", "delta": -1, "min": 0, "max": 10}])
             break
     if "жаропонижающее средство" in lower and "мороз" in lower:
         direct["temperature_delta"] = -1

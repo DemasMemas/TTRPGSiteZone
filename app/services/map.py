@@ -11,6 +11,26 @@ logger = logging.getLogger(__name__)
 
 class MapService:
     @staticmethod
+    def get_tile_data(lobby_id, tile_x, tile_y):
+        """Return a world tile without generating or modifying its chunk."""
+        if tile_x < 0 or tile_y < 0:
+            return {}
+        chunk = MapChunk.query.filter_by(
+            lobby_id=lobby_id,
+            chunk_x=tile_x // CHUNK_SIZE,
+            chunk_y=tile_y // CHUNK_SIZE,
+        ).first()
+        if not chunk or not isinstance(chunk.data, list):
+            return {}
+        local_x = tile_x % CHUNK_SIZE
+        local_y = tile_y % CHUNK_SIZE
+        try:
+            tile = chunk.data[local_y][local_x]
+        except (IndexError, TypeError):
+            return {}
+        return tile if isinstance(tile, dict) else {}
+
+    @staticmethod
     def _validate_chunk_bounds(lobby, min_x, max_x, min_y, max_y):
         if min_x > max_x or min_y > max_y:
             raise ValidationError("Invalid chunk bounds")
