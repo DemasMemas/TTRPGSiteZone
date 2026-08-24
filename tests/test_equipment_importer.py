@@ -54,6 +54,10 @@ def test_field_repair_kits_are_single_use_tools():
 
     assert weapon_kit["attributes"]["uses"] == 1
     assert weapon_kit["attributes"]["repair_profile"]["consumed_on_use"] is True
+    assert weapon_kit["attributes"]["repair_profile"]["minimum_durability"] == 75
+    assert weapon_kit["attributes"]["repair_profile"]["repair_amount"] == 10
+    assert weapon_kit["attributes"]["repair_profile"]["duration_minutes"] == 5
+    assert weapon_kit["attributes"]["repair_profile"]["can_lubricate_prostheses"] is True
     assert armor_kit["attributes"]["uses"] == 1
     assert armor_kit["attributes"]["repair_profile"]["consumed_on_use"] is True
 

@@ -669,7 +669,8 @@ def _parse_tools(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     profiles = {
         "набор смазочных приспособлений": {
             "kind": "weapon", "repair_amount": 10, "duration_minutes": 5,
-            "minimum_durability": 0, "engineering_min": 0, "consumed_on_use": True,
+            "minimum_durability": 75, "engineering_min": 0, "consumed_on_use": True,
+            "can_lubricate_prostheses": True,
         },
         "набор инструментов оружейника (упрощеные) 15/15": {
             "kind": "weapon", "repair_amount": 5, "duration_minutes": 30,

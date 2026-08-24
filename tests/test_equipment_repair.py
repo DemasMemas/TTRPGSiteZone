@@ -64,7 +64,7 @@ def test_weapon_tool_checks_engineering_and_minimum_durability():
         repair_equipment(data, ["inventory", "pockets", 0], ["weapons", 0])
 
 
-def test_field_weapon_repairs_can_reach_reduced_maximum_and_clear_jam_12():
+def test_full_weapon_repairs_can_reach_reduced_maximum_and_clear_jam_12():
     tools = [weapon_tool(
         repair_amount=10, duration_minutes=5, minimum_durability=0,
         engineering_min=0, max_item_class=None, consumed_on_use=True,
@@ -85,14 +85,36 @@ def test_field_weapon_repairs_can_reach_reduced_maximum_and_clear_jam_12():
 
 def test_single_use_field_repair_kit_is_removed_after_repair():
     tool = weapon_tool(
-        repair_amount=10, duration_minutes=5, minimum_durability=0,
+        repair_amount=10, duration_minutes=5, minimum_durability=75,
         engineering_min=0, max_item_class=None, consumed_on_use=True,
     )
-    weapon = {"category": "weapon", "durability": 50, "maxDurability": 100}
+    weapon = {"category": "weapon", "durability": 80, "maxDurability": 100}
     data = character_data(engineering=0, tool=tool, target=weapon)
 
     repair_equipment(data, ["inventory", "pockets", 0], ["weapons", 0])
 
+    assert data["inventory"]["pockets"] == []
+
+
+def test_legacy_lubrication_kit_only_repairs_weapons_above_75():
+    legacy_tool = {
+        "name": "Набор смазочных приспособлений",
+        "category": "tool",
+        "attributes": {"repair_profile": {
+            "kind": "weapon", "repair_amount": 10, "duration_minutes": 5,
+            "minimum_durability": 0, "engineering_min": 0, "consumed_on_use": True,
+        }},
+    }
+    weapon = {"category": "weapon", "durability": 75, "maxDurability": 100}
+    data = character_data(engineering=0, tool=legacy_tool, target=weapon)
+
+    with pytest.raises(ValueError, match="выше 75"):
+        repair_equipment(data, ["inventory", "pockets", 0], ["weapons", 0])
+
+    weapon["durability"] = 76
+    result = repair_equipment(data, ["inventory", "pockets", 0], ["weapons", 0])
+
+    assert result["after"] == 86
     assert data["inventory"]["pockets"] == []
 
 

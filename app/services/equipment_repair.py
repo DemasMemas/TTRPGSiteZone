@@ -9,6 +9,28 @@ from app.services.combat import CombatService
 
 ARMOR_CATEGORIES = {"armor", "helmet", "gas_mask"}
 WEAPON_CATEGORIES = {"weapon", "melee_weapon"}
+LUBRICATION_KIT_NAME = "набор смазочных приспособлений"
+LUBRICATION_KIT_PROFILE = {
+    "kind": "weapon",
+    "repair_amount": 10,
+    "duration_minutes": 5,
+    "minimum_durability": 75,
+    "engineering_min": 0,
+    "consumed_on_use": True,
+    "can_lubricate_prostheses": True,
+}
+
+
+def _normalized_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().replace("ё", "е").split())
+
+
+def _repair_profile(tool: Dict[str, Any], template: Any) -> Dict[str, Any] | None:
+    attributes = {**(getattr(template, "attributes", None) or {}), **(tool.get("attributes") or {})}
+    profile = attributes.get("repair_profile")
+    if _normalized_name(tool.get("name") or getattr(template, "name", "")) == LUBRICATION_KIT_NAME:
+        return {**(profile if isinstance(profile, dict) else {}), **LUBRICATION_KIT_PROFILE}
+    return profile if isinstance(profile, dict) else None
 
 
 def resolve_item_path(character_data: Dict[str, Any], path: Iterable[Any]) -> Dict[str, Any]:
@@ -175,8 +197,7 @@ def repair_equipment(
 ) -> Dict[str, Any]:
     tool = resolve_item_path(character_data, tool_path)
     target = resolve_item_path(character_data, target_path)
-    tool_attributes = {**(getattr(tool_template, "attributes", None) or {}), **(tool.get("attributes") or {})}
-    profile = tool_attributes.get("repair_profile")
+    profile = _repair_profile(tool, tool_template)
     if not isinstance(profile, dict) or profile.get("kind") not in {
         "weapon", "armor", "armor_current_stage", "restore_tool",
     }:
