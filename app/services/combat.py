@@ -3202,9 +3202,15 @@ class CombatService:
             protection = item.get('protection')
             if not isinstance(protection, dict):
                 protection = attributes.get('protection') if isinstance(attributes.get('protection'), dict) else {}
+            parsed = CombatService._protection_percent(protection.get(damage_type), 0)
+            if not CombatService._is_gas_mask_item(slot, item, attributes):
+                parsed = max(
+                    0,
+                    parsed - CombatService._armor_stage_penalty(item, damage_type),
+                )
             best = max(
                 best,
-                CombatService._protection_percent(protection.get(damage_type), 0),
+                parsed,
             )
         return max(0, min(100, best))
 

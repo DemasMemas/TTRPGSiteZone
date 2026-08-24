@@ -99,6 +99,46 @@ def test_successful_fall_stays_standing_and_reduces_damage_by_leg_protection(mon
     assert target.posture == "standing"
 
 
+def test_fall_uses_armor_protection_without_damaging_armor(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 20)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    armor = {
+        "name": "Leg armor",
+        "category": "armor",
+        "durability": 10,
+        "stage": 5,
+        "currentStageDurability": 0,
+        "brokenDamage": 49,
+        "brokenProtectionLoss": 0,
+        "protection": {"physical": 0.8},
+    }
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"agility": {"base": 10, "bonus": 0}}},
+            "equipment": {"armor": armor},
+            "health": {
+                "current": 700,
+                "max": 700,
+                "zones": {
+                    "leftLeg": {"current": 100, "max": 100},
+                    "rightLeg": {"current": 100, "max": 100},
+                },
+                "effects": [],
+            },
+        }),
+        hp_zones={}, posture="standing", cover_object_id=None,
+        weapon_braced=False, braced_weapon_index=None,
+    )
+
+    result = CombatService.resolve_fall(target, 4)
+
+    assert [leg["protection"] for leg in result["legs"]] == [25, 25]
+    assert armor["durability"] == 10
+    assert armor["stage"] == 5
+    assert armor["brokenDamage"] == 49
+    assert armor["brokenProtectionLoss"] == 0
+
+
 def test_stress_trigger_checks_will_and_persists_manifestation(monkeypatch):
     rolls = iter([1, 1])
     monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
@@ -1908,10 +1948,68 @@ def test_broken_armor_loses_durability_and_protection_per_50_damage():
         "currentStageDurability": 0,
     }
 
-    CombatService._damage_armor_item(armor, {}, 120)
+    CombatService._damage_armor_item(armor, {}, 49)
+
+    assert armor["durability"] == 10
+    assert armor.get("brokenProtectionLoss", 0) == 0
+
+    CombatService._damage_armor_item(armor, {}, 1)
+
+    assert armor["durability"] == 9
+    assert armor["brokenProtectionLoss"] == 1
+
+    CombatService._damage_armor_item(armor, {}, 50)
 
     assert armor["durability"] == 8
     assert armor["brokenProtectionLoss"] == 2
+
+
+def test_broken_armor_protection_loss_applies_to_every_damage_type():
+    armor = {
+        "name": "Test armor",
+        "category": "armor",
+        "durability": 8,
+        "stage": 5,
+        "brokenProtectionLoss": 2,
+        "protection": {
+            "physical": 0.6,
+            "chemical": 0.6,
+            "thermal": 0.6,
+            "electric": 0.6,
+            "radiation": 0.6,
+        },
+    }
+    data = {"equipment": {"armor": armor}}
+
+    physical, _ = CombatService._target_armor(data, "chest")
+
+    assert physical == 13
+    for damage_type in ("chemical", "thermal", "electric", "radiation"):
+        assert CombatService._target_elemental_protection(data, damage_type) == 23
+
+
+def test_armor_protection_never_becomes_negative():
+    armor = {
+        "name": "Ruined armor",
+        "category": "armor",
+        "durability": 0,
+        "stage": 5,
+        "brokenProtectionLoss": 100,
+        "protection": {
+            "physical": 0.1,
+            "chemical": 0.1,
+            "thermal": 0.1,
+            "electric": 0.1,
+            "radiation": 0.1,
+        },
+    }
+    data = {"equipment": {"armor": armor}}
+
+    physical, _ = CombatService._target_armor(data, "chest")
+
+    assert physical == 0
+    for damage_type in ("chemical", "thermal", "electric", "radiation"):
+        assert CombatService._target_elemental_protection(data, damage_type) == 0
 
 
 def test_gas_mask_has_no_stages_and_loses_fixed_durability():
