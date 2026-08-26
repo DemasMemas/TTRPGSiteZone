@@ -119,6 +119,9 @@ def handle_join_location(data):
             'x': lc.pos_x,
             'y': lc.pos_y,
             'status': lc.status,
+            'is_mutant': CombatService._is_mutant_character(
+                character.data if isinstance(character.data, dict) else {}
+            ),
         })
     emit('location_state', state, room=request.sid)
 

@@ -128,6 +128,7 @@ let movementTypeMenu = null;
 let postureMenu = null;
 let facingMenu = null;
 let pendingFacingSelection = null;
+let facingPreviewMesh = null;
 let combatParticipantMenu = null;
 let teamManagementModal = null;
 let opportunityAttackModal = null;
@@ -169,6 +170,15 @@ const COMBAT_MOVEMENT_TYPES = {
         actionPoints: 0,
         freeActions: 1,
         summary: 'До 3 м без траты ОП',
+    },
+    backward_sideways: {
+        label: 'Спиной / боком',
+        icon: '↙',
+        maxDistance: 5,
+        divisor: 0.5,
+        actionPoints: 0,
+        freeActions: 0,
+        summary: 'До 5 м · 1 м = 2 ОП · без разворота',
     },
     run: {
         label: 'Бег',
@@ -237,6 +247,8 @@ const objectInteractions = {
     corpse: ['open_container'],
     table: ['move', 'climb'],
     chair: ['move', 'climb'],
+    box: ['move', 'climb'],
+    barrel: ['move'],
     fence: ['climb']
 };
 
@@ -251,6 +263,13 @@ const LOW_CLIMB_OBJECT_TYPES = new Set(['table', 'chair', 'chest', 'box', 'barri
 const HIGH_CLIMB_OBJECT_TYPES = new Set(['fence']);
 const TOO_HIGH_OBJECT_TYPES = new Set(['tree', 'rock', 'house', 'tent', 'wall', 'shelf']);
 const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'ground_item', 'anomaly']);
+const THROWABLE_OBJECT_WEIGHTS = {
+    chair: 5,
+    box: 10,
+    chest: 15,
+    table: 25,
+    barrel: 40,
+};
 const ANOMALY_VISUAL_BY_KEY = {
     batut: 'void', otboynik: 'void', kacheli: 'void', zybuchka: 'void', vozduhovorot: 'void', glukhar: 'void', britva: 'void', viselitsa: 'void',
     vspishka: 'electric', pautina: 'electric', tesla: 'electric', katushka: 'electric', kapkan: 'electric', paralizator: 'electric', akkumulyator: 'electric', ionny_tuman: 'electric',
@@ -664,8 +683,20 @@ function getMovementModeAvailability(movementType, route = null) {
         && (Number(current.action_points_current) || 0) >= modeActionPoints + climbActionPoints
     );
     let reason = '';
+    const routeMovesForward = movementType === 'backward_sideways'
+        && Array.isArray(route?.path)
+        && route.path.slice(1).some((tile, index) => {
+            const previous = route.path[index];
+            const stepX = Number(tile?.[0]) - Number(previous?.[0]);
+            const stepY = Number(tile?.[1]) - Number(previous?.[1]);
+            const facingX = Number(current.facing_x) || 0;
+            const facingY = Number(current.facing_y) || 1;
+            return stepX * facingX + stepY * facingY > 0;
+        });
 
-    if (usedMode && usedMode !== movementType) {
+    if (routeMovesForward) {
+        reason = 'Этот режим допускает только шаги спиной или боком';
+    } else if (usedMode && usedMode !== movementType) {
         reason = 'В этом ходу уже выбран другой вид движения';
     } else if (routeCost.climbCost > 0 && posture !== 'standing') {
         reason = 'Перед перелезанием нужно встать';
@@ -780,7 +811,7 @@ function updateMovementPreview(clientX, clientY) {
         ? `ОП ${availability.travelMovementPoints}/${available} + ${availability.climbActionPoints} ОД`
         : `ОП ${cost}/${available}`;
     hint.textContent = route
-        ? `${movementMode.label}: ${availability.distance} м · ${costLabel}`
+        ? `${movementMode.label}: ${availability.distance} м · ${costLabel}${availability.reason ? ` · ${availability.reason}` : ''}`
         : 'Путь заблокирован';
     hint.style.left = `${clientX + 14}px`;
     hint.style.top = `${clientY + 14}px`;
@@ -2238,6 +2269,19 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         });
     }
     if (window.isGM) {
+        if (combatState?.status !== 'active' && combatCharacter?.location_character_id) {
+            menuItems.push({
+                label: 'Начать бой',
+                icon: '⚔',
+                title: 'Начать бой действием этого персонажа; он будет первым',
+                angle: -18,
+                ringRadius: 165,
+                allowAlways: true,
+                action: () => showCombatParticipantSelection(
+                    combatCharacter.location_character_id,
+                ),
+            });
+        }
         menuItems.push({
             label: gmVisionCharacterId === characterId ? 'Обзор ГМа' : 'Взгляд',
             icon: gmVisionCharacterId === characterId ? '◉' : '◌',
@@ -2352,6 +2396,99 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     combatActionMenu.style.top = `${top}px`;
 }
 
+function collectStealableElectronics(characterData) {
+    const matches = [];
+    const isDevice = (item) => {
+        const name = String(item?.name || '').toLowerCase();
+        return ['детектор аномал', 'рация', 'радио', 'пнв', 'кпк']
+            .some(token => name.includes(token));
+    };
+    const walk = (value, path) => {
+        if (Array.isArray(value)) {
+            value.forEach((entry, index) => walk(entry, [...path, index]));
+            return;
+        }
+        if (!value || typeof value !== 'object') return;
+        if (isDevice(value)) {
+            matches.push({ item: value, path });
+            return;
+        }
+        Object.entries(value).forEach(([key, entry]) => {
+            if (entry && typeof entry === 'object') walk(entry, [...path, key]);
+        });
+    };
+    walk(characterData?.inventory || {}, ['inventory']);
+    walk(characterData?.equipment || {}, ['equipment']);
+    return matches;
+}
+
+async function showElectrocrowStealMenu(actor) {
+    const targets = (combatState?.characters || []).filter(target => (
+        target.location_character_id !== actor.location_character_id
+        && target.condition?.state !== 'dead'
+        && Math.max(
+            Math.abs(Number(target.x) - Number(actor.x)),
+            Math.abs(Number(target.y) - Number(actor.y)),
+        ) <= 1
+    ));
+    const candidates = [];
+    for (const target of targets) {
+        const character = await Server.getCharacter(target.character_id);
+        collectStealableElectronics(character?.data || {}).forEach(device => {
+            candidates.push({ target, ...device });
+        });
+    }
+    if (!candidates.length) {
+        showNotification('У соседних целей нет Детектора, Рации, ПНВ или КПК', 'system');
+        return;
+    }
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.style.display = 'flex';
+    modal.innerHTML = `
+        <div class="modal-content" style="width:min(500px,calc(100vw - 28px));">
+            <button type="button" class="close">&times;</button>
+            <h3>Украсть устройство · 2 ОД</h3>
+            <div class="electrocrow-device-list" style="display:grid;gap:8px;"></div>
+        </div>
+    `;
+    const list = modal.querySelector('.electrocrow-device-list');
+    candidates.forEach(candidate => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-secondary';
+        button.textContent = `${candidate.item.name} · у ${candidate.target.name}`;
+        button.onclick = async () => {
+            button.disabled = true;
+            try {
+                const result = await Server.performLocationCombatAction(
+                    window.currentLobbyId,
+                    getCurrentLocationId(),
+                    {
+                        location_character_id: actor.location_character_id,
+                        action_key: 'mutant_steal_device',
+                        target_character_id: candidate.target.character_id,
+                        item_path: candidate.path,
+                        pending_action_id: `mutant-steal-${actor.location_character_id}-${Date.now()}`,
+                    },
+                );
+                modal.remove();
+                if (result?.pending_action) {
+                    showNotification('Кража начата и завершится после оплаты оставшихся ОД', 'system');
+                } else {
+                    showNotification(`Украдено: ${candidate.item.name}`, 'success');
+                }
+            } catch (error) {
+                button.disabled = false;
+                showNotification(error.message || 'Не удалось украсть устройство', 'system');
+            }
+        };
+        list.appendChild(button);
+    });
+    modal.querySelector('.close').onclick = () => modal.remove();
+    document.body.appendChild(modal);
+}
+
 async function openCharacterAttackSelection(characterId) {
     try {
         const character = await Server.getCharacter(characterId);
@@ -2402,8 +2539,16 @@ async function openCharacterAttackSelection(characterId) {
                     const targets = result?.mutant_action?.targets || [];
                     const failed = targets.filter((entry) => !entry.success).length;
                     showNotification(`Боевой клич: проверок ${targets.length}, провалов ${failed}.`, 'success');
+                } else if (actionKey === 'mutant_camouflage') {
+                    showNotification('Маскировка активна на 3 раунда или до первой атаки.', 'success');
+                } else if (actionKey === 'mutant_psy_roar') {
+                    const targets = result?.mutant_action?.targets || [];
+                    const failed = targets.filter((entry) => !entry?.save?.success).length;
+                    showNotification(`Пси-рёв: целей ${targets.length}, провалов Воли ${failed}.`, 'success');
+                } else if (actionKey === 'mutant_clone') {
+                    showNotification('Пси-копия создана на соседней клетке.', 'success');
                 } else {
-                    showNotification('Жмурка затаилась: Скрытность +5.', 'success');
+                    showNotification('Засада подготовлена: СЛ обнаружения увеличена на 5.', 'success');
                 }
             } catch (error) {
                 showNotification(error.message || 'Не удалось выполнить действие мутанта', 'system');
@@ -2419,9 +2564,20 @@ async function openCharacterAttackSelection(characterId) {
             const firstAttackNote = hasTrait('Улучшенные рефлексы') ? ` · первая атака ${Math.max(0, baseCost - 1)} ОД` : '';
             const isBattleCry = attrs.special_action === 'mutant_battle_cry'
                 || String(weapon.name || '').toLowerCase().includes('клич');
+            const isPsyAttack = ['пси-удар', 'зомбирование', 'приказ смерти']
+                .includes(String(weapon.name || '').toLowerCase());
+            const isObjectAttack = [
+                'бросок',
+                'огненный снаряд',
+                'электрический снаряд',
+                'химический снаряд',
+            ].includes(String(weapon.name || '').toLowerCase());
+            const isAnomalyShield = String(weapon.name || '').toLowerCase() === 'щит';
             button.textContent = isBattleCry
                 ? `${weapon.name} · ${baseCost} ОД${firstAttackNote} · Воля СЛ 15`
-                : `${weapon.name} · ${baseCost} ОД${firstAttackNote} · урон ${Number(attrs.damage) || 0} · пробитие ${Number(attrs.armor_piercing) || 0}%`;
+                : (isPsyAttack
+                    ? `${weapon.name} · ${baseCost} ОД · автоматически при прямой видимости`
+                    : `${weapon.name} · ${baseCost} ОД${firstAttackNote} · урон ${Number(attrs.damage) || 0} · пробитие ${Number(attrs.armor_piercing) || 0}%`);
             button.onclick = () => {
                 modal.remove();
                 if (combatState?.status !== 'active') {
@@ -2432,10 +2588,16 @@ async function openCharacterAttackSelection(characterId) {
                     performMutantAction('mutant_battle_cry');
                     return;
                 }
+                if (isAnomalyShield) {
+                    performMutantAction('mutant_anomaly_shield');
+                    return;
+                }
                 beginPendingCombatAction({
                     actorCharacterId: characterId,
                     actorLocationCharacterId: actor.location_character_id,
-                    actionKey: 'attack',
+                    actionKey: isPsyAttack
+                        ? 'mutant_psy_attack'
+                        : (isObjectAttack ? 'mutant_object_attack' : 'attack'),
                     weaponIndex: index,
                     attackType: weapon.name,
                     targetType: 'character',
@@ -2465,12 +2627,86 @@ async function openCharacterAttackSelection(characterId) {
             const ambushButton = document.createElement('button');
             ambushButton.type = 'button';
             ambushButton.className = 'btn btn-secondary';
-            ambushButton.textContent = 'Засада · Скрытность +5 · требуется куст';
+            ambushButton.textContent = 'Засада · СЛ обнаружения +5 · требуется куст';
             ambushButton.onclick = () => {
                 modal.remove();
                 performMutantAction('mutant_ambush');
             };
             options.appendChild(ambushButton);
+        }
+        if (hasTrait('Маскировка')) {
+            const camouflageButton = document.createElement('button');
+            camouflageButton.type = 'button';
+            camouflageButton.className = 'btn btn-secondary';
+            camouflageButton.textContent = 'Маскировка · 1 ОД · 3 раунда или до атаки';
+            camouflageButton.onclick = () => {
+                modal.remove();
+                performMutantAction('mutant_camouflage');
+            };
+            options.appendChild(camouflageButton);
+        }
+        if (hasTrait('Пси-рёв')) {
+            const roarButton = document.createElement('button');
+            roarButton.type = 'button';
+            roarButton.className = 'btn btn-secondary';
+            roarButton.textContent = 'Пси-рёв · 3 ОД · все противники в бою';
+            roarButton.onclick = () => {
+                modal.remove();
+                performMutantAction('mutant_psy_roar');
+            };
+            options.appendChild(roarButton);
+        }
+        if (hasTrait('Клонирование')) {
+            const cloneButton = document.createElement('button');
+            cloneButton.type = 'button';
+            cloneButton.className = 'btn btn-secondary';
+            cloneButton.textContent = 'Клонирование · 1 ОД · создать копию рядом';
+            cloneButton.onclick = () => {
+                modal.remove();
+                performMutantAction('mutant_clone');
+            };
+            options.appendChild(cloneButton);
+        }
+        if (hasTrait('Сон')) {
+            const sleepButton = document.createElement('button');
+            sleepButton.type = 'button';
+            sleepButton.className = 'btn btn-secondary';
+            sleepButton.textContent = 'Пси-сон · 4 ОД · цель до 10 м';
+            sleepButton.onclick = () => {
+                modal.remove();
+                beginPendingCombatAction({
+                    actorCharacterId: characterId,
+                    actorLocationCharacterId: actor.location_character_id,
+                    actionKey: 'mutant_psy_sleep',
+                    targetType: 'character',
+                    source: 'mutant-card',
+                });
+            };
+            options.appendChild(sleepButton);
+        }
+        if (hasTrait('Вор')) {
+            const stealButton = document.createElement('button');
+            stealButton.type = 'button';
+            stealButton.className = 'btn btn-secondary';
+            stealButton.textContent = 'Украсть устройство · 2 ОД · соседняя цель';
+            stealButton.onclick = () => {
+                modal.remove();
+                showElectrocrowStealMenu(actor).catch(error => {
+                    showNotification(error.message || 'Не удалось открыть список устройств', 'system');
+                });
+            };
+            options.appendChild(stealButton);
+        }
+        if (combatState?.status === 'active') {
+            const skillCheckButton = document.createElement('button');
+            skillCheckButton.type = 'button';
+            skillCheckButton.className = 'btn btn-secondary';
+            skillCheckButton.textContent = 'Проверка навыка / другое действие';
+            skillCheckButton.onclick = () => {
+                modal.remove();
+                showNarrativeActionModal(characterId);
+            };
+            options.appendChild(skillCheckButton);
         }
         if (!weapons.length) options.textContent = 'У этого мутанта нет атак.';
         modal.querySelector('.mutant-attack-close').onclick = () => modal.remove();
@@ -2931,6 +3167,83 @@ function closeFacingMenu() {
     if (facingMenu) facingMenu.remove();
     facingMenu = null;
     pendingFacingSelection = null;
+    clearFacingPreview();
+}
+
+function clearFacingPreview() {
+    if (!facingPreviewMesh) return;
+    scene?.remove(facingPreviewMesh);
+    facingPreviewMesh.geometry?.dispose();
+    facingPreviewMesh.material?.dispose();
+    facingPreviewMesh = null;
+}
+
+function updateFacingPreview(clientX, clientY) {
+    if (!pendingFacingSelection || !currentLocationData || !scene) {
+        clearFacingPreview();
+        return;
+    }
+    const tile = getLocationTileAtScreen(clientX, clientY);
+    const character = pendingFacingSelection.isCombatActive
+        ? findCombatCharacterByCharacterId(pendingFacingSelection.characterId)
+        : getCharacterModelEntry(pendingFacingSelection.characterId);
+    if (!tile || !character) {
+        clearFacingPreview();
+        return;
+    }
+    const sourceX = Number(character.x ?? character.posX);
+    const sourceY = Number(character.y ?? character.posY);
+    const facingX = tile.x - sourceX;
+    const facingY = tile.y - sourceY;
+    const facingLength = Math.hypot(facingX, facingY);
+    if (!facingLength) {
+        clearFacingPreview();
+        return;
+    }
+    const visibleTiles = [];
+    const sourceHeight = visionEyeHeight({
+        posX: sourceX,
+        posY: sourceY,
+        posture: character.posture || 'standing',
+    });
+    const minX = Math.max(0, Math.floor(sourceX - FOG_VIEW_RADIUS));
+    const maxX = Math.min(currentLocationData.grid_width - 1, Math.ceil(sourceX + FOG_VIEW_RADIUS));
+    const minY = Math.max(0, Math.floor(sourceY - FOG_VIEW_RADIUS));
+    const maxY = Math.min(currentLocationData.grid_height - 1, Math.ceil(sourceY + FOG_VIEW_RADIUS));
+    for (let y = minY; y <= maxY; y += 1) {
+        for (let x = minX; x <= maxX; x += 1) {
+            const dx = x - sourceX;
+            const dy = y - sourceY;
+            const distance = Math.hypot(dx, dy);
+            if (!distance || distance > FOG_VIEW_RADIUS) continue;
+            const cosine = (dx * facingX + dy * facingY) / (distance * facingLength);
+            if (cosine < Math.cos(FOG_VIEW_HALF_ANGLE)) continue;
+            if (!hasLineOfSight(sourceX, sourceY, x, y, sourceHeight, getTileHeight(x, y) + 1.65)) continue;
+            visibleTiles.push({ x, y });
+        }
+    }
+    clearFacingPreview();
+    if (!visibleTiles.length) return;
+    const geometry = new THREE.PlaneGeometry(0.9, 0.9);
+    const material = new THREE.MeshBasicMaterial({
+        color: 0xd3b66a,
+        transparent: true,
+        opacity: 0.24,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+    });
+    facingPreviewMesh = new THREE.InstancedMesh(geometry, material, visibleTiles.length);
+    const transform = new THREE.Object3D();
+    visibleTiles.forEach(({ x, y }, index) => {
+        transform.position.set(x + 0.5, getTileHeight(x, y) + 0.035, y + 0.5);
+        transform.rotation.set(-Math.PI / 2, 0, 0);
+        transform.updateMatrix();
+        facingPreviewMesh.setMatrixAt(index, transform.matrix);
+    });
+    facingPreviewMesh.instanceMatrix.needsUpdate = true;
+    facingPreviewMesh.renderOrder = 18;
+    facingPreviewMesh.raycast = () => {};
+    scene.add(facingPreviewMesh);
 }
 
 function getFacingChangeOptions(character, targetX, targetY) {
@@ -2940,11 +3253,22 @@ function getFacingChangeOptions(character, targetX, targetY) {
     const lengths = Math.hypot(fromX, fromY) * Math.hypot(targetX, targetY);
     const degrees = Math.round(Math.acos(Math.max(-1, Math.min(1, dot / lengths))) * 180 / Math.PI);
     const prone = character.posture === 'prone';
-    const movement = Math.max(0, (degrees <= 45 ? 3 : 5) - (Number(character.agility_bonus) || 0) + (prone ? 3 : 0));
+    if (degrees <= 45) {
+        return {
+            degrees,
+            options: prone
+                ? [
+                    { payment: 'prone_action', action: 1, free: 0, movement: 0 },
+                    { payment: 'prone_movement', action: 0, free: 0, movement: 3 },
+                ]
+                : [{ payment: 'free_turn', action: 0, free: 0, movement: 0 }],
+        };
+    }
+    const movement = Math.max(0, (degrees <= 90 ? 3 : 5) - (Number(character.agility_bonus) || 0) + (prone ? 3 : 0));
     const actionExtra = prone ? 1 : 0;
     return {
         degrees,
-        options: degrees <= 45
+        options: degrees <= 90
             ? [
                 { payment: 'free', action: actionExtra, free: 1, movement: 0 },
                 { payment: 'action', action: 1 + actionExtra, free: 0, movement: 0 },
@@ -2962,8 +3286,8 @@ function facingPaymentLabel(option) {
     const parts = [];
     if (option.action) parts.push(`${option.action} \u041e\u0414`);
     if (option.free) parts.push(`${option.free} \u0421\u0414`);
-    if (option.movement || (!option.action && !option.free)) parts.push(`${option.movement} \u041e\u041f`);
-    return parts.join(' + ');
+    if (option.movement) parts.push(`${option.movement} \u041e\u041f`);
+    return parts.join(' + ') || 'Бесплатно';
 }
 
 function showFacingMenuLegacy(characterId) {
@@ -3168,13 +3492,14 @@ async function resolveFacingCell(clientX, clientY) {
     }
     const sourceX = Number(character.x ?? character.posX);
     const sourceY = Number(character.y ?? character.posY);
-    const targetX = Math.sign(tile.x - sourceX);
-    const targetY = Math.sign(tile.y - sourceY);
+    const targetX = tile.x - sourceX;
+    const targetY = tile.y - sourceY;
     if (!targetX && !targetY) {
         showNotification('\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u0443\u044e \u043a\u043b\u0435\u0442\u043a\u0443', 'system');
         return;
     }
     pendingFacingSelection = null;
+    clearFacingPreview();
     renderer.domElement.style.cursor = 'default';
     if (!pending.isCombatActive) {
         try {
@@ -3964,7 +4289,7 @@ function updateCharacterTeamVisual(characterId, teamName, teamColor) {
     badge.style.borderColor = entry.teamColor || '#8b98a3';
 }
 
-export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1) {
+export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1, isMutant = false) {
     if (characterModels.has(characterId)) {
         const old = characterModels.get(characterId);
         scene.remove(old.model);
@@ -4063,6 +4388,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         ownerName,
         hpZones,
         effects,
+        isMutant: Boolean(isMutant),
         posX,
         posY,
         posture: 'standing',
@@ -5030,7 +5356,7 @@ function closeCombatParticipantMenu() {
     }
 }
 
-async function showCombatParticipantSelection() {
+async function showCombatParticipantSelection(initiatorLocationCharacterId = null) {
     if (!window.isGM || combatState?.status === 'active') return;
     let characters = [];
     try {
@@ -5113,7 +5439,7 @@ async function showCombatParticipantSelection() {
             cursor:pointer;
         `;
         row.innerHTML = `
-            <input type="checkbox" value="${character.location_character_id}" checked>
+            <input type="checkbox" value="${character.location_character_id}" checked ${character.location_character_id === initiatorLocationCharacterId ? 'disabled' : ''}>
             <strong class="combat-participant-name" style="overflow:hidden; text-overflow:ellipsis;"></strong>
             <span style="font-size:12px; opacity:.75;">Инициатива ${bonus >= 0 ? '+' : ''}${bonus}</span>
         `;
@@ -5133,6 +5459,12 @@ async function showCombatParticipantSelection() {
         const selectedIds = Array.from(
             combatParticipantMenu.querySelectorAll('input[type="checkbox"]:checked'),
         ).map(input => Number(input.value)).filter(Number.isFinite);
+        if (
+            Number.isFinite(Number(initiatorLocationCharacterId))
+            && !selectedIds.includes(Number(initiatorLocationCharacterId))
+        ) {
+            selectedIds.unshift(Number(initiatorLocationCharacterId));
+        }
         if (!selectedIds.length) {
             showNotification('Выберите хотя бы одного участника боя', 'system');
             return;
@@ -5143,6 +5475,7 @@ async function showCombatParticipantSelection() {
                 window.currentLobbyId,
                 getCurrentLocationId(),
                 selectedIds,
+                initiatorLocationCharacterId,
             );
             close();
         } catch (error) {
@@ -6954,6 +7287,111 @@ async function showCharacterLootMenu(actorLocationCharacterId, targetCharacterId
     containerInteractionMenu.style.top = `${Math.max(8, window.innerHeight / 2 - Math.min(window.innerHeight * .4, 360))}px`;
 }
 
+async function showMutantButcheringMenu(actorLocationCharacterId, targetCharacterId) {
+    const profile = await Server.butcherLocationMutant(
+        window.currentLobbyId,
+        getCurrentLocationId(),
+        targetCharacterId,
+        { actor_location_character_id: actorLocationCharacterId },
+    );
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.style.display = 'flex';
+    modal.innerHTML = `
+        <div class="modal-content" style="width:min(660px,calc(100vw - 28px));max-height:calc(100vh - 28px);overflow:auto;">
+            <button type="button" class="close">&times;</button>
+            <h3 style="margin-bottom:5px;">Разделка: ${escapeHtml(profile.target_name || profile.species)}</h3>
+            <div style="font-size:13px;opacity:.78;margin-bottom:12px;">
+                d20 ${profile.roll.roll} ${Number(profile.roll.mutant_modifier) >= 0 ? '+' : ''}${profile.roll.mutant_modifier} вид
+                ${Number(profile.roll.weapon_bonus) >= 0 ? '+' : ''}${profile.roll.weapon_bonus} оружие
+                ${Number(profile.roll.survival_bonus) >= 0 ? '+' : ''}${profile.roll.survival_bonus} Выживание − 5
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid rgba(211,182,106,.3);border-radius:10px;background:rgba(211,182,106,.08);">
+                <strong>Очки разделки</strong><strong class="butchering-points" style="font-size:20px;"></strong>
+            </div>
+            <div class="butchering-parts" style="display:grid;gap:8px;margin-top:12px;"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+                <button type="button" class="btn btn-secondary butchering-cancel">Отмена</button>
+                <button type="button" class="btn btn-primary butchering-confirm">Завершить разделку</button>
+            </div>
+        </div>
+    `;
+    const values = Object.fromEntries(Object.keys(profile.parts || {}).map(key => [key, 0]));
+    const points = modal.querySelector('.butchering-points');
+    const list = modal.querySelector('.butchering-parts');
+    const rows = new Map();
+    const spentPoints = () => Object.entries(values).reduce(
+        (sum, [key, value]) => sum + value * Number(profile.parts[key]?.points || 0),
+        0,
+    );
+    const render = () => {
+        const spent = spentPoints();
+        const total = Number(profile.roll.total) || 0;
+        points.textContent = `${total - spent} / ${total}`;
+        rows.forEach((row, key) => {
+            const part = profile.parts[key];
+            row.querySelector('.butchering-count').textContent = values[key];
+            row.querySelector('.butchering-minus').disabled = values[key] <= 0;
+            row.querySelector('.butchering-plus').disabled = !part.available
+                || spent + Number(part.points) > total
+                || (part.max !== null && part.max !== undefined && values[key] >= Number(part.max));
+        });
+    };
+    Object.entries(profile.parts || {}).forEach(([key, part]) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid rgba(255,255,255,.1);border-radius:10px;background:rgba(255,255,255,.035);';
+        const maxText = part.max === null || part.max === undefined ? '' : ` · максимум ${part.max}`;
+        const radiationText = Number(part.radiation) > 0 ? ` · радиация ${part.radiation}` : '';
+        row.innerHTML = `
+            <div><strong>${escapeHtml(part.label)}</strong><div style="font-size:12px;opacity:.7;">${part.points} очк. · ${part.weight} кг · ${part.unit_price} ₽${maxText}${radiationText}${part.available ? '' : ' · недоступно'}</div></div>
+            <div style="display:grid;grid-template-columns:34px 34px 34px;align-items:center;text-align:center;gap:4px;">
+                <button type="button" class="btn btn-sm btn-secondary butchering-minus">−</button>
+                <strong class="butchering-count">0</strong>
+                <button type="button" class="btn btn-sm btn-secondary butchering-plus">+</button>
+            </div>
+        `;
+        row.querySelector('.butchering-minus').onclick = () => {
+            values[key] = Math.max(0, values[key] - 1);
+            render();
+        };
+        row.querySelector('.butchering-plus').onclick = () => {
+            values[key] += 1;
+            render();
+        };
+        rows.set(key, row);
+        list.appendChild(row);
+    });
+    const close = () => modal.remove();
+    modal.querySelector('.close').onclick = close;
+    modal.querySelector('.butchering-cancel').onclick = close;
+    modal.addEventListener('pointerdown', event => {
+        if (event.target === modal) close();
+    });
+    modal.querySelector('.butchering-confirm').onclick = async event => {
+        event.currentTarget.disabled = true;
+        try {
+            const result = await Server.butcherLocationMutant(
+                window.currentLobbyId,
+                getCurrentLocationId(),
+                targetCharacterId,
+                {
+                    actor_location_character_id: actorLocationCharacterId,
+                    confirm: true,
+                    allocation: values,
+                },
+            );
+            close();
+            const loot = (result.loot || []).map(item => `${item.name} ×${item.quantity}`).join(', ');
+            showNotification(loot ? `Получено: ${loot}` : 'Разделка завершена без добычи', 'success');
+        } catch (error) {
+            event.currentTarget.disabled = false;
+            showNotification(error.message || 'Не удалось завершить разделку', 'system');
+        }
+    };
+    document.body.appendChild(modal);
+    render();
+}
+
 function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
     const actorCharacterId = pendingStructureAction?.actorCharacterId;
     const actorLocationCharacterId = pendingStructureAction?.actorLocationCharacterId;
@@ -6963,6 +7401,7 @@ function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
     }
     ensureStructureActionMenu();
     const target = getLocationCharacterById(targetCharacterId);
+    const targetCombat = findCombatCharacterByCharacterId(targetCharacterId);
     const condition = getLocationCharacterCondition(targetCharacterId);
     structureActionMenuState = {
         objectId: `character:${targetCharacterId}`,
@@ -7003,6 +7442,13 @@ function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
                 run: () => showMedicalConsumableMenu(actorCharacterId, targetCharacterId, actorLocationCharacterId),
             },
         ];
+    if (condition.state === 'dead' && (targetCombat?.is_mutant || target?.isMutant)) {
+        actions.push({
+            icon: '◆',
+            label: 'Разделать мутанта',
+            run: () => showMutantButcheringMenu(actorLocationCharacterId, targetCharacterId),
+        });
+    }
     actions.forEach(action => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -7856,6 +8302,13 @@ function createLocationObjectMesh(obj) {
             leg.position.set(x * (width / 2 - 0.12), (height - 0.12) / 2, z * (depth / 2 - 0.12));
             group.add(leg);
         }));
+    } else if (obj.type === 'barrel') {
+        main = new THREE.Mesh(
+            new THREE.CylinderGeometry(width / 2, width / 2, height, 20),
+            material,
+        );
+        main.position.y = height / 2;
+        group.add(main);
     } else {
         main = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
         main.position.y = height / 2;
@@ -7948,6 +8401,7 @@ async function placeStructureAtTile(x, z) {
                 cover_hp: coverProfile.maxHp,
                 cover_base_physical_protection: coverProfile.protection,
                 cover_physical_protection: coverProfile.protection,
+                weight_kg: THROWABLE_OBJECT_WEIGHTS[structurePreset],
                 interactions: objectInteractions[structurePreset] || [],
                 interaction_requirements: (objectInteractions[structurePreset] || []).reduce((rules, action) => {
                     rules[action] = interactionRequirements[action];
@@ -8402,6 +8856,9 @@ function setupCharacterDragging() {
 
         if (armedMoveCharacterId && !isDraggingCharacter) {
             updateMovementPreview(e.clientX, e.clientY);
+        }
+        if (pendingFacingSelection) {
+            updateFacingPreview(e.clientX, e.clientY);
         }
         if (pendingCombatAction) {
             updateAttackPreview(e.clientX, e.clientY);

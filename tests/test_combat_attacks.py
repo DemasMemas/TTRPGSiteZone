@@ -132,6 +132,236 @@ def test_battle_cry_deafness_threshold_is_90():
     }) == 0
 
 
+def test_psi_defense_sums_will_armor_gas_mask_and_temporary_bonus(monkeypatch):
+    monkeypatch.setattr(
+        combat_module,
+        'artifact_passive_profile',
+        lambda data: {
+            'protection': {'psi': 5},
+            'skill_physical': 0, 'skill_other': 0,
+            'skill_strength': 0, 'skill_will': 0,
+            'skill_awareness': 0, 'skill_stealth': 0,
+        },
+    )
+    data = {
+        'skills': {'physical': {'will': {'base': 18, 'bonus': 0}}},
+        'equipment': {
+            'armor': {'name': 'Комбинезон Купол', 'durability': 100},
+            'gasMask': {
+                'name': 'Противогаз ГП-5', 'durability': 20,
+                'category': 'gas_mask',
+            },
+        },
+        'health': {'combatMeta': {'consumableModifiers': [
+            {'stat': 'psy_defense', 'value': 10, 'remaining': 2},
+        ]}},
+    }
+
+    profile = CombatService._psi_defense_profile(data)
+
+    assert profile['will'] == 20
+    assert profile['artifacts'] == 5
+    assert profile['armor'] == 35
+    assert profile['temporary'] == 10
+    assert profile['total'] == 70
+
+
+def test_incoming_psi_state_is_reduced_by_total_defense(monkeypatch):
+    monkeypatch.setattr(
+        CombatService,
+        '_psi_defense_profile',
+        staticmethod(lambda data: {
+            'total': 40, 'will_bonus': 0, 'will': 0, 'artifacts': 0,
+            'armor': 40, 'temporary': 0, 'equipment': [],
+        }),
+    )
+    data = {'health': {'psyState': 5}}
+
+    result = CombatService._increase_psy_state(data, 10, 'test')
+
+    assert result['received'] == 6
+    assert result['prevented'] == 4
+    assert result['after'] == 11
+    assert data['health']['psy_state'] == 11
+
+
+@pytest.mark.parametrize(('psy_state', 'deafness'), [
+    (19, 0), (20, 50), (39, 50), (40, 100),
+])
+def test_psi_threshold_sets_minimum_deafness(psy_state, deafness):
+    assert CombatService._deafness_level({
+        'health': {'psyState': psy_state, 'deafness': 0},
+    }) == deafness
+
+
+def test_psi_state_recovers_once_at_end_of_round(monkeypatch):
+    monkeypatch.setattr(combat_module, 'flag_modified', lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        CombatService,
+        '_sync_location_effects_from_character',
+        staticmethod(lambda loc_char: loc_char),
+    )
+    character = SimpleNamespace(
+        id=10, name='Test', data={'health': {'psyState': 20}},
+    )
+    loc_char = SimpleNamespace(character=character, character_id=10)
+
+    result = CombatService._apply_end_of_round_psi_recovery([loc_char])
+
+    assert character.data['health']['psyState'] == 19
+    assert character.data['health']['psy_state'] == 19
+    assert result[0]['before'] == 20
+    assert result[0]['after'] == 19
+
+
+def test_psi_crisis_without_weapon_resets_state_and_applies_reset_damage(monkeypatch):
+    monkeypatch.setattr(
+        CombatService,
+        '_psi_defense_profile',
+        staticmethod(lambda data: {
+            'total': 0, 'will_bonus': 0, 'will': 0, 'artifacts': 0,
+            'armor': 0, 'temporary': 0, 'equipment': [],
+        }),
+    )
+    data = {
+        'health': {
+            'current': 700, 'max': 700, 'psyState': 49, 'effects': [],
+            'zones': {'head': {'current': 50, 'max': 50}},
+        },
+    }
+
+    result = CombatService._increase_psy_state(data, 1, 'test')
+
+    assert result['crisis']['triggered'] is True
+    assert result['crisis']['suicide_attempt']['failure_reason'] == 'no_suitable_weapon'
+    assert result['crisis']['reset_damage'] == 500
+    assert data['health']['psyState'] == 0
+    assert data['health']['current'] == 200
+    assert data['health']['zones']['head']['current'] == 50
+
+
+def test_successful_psi_suicide_shot_kills_without_reset_damage(monkeypatch):
+    monkeypatch.setattr(
+        CombatService,
+        '_psi_defense_profile',
+        staticmethod(lambda data: {
+            'total': 0, 'will_bonus': 0, 'will': 0, 'artifacts': 0,
+            'armor': 0, 'temporary': 0, 'equipment': [],
+        }),
+    )
+    monkeypatch.setattr(combat_module.random, 'randint', lambda start, end: 10)
+    data = {
+        'weapons': [{
+            'name': 'Пистолет', 'category': 'firearm', 'ammo': 1,
+            'durability': 100, 'maxDurability': 100,
+            'attributes': {'damage': 50, 'armor_piercing': 20},
+        }],
+        'health': {'current': 700, 'max': 700, 'psyState': 49, 'effects': []},
+    }
+    loc_char = SimpleNamespace(
+        character=SimpleNamespace(data=data), drawn_weapon_index=0,
+        posture='standing', cover_object_id=None,
+        weapon_braced=False, braced_weapon_index=None,
+    )
+
+    result = CombatService._increase_psy_state(
+        data, 1, 'test', loc_char=loc_char,
+    )
+
+    assert result['crisis']['suicide_succeeded'] is True
+    assert result['crisis']['reset_damage'] == 0
+    assert data['health']['psyState'] == 50
+    assert CombatService._character_condition(data)['state'] == 'dead'
+    assert data['weapons'][0]['ammo'] == 0
+
+
+def test_psi_suicide_jam_causes_reset_instead_of_death(monkeypatch):
+    monkeypatch.setattr(combat_module.random, 'randint', lambda start, end: 1)
+    data = {
+        'weapons': [{
+            'name': 'Изношенный пистолет', 'category': 'firearm', 'ammo': 1,
+            'durability': 90, 'maxDurability': 100,
+            'attributes': {'damage': 50, 'armor_piercing': 20},
+        }],
+        'health': {'current': 700, 'max': 700, 'psyState': 50, 'effects': []},
+    }
+    loc_char = SimpleNamespace(
+        character=SimpleNamespace(data=data), drawn_weapon_index=0,
+        posture='standing', cover_object_id=None,
+        weapon_braced=False, braced_weapon_index=None,
+    )
+
+    crisis = CombatService._resolve_psi_crisis(data, loc_char)
+
+    assert crisis['suicide_succeeded'] is False
+    assert crisis['suicide_attempt']['failure_reason'] == 'weapon_jammed'
+    assert crisis['reset_damage'] == 500
+    assert data['health']['psyState'] == 0
+    assert data['weapons'][0]['ammo'] == 1
+
+
+def test_psi_suicide_shot_fails_when_ear_protection_is_not_penetrated(monkeypatch):
+    monkeypatch.setattr(combat_module.random, 'randint', lambda start, end: 10)
+    data = {
+        'weapons': [{
+            'name': 'Пистолет', 'category': 'firearm', 'ammo': 1,
+            'durability': 100, 'maxDurability': 100,
+            'attributes': {'damage': 50, 'armor_piercing': 20},
+        }],
+        'equipment': {'helmet': {
+            'name': 'Закрытый шлем', 'durability': 20,
+            'protection': {'physical': 40},
+            'attributes': {'protection_zones': ['ears']},
+        }},
+        'health': {'current': 700, 'max': 700, 'psyState': 50, 'effects': []},
+    }
+
+    attempt = CombatService._resolve_psi_suicide_attempt(data)
+
+    assert attempt['success'] is False
+    assert attempt['failure_reason'] == 'armor_not_penetrated'
+    assert attempt['armor_zone'] == 'ears'
+    assert attempt['armor'] == 40
+    assert attempt['armor_piercing'] == 20
+    assert data['weapons'][0]['ammo'] == 0
+
+
+def test_death_from_psi_reset_transforms_character_into_zombie(monkeypatch):
+    monkeypatch.setattr(combat_module, 'flag_modified', lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        CombatService,
+        '_psi_defense_profile',
+        staticmethod(lambda data: {
+            'total': 0, 'will_bonus': 0, 'will': 0, 'artifacts': 0,
+            'armor': 0, 'temporary': 0, 'equipment': [],
+        }),
+    )
+    data = {
+        'health': {
+            'current': 500, 'max': 700, 'psyState': 49, 'effects': [],
+            'zones': {'head': {'current': 50, 'max': 50}},
+        },
+        'inventory': {'pockets': [{'name': 'КПК'}]},
+    }
+    character = SimpleNamespace(id=7, name='Test', data=data)
+    loc_char = SimpleNamespace(
+        character=character, character_id=7, drawn_weapon_index=None,
+        location=SimpleNamespace(lobby=SimpleNamespace(gm_id=1)),
+        controlled_by=2, posture='standing', cover_object_id=None,
+        weapon_braced=False, braced_weapon_index=None,
+    )
+
+    result = CombatService._increase_psy_state(
+        data, 1, 'test', loc_char=loc_char,
+    )
+
+    assert result['crisis']['transformed']['mutant_type'] == 'Зомбированный'
+    assert character.data['basic']['mutant_type'] == 'Зомбированный'
+    assert character.data['inventory']['pockets'][0]['name'] == 'КПК'
+    assert loc_char.controlled_by == 1
+    assert loc_char.posture == 'prone'
+
+
 def test_mutant_natural_hit_and_bite_are_opportunity_attack_options():
     mutant = SimpleNamespace(
         drawn_weapon_index=None,
@@ -3248,3 +3478,158 @@ def test_weapon_fire_rate_counts_shots_per_weapon_and_resets_each_round():
     assert CombatService._validate_weapon_fire_rate(
         meta, 2, 0, weapon, 3
     )["fired"] == 0
+
+
+def test_mutant_acceleration_uses_value_from_each_trait():
+    kabar = {
+        "mutant": {
+            "traits": [
+                "Возможность разгона. На следующий ход он получает +1 Перемещение."
+            ]
+        }
+    }
+    zhmerka = {
+        "mutant": {
+            "traits": [
+                "Возможность разгона. На следующий ход она получает +2 Перемещения."
+            ]
+        }
+    }
+
+    assert CombatService._mutant_acceleration_bonus(kabar) == 1
+    assert CombatService._mutant_acceleration_bonus(zhmerka) == 2
+
+
+def test_mutant_reinforced_forehead_adds_head_protection_only():
+    data = {
+        "mutant": {
+            "physical_protection": 20,
+            "traits": [
+                "Усиленное лобовое бронирование. Физ. защита в голове увеличена на 15%"
+            ],
+        },
+        "equipment": {},
+    }
+
+    head, _ = CombatService._target_armor(data, "head")
+    chest, _ = CombatService._target_armor(data, "chest")
+
+    assert head == 35
+    assert chest == 20
+
+
+def test_mutant_camouflage_is_active_only_through_configured_round():
+    data = {
+        "health": {
+            "combatMeta": {
+                "mutantCamouflageActive": True,
+                "mutantCamouflageUntilRound": 5,
+            }
+        }
+    }
+
+    assert CombatService._mutant_camouflage_active(data, 5) is True
+    assert CombatService._mutant_camouflage_active(data, 6) is False
+
+
+def test_mutant_opening_ambush_grants_attack_advantage():
+    data = {
+        "health": {
+            "combatMeta": {
+                "mutantOpeningAttackAdvantage": True,
+            }
+        }
+    }
+
+    assert CombatService._has_roll_advantage(
+        data, "skills.physical.shooting"
+    ) is True
+    assert CombatService._has_roll_advantage(
+        data, "skills.physical.melee"
+    ) is True
+    assert CombatService._has_roll_advantage(
+        data, "skills.physical.will"
+    ) is False
+
+
+def test_regular_ambush_does_not_grant_opening_combat_bonuses():
+    data = {
+        'health': {'combatMeta': {'mutantAmbushActive': True}},
+        'mutant': {
+            'traits': [
+                'Засада. Сложность обнаружения существа в засаде увеличена на 5.',
+            ],
+            'variant': {'traits': []},
+        },
+    }
+
+    assert CombatService._mutant_opening_ambush_eligible(data) is False
+    assert CombatService._skill_modifier(
+        data, 'skills.other.stealth',
+    ) == 5
+
+
+def test_swamp_bloodsucker_ambush_grants_opening_combat_bonuses():
+    data = {
+        'health': {'combatMeta': {'mutantAmbushActive': True}},
+        'mutant': {
+            'traits': [],
+            'variant': {'traits': [
+                'Атака из засады. Если начинает бой первым, получает бонусы.',
+            ]},
+        },
+    }
+
+    assert CombatService._mutant_opening_ambush_eligible(data) is True
+
+
+def test_anomalous_shield_raises_physical_protection_to_eighty():
+    data = {
+        "mutant": {"physical_protection": 5},
+        "health": {"combatMeta": {"mutantAnomalyShield": True}},
+        "equipment": {},
+    }
+
+    protection, layers = CombatService._target_armor(data, "chest")
+
+    assert protection == 80
+    assert any(layer["slot"] == "mutant_anomaly_shield" for layer in layers)
+
+
+def test_electrocrow_can_only_steal_supported_devices():
+    assert CombatService._is_stealable_electronic(
+        {"name": "Детектор аномалий Медведь"}
+    ) is True
+    assert CombatService._is_stealable_electronic(
+        {"name": "ПНВ армейский"}
+    ) is True
+    assert CombatService._is_stealable_electronic(
+        {"name": "Аптечка"}
+    ) is False
+
+
+def test_throwable_object_weight_uses_explicit_value_then_type_default():
+    explicit = type("Object", (), {
+        "properties": {"weight_kg": 12.5}, "type": "chair",
+    })()
+    default = type("Object", (), {
+        "properties": {}, "type": "barrel",
+    })()
+
+    assert CombatService._throwable_object_weight(explicit) == 12.5
+    assert CombatService._throwable_object_weight(default) == 40
+
+
+def test_zombification_controller_overrides_character_owner():
+    loc_char = SimpleNamespace(
+        controlled_by=5,
+        character=SimpleNamespace(owner_id=5, data={
+            "health": {
+                "combatMeta": {"zombificationController": 9},
+            }
+        }),
+    )
+
+    assert CombatService._can_end_turn_for_character(loc_char, 5) is False
+    assert CombatService._can_end_turn_for_character(loc_char, 9) is True
+    assert CombatService._can_end_turn_for_character(loc_char, 5, is_gm=True) is True

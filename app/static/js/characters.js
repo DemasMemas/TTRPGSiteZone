@@ -169,13 +169,41 @@ export async function openMutantCard(characterId, loadedCharacter = null) {
             shock: 'Болевой шок', unconsciousness: 'Без сознания',
             critical_condition: 'Критическое состояние', death: 'Смерть',
             pain: 'Боль', blindness: 'Слепота', deafness: 'Глухота',
-            mutant_ambush: 'Засада: Скрытность +5',
+            mutant_ambush: 'Засада: СЛ обнаружения +5',
+            mutant_camouflage: 'Маскировка',
+            mutant_pack: 'Бонус стаи',
+            mutant_rage: 'Яростные атаки',
+            mutant_provoked: 'Спровоцирован',
         };
         const hiddenEffectTypes = new Set(['stress', 'stress_effect', 'stress_stupor', 'phobia']);
         const visibleEffects = [
             ...(health.effects || []),
             ...(health.combatMeta?.mutantAmbushActive
                 ? [{ type: 'mutant_ambush', active: true }]
+                : []),
+            ...(health.combatMeta?.mutantCamouflageActive
+                ? [{
+                    type: 'mutant_camouflage',
+                    active: true,
+                    area: `до раунда ${health.combatMeta.mutantCamouflageUntilRound}`,
+                }]
+                : []),
+            ...(Number(health.combatMeta?.mutantPackRollBonus) > 0
+                ? [{
+                    type: 'mutant_pack',
+                    active: true,
+                    area: `+${Number(health.combatMeta.mutantPackRollBonus)} к броскам`,
+                }]
+                : []),
+            ...(Number(health.combatMeta?.mutantRageAccuracy) > 0
+                ? [{
+                    type: 'mutant_rage',
+                    active: true,
+                    area: `+${Number(health.combatMeta.mutantRageAccuracy)} к точности`,
+                }]
+                : []),
+            ...(health.combatMeta?.mutantProvoked
+                ? [{ type: 'mutant_provoked', active: true }]
                 : []),
         ];
         const effects = visibleEffects

@@ -2631,6 +2631,7 @@ function renderHealthTab(data, container = null) {
         { key: 'intoxication', label: 'Опьянение', value: health.intoxication, color: '#9bb8ff' },
         { key: 'painLevel', label: 'Боль', value: health.painLevel, color: '#ff8a8a' },
         { key: 'stress', label: 'Стресс', value: health.stress, color: '#d4a5ff' },
+        { key: 'psyState', label: 'Пси-состояние', value: health.psyState ?? health.psy_state, color: '#72d6c9' },
         { key: 'exhaustion', label: 'Истощение', value: health.exhaustion, color: '#ffd67d' },
         { key: 'infection', label: 'Заражение', value: health.infection, color: '#86d48f' },
     ].filter(item => Number.isFinite(Number(item.value)) && Number(item.value) !== 0);

@@ -429,6 +429,17 @@ export const Server = {
         );
     },
 
+    async butcherLocationMutant(lobbyId, locationId, characterId, payload) {
+        return apiFetch(
+            `/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/butchering`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            }
+        );
+    },
+
     async treatLocationCharacter(lobbyId, locationId, characterId, payload) {
         return apiFetch(
             `/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/treatment`,
@@ -502,12 +513,18 @@ export const Server = {
         });
     },
 
-    async startLocationCombat(lobbyId, locationId, locationCharacterIds = null) {
+    async startLocationCombat(
+        lobbyId,
+        locationId,
+        locationCharacterIds = null,
+        initiatorLocationCharacterId = null,
+    ) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 location_character_ids: locationCharacterIds,
+                initiator_location_character_id: initiatorLocationCharacterId,
             }),
         });
     },

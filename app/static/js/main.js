@@ -274,6 +274,8 @@ window.enterLocation = async function(locationId) {
                                 <option value="door">Дверь</option>
                                 <option value="table">Стол</option>
                                 <option value="chair">Стул</option>
+                                <option value="box">Ящик</option>
+                                <option value="barrel">Бочка</option>
                                 <option value="shelf">Стеллаж</option>
                                 <option value="chest">Сундук</option>
                                 <option value="fence">Забор</option>
@@ -410,6 +412,8 @@ window.enterLocation = async function(locationId) {
                     door: { width: 0.9, depth: 0.18, height: 2 },
                     table: { width: 1.4, depth: 0.8, height: 1 },
                     chair: { width: 0.55, depth: 0.55, height: 1 },
+                    box: { width: 0.8, depth: 0.8, height: 0.7 },
+                    barrel: { width: 0.65, depth: 0.65, height: 1 },
                     shelf: { width: 1.2, depth: 0.4, height: 2 },
                     chest: { width: 0.9, depth: 0.6, height: 0.7 },
                     fence: { width: 2, depth: 0.15, height: 1.2 }
@@ -825,6 +829,7 @@ if (socket) {
                     s.team_color,
                     s.facing_x,
                     s.facing_y,
+                    s.is_mutant,
                 );
             });
         });
@@ -878,6 +883,7 @@ if (socket) {
                 data.character.team_color,
                 data.character.facing_x,
                 data.character.facing_y,
+                data.character.is_mutant,
             );
         });
     });

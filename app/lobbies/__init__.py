@@ -2793,8 +2793,8 @@ def change_character_facing_outside_combat(
     payload = request.get_json() or {}
     facing_x = CombatService._coerce_int(payload.get('facing_x'), 0)
     facing_y = CombatService._coerce_int(payload.get('facing_y'), 0)
-    if (facing_x, facing_y) == (0, 0) or abs(facing_x) > 1 or abs(facing_y) > 1:
-        return jsonify({'error': 'Choose one of the eight facing directions'}), 400
+    if (facing_x, facing_y) == (0, 0):
+        return jsonify({'error': 'Choose a facing direction'}), 400
     location_character.facing_x = facing_x
     location_character.facing_y = facing_y
     db.session.commit()
@@ -2830,6 +2830,52 @@ def inspect_incapacitated_location_character(
         actor_location_character_id,
         character_id,
     )
+    return jsonify(result), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/butchering',
+    methods=['POST'],
+)
+@jwt_required()
+@requires_participant
+def butcher_location_mutant(
+    lobby_id,
+    location_id,
+    character_id,
+    lobby,
+    participant,
+):
+    data = request.get_json(silent=True) or {}
+    actor_location_character_id = data.get('actor_location_character_id')
+    if not actor_location_character_id:
+        return jsonify({'error': 'actor_location_character_id is required'}), 400
+    result = CombatService.butcher_mutant(
+        location_id,
+        participant.user_id,
+        actor_location_character_id,
+        character_id,
+        allocation=data.get('allocation') if data.get('confirm') else None,
+    )
+    if result.get('completed'):
+        socketio.emit(
+            'character_data_updated',
+            {
+                'character_id': result['actor_character_id'],
+                'updates': {'data': result['actor_data']},
+                'source': 'mutant_butchering',
+            },
+            room=f"character_{result['actor_character_id']}",
+        )
+        loot_text = ', '.join(
+            f"{item['name']} x{item['quantity']}" for item in result.get('loot') or []
+        ) or 'ничего'
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            f"Разделка {result['target_name']}: получено {loot_text}.",
+            username='Разделка',
+        )
     return jsonify(result), 200
 
 
@@ -3056,6 +3102,9 @@ def start_location_combat(lobby_id, location_id, lobby):
         location_id,
         lobby.gm_id,
         location_character_ids=data.get('location_character_ids'),
+        initiator_location_character_id=data.get(
+            'initiator_location_character_id'
+        ),
     )
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     for detonation in state.get('detonations') or []:
@@ -3616,6 +3665,43 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             room=f"character_{actor.id}",
         )
     mutant_action = result.get('mutant_action')
+    if isinstance(mutant_action, dict) and isinstance(mutant_action.get('clone'), dict):
+        clone = mutant_action['clone']
+        socketio.emit(
+            'character_spawned',
+            {
+                'action': 'spawned',
+                'character': {
+                    'id': clone.get('character_id'),
+                    'name': clone.get('name'),
+                    'owner_id': clone.get('owner_id'),
+                    'owner_username': clone.get('owner_username'),
+                    'controlled_by': clone.get('controlled_by'),
+                    'team_name': clone.get('team_name'),
+                    'team_color': clone.get('team_color'),
+                    'hp_zones': clone.get('hp_zones'),
+                    'effects': clone.get('effects'),
+                    'pos_x': clone.get('x'),
+                    'pos_y': clone.get('y'),
+                    'facing_x': clone.get('facing_x'),
+                    'facing_y': clone.get('facing_y'),
+                },
+            },
+            room=f"location_{location_id}",
+        )
+    evaporated_clones = []
+    for source in (result.get('attack'), result.get('explosive'), mutant_action):
+        if isinstance(source, dict):
+            evaporated_clones.extend(source.get('evaporated_clones') or [])
+    for clone in {item.get('character_id'): item for item in evaporated_clones if item.get('character_id')}.values():
+        socketio.emit(
+            'location_character_removed',
+            {
+                'location_id': location_id,
+                'character_id': clone.get('character_id'),
+            },
+            room=f"location_{location_id}",
+        )
     if isinstance(mutant_action, dict) and mutant_action.get('kind') == 'battle_cry':
         for target_result in mutant_action.get('targets') or []:
             target_character = db.session.get(
@@ -3644,6 +3730,86 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             f"Боевой клич. {checks}.",
             username='Мутант',
         )
+    if isinstance(mutant_action, dict) and mutant_action.get('kind') in {
+        'psy_attack', 'psy_roar', 'psy_sleep', 'object_attack', 'steal_device',
+    }:
+        affected_ids = {
+            int(value)
+            for value in [mutant_action.get('target_character_id')]
+            if value is not None
+        }
+        affected_ids.update(
+            int(item['character_id'])
+            for item in mutant_action.get('targets') or []
+            if isinstance(item, dict) and item.get('character_id') is not None
+        )
+        for affected_id in affected_ids:
+            target_character = db.session.get(LobbyCharacter, affected_id)
+            if not target_character:
+                continue
+            socketio.emit(
+                'character_data_updated',
+                {
+                    'character_id': target_character.id,
+                    'updates': {'data': target_character.data},
+                    'source': mutant_action.get('kind'),
+                },
+                room=f"character_{target_character.id}",
+            )
+
+        if mutant_action.get('kind') == 'psy_attack':
+            save = mutant_action.get('save') or {}
+            message = (
+                f"{mutant_action.get('attack_name') or 'Пси-атака'}: "
+                f"Воля d20 {save.get('roll')} "
+                f"{save.get('modifier', 0):+d} = {save.get('total')} "
+                f"против СЛ {save.get('difficulty')} - "
+                f"{'успех' if save.get('success') else 'провал'}."
+            )
+        elif mutant_action.get('kind') == 'psy_sleep':
+            save = mutant_action.get('save') or {}
+            outcome = 'успех' if save.get('success') else mutant_action.get('duration', 'сон')
+            message = (
+                f"Пси-сон: Воля d20 {save.get('roll')} "
+                f"{save.get('modifier', 0):+d} = {save.get('total')} "
+                f"против СЛ {save.get('difficulty')} - {outcome}."
+            )
+        elif mutant_action.get('kind') == 'psy_roar':
+            target_lines = []
+            for item in mutant_action.get('targets') or []:
+                save = item.get('save') or {}
+                outcome = 'успех' if save.get('success') else 'провал'
+                target_lines.append(
+                    f"{item.get('name')}: {save.get('total')} против СЛ 16 - {outcome}"
+                )
+            message = 'Пси-рёв. ' + ('; '.join(target_lines) or 'Целей нет.')
+        elif mutant_action.get('kind') == 'object_attack':
+            save = mutant_action.get('save') or {}
+            outcome = (
+                'цель увернулась'
+                if save.get('success')
+                else f"урон {round(mutant_action.get('damage') or 0)}"
+            )
+            message = (
+                f"{mutant_action.get('attack_name')}: "
+                f"{mutant_action.get('object_name')} "
+                f"({mutant_action.get('object_weight')} кг), "
+                f"Ловкость {save.get('total')} против СЛ {save.get('difficulty')} - "
+                f"{outcome}."
+            )
+        else:
+            message = (
+                f"Электроворона украла "
+                f"{(mutant_action.get('stolen_item') or {}).get('name') or mutant_action.get('item_name')} "
+                f"у {mutant_action.get('target_name')}."
+            )
+        _emit_lobby_chat_message(
+            lobby_id,
+            participant.user_id,
+            message,
+            username='Мутант',
+        )
+
     attack_summary = CombatService.format_attack_summary(result)
     if attack_summary:
         _emit_lobby_chat_message(

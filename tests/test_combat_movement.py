@@ -74,6 +74,7 @@ def test_near_death_intoxication_blocks_actions():
     [
         ("walk", 5, 5),
         ("correction", 3, 0),
+        ("backward_sideways", 5, 10),
         ("run", 5, 3),
         ("sprint", 5, 2),
     ],
@@ -98,6 +99,21 @@ def test_climb_cost_is_not_reduced_by_running():
 def test_unknown_movement_mode_is_rejected():
     with pytest.raises(ValidationError, match="Unknown movement mode"):
         CombatService._movement_route_cost(movement_path(1), "teleport")
+
+
+def test_backward_sideways_path_rejects_forward_steps():
+    character = SimpleNamespace(facing_x=0, facing_y=1)
+
+    CombatService._validate_backward_sideways_path(
+        character,
+        {"path": [(2, 2), (1, 2), (1, 1)]},
+    )
+
+    with pytest.raises(ValidationError, match="нельзя идти вперёд"):
+        CombatService._validate_backward_sideways_path(
+            character,
+            {"path": [(2, 2), (2, 3)]},
+        )
 
 
 def test_grapple_group_path_keeps_companion_offset(monkeypatch):

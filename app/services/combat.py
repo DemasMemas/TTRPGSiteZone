@@ -94,6 +94,13 @@ MOVEMENT_MODES = {
         'action_points': 0,
         'free_actions': 1,
     },
+    'backward_sideways': {
+        'label': 'Спиной / боком',
+        'max_distance': 5,
+        'movement_divisor': 0.5,
+        'action_points': 0,
+        'free_actions': 0,
+    },
     'run': {
         'label': 'Бег',
         'max_distance': 20,
@@ -187,10 +194,76 @@ ACTION_CATALOG = [
     {'key': 'mutant_jump', 'label': 'Прыжок', 'action_points': 4, 'free_actions': 0, 'movement_points': 0},
     {'key': 'mutant_ambush', 'label': 'Засада', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
     {'key': 'mutant_battle_cry', 'label': 'Боевой клич', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_camouflage', 'label': 'Маскировка', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_psy_attack', 'label': 'Пси-атака', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_psy_roar', 'label': 'Пси-рёв', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_psy_sleep', 'label': 'Пси-сон', 'action_points': 4, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_clone', 'label': 'Клонирование', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_object_attack', 'label': 'Бросок объекта', 'action_points': 0, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_anomaly_shield', 'label': 'Аномальный щит', 'action_points': 3, 'free_actions': 0, 'movement_points': 0},
+    {'key': 'mutant_steal_device', 'label': 'Украсть устройство', 'action_points': 2, 'free_actions': 0, 'movement_points': 0},
 ]
 
 
 class CombatService:
+    BUTCHERING_PARTS = {
+        'meat': {'label': 'Мясо', 'points': 2, 'max': None, 'price_multiplier': 0.5, 'weight': 0.5},
+        'hide': {'label': 'Шкура', 'points': 3, 'max': None, 'price_multiplier': 0.75, 'weight': 0.5},
+        'limb': {'label': 'Конечность / хвост', 'points': 5, 'max': 4, 'price_multiplier': 1.0, 'weight': 0.5},
+        'organ': {'label': 'Орган', 'points': 7, 'max': 4, 'price_multiplier': 1.25, 'weight': 0.25},
+        'eye': {'label': 'Глаз', 'points': 9, 'max': 2, 'price_multiplier': 1.5, 'weight': 0.1},
+    }
+    BUTCHERING_MUTANT_MODIFIERS = {
+        'слепыш': -12,
+        'собака': -6,
+        'кот': -6,
+        'болотник': -6,
+        'колобок': -5,
+        'лжепес': -4,
+        'ползун': -3,
+        'псионик': -3,
+        'кабан': -2,
+        'топотун': -2,
+        'кровопийца': -2,
+        'туша': 0,
+        'биголовый': 5,
+    }
+    BUTCHERING_BASE_PRICES = {
+        'слепыш': 50,
+        'собака': 250,
+        'кот': 300,
+        'болотник': 300,
+        'лжепес': 450,
+        'туша': 600,
+        'кабан': 750,
+        'топотун': 750,
+        'одичалый': 1200,
+        'кровопийца': 1800,
+        'псионик': 3000,
+        'жмурка': 7500,
+        'колобок': 10000,
+    }
+    BUTCHERING_MEAT_RADIATION = {
+        'слепыш': 25,
+        'собака': 30,
+        'кот': 20,
+        'болотник': 20,
+        'лжепес': 35,
+        'туша': 25,
+        'кабан': 40,
+        'топотун': 40,
+        'кровопийца': 45,
+        'псионик': 50,
+        'жмурка': 60,
+        'колобок': 200,
+    }
+    THROWABLE_OBJECT_WEIGHTS = {
+        'chair': 5.0,
+        'box': 10.0,
+        'chest': 15.0,
+        'table': 25.0,
+        'barrel': 40.0,
+    }
     NARRATIVE_SKILLS = {
         'skills.physical.strength': 'Сила',
         'skills.physical.agility': 'Ловкость',
@@ -952,8 +1025,8 @@ class CombatService:
     def _facing_change_options(loc_char, target_x, target_y):
         target_x = CombatService._coerce_int(target_x, 0)
         target_y = CombatService._coerce_int(target_y, 0)
-        if (target_x, target_y) == (0, 0) or abs(target_x) > 1 or abs(target_y) > 1:
-            raise ValidationError("Choose one of the eight facing directions")
+        if (target_x, target_y) == (0, 0):
+            raise ValidationError("Choose a facing direction")
         current_x = CombatService._coerce_int(getattr(loc_char, 'facing_x', 0), 0)
         current_y = CombatService._coerce_int(getattr(loc_char, 'facing_y', 1), 1)
         current_length = math.hypot(current_x, current_y)
@@ -976,9 +1049,27 @@ class CombatService:
             character_data, 'skills.physical.agility',
         )
         prone = CombatService._posture_key(loc_char) == 'prone'
-        movement_cost = (3 if degrees <= 45 else 5) - agility_bonus + (3 if prone else 0)
-        action_extra = 1 if prone else 0
         if degrees <= 45:
+            return {
+                'from_x': current_x,
+                'from_y': current_y,
+                'to_x': target_x,
+                'to_y': target_y,
+                'degrees': degrees,
+                'prone': prone,
+                'agility_bonus': agility_bonus,
+                'options': (
+                    [
+                        {'payment': 'prone_action', 'action_points': 1, 'free_actions': 0, 'movement_points': 0},
+                        {'payment': 'prone_movement', 'action_points': 0, 'free_actions': 0, 'movement_points': 3},
+                    ]
+                    if prone else
+                    [{'payment': 'free_turn', 'action_points': 0, 'free_actions': 0, 'movement_points': 0}]
+                ),
+            }
+        movement_cost = (3 if degrees <= 90 else 5) - agility_bonus + (3 if prone else 0)
+        action_extra = 1 if prone else 0
+        if degrees <= 90:
             options = [
                 {'payment': 'free', 'action_points': action_extra, 'free_actions': 1, 'movement_points': 0},
                 {'payment': 'action', 'action_points': 1 + action_extra, 'free_actions': 0, 'movement_points': 0},
@@ -1000,6 +1091,23 @@ class CombatService:
             'agility_bonus': agility_bonus,
             'options': options,
         }
+
+    @staticmethod
+    def _validate_backward_sideways_path(loc_char, path):
+        facing_x = CombatService._coerce_int(getattr(loc_char, 'facing_x', 0), 0)
+        facing_y = CombatService._coerce_int(getattr(loc_char, 'facing_y', 1), 1)
+        if (facing_x, facing_y) == (0, 0):
+            facing_y = 1
+        tiles = path.get('path') if isinstance(path, dict) else None
+        if not isinstance(tiles, list):
+            raise ValidationError("Movement path is missing")
+        for previous, current in zip(tiles, tiles[1:]):
+            if not isinstance(previous, (list, tuple)) or not isinstance(current, (list, tuple)):
+                raise ValidationError("Invalid movement path")
+            step_x = CombatService._coerce_int(current[0], 0) - CombatService._coerce_int(previous[0], 0)
+            step_y = CombatService._coerce_int(current[1], 0) - CombatService._coerce_int(previous[1], 0)
+            if step_x * facing_x + step_y * facing_y > 0:
+                raise ValidationError("В режиме движения спиной или боком нельзя идти вперёд")
 
     @staticmethod
     def _validate_posture_movement(posture, movement_mode):
@@ -1127,7 +1235,7 @@ class CombatService:
             combat_meta.get('mutantAccelerationActive')
             and CombatService._mutant_has_trait(data, 'Возможность разгона')
         ):
-            movement_gain += 2
+            movement_gain += CombatService._mutant_acceleration_bonus(data)
 
         return {
             'initiative_bonus': CombatService._coerce_int(initiative_bonus, 0),
@@ -1494,6 +1602,8 @@ class CombatService:
             combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
             if combat_meta.get('mutantAmbushActive'):
                 modifier += 5
+        combat_meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+        modifier += CombatService._coerce_int(combat_meta.get('mutantPackRollBonus'), 0)
         return modifier
 
     @staticmethod
@@ -1565,6 +1675,12 @@ class CombatService:
         pain = CombatService._coerce_int(health.get('painLevel'), 0)
         wounded = CombatService._coerce_float(health.get('current'), health.get('max', 700)) < CombatService._coerce_float(health.get('max'), 700)
         for effect in normalize_effect_list(health.get('effects') or []):
+            disadvantage_skills = effect.get('disadvantage_skills') or []
+            if (
+                effect.get('active', True)
+                and ('*' in disadvantage_skills or skill_path in disadvantage_skills)
+            ):
+                return True
             if not effect.get('active', True) or effect.get('type') != 'phobia':
                 continue
             phobia = f"{effect.get('phobia', '')} {effect.get('name', '')}".lower()
@@ -1584,6 +1700,16 @@ class CombatService:
         if not isinstance(health, dict):
             return 0
         values = [CombatService._coerce_float(health.get('deafness'), 0)]
+        psy_state = max(
+            0,
+            CombatService._coerce_float(
+                health.get('psyState', health.get('psy_state')), 0,
+            ),
+        )
+        if psy_state >= 40:
+            values.append(100)
+        elif psy_state >= 20:
+            values.append(50)
         values.extend(
             CombatService._coerce_float(effect.get('value'), 0)
             for effect in normalize_effect_list(health.get('effects') or [])
@@ -1595,6 +1721,20 @@ class CombatService:
     @staticmethod
     def _has_roll_advantage(character_data, skill_path, consume=False):
         health = character_data.get('health') if isinstance(character_data, dict) else {}
+        combat_meta = health.get('combatMeta') if isinstance(health, dict) and isinstance(health.get('combatMeta'), dict) else {}
+        if (
+            skill_path == 'skills.physical.will'
+            and combat_meta.get('mutantPackWillAdvantage')
+        ):
+            return True
+        if (
+            skill_path in {
+                'skills.physical.shooting',
+                'skills.physical.melee',
+            }
+            and combat_meta.get('mutantOpeningAttackAdvantage')
+        ):
+            return True
         effects = normalize_effect_list((health or {}).get('effects') or [])
         for effect in effects:
             if not effect.get('active', True) or not effect.get('gmApproved', False):
@@ -2856,7 +2996,7 @@ class CombatService:
         difficulty_penalty = 0
         disadvantage = False
 
-        if shooter_mode == 'walk':
+        if shooter_mode in {'walk', 'backward_sideways'}:
             difficulty_penalty += 2
         elif shooter_mode in {'run', 'sprint'}:
             difficulty_penalty += 2
@@ -3102,6 +3242,128 @@ class CombatService:
         )
 
     @staticmethod
+    def _mutant_acceleration_bonus(character_data):
+        for trait in CombatService._mutant_traits(character_data):
+            if 'Возможность разгона' not in trait:
+                continue
+            match = re.search(r'получает\s*\+(\d+)\s*Перемещ', trait, re.IGNORECASE)
+            if match:
+                return max(0, int(match.group(1)))
+        return 0
+
+    @staticmethod
+    def _mutant_profile_name(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        basic = data.get('basic') if isinstance(data.get('basic'), dict) else {}
+        mutant = data.get('mutant') if isinstance(data.get('mutant'), dict) else {}
+        return str(basic.get('mutant_type') or mutant.get('profile') or '').strip()
+
+    @staticmethod
+    def _mutant_pack_roll_bonus(loc_char, participant_ids=None):
+        if not loc_char or not loc_char.character or not isinstance(loc_char.character.data, dict):
+            return 0
+        data = loc_char.character.data
+        profile_name = CombatService._mutant_profile_name(data).casefold()
+        if not profile_name:
+            return 0
+        required = 0
+        bonus = 0
+        for trait in CombatService._mutant_traits(data):
+            if 'Чувство стаи' in trait:
+                match = re.search(r'хотя бы\s+(\d+)\s+жив', trait, re.IGNORECASE)
+                required = int(match.group(1)) if match else 0
+                bonus = 1
+                break
+            if 'Вожак стаи' in trait:
+                match = re.search(r'хотя бы\s+(\d+)\s+жив', trait, re.IGNORECASE)
+                required = int(match.group(1)) if match else 0
+                bonus = 3
+                profile_name = 'собака'
+                break
+        if required <= 0:
+            return 0
+        candidates = CombatService._unique_location_characters(
+            LocationCharacter.query.filter_by(location_id=loc_char.location_id).all()
+        )
+        if participant_ids is None:
+            state = LocationCombatState.query.filter_by(
+                location_id=loc_char.location_id,
+            ).first()
+            if state and state.status == 'active':
+                participant_ids = set(state.turn_order or [])
+        if participant_ids is not None:
+            participant_ids = {
+                CombatService._coerce_int(value, 0) for value in participant_ids
+            }
+            candidates = [item for item in candidates if item.id in participant_ids]
+        alive = 0
+        for candidate in candidates:
+            candidate_data = (
+                candidate.character.data
+                if candidate.character and isinstance(candidate.character.data, dict)
+                else {}
+            )
+            if CombatService._mutant_profile_name(candidate_data).casefold() != profile_name:
+                continue
+            if CombatService._location_character_condition(candidate)['state'] != 'dead':
+                alive += 1
+        return bonus if alive >= required else 0
+
+    @staticmethod
+    def _refresh_mutant_pack_bonus(loc_char, participant_ids=None):
+        if not loc_char or not loc_char.character or not isinstance(loc_char.character.data, dict):
+            return
+        data = loc_char.character.data
+        meta = data.setdefault('health', {}).setdefault('combatMeta', {})
+        value = CombatService._mutant_pack_roll_bonus(loc_char, participant_ids)
+        if CombatService._coerce_int(meta.get('mutantPackRollBonus'), 0) == value:
+            return
+        if value:
+            meta['mutantPackRollBonus'] = value
+        else:
+            meta.pop('mutantPackRollBonus', None)
+        profile_name = CombatService._mutant_profile_name(data).casefold()
+        dog_will_advantage = False
+        if profile_name == 'собака':
+            candidates = CombatService._unique_location_characters(
+                LocationCharacter.query.filter_by(
+                    location_id=loc_char.location_id,
+                ).all()
+            )
+            if participant_ids is None:
+                state = LocationCombatState.query.filter_by(
+                    location_id=loc_char.location_id,
+                ).first()
+                participant_ids = (
+                    set(state.turn_order or [])
+                    if state and state.status == 'active'
+                    else None
+                )
+            if participant_ids is not None:
+                allowed = {
+                    CombatService._coerce_int(value, 0)
+                    for value in participant_ids
+                }
+                candidates = [item for item in candidates if item.id in allowed]
+            dog_will_advantage = any(
+                candidate.character
+                and CombatService._location_character_condition(candidate)['state'] != 'dead'
+                and CombatService._mutant_has_trait(
+                    candidate.character.data
+                    if isinstance(candidate.character.data, dict)
+                    else {},
+                    'Вожак стаи',
+                )
+                for candidate in candidates
+            )
+        if dog_will_advantage:
+            meta['mutantPackWillAdvantage'] = True
+        else:
+            meta.pop('mutantPackWillAdvantage', None)
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+
+    @staticmethod
     def _mutant_back_torso_protection(character_data):
         """Return the exact innate torso protection used for attacks from behind."""
         base = None
@@ -3152,6 +3414,813 @@ class CombatService:
         return max(0, base_cost - 1)
 
     @staticmethod
+    def _mutant_camouflage_active(character_data, round_number):
+        data = character_data if isinstance(character_data, dict) else {}
+        health = data.get('health') if isinstance(data.get('health'), dict) else {}
+        meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+        if not meta.get('mutantCamouflageActive'):
+            return False
+        return CombatService._coerce_int(
+            meta.get('mutantCamouflageUntilRound'), 0,
+        ) >= max(1, CombatService._coerce_int(round_number, 1))
+
+    @staticmethod
+    def _mutant_opening_ambush_eligible(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        health = data.get('health') if isinstance(data.get('health'), dict) else {}
+        meta = health.get('combatMeta') if isinstance(health.get('combatMeta'), dict) else {}
+        return bool(
+            meta.get('mutantAmbushActive')
+            and CombatService._mutant_has_trait(data, 'Атака из засады')
+        )
+
+    @staticmethod
+    def _psi_armor_bonus(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        equipment = data.get('equipment') if isinstance(data.get('equipment'), dict) else {}
+        total = 0.0
+        details = []
+
+        armor = equipment.get('armor')
+        if isinstance(armor, dict) and not armor.get('protectionDisabled'):
+            attributes = CombatService._template_attributes(armor)
+            protection = armor.get('protection')
+            if not isinstance(protection, dict):
+                protection = attributes.get('protection') if isinstance(attributes.get('protection'), dict) else {}
+            explicit = CombatService._protection_percent(protection.get('psi'), 0)
+            name = str(armor.get('name') or '').strip().casefold().replace('ё', 'е')
+            if explicit:
+                bonus = explicit
+            elif 'гроб' in name:
+                bonus = 50
+            elif 'купол-м' in name or 'купол м' in name:
+                bonus = 40
+            elif 'купол' in name:
+                bonus = 25
+            elif 'химзащит' in name:
+                bonus = 5
+            else:
+                bonus = 0
+            if bonus:
+                total += bonus
+                details.append({'slot': 'armor', 'name': armor.get('name'), 'bonus': bonus})
+
+        for slot in ('gasMask', 'helmet'):
+            item = equipment.get(slot)
+            if not isinstance(item, dict) or item.get('protectionDisabled'):
+                continue
+            attributes = CombatService._template_attributes(item)
+            if not CombatService._is_gas_mask_item(slot, item, attributes):
+                continue
+            durability = CombatService._coerce_float(
+                item.get(
+                    'durability',
+                    item.get(
+                        'maxDurability',
+                        attributes.get('max_durability', attributes.get('durability', 0)),
+                    ),
+                ),
+                0,
+            )
+            if durability <= 0:
+                continue
+            protection = item.get('protection')
+            if not isinstance(protection, dict):
+                protection = attributes.get('protection') if isinstance(attributes.get('protection'), dict) else {}
+            explicit = CombatService._protection_percent(protection.get('psi'), 0)
+            name = str(item.get('name') or '').strip().casefold().replace('ё', 'е')
+            bonus = explicit or (10 if 'гп-5' in name or 'гп 5' in name else 5)
+            total += bonus
+            details.append({'slot': slot, 'name': item.get('name'), 'bonus': bonus})
+        return total, details
+
+    @staticmethod
+    def _psi_defense_profile(character_data):
+        data = character_data if isinstance(character_data, dict) else {}
+        will_bonus = CombatService._base_skill_modifier(
+            data, 'skills.physical.will',
+        )
+        will_protection = will_bonus * 5
+        artifact_protection = CombatService._coerce_float(
+            artifact_passive_profile(data)['protection'].get('psi'), 0,
+        )
+        armor_protection, armor_details = CombatService._psi_armor_bonus(data)
+        temporary_protection = CombatService._consumable_stat_value_bonus(
+            data, 'psy_defense',
+        )
+        total = max(
+            -100,
+            min(
+                100,
+                will_protection + artifact_protection
+                + armor_protection + temporary_protection,
+            ),
+        )
+        return {
+            'total': total,
+            'will_bonus': will_bonus,
+            'will': will_protection,
+            'artifacts': artifact_protection,
+            'armor': armor_protection,
+            'temporary': temporary_protection,
+            'equipment': armor_details,
+        }
+
+    @staticmethod
+    def _psi_suicide_weapon(character_data, loc_char=None):
+        data = character_data if isinstance(character_data, dict) else {}
+        weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+        index = CombatService._coerce_int(
+            getattr(loc_char, 'drawn_weapon_index', -1), -1,
+        ) if loc_char is not None else -1
+        ordered = []
+        if 0 <= index < len(weapons) and isinstance(weapons[index], dict):
+            ordered.append((index, weapons[index]))
+        ordered.extend(
+            (weapon_index, weapon)
+            for weapon_index, weapon in enumerate(weapons)
+            if isinstance(weapon, dict) and weapon_index != index
+        )
+        for weapon_index, weapon in ordered:
+            template = CombatService._weapon_template(weapon)
+            category = str(
+                (template.category if template else None)
+                or weapon.get('category') or ''
+            ).strip().casefold()
+            if category in {'firearm', 'weapon', 'ranged_weapon'}:
+                return weapon_index, weapon, 'gunshot'
+            profile = CombatService._weapon_damage_profile(weapon)
+            attributes = CombatService._template_attributes(weapon)
+            attack_names = ' '.join(
+                str(value or '') for value in attributes.get('allowed_attacks') or []
+            ).casefold()
+            damage_type = str(profile.get('melee_damage_type') or '').casefold()
+            if any(
+                token in f'{damage_type} {attack_names}'
+                for token in ('реж', 'руб', 'кол', 'slash', 'pierc')
+            ):
+                return weapon_index, weapon, 'cut_throat'
+        return None, None, None
+
+    @staticmethod
+    def _resolve_psi_suicide_attempt(character_data, loc_char=None):
+        data = character_data if isinstance(character_data, dict) else {}
+        weapon_index, weapon, kind = CombatService._psi_suicide_weapon(
+            data, loc_char,
+        )
+        if not weapon:
+            return {
+                'attempted': False, 'success': False,
+                'failure_reason': 'no_suitable_weapon',
+            }
+        result = {
+            'attempted': True, 'success': False, 'kind': kind,
+            'weapon_index': weapon_index, 'weapon': weapon.get('name'),
+        }
+        if kind == 'cut_throat':
+            apply_effect_to_health(data.setdefault('health', {}), {
+                'type': 'death', 'name': 'Смерть',
+                'source': 'psy_state_suicide', 'area': 'head', 'tick': 'manual',
+            })
+            result['success'] = True
+            return result
+
+        if CombatService._weapon_jam_effects(weapon)['blocks_fire']:
+            result['failure_reason'] = 'weapon_jammed'
+            result['existing_jam'] = True
+            return result
+        if weapon.get('requiresManualCycle'):
+            result['failure_reason'] = 'weapon_not_cycled'
+            return result
+        if CombatService._weapon_loaded_shots(weapon) <= 0:
+            result['failure_reason'] = 'weapon_unloaded'
+            return result
+
+        attack_roll = random.randint(1, 20)
+        jam = CombatService._roll_weapon_jam(weapon, attack_roll)
+        result['attack_roll'] = attack_roll
+        result['jam'] = jam
+        if isinstance(jam, dict) and jam.get('triggered'):
+            result['failure_reason'] = 'weapon_jammed'
+            return result
+
+        profile, _ = CombatService._ranged_damage_profile(weapon)
+        CombatService._consume_weapon_ammo(weapon, 1)
+        result['ammo_consumed'] = 1
+        result['weapon_wear'] = CombatService._weapon_use_wear(
+            weapon, fire_mode='single', shot_count=1, ammo_profile=profile,
+        )
+        armor_data = dict(data)
+        armor_data['_headProtectionZone'] = 'ears'
+        armor, armor_layers = CombatService._target_armor(armor_data, 'head')
+        penetration = CombatService._coerce_float(
+            profile.get('armor_piercing'), 0,
+        )
+        result['armor_zone'] = 'ears'
+        result['armor'] = armor
+        result['armor_piercing'] = penetration
+        result['armor_penetrated'] = penetration >= armor
+        armor_damage = []
+        for layer in armor_layers:
+            if layer.get('is_gas_mask'):
+                damage_result = CombatService._damage_gas_mask(
+                    layer['item'], 'bullet',
+                )
+            else:
+                damage_result = CombatService._damage_armor_item(
+                    layer['item'], layer['attributes'], profile.get('damage', 0),
+                )
+            if damage_result:
+                armor_damage.append(damage_result)
+        result['armor_damage'] = armor_damage
+        if result['armor_penetrated']:
+            apply_effect_to_health(data.setdefault('health', {}), {
+                'type': 'death', 'name': 'Смерть',
+                'source': 'psy_state_suicide', 'area': 'brain', 'tick': 'manual',
+            })
+            result['success'] = True
+            return result
+
+        result['failure_reason'] = 'armor_not_penetrated'
+        deficit = max(0, armor - penetration)
+        multiplier = max(0.0, 1 - math.ceil(deficit / 5) * 0.25)
+        if multiplier <= 0:
+            multiplier = CombatService._behind_armor_damage_multiplier(
+                profile, target_data=data, penetration_deficit=deficit,
+            )
+        behind_armor_damage = max(
+            0,
+            round(CombatService._coerce_float(profile.get('damage'), 0) * multiplier),
+        )
+        result['behind_armor_damage'] = behind_armor_damage
+        if behind_armor_damage and loc_char is not None:
+            CombatService._apply_attack_damage(
+                loc_char, behind_armor_damage, 'head', profile,
+                round_number=0, allow_bleeding=False, trauma_checks=0,
+                head_impact={
+                    'part': 'ear', 'direction': 'side', 'armor_zone': 'ears',
+                    'damage_head': False, 'damage_head_if_penetrated': True,
+                    'damage_skull_if_penetrated': False, 'primary_organ': None,
+                    'secondary_organs_if_penetrated': ['brain'],
+                },
+                armor_penetrated=False,
+            )
+        return result
+
+    @staticmethod
+    def _transform_into_zombie(loc_char, previous_data):
+        if loc_char is None or not getattr(loc_char, 'character', None):
+            return None
+        from app.services.world_rules import mutant_character_data, mutant_profile
+
+        profile = mutant_profile('Зомбированный')
+        if not profile:
+            return None
+        zombie_data = mutant_character_data(profile)
+        for key in ('inventory', 'equipment'):
+            if isinstance(previous_data.get(key), (dict, list)):
+                zombie_data[key] = deepcopy(previous_data[key])
+        previous_weapons = previous_data.get('weapons')
+        if isinstance(previous_weapons, list):
+            zombie_data['weapons'].extend(deepcopy(previous_weapons))
+        zombie_data.setdefault('basic', {})['former_character_id'] = loc_char.character_id
+        zombie_data['basic']['former_name'] = loc_char.character.name
+        previous_data.clear()
+        previous_data.update(zombie_data)
+        loc_char.character.data = previous_data
+        lobby = getattr(getattr(loc_char, 'location', None), 'lobby', None)
+        if lobby is not None:
+            loc_char.controlled_by = lobby.gm_id
+        loc_char.posture = 'prone'
+        loc_char.drawn_weapon_index = None
+        loc_char.cover_object_id = None
+        loc_char.weapon_braced = False
+        loc_char.braced_weapon_index = None
+        flag_modified(loc_char.character, 'data')
+        return {'mutant_type': 'Зомбированный', 'controlled_by_gm': lobby is not None}
+
+    @staticmethod
+    def _resolve_psi_crisis(character_data, loc_char=None):
+        data = character_data if isinstance(character_data, dict) else {}
+        health = data.setdefault('health', {})
+        psy_state = max(
+            0,
+            CombatService._coerce_float(
+                health.get('psyState', health.get('psy_state')), 0,
+            ),
+        )
+        if psy_state < 50:
+            return None
+
+        suicide_attempt = CombatService._resolve_psi_suicide_attempt(
+            data, loc_char,
+        )
+        health = data.setdefault('health', {})
+        suicide_succeeded = bool(suicide_attempt.get('success'))
+        maximum = max(0, CombatService._coerce_float(health.get('max'), 700))
+        reset_damage = 0
+        transformed = None
+        if not suicide_succeeded:
+            health['psyState'] = 0
+            health['psy_state'] = 0
+            reset_damage = psy_state * 10
+            health['current'] = max(
+                0,
+                CombatService._coerce_float(health.get('current'), maximum) - reset_damage,
+            )
+            if health['current'] <= 0:
+                apply_effect_to_health(health, {
+                    'type': 'death', 'name': 'Смерть',
+                    'source': 'psy_state_reset', 'tick': 'manual',
+                })
+                transformed = CombatService._transform_into_zombie(loc_char, data)
+        if loc_char is not None and CombatService._character_condition(
+            loc_char.character.data if transformed else data,
+        )['state'] in {'critical', 'dead'}:
+            loc_char.posture = 'prone'
+        return {
+            'triggered': True,
+            'psy_state': psy_state,
+            'suicide_attempt': suicide_attempt,
+            'suicide_succeeded': suicide_succeeded,
+            'reset_damage': reset_damage,
+            'transformed': transformed,
+        }
+
+    @staticmethod
+    def _increase_psy_state(character_data, amount, source, loc_char=None, apply_protection=True):
+        data = character_data if isinstance(character_data, dict) else {}
+        health = data.setdefault('health', {})
+        before = max(
+            0, CombatService._coerce_float(
+                health.get('psyState', health.get('psy_state')), 0,
+            ),
+        )
+        incoming = CombatService._coerce_float(amount, 0)
+        defense = CombatService._psi_defense_profile(data) if incoming > 0 and apply_protection else {
+            'total': 0, 'will_bonus': 0, 'will': 0, 'artifacts': 0,
+            'armor': 0, 'temporary': 0, 'equipment': [],
+        }
+        received = incoming * (1 - defense['total'] / 100) if incoming > 0 else incoming
+        received = round(received, 2)
+        after = max(0, round(before + received, 2))
+        health['psyState'] = after
+        health['psy_state'] = after
+        crisis = CombatService._resolve_psi_crisis(data, loc_char) if after >= 50 else None
+        stored_after = CombatService._coerce_float(
+            health.get('psyState', health.get('psy_state')), 0,
+        )
+        return {
+            'before': before,
+            'after': stored_after,
+            'amount': received,
+            'net_change': round(stored_after - before, 2),
+            'incoming': incoming,
+            'received': received,
+            'prevented': round(incoming - received, 2) if incoming > 0 else 0,
+            'defense': defense,
+            'source': source,
+            'crisis': crisis,
+        }
+
+    @staticmethod
+    def _mutant_has_direct_sight(location_id, attacker, target):
+        if not CombatService._is_in_facing_arc(attacker, target.pos_x, target.pos_y):
+            return False
+        analysis = CombatService._cover_analysis(location_id, attacker, target)
+        return bool(analysis.get('targetable'))
+
+    @staticmethod
+    def _mutant_fear_profile(character_data):
+        for trait in CombatService._mutant_traits(character_data):
+            if 'Пугливость' not in trait:
+                continue
+            noise_match = re.search(r'шумом\s+больше\s+(\d+)', trait, re.IGNORECASE)
+            difficulty_match = re.search(r'СЛ\s*(\d+)', trait, re.IGNORECASE)
+            if noise_match and difficulty_match:
+                return {
+                    'noise_threshold': int(noise_match.group(1)),
+                    'difficulty': int(difficulty_match.group(1)),
+                }
+        return None
+
+    @staticmethod
+    def _flee_mutant_from_noise(location, mutant, source, round_number):
+        data = mutant.character.data if mutant.character and isinstance(mutant.character.data, dict) else {}
+        profile = CombatService._mutant_fear_profile(data)
+        if not profile:
+            return None
+        check = CombatService._mutant_saving_throw(
+            mutant, 'skills.physical.will', profile['difficulty'],
+        )
+        result = {
+            'character_id': mutant.character_id,
+            'name': mutant.character.name if mutant.character else 'Мутант',
+            'check': check,
+            'fled': False,
+            'distance': 0,
+        }
+        if check['success']:
+            return result
+
+        dx = 0 if mutant.pos_x == source.pos_x else (1 if mutant.pos_x > source.pos_x else -1)
+        dy = 0 if mutant.pos_y == source.pos_y else (1 if mutant.pos_y > source.pos_y else -1)
+        if dx == 0 and dy == 0:
+            dx, dy = 0, 1
+        mutant.facing_x, mutant.facing_y = dx, dy
+        blocked, _ = CombatService._build_movement_map(
+            location, mutant.character_id,
+        )
+        movement_gain = max(
+            0, DEFAULT_CONVERSION_BASE - CombatService._movement_penalty(mutant),
+        )
+        budget = max(0, mutant.movement_points_current) + max(
+            0, mutant.action_points_current,
+        ) * movement_gain
+        start_x, start_y = mutant.pos_x, mutant.pos_y
+        for _ in range(budget):
+            candidates = []
+            for step_x in (-1, 0, 1):
+                for step_y in (-1, 0, 1):
+                    if step_x == 0 and step_y == 0:
+                        continue
+                    destination = (mutant.pos_x + step_x, mutant.pos_y + step_y)
+                    if (
+                        destination in blocked
+                        or not (0 <= destination[0] < location.grid_width)
+                        or not (0 <= destination[1] < location.grid_height)
+                    ):
+                        continue
+                    distance = math.hypot(
+                        destination[0] - source.pos_x,
+                        destination[1] - source.pos_y,
+                    )
+                    candidates.append((distance, destination))
+            if not candidates:
+                break
+            _, destination = max(candidates, key=lambda item: item[0])
+            if math.hypot(
+                destination[0] - source.pos_x,
+                destination[1] - source.pos_y,
+            ) <= math.hypot(
+                mutant.pos_x - source.pos_x,
+                mutant.pos_y - source.pos_y,
+            ):
+                break
+            mutant.pos_x, mutant.pos_y = destination
+            blocked.add(destination)
+            result['distance'] += 1
+
+        mutant.action_points_current = 0
+        mutant.movement_points_current = 0
+        mutant.movement_mode_this_turn = 'run'
+        mutant.movement_distance_this_turn = max(
+            mutant.movement_distance_this_turn or 0,
+            result['distance'],
+        )
+        mutant.strenuous_movement_blocked_until_round = max(
+            mutant.strenuous_movement_blocked_until_round or 0,
+            round_number + 1,
+        )
+        CombatService._clear_aim(mutant)
+        result['fled'] = True
+        result['from'] = {'x': start_x, 'y': start_y}
+        result['to'] = {'x': mutant.pos_x, 'y': mutant.pos_y}
+        return result
+
+    @staticmethod
+    def _resolve_mutant_fear_from_noise(location, source, noise, round_number):
+        noise = CombatService._coerce_float(noise, 0)
+        results = []
+        for mutant in CombatService._unique_location_characters(
+            LocationCharacter.query.filter_by(location_id=location.id).all()
+        ):
+            if mutant.id == source.id or not mutant.character:
+                continue
+            data = mutant.character.data if isinstance(mutant.character.data, dict) else {}
+            profile = CombatService._mutant_fear_profile(data)
+            if (
+                not profile
+                or noise <= profile['noise_threshold']
+                or CombatService._location_character_condition(mutant)['state'] == 'dead'
+            ):
+                continue
+            resolved = CombatService._flee_mutant_from_noise(
+                location, mutant, source, round_number,
+            )
+            if resolved:
+                results.append(resolved)
+        return results
+
+    @staticmethod
+    def _resolve_mutant_psy_end_turn(location, state, loc_char):
+        data = loc_char.character.data if loc_char.character and isinstance(loc_char.character.data, dict) else {}
+        health = data.setdefault('health', {})
+        effects = normalize_effect_list(health.get('effects') or [])
+        result = {'zombification': None, 'death_order': False, 'psy_fields': []}
+
+        death_order = next((
+            item for item in effects
+            if item.get('active', True) and item.get('type') == 'death_order'
+        ), None)
+        if death_order:
+            death_order['active'] = False
+            effects.append({
+                'type': 'death', 'name': 'Смерть',
+                'source': 'death_order', 'active': True,
+            })
+            loc_char.posture = 'prone'
+            result['death_order'] = True
+
+        zombification = next((
+            item for item in effects
+            if item.get('active', True) and item.get('type') == 'zombification'
+        ), None)
+        if zombification and not death_order:
+            save = CombatService._mutant_saving_throw(
+                loc_char, 'skills.physical.will', 14,
+            )
+            result['zombification'] = save
+            if save['success']:
+                zombification['active'] = False
+                meta = health.setdefault('combatMeta', {})
+                loc_char.controlled_by = meta.pop(
+                    'zombificationPreviousController', None,
+                )
+                meta.pop('zombificationController', None)
+
+        participant_ids = set(state.turn_order or []) if state else None
+        for psyionik in CombatService._unique_location_characters(
+            LocationCharacter.query.filter_by(location_id=location.id).all()
+        ):
+            if (
+                psyionik.id == loc_char.id
+                or (participant_ids is not None and psyionik.id not in participant_ids)
+                or not psyionik.character
+                or not CombatService._are_opponents(psyionik, loc_char)
+                or math.hypot(psyionik.pos_x - loc_char.pos_x, psyionik.pos_y - loc_char.pos_y) > 10
+            ):
+                continue
+            psy_data = psyionik.character.data if isinstance(psyionik.character.data, dict) else {}
+            if not CombatService._mutant_has_trait(psy_data, 'Пси-Поле'):
+                continue
+            psy_meta = psy_data.get('health', {}).get('combatMeta', {})
+            if psy_meta.get('psyFieldDisabled'):
+                continue
+            save = CombatService._mutant_saving_throw(
+                loc_char, 'skills.physical.will', 15,
+            )
+            applied = None
+            if not save['success']:
+                applied = CombatService._increase_psy_state(
+                    data, 5, 'psy_field', loc_char=loc_char,
+                )
+            result['psy_fields'].append({
+                'source_character_id': psyionik.character_id,
+                'source_name': psyionik.character.name,
+                'save': save,
+                'psy_state': applied,
+            })
+
+        health['effects'] = effects
+        sync_health_derived_statuses(health)
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        return result
+
+    @staticmethod
+    def _evaporate_dead_psi_clones(location_id, state=None):
+        removed = []
+        for loc_char in LocationCharacter.query.filter_by(location_id=location_id).all():
+            data = loc_char.character.data if loc_char.character and isinstance(loc_char.character.data, dict) else {}
+            if (
+                not data.get('basic', {}).get('is_psi_clone')
+                or CombatService._location_character_condition(loc_char)['state'] != 'dead'
+            ):
+                continue
+            removed.append({
+                'location_character_id': loc_char.id,
+                'character_id': loc_char.character_id,
+                'name': loc_char.character.name if loc_char.character else 'Копия',
+            })
+            if state:
+                state.turn_order = [
+                    value for value in (state.turn_order or []) if value != loc_char.id
+                ]
+            character = loc_char.character
+            db.session.delete(loc_char)
+            if character:
+                db.session.delete(character)
+        return removed
+
+    @staticmethod
+    def _throwable_object_weight(obj):
+        if not obj:
+            return 0.0
+        properties = obj.properties if isinstance(obj.properties, dict) else {}
+        explicit = CombatService._coerce_float(properties.get('weight_kg'), 0)
+        if explicit > 0:
+            return explicit
+        return CombatService.THROWABLE_OBJECT_WEIGHTS.get(
+            str(obj.type or '').strip().lower(), 0.0,
+        )
+
+    @staticmethod
+    def _nearest_throwable_object(location_id, target, maximum_weight=None):
+        candidates = []
+        for obj in LocationObject.query.filter_by(location_id=location_id).all():
+            weight = CombatService._throwable_object_weight(obj)
+            if weight <= 0 or (maximum_weight is not None and weight > maximum_weight):
+                continue
+            distance = math.hypot(obj.tile_x - target.pos_x, obj.tile_y - target.pos_y)
+            candidates.append((distance, obj.id, obj, weight))
+        if not candidates:
+            return None, 0.0
+        _, _, obj, weight = min(candidates, key=lambda item: (item[0], item[1]))
+        return obj, weight
+
+    @staticmethod
+    def _retreat_blood_stage(stage):
+        order = ['normal', 'light', 'medium', 'severe', 'critical', 'fatal']
+        current = str(stage or 'normal').lower()
+        if current not in order:
+            current = 'normal'
+        return order[max(0, order.index(current) - 1)]
+
+    @staticmethod
+    def _mutant_saving_throw(loc_char, skill_path, difficulty):
+        data = (
+            loc_char.character.data
+            if loc_char and loc_char.character and isinstance(loc_char.character.data, dict)
+            else {}
+        )
+        CombatService._refresh_mutant_pack_bonus(loc_char)
+        advantage = CombatService._has_roll_advantage(data, skill_path)
+        disadvantage = CombatService._has_roll_disadvantage(data, skill_path)
+        rolls = [random.randint(1, 20) for _ in range(2 if advantage != disadvantage else 1)]
+        roll = max(rolls) if advantage and not disadvantage else (
+            min(rolls) if disadvantage and not advantage else rolls[0]
+        )
+        bonus = CombatService._skill_modifier(data, skill_path)
+        total = roll + bonus
+        return {
+            'roll': roll,
+            'rolls': rolls,
+            'bonus': bonus,
+            'total': total,
+            'difficulty': difficulty,
+            'success': roll == 20 or (roll != 1 and total >= difficulty),
+            'advantage': advantage,
+            'disadvantage': disadvantage,
+        }
+
+    @staticmethod
+    def _apply_mutant_melee_hit_effects(attacker, target, attack_type, damage, result):
+        attacker_data = (
+            attacker.character.data
+            if attacker and attacker.character and isinstance(attacker.character.data, dict)
+            else {}
+        )
+        target_data = (
+            target.character.data
+            if target and target.character and isinstance(target.character.data, dict)
+            else {}
+        )
+        if not CombatService._is_mutant_character(attacker_data):
+            return
+        attack_name = str(attack_type or '').strip().casefold()
+        effects = []
+
+        clone_psy_damage = CombatService._coerce_int(
+            attacker_data.get('basic', {}).get('psi_clone_damage'), 0,
+        )
+        if clone_psy_damage > 0:
+            psy_state = CombatService._increase_psy_state(
+                target_data, clone_psy_damage, 'psi_clone_attack', loc_char=target,
+            )
+            effects.append({
+                'kind': 'psi_clone_attack',
+                'psy_state': psy_state,
+            })
+
+        if (
+            damage > 0
+            and 'укус' in attack_name
+            and CombatService._mutant_has_trait(attacker_data, 'Ядовитые укусы')
+        ):
+            check = CombatService._mutant_saving_throw(
+                target, 'skills.physical.will', 12,
+            )
+            effect = {'kind': 'poison_bite', 'save': check}
+            if not check['success']:
+                health = target_data.setdefault('health', {})
+                apply_effect_to_health(health, {
+                    'type': 'mutant_poison',
+                    'name': 'Яд Слепыша',
+                    'remaining': 3,
+                    'tick': 'round_end',
+                    'source': 'mutant_bite',
+                    'rollPenalty': 3,
+                })
+                effect['applied'] = True
+            effects.append(effect)
+
+        if 'сбивание с ног' in attack_name:
+            target.posture = 'prone'
+            target.cover_object_id = None
+            target.weapon_braced = False
+            target.braced_weapon_index = None
+            CombatService._clear_aim(target)
+            effects.append({'kind': 'knockdown', 'posture': 'prone'})
+
+        if (
+            'высасывание крови' in attack_name
+            and CombatService._mutant_has_trait(attacker_data, 'Вампиризм')
+        ):
+            attacker_health = attacker_data.setdefault('health', {})
+            target_health = target_data.setdefault('health', {})
+            attacker_stage = attacker_health.get('blood') or attacker_health.get('bloodStage')
+            target_stage = target_health.get('blood') or target_health.get('bloodStage')
+            attacker_next = CombatService._retreat_blood_stage(attacker_stage)
+            target_next = CombatService._advance_blood_stage(target_stage)
+            attacker_health['blood'] = attacker_next
+            attacker_health['bloodStage'] = attacker_next
+            target_health['blood'] = target_next
+            target_health['bloodStage'] = target_next
+            modifiers = attacker_health.setdefault('combatMeta', {}).setdefault(
+                'bleedingModifiers', [],
+            )
+            modifiers.append({
+                'value': -5,
+                'source': 'mutant_vampirism',
+                'scope': 'combat',
+            })
+            effects.append({
+                'kind': 'vampirism',
+                'attacker_blood_stage': attacker_next,
+                'target_blood_stage': target_next,
+                'bleeding_severity_modifier': -5,
+            })
+
+        if 'атака наповал' in attack_name:
+            check = CombatService._mutant_saving_throw(
+                target, 'skills.physical.strength', 15,
+            )
+            effect = {'kind': 'knockout_attack', 'save': check, 'distance': 0}
+            if not check['success']:
+                location = Location.query.get(getattr(target, 'location_id', None))
+                if location:
+                    dx = 0 if target.pos_x == attacker.pos_x else (1 if target.pos_x > attacker.pos_x else -1)
+                    dy = 0 if target.pos_y == attacker.pos_y else (1 if target.pos_y > attacker.pos_y else -1)
+                    blocked, _ = CombatService._build_movement_map(
+                        location, target.character_id,
+                    )
+                    for step in range(1, 6):
+                        destination = (target.pos_x + dx, target.pos_y + dy)
+                        if (
+                            destination in blocked
+                            or not (0 <= destination[0] < location.grid_width)
+                            or not (0 <= destination[1] < location.grid_height)
+                        ):
+                            break
+                        target.pos_x, target.pos_y = destination
+                        effect['distance'] = step
+                target.posture = 'prone'
+                target.cover_object_id = None
+                target.weapon_braced = False
+                target.braced_weapon_index = None
+                dropped = CombatService._apply_fall_or_drop(
+                    target, target_data, 'right_arm',
+                )
+                apply_effect_to_health(target_data.setdefault('health', {}), {
+                    'type': 'concussion',
+                    'name': 'Контузия',
+                    'remaining': 3,
+                    'tick': 'round_end',
+                    'source': 'mutant_knockout_attack',
+                    'roll_modifier': -3,
+                })
+                effect.update({'applied': True, 'dropped': dropped})
+            effects.append(effect)
+
+        if CombatService._mutant_has_trait(attacker_data, 'Яростные атаки'):
+            meta = attacker_data.setdefault('health', {}).setdefault('combatMeta', {})
+            meta['mutantRageAccuracy'] = max(
+                0, CombatService._coerce_int(meta.get('mutantRageAccuracy'), 0)
+            ) + 1
+            effects.append({
+                'kind': 'rage_accuracy',
+                'value': meta['mutantRageAccuracy'],
+            })
+
+        attacker.character.data = attacker_data
+        target.character.data = target_data
+        flag_modified(attacker.character, 'data')
+        flag_modified(target.character, 'data')
+        if effects:
+            result['mutant_effects'] = effects
+
+    @staticmethod
     def _mark_mutant_attack_used(loc_char, round_number):
         if not loc_char or not loc_char.character or not isinstance(loc_char.character.data, dict):
             return
@@ -3197,28 +4266,32 @@ class CombatService:
         characters = CombatService._unique_location_characters(
             LocationCharacter.query.filter_by(location_id=location_id).all()
         )
-        zhmerkas = []
+        ugly_mutants = []
         for loc_char in characters:
             data = (
                 loc_char.character.data
                 if loc_char.character and isinstance(loc_char.character.data, dict)
                 else {}
             )
-            if (
-                CombatService._is_zhmerka(data)
-                and CombatService._mutant_has_trait(data, 'Уродливый вид')
-            ):
-                zhmerkas.append(loc_char)
+            for trait in CombatService._mutant_traits(data):
+                if 'Уродливый вид' not in trait:
+                    continue
+                match = re.search(r'штраф\s+(\d+)\s+к броскам Воли', trait, re.IGNORECASE)
+                ugly_mutants.append((loc_char, int(match.group(1)) if match else 0))
+                break
         for loc_char in characters:
             if not loc_char.character or not isinstance(loc_char.character.data, dict):
                 continue
             data = loc_char.character.data
             penalty = 0
-            if not CombatService._is_zhmerka(data) and any(
-                CombatService._can_see_location_character(loc_char, zhmerka)
-                for zhmerka in zhmerkas
-            ):
-                penalty = 4
+            observer_profile = CombatService._mutant_profile_name(data).casefold()
+            penalty = max((
+                value for ugly, value in ugly_mutants
+                if CombatService._mutant_profile_name(
+                    ugly.character.data if ugly.character else {}
+                ).casefold() != observer_profile
+                and CombatService._can_see_location_character(loc_char, ugly)
+            ), default=0)
             meta = data.setdefault('health', {}).setdefault('combatMeta', {})
             if CombatService._coerce_int(meta.get('uglyAppearanceWillPenalty'), 0) == penalty:
                 continue
@@ -3638,6 +4711,16 @@ class CombatService:
             innate = max(0, min(100, CombatService._coerce_float(
                 mutant.get('physical_protection'), 0,
             )))
+            if zone == 'head':
+                for trait in CombatService._mutant_traits(target_data):
+                    match = re.search(
+                        r'защит\w*\s+в\s+голове\s+увеличен\w*\s+на\s*(\d+)\s*%',
+                        trait,
+                        re.IGNORECASE,
+                    )
+                    if match:
+                        innate = min(100, innate + int(match.group(1)))
+                        break
             total = max(total, innate)
             if innate:
                 details.append({
@@ -3647,6 +4730,20 @@ class CombatService:
                     'protection': innate,
                     'is_gas_mask': False,
                 })
+        combat_meta = (
+            target_data.get('health', {}).get('combatMeta', {})
+            if isinstance(target_data, dict)
+            else {}
+        )
+        if isinstance(combat_meta, dict) and combat_meta.get('mutantAnomalyShield'):
+            total = max(total, 80.0)
+            details.append({
+                'slot': 'mutant_anomaly_shield',
+                'item': {'name': 'Аномальный щит'},
+                'attributes': {'indestructible': True},
+                'protection': 80.0,
+                'is_gas_mask': False,
+            })
         artifact_protection = max(
             0,
             artifact_passive_profile(target_data)['protection']['physical'],
@@ -6044,6 +7141,12 @@ class CombatService:
     ):
         attacker_data = attacker.character.data if attacker.character and isinstance(attacker.character.data, dict) else {}
         target_data = target.character.data if target.character and isinstance(target.character.data, dict) else {}
+        if CombatService._mutant_has_trait(target_data, 'Миролюбивый'):
+            target_data.setdefault('health', {}).setdefault('combatMeta', {})[
+                'mutantProvoked'
+            ] = True
+            target.character.data = target_data
+            flag_modified(target.character, 'data')
         target_character = getattr(target, 'character', None)
         target_character_id = getattr(
             target,
@@ -6060,6 +7163,13 @@ class CombatService:
                 or CombatService._weapon_damage_profile(weapon, attack_type)
             )
             profile = dict(profile)
+            normalized_attack_type = str(attack_type or '').strip().casefold()
+            if (
+                'затаптывание' in normalized_attack_type
+                and CombatService._posture_key(target) == 'prone'
+                and CombatService._mutant_has_trait(attacker_data, 'Тяжелые удары')
+            ):
+                profile['damage'] = CombatService._coerce_float(profile.get('damage'), 0) + 100
             artifact_melee_bonus = artifact_passive_profile(attacker_data)[
                 'melee_damage_percent'
             ]
@@ -6541,6 +7651,10 @@ class CombatService:
                 health.get('zones') or {}
             ).get({'left_arm': 'leftArm', 'right_arm': 'rightArm', 'left_leg': 'leftLeg', 'right_leg': 'rightLeg'}.get(zone, zone), {}).get('current'),
         })
+        if melee and result.get('hit'):
+            CombatService._apply_mutant_melee_hit_effects(
+                attacker, target, attack_type, final_damage, result,
+            )
         if not melee and 'live_shield_result' in locals() and live_shield_result:
             result.update({
                 'live_shield_hit': True,
@@ -6818,6 +7932,19 @@ class CombatService:
             attack.get('attack_type') or attack.get('fire_mode') or 'атака',
         )
         lines = [f"{actor}: {mode}."]
+        for frightened in attack.get('frightened_mutants') or []:
+            check = frightened.get('check') or {}
+            rolls = '/'.join(str(value) for value in check.get('rolls') or [check.get('roll')])
+            outcome = (
+                f"провал, убегает на {frightened.get('distance', 0)} м"
+                if frightened.get('fled')
+                else 'успех'
+            )
+            lines.append(
+                f"Пугливость: {frightened.get('name')}: d20 {rolls} "
+                f"{CombatService._coerce_int(check.get('bonus'), 0):+d} = "
+                f"{check.get('total', '—')}, СЛ {check.get('difficulty', '—')} — {outcome}."
+            )
         if attack.get('fire_mode') == 'area':
             first = results[0]
             lines.append(
@@ -7066,6 +8193,40 @@ class CombatService:
                 )
             else:
                 lines.append("   Доп. травма: нет.")
+
+            for mutant_effect in hit_result.get('mutant_effects') or []:
+                kind = mutant_effect.get('kind')
+                save = mutant_effect.get('save') or {}
+                if kind == 'poison_bite':
+                    outcome = 'успех' if save.get('success') else 'провал, яд на 3 раунда'
+                    lines.append(
+                        f"   Ядовитый укус: d20 {save.get('roll', '—')} "
+                        f"{CombatService._coerce_int(save.get('bonus'), 0):+d} = "
+                        f"{save.get('total', '—')}, СЛ 12 — {outcome}."
+                    )
+                elif kind == 'knockdown':
+                    lines.append("   Цель сбита с ног.")
+                elif kind == 'vampirism':
+                    lines.append(
+                        "   Вампиризм: кровопотеря цели ухудшена, кровопотеря "
+                        "атакующего улучшена, тяжесть его кровотечений -5."
+                    )
+                elif kind == 'knockout_attack':
+                    outcome = (
+                        'успех'
+                        if save.get('success')
+                        else f"провал, отброшен на {mutant_effect.get('distance', 0)} м и контужен"
+                    )
+                    lines.append(
+                        f"   Атака наповал: d20 {save.get('roll', '—')} "
+                        f"{CombatService._coerce_int(save.get('bonus'), 0):+d} = "
+                        f"{save.get('total', '—')}, СЛ 15 — {outcome}."
+                    )
+                elif kind == 'rage_accuracy':
+                    lines.append(
+                        f"   Яростные атаки: накопленный бонус точности "
+                        f"+{mutant_effect.get('value', 0)}."
+                    )
 
             catastrophic = hit_result.get('catastrophic_limb_injury')
             if isinstance(catastrophic, dict):
@@ -7554,6 +8715,7 @@ class CombatService:
         if isinstance(health, dict):
             loc_char.effects = normalize_effect_list(health.get('effects') or [])
             meta = health.setdefault('combatMeta', {})
+            meta.pop('mutantAnomalyShield', None)
             triggered_ids = set(meta.get('stressTriggeredEffectIds') or [])
             for effect in loc_char.effects:
                 effect_id = str(effect.get('id') or '')
@@ -7603,6 +8765,39 @@ class CombatService:
             meta['painIncreased'] = False
             character.data = data
             flag_modified(character, 'data')
+
+    @staticmethod
+    def _apply_end_of_round_psi_recovery(loc_chars):
+        results = []
+        for loc_char in loc_chars or []:
+            character = getattr(loc_char, 'character', None)
+            if not character or not isinstance(character.data, dict):
+                continue
+            data = character.data
+            health = data.get('health')
+            if not isinstance(health, dict):
+                continue
+            before = max(
+                0,
+                CombatService._coerce_float(
+                    health.get('psyState', health.get('psy_state')), 0,
+                ),
+            )
+            if before <= 0:
+                continue
+            after = max(0, round(before - 1, 2))
+            health['psyState'] = after
+            health['psy_state'] = after
+            character.data = data
+            flag_modified(character, 'data')
+            CombatService._sync_location_effects_from_character(loc_char)
+            results.append({
+                'character_id': loc_char.character_id,
+                'name': character.name,
+                'before': before,
+                'after': after,
+            })
+        return results
 
     @staticmethod
     def _resolve_pain_shock_check(loc_char, round_number):
@@ -8002,11 +9197,13 @@ class CombatService:
             psi_value = CombatService._coerce_float(profile.get('psi_eyes_closed'), psi_value)
         psi = psi_value * fraction
         if psi:
-            psi_protection = CombatService._target_elemental_protection(data, 'psi')
-            received_psi = psi * max(0, 100 - psi_protection) / 100
-            health['psiState'] = max(0, CombatService._coerce_float(health.get('psiState'), 0) + received_psi)
-            result['psi'] = received_psi
-            result['psi_protection'] = psi_protection
+            psi_result = CombatService._increase_psy_state(
+                data, psi, 'anomaly', loc_char=loc_char,
+            )
+            health = data.setdefault('health', {})
+            result['psi'] = psi_result['received']
+            result['psi_protection'] = psi_result['defense']['total']
+            result['psi_state'] = psi_result
         for effect_type, profile_key in (('pain', 'pain'), ('exhaustion', 'exhaustion')):
             amount = CombatService._coerce_float(profile.get(profile_key), 0) * fraction
             if amount:
@@ -8651,6 +9848,14 @@ class CombatService:
         if is_gm:
             return True
         character = getattr(loc_char, 'character', None)
+        data = character.data if character and isinstance(character.data, dict) else {}
+        meta = data.get('health', {}).get('combatMeta', {})
+        zombification_controller = CombatService._coerce_int(
+            meta.get('zombificationController') if isinstance(meta, dict) else None,
+            0,
+        )
+        if zombification_controller:
+            return zombification_controller == user_id
         if character and character.owner_id == user_id:
             return True
         return loc_char.controlled_by == user_id
@@ -8750,6 +9955,11 @@ class CombatService:
             else:
                 raise NotFoundError("Item not found")
         index = CombatService._coerce_int(path[-1], -1)
+        if isinstance(current, dict):
+            key = path[-1]
+            if key not in current or not isinstance(current[key], dict):
+                raise NotFoundError("Item not found")
+            return current.pop(key)
         if not isinstance(current, list) or index < 0 or index >= len(current):
             raise NotFoundError("Item not found")
         item = current[index]
@@ -8764,6 +9974,15 @@ class CombatService:
         else:
             item['quantity'] = quantity - transfer_amount
         return transferred
+
+    @staticmethod
+    def _is_stealable_electronic(item):
+        if not isinstance(item, dict):
+            return False
+        name = str(item.get('name') or '').strip().casefold()
+        return any(token in name for token in (
+            'детектор аномал', 'рация', 'радио', 'пнв', 'кпк',
+        ))
 
     @staticmethod
     def _inventory_item_at_path(character_data, path):
@@ -8783,6 +10002,207 @@ class CombatService:
         if not isinstance(current, dict):
             raise NotFoundError("Item not found")
         return current
+
+    @staticmethod
+    def _butchering_species_key(character_data):
+        name = CombatService._mutant_profile_name(character_data).casefold().replace('ё', 'е')
+        for prefix in ('матерая ', 'матерый ', 'матерое '):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        return name.strip()
+
+    @staticmethod
+    def _butchering_weapon_profile(actor):
+        data = actor.character.data if actor.character and isinstance(actor.character.data, dict) else {}
+        weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+        index = CombatService._coerce_int(actor.drawn_weapon_index, -1)
+        if not 0 <= index < len(weapons) or not isinstance(weapons[index], dict):
+            raise ValidationError('Для разделки нужно взять в руки острое оружие')
+        weapon = weapons[index]
+        template = CombatService._weapon_template(weapon)
+        category = str((template.category if template else None) or weapon.get('category') or '').casefold()
+        if category != 'melee_weapon':
+            raise ValidationError('Для разделки нужно взять в руки острое оружие')
+        attributes = CombatService._template_attributes(weapon)
+        attacks = [
+            str(value or '').casefold().replace('ё', 'е')
+            for value in (attributes.get('allowed_attacks') or [])
+        ]
+        damage_type = str(attributes.get('melee_damage_type') or '').casefold().replace('ё', 'е')
+        sharp_attacks = [value for value in attacks if 'дроб' not in value and 'нелет' not in value]
+        if not sharp_attacks and ('дроб' in damage_type or not damage_type):
+            raise ValidationError('Дробящим оружием мутанта разделать нельзя')
+        penetration = max(
+            [CombatService._weapon_damage_profile(weapon, attack)['armor_piercing'] for attack in sharp_attacks]
+            or [CombatService._weapon_damage_profile(weapon)['armor_piercing']]
+        )
+        name = str((template.name if template else None) or weapon.get('name') or 'Оружие').strip()
+        normalized_name = name.casefold().replace('ё', 'е')
+        if 'охотнич' in normalized_name and 'нож' in normalized_name:
+            bonus = 3
+        elif 'штык' in normalized_name or 'кортик' in normalized_name:
+            bonus = 1
+        elif any(value in normalized_name for value in ('нож', 'топор', 'томагавк', 'меч')):
+            bonus = 0
+        else:
+            bonus = -3
+        has_hunter_toolkit = any(
+            'набор инструментов охотника'
+            in str(item.get('name') or '').casefold().replace('ё', 'е')
+            for item, _path in CombatService._iter_inventory_items_with_paths(data)
+        )
+        if has_hunter_toolkit:
+            bonus = 6
+            name = f"{name} + набор инструментов охотника"
+        return {'index': index, 'name': name, 'bonus': bonus, 'penetration': penetration}
+
+    @staticmethod
+    def butcher_mutant(location_id, user_id, actor_location_character_id, target_character_id, allocation=None):
+        location = CombatService._get_location(location_id)
+        CombatService._ensure_access(location, user_id)
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if state and state.status == 'active':
+            raise ValidationError('Разделывать мутанта можно только вне боя')
+        actor = db.session.get(LocationCharacter, CombatService._coerce_int(actor_location_character_id, 0))
+        target = LocationCharacter.query.filter_by(
+            location_id=location_id,
+            character_id=CombatService._coerce_int(target_character_id, 0),
+        ).first()
+        if not actor or actor.location_id != location_id or not actor.character:
+            raise NotFoundError('Разделывающий персонаж не найден')
+        if not target or not target.character:
+            raise NotFoundError('Тело мутанта не найдено')
+        can_control = bool(
+            location.lobby.gm_id == user_id
+            or actor.controlled_by == user_id
+            or actor.character.owner_id == user_id
+        )
+        if not can_control:
+            raise PermissionDenied('Вы не управляете этим персонажем')
+        if max(abs(actor.pos_x - target.pos_x), abs(actor.pos_y - target.pos_y)) > 1:
+            raise ValidationError('Для разделки нужно находиться рядом с телом')
+        target_data = target.character.data if isinstance(target.character.data, dict) else {}
+        if not CombatService._is_mutant_character(target_data):
+            raise ValidationError('Разделывать по этим правилам можно только мутантов')
+        if CombatService._location_character_condition(target)['state'] != 'dead':
+            raise ValidationError('Разделывать можно только мёртвого мутанта')
+        target_meta = target_data.setdefault('health', {}).setdefault('combatMeta', {})
+        if target_meta.get('butchered'):
+            raise ValidationError('Этот мутант уже разделан')
+        weapon = CombatService._butchering_weapon_profile(actor)
+        protection = CombatService._coerce_float(
+            (target_data.get('mutant') or {}).get('physical_protection'), 0,
+        )
+        if weapon['penetration'] + 20 <= protection:
+            raise ValidationError(
+                f"Пробития недостаточно: {round(weapon['penetration'])}% + 20% не превышает защиту {round(protection)}%"
+            )
+        species = CombatService._butchering_species_key(target_data)
+        if species not in CombatService.BUTCHERING_BASE_PRICES:
+            raise ValidationError('Для этого вида мутанта в правилах не указана добыча разделки')
+        pending = target_meta.get('butcheringRoll')
+        if not isinstance(pending, dict):
+            actor_data = actor.character.data if isinstance(actor.character.data, dict) else {}
+            survival_bonus = CombatService._base_skill_modifier(actor_data, 'skills.other.survival')
+            roll = random.randint(1, 20)
+            mutant_modifier = CombatService.BUTCHERING_MUTANT_MODIFIERS.get(species, 0)
+            total = max(0, roll + mutant_modifier + weapon['bonus'] + survival_bonus - 5)
+            pending = {
+                'actor_location_character_id': actor.id,
+                'roll': roll,
+                'mutant_modifier': mutant_modifier,
+                'weapon_bonus': weapon['bonus'],
+                'survival_bonus': survival_bonus,
+                'total': total,
+                'weapon_name': weapon['name'],
+            }
+            target_meta['butcheringRoll'] = pending
+            target.character.data = target_data
+            flag_modified(target.character, 'data')
+            db.session.commit()
+        elif CombatService._coerce_int(pending.get('actor_location_character_id'), 0) != actor.id:
+            raise ValidationError('Разделку уже начал другой персонаж')
+
+        base_price = CombatService.BUTCHERING_BASE_PRICES.get(species, 0)
+        unavailable = {'meat', 'hide'} if species == 'одичалый' else set()
+        parts = {
+            key: {
+                **profile,
+                'available': key not in unavailable,
+                'unit_price': round(base_price * profile['price_multiplier']),
+                'radiation': CombatService.BUTCHERING_MEAT_RADIATION.get(species, 0) if key == 'meat' else 0,
+            }
+            for key, profile in CombatService.BUTCHERING_PARTS.items()
+        }
+        if allocation is None:
+            return {
+                'target_character_id': target.character_id,
+                'target_name': target.character.name,
+                'species': CombatService._mutant_profile_name(target_data),
+                'roll': deepcopy(pending),
+                'parts': parts,
+            }
+
+        selected = allocation if isinstance(allocation, dict) else {}
+        normalized = {}
+        spent = 0
+        for key, profile in parts.items():
+            amount = max(0, CombatService._coerce_int(selected.get(key), 0))
+            if not profile['available'] and amount:
+                raise ValidationError(f"Часть «{profile['label']}» недоступна для этого мутанта")
+            if profile['max'] is not None and amount > profile['max']:
+                raise ValidationError(f"Превышен максимум для части «{profile['label']}»")
+            normalized[key] = amount
+            spent += amount * profile['points']
+        if spent > CombatService._coerce_int(pending.get('total'), 0):
+            raise ValidationError('На выбранные части не хватает очков разделки')
+
+        actor_data = actor.character.data if isinstance(actor.character.data, dict) else {}
+        backpack = actor_data.setdefault('inventory', {}).setdefault('backpack', [])
+        if not isinstance(backpack, list):
+            backpack = []
+            actor_data['inventory']['backpack'] = backpack
+        loot = []
+        for key, amount in normalized.items():
+            if amount <= 0:
+                continue
+            profile = parts[key]
+            item = {
+                'id': f"item_{uuid.uuid4().hex}",
+                'name': f"{profile['label']}: {CombatService._mutant_profile_name(target_data)}",
+                'category': 'mutant_part',
+                'subcategory': profile['label'],
+                'quantity': amount,
+                'weight': profile['weight'],
+                'price': profile['unit_price'],
+                'attributes': {
+                    'mutant_part': key,
+                    'source_mutant': CombatService._mutant_profile_name(target_data),
+                    'radiation': profile['radiation'],
+                },
+            }
+            backpack.append(item)
+            loot.append(deepcopy(item))
+        target_meta['butchered'] = True
+        target_meta['butcheringResult'] = {'allocation': normalized, 'spent': spent}
+        target_meta.pop('butcheringRoll', None)
+        actor.character.data = actor_data
+        target.character.data = target_data
+        flag_modified(actor.character, 'data')
+        flag_modified(target.character, 'data')
+        db.session.commit()
+        return {
+            'completed': True,
+            'actor_character_id': actor.character_id,
+            'target_character_id': target.character_id,
+            'target_name': target.character.name,
+            'species': CombatService._mutant_profile_name(target_data),
+            'roll': deepcopy(pending),
+            'spent': spent,
+            'remaining': max(0, CombatService._coerce_int(pending.get('total'), 0) - spent),
+            'loot': loot,
+            'actor_data': actor_data,
+        }
 
     @staticmethod
     def _equipment_template(item):
@@ -9290,7 +10710,12 @@ class CombatService:
         return CombatService._serialize_state(location, state)
 
     @staticmethod
-    def start_combat(location_id, user_id, location_character_ids=None):
+    def start_combat(
+        location_id,
+        user_id,
+        location_character_ids=None,
+        initiator_location_character_id=None,
+    ):
         location = CombatService._get_location(location_id)
         CombatService._ensure_access(location, user_id)
         if location.lobby.gm_id != user_id:
@@ -9320,12 +10745,26 @@ class CombatService:
                 raise ValidationError("Selected character is not in this location")
             loc_chars = [available_by_id[value] for value in selected_ids]
 
+        initiator_id = CombatService._coerce_int(
+            initiator_location_character_id, 0,
+        )
+        if initiator_id and initiator_id not in {item.id for item in loc_chars}:
+            raise ValidationError("The combat initiator must be a selected participant")
+        if initiator_id and not CombatService._can_take_combat_turn(
+            available_by_id[initiator_id]
+        ):
+            raise ValidationError("An incapacitated character cannot initiate combat")
+
         state = CombatService._get_or_create_state(location_id)
         if state.status == 'active':
             raise ValidationError("Combat is already active")
         state.started_at = datetime.now(timezone.utc)
 
         selected_location_ids = {item.id for item in loc_chars}
+        for loc_char in loc_chars:
+            CombatService._refresh_mutant_pack_bonus(
+                loc_char, selected_location_ids,
+            )
         for loc_char in available_characters:
             character_data = (
                 loc_char.character.data
@@ -9357,11 +10796,32 @@ class CombatService:
         ordered_chars = sorted(
             loc_chars,
             key=lambda item: (
+                0 if initiator_id and item.id == initiator_id else 1,
                 -(item.initiative_total or 0),
                 -(item.initiative_bonus or 0),
                 item.id,
             ),
         )
+
+        opening_character = ordered_chars[0] if ordered_chars else None
+        if opening_character and opening_character.character:
+            opening_data = opening_character.character.data
+            opening_data = opening_data if isinstance(opening_data, dict) else {}
+            opening_meta = opening_data.setdefault('health', {}).setdefault(
+                'combatMeta', {},
+            )
+            if CombatService._mutant_opening_ambush_eligible(opening_data):
+                opening_meta['mutantOpeningMovementBonus'] = 5
+                opening_meta['mutantOpeningAttackAdvantage'] = True
+                opening_meta['mutantOpeningRound'] = 1
+                opening_character.movement_points_max = (
+                    opening_character.movement_points_max or 0
+                ) + 5
+                opening_character.movement_points_current = (
+                    opening_character.movement_points_current or 0
+                ) + 5
+                opening_character.character.data = opening_data
+                flag_modified(opening_character.character, 'data')
 
         first_actionable_index = next(
             (
@@ -9494,6 +10954,9 @@ class CombatService:
         )
         CombatService._tick_character_effects(current_character, phase='turn_end')
         CombatService._apply_periodic_health_effects(current_character, phase='turn_end')
+        psy_end_turn = CombatService._resolve_mutant_psy_end_turn(
+            location, state, current_character,
+        )
         anomaly_result = CombatService._resolve_anomaly_end_turn(
             current_character, ending_round,
         )
@@ -9523,6 +10986,16 @@ class CombatService:
         if current_meta.pop('helpAdvantage', None) is not None:
             current_character.character.data = current_data
             flag_modified(current_character.character, 'data')
+        if (
+            CombatService._coerce_int(
+                current_meta.get('mutantOpeningRound'), 0,
+            ) == ending_round
+        ):
+            current_meta.pop('mutantOpeningMovementBonus', None)
+            current_meta.pop('mutantOpeningAttackAdvantage', None)
+            current_meta.pop('mutantOpeningRound', None)
+            current_character.character.data = current_data
+            flag_modified(current_character.character, 'data')
         if current_meta.pop('circularAttackRound', None) == ending_round:
             apply_effect_to_health(current_health, {
                 'type': 'circular_attack_recovery',
@@ -9542,6 +11015,10 @@ class CombatService:
                 LocationCharacter.query.filter_by(location_id=location_id).all()
             )
             CombatService._apply_end_of_round_pain_recovery(round_characters)
+            participant_ids = set(state.turn_order or [])
+            psy_recovery = CombatService._apply_end_of_round_psi_recovery(
+                [item for item in round_characters if item.id in participant_ids],
+            )
             for round_character in round_characters:
                 CombatService._advance_character_time(round_character, 6)
             state.round_number += 1
@@ -9551,6 +11028,7 @@ class CombatService:
             area_updates = CombatService._advance_area_effects(state)
         else:
             area_updates = []
+            psy_recovery = []
         state.turn_index = next_index
         state.current_location_character_id = next_character_id
         CombatService._prepare_character_for_turn(next_character)
@@ -9615,6 +11093,8 @@ class CombatService:
         payload['pain_shock_check'] = pain_shock_check
         payload['detonations'] = detonations
         payload['area_updates'] = area_updates
+        payload['psy_end_turn'] = psy_end_turn
+        payload['psy_recovery'] = psy_recovery
         return payload
 
     @staticmethod
@@ -10191,12 +11671,15 @@ class CombatService:
                 'character': CombatService._serialize_character(character),
                 'state': CombatService._serialize_state(location, state),
                 'action': action_key,
-                'mutant_action': {'kind': 'ambush', 'stealth_bonus': 5},
+                'mutant_action': {
+                    'kind': 'ambush', 'detection_difficulty_bonus': 5,
+                },
             }
         if not state or state.status != 'active':
             raise ValidationError("Combat is not active")
 
         CombatService._refresh_ugly_appearance_penalties(location_id)
+        CombatService._refresh_mutant_pack_bonus(character)
 
         data = (
             character.character.data
@@ -10279,7 +11762,9 @@ class CombatService:
             if not CombatService._tile_has_bush(location, character.pos_x, character.pos_y):
                 raise ValidationError('Для засады Жмурка должна находиться в кусте')
             special_action_cost = 0
-            mutant_action_details = {'kind': 'ambush', 'stealth_bonus': 5}
+            mutant_action_details = {
+                'kind': 'ambush', 'detection_difficulty_bonus': 5,
+            }
         elif action_key == 'mutant_battle_cry':
             if not any(
                 CombatService._template_attributes(weapon).get('special_action') == 'mutant_battle_cry'
@@ -10293,6 +11778,236 @@ class CombatService:
             mutant_action_details = {
                 'kind': 'battle_cry', 'difficulty': 15,
                 'action_points': special_action_cost, 'targets': [],
+            }
+        elif action_key == 'mutant_camouflage':
+            if not CombatService._mutant_has_trait(data, 'Маскировка'):
+                raise ValidationError('Этому мутанту недоступна маскировка')
+            last_round = CombatService._coerce_int(
+                combat_meta.get('mutantCamouflageUsedRound'), -100,
+            )
+            if current_round - last_round < 4:
+                raise ValidationError('Маскировка восстанавливается раз в 4 раунда')
+            special_action_cost = 1
+            mutant_action_details = {
+                'kind': 'camouflage',
+                'action_points': 1,
+                'until_round': current_round + 2,
+            }
+        elif action_key == 'mutant_psy_attack':
+            weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            if not 0 <= weapon_index < len(weapons):
+                raise ValidationError('Пси-атака не найдена')
+            weapon = weapons[weapon_index] if isinstance(weapons[weapon_index], dict) else {}
+            attack_name = str(weapon.get('name') or '')
+            if attack_name.casefold() not in {
+                'пси-удар', 'зомбирование', 'приказ смерти',
+            }:
+                raise ValidationError('Выбранная атака не является пси-атакой Псионика')
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError('Выберите цель пси-атаки')
+            if not CombatService._mutant_has_direct_sight(location_id, character, target):
+                raise ValidationError('Для пси-атаки нужна прямая видимость')
+            raw_effect = str(CombatService._template_attributes(weapon).get('raw_effect') or '')
+            cost_match = re.search(r'(\d+)\s*ОД', raw_effect, re.IGNORECASE)
+            special_action_cost = int(cost_match.group(1)) if cost_match else 0
+            mutant_action_details = {
+                'kind': 'psy_attack',
+                'attack_name': attack_name,
+                'weapon_index': weapon_index,
+                'target': target,
+                'target_character_id': target.character_id,
+                'action_points': special_action_cost,
+            }
+        elif action_key == 'mutant_psy_roar':
+            if not CombatService._mutant_has_trait(data, 'Пси-рёв'):
+                raise ValidationError('Этому мутанту недоступен Пси-рёв')
+            special_action_cost = 3
+            mutant_action_details = {
+                'kind': 'psy_roar',
+                'action_points': 3,
+                'targets': [],
+            }
+        elif action_key == 'mutant_psy_sleep':
+            if not CombatService._mutant_has_trait(data, 'Сон'):
+                raise ValidationError('Этому мутанту недоступен Пси-сон')
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError('Выберите цель Пси-сна')
+            if math.hypot(target.pos_x - character.pos_x, target.pos_y - character.pos_y) > 10:
+                raise ValidationError('Дальность Пси-сна ограничена 10 метрами')
+            if not CombatService._mutant_has_direct_sight(location_id, character, target):
+                raise ValidationError('Для Пси-сна нужна прямая видимость')
+            special_action_cost = 4
+            mutant_action_details = {
+                'kind': 'psy_sleep',
+                'target': target,
+                'target_character_id': target.character_id,
+                'action_points': 4,
+            }
+        elif action_key == 'mutant_object_attack':
+            weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+            weapon_index = CombatService._coerce_int(weapon_index, -1)
+            if not 0 <= weapon_index < len(weapons):
+                raise ValidationError('Атака Аномальной души не найдена')
+            weapon = weapons[weapon_index] if isinstance(weapons[weapon_index], dict) else {}
+            attack_name = str(weapon.get('name') or '').strip()
+            object_profiles = {
+                'бросок': {
+                    'damage_multiplier': 50, 'base_cost': 6,
+                    'difficulty': 14, 'damage_type': 'crushing',
+                },
+                'огненный снаряд': {
+                    'damage_multiplier': 40, 'base_cost': 5,
+                    'difficulty': 12, 'damage_type': 'thermal',
+                    'burning': True,
+                },
+                'электрический снаряд': {
+                    'damage_multiplier': 25, 'base_cost': 3,
+                    'difficulty': 16, 'damage_type': 'electric',
+                    'maximum_weight': 5,
+                },
+                'химический снаряд': {
+                    'damage_multiplier': 75, 'base_cost': 2,
+                    'difficulty': 12, 'damage_type': 'chemical',
+                    'maximum_range': 5, 'armor_damage_multiplier': 2,
+                },
+            }
+            object_profile = object_profiles.get(attack_name.casefold())
+            if not object_profile:
+                raise ValidationError('Выбранная атака не использует объект окружения')
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError('Выберите цель атаки')
+            target_distance = math.hypot(
+                target.pos_x - character.pos_x,
+                target.pos_y - character.pos_y,
+            )
+            if (
+                object_profile.get('maximum_range') is not None
+                and target_distance > object_profile['maximum_range']
+            ):
+                raise ValidationError(
+                    f"Дальность этой атаки ограничена {object_profile['maximum_range']} метрами"
+                )
+            thrown_object, object_weight = CombatService._nearest_throwable_object(
+                location_id,
+                target,
+                maximum_weight=object_profile.get('maximum_weight'),
+            )
+            if not thrown_object:
+                raise ValidationError('Рядом с целью нет подходящего объекта для броска')
+            special_action_cost = object_profile['base_cost'] + math.ceil(object_weight)
+            mutant_action_details = {
+                'kind': 'object_attack',
+                'attack_name': attack_name,
+                'weapon_index': weapon_index,
+                'target': target,
+                'target_character_id': target.character_id,
+                'target_name': target.character.name if target.character else 'Цель',
+                'target_distance': target_distance,
+                'object': thrown_object,
+                'object_id': thrown_object.id,
+                'object_name': thrown_object.name or thrown_object.type,
+                'object_weight': object_weight,
+                'profile': object_profile,
+                'action_points': special_action_cost,
+            }
+        elif action_key == 'mutant_anomaly_shield':
+            weapons = data.get('weapons') if isinstance(data.get('weapons'), list) else []
+            if not any(
+                str(item.get('name') or '').strip().casefold() == 'щит'
+                for item in weapons if isinstance(item, dict)
+            ):
+                raise ValidationError('Этому мутанту недоступен Аномальный щит')
+            special_action_cost = 3
+            mutant_action_details = {
+                'kind': 'anomaly_shield',
+                'physical_protection': 80,
+                'action_points': 3,
+            }
+        elif action_key == 'mutant_steal_device':
+            if not CombatService._mutant_has_trait(data, 'Вор'):
+                raise ValidationError('Этому мутанту недоступна кража устройств')
+            target = LocationCharacter.query.filter_by(
+                location_id=location_id,
+                character_id=target_character_id,
+            ).first()
+            if not target or target.id == character.id:
+                raise ValidationError('Выберите цель кражи')
+            if not CombatService._is_adjacent(character, target):
+                raise ValidationError('Для кражи нужно находиться на соседней клетке')
+            target_data = (
+                target.character.data
+                if target.character and isinstance(target.character.data, dict)
+                else {}
+            )
+            device = CombatService._inventory_item_at_path(target_data, item_path)
+            if not CombatService._is_stealable_electronic(device):
+                raise ValidationError('Можно украсть только Детектор, Рацию, ПНВ или КПК')
+            special_action_cost = 2
+            mutant_action_details = {
+                'kind': 'steal_device',
+                'target': target,
+                'target_character_id': target.character_id,
+                'target_name': target.character.name if target.character else 'Цель',
+                'item_path': list(item_path or []),
+                'item_name': device.get('name') or 'Устройство',
+                'action_points': 2,
+            }
+        elif action_key == 'mutant_clone':
+            clone_trait = next((
+                trait for trait in CombatService._mutant_traits(data)
+                if 'Клонирование' in trait
+            ), None)
+            if not clone_trait:
+                raise ValidationError('Этому мутанту недоступно клонирование')
+            limit_match = re.search(r'До\s+(\d+)\s+коп', clone_trait, re.IGNORECASE)
+            psy_match = re.search(r'наносит\s+(\d+)\s+Пси', clone_trait, re.IGNORECASE)
+            clone_limit = int(limit_match.group(1)) if limit_match else 1
+            clone_psy_damage = int(psy_match.group(1)) if psy_match else 0
+            active_clones = [
+                item for item in CombatService._unique_location_characters(
+                    LocationCharacter.query.filter_by(location_id=location_id).all()
+                )
+                if item.character
+                and isinstance(item.character.data, dict)
+                and item.character.data.get('basic', {}).get('psi_clone_source_id') == character.character_id
+                and CombatService._location_character_condition(item)['state'] != 'dead'
+            ]
+            if len(active_clones) >= clone_limit:
+                raise ValidationError(f'Одновременно доступно не больше {clone_limit} копий')
+            blocked, _ = CombatService._build_movement_map(
+                location, character.character_id,
+            )
+            spawn_tile = next((
+                (character.pos_x + dx, character.pos_y + dy)
+                for dx, dy in ((0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1))
+                if (
+                    0 <= character.pos_x + dx < location.grid_width
+                    and 0 <= character.pos_y + dy < location.grid_height
+                    and (character.pos_x + dx, character.pos_y + dy) not in blocked
+                )
+            ), None)
+            if not spawn_tile:
+                raise ValidationError('Рядом нет свободной клетки для копии')
+            special_action_cost = 1
+            mutant_action_details = {
+                'kind': 'clone',
+                'clone_limit': clone_limit,
+                'clone_psy_damage': clone_psy_damage,
+                'spawn_tile': spawn_tile,
+                'action_points': 1,
             }
         if action_key == 'escape_anomaly':
             _, _, _, active_anomaly = CombatService._active_anomaly(character)
@@ -10318,6 +12033,17 @@ class CombatService:
                 else 'skills.physical.agility'
             )
             check = CombatService._narrative_skill_check(data, skill_path)
+            long_jump_bonus = (
+                4 if CombatService._mutant_has_trait(data, 'Длинный прыжок') else 0
+            )
+            if long_jump_bonus:
+                check['modifier'] = CombatService._coerce_int(
+                    check.get('modifier'), 0,
+                ) + long_jump_bonus
+                check['total'] = CombatService._coerce_int(
+                    check.get('total'), 0,
+                ) + long_jump_bonus
+                check['mutant_long_jump_bonus'] = long_jump_bonus
             difficulty_key = (
                 'secondary_dc'
                 if active_anomaly.get('key') == 'kapkan'
@@ -10990,7 +12716,7 @@ class CombatService:
                 else {}
             )
             if CombatService._mutant_has_trait(target_data, 'Не может быть целью Захвата'):
-                raise ValidationError('Жмурка не может быть целью захвата')
+                raise ValidationError('Это существо нельзя взять в захват')
             if not CombatService._has_usable_free_hand(character):
                 raise ValidationError("At least one free hand is required for a grapple")
             if character.grapple_target_id or character.grappled_by_id:
@@ -11567,6 +13293,13 @@ class CombatService:
             distance = max(abs(character.pos_x - target.pos_x), abs(character.pos_y - target.pos_y))
             if not circular_attack and distance != 1:
                 raise ValidationError("Цель атаки ближнего боя должна находиться на соседней клетке")
+            if (
+                CombatService._mutant_has_trait(data, 'Миролюбивый')
+                and not combat_meta.get('mutantProvoked')
+            ):
+                raise ValidationError(
+                    'Миролюбивый мутант не может атаковать первым'
+                )
             character.facing_x = 0 if target.pos_x == character.pos_x else (1 if target.pos_x > character.pos_x else -1)
             character.facing_y = 0 if target.pos_y == character.pos_y else (1 if target.pos_y > character.pos_y else -1)
             profile = (
@@ -11579,6 +13312,12 @@ class CombatService:
             )
             melee_bonus = CombatService._skill_modifier(
                 character.character.data or {}, 'skills.physical.melee'
+            )
+            melee_bonus += max(
+                0,
+                CombatService._coerce_int(
+                    combat_meta.get('mutantRageAccuracy'), 0,
+                ),
             )
             accuracy = CombatService._coerce_int(profile.get('accuracy'), 0)
             payment_tokens = {
@@ -11872,6 +13611,18 @@ class CombatService:
                 )
                 or movement_modifiers['disadvantage']
             )
+            if (
+                range_target
+                and CombatService._mutant_has_trait(
+                    range_target.character.data if range_target.character else {},
+                    'Полёт',
+                )
+                and CombatService._coerce_float(
+                    range_target.movement_distance_this_turn, 0,
+                ) > 0
+                and range_target.movement_mode_this_turn != 'correction'
+            ):
+                base_shooting_disadvantage = True
             rapid_fire_accuracy_penalty = (
                 CombatService._rapid_fire_accuracy_penalty(weapon)
                 if fire_mode == 'rapid'
@@ -11998,8 +13749,22 @@ class CombatService:
                     attack_details['shooting_disadvantage'] = True
                     attack_details['base_shooting_disadvantage'] = True
             if range_target:
+                range_target_data = (
+                    range_target.character.data
+                    if range_target.character and isinstance(range_target.character.data, dict)
+                    else {}
+                )
+                if CombatService._mutant_camouflage_active(
+                    range_target_data, current_round,
+                ):
+                    if fire_mode in {'aimed', 'rapid'}:
+                        raise ValidationError(
+                            'По замаскированному мутанту недоступен прицельный и беглый выстрел'
+                        )
+                    hit_difficulty += 8
+                    attack_details['mutant_camouflage_penalty'] = 8
                 mutant_target_modifier = CombatService._mutant_shooting_target_modifier(
-                    range_target.character.data if range_target.character else {},
+                    range_target_data,
                 )
                 hit_difficulty -= mutant_target_modifier
                 attack_details['mutant_target_accuracy_modifier'] = mutant_target_modifier
@@ -12130,6 +13895,9 @@ class CombatService:
                 }
             if not resumed_paid_action:
                 character.action_points_current -= action_point_cost
+            if action_key != 'attack' and combat_meta.pop('mutantRageAccuracy', None) is not None:
+                character.character.data = data
+                flag_modified(character.character, 'data')
             if CombatService._mutant_has_trait(data, 'Возможность разгона'):
                 activity = combat_meta.setdefault('mutantTurnActivity', {
                     'round': current_round, 'moved': False, 'other': False,
@@ -12139,6 +13907,10 @@ class CombatService:
                 character.character.data = data
                 flag_modified(character.character, 'data')
             if action_key != 'mutant_ambush' and combat_meta.pop('mutantAmbushActive', None):
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            if action_key == 'attack' and combat_meta.pop('mutantCamouflageActive', None):
+                combat_meta.pop('mutantCamouflageUntilRound', None)
                 character.character.data = data
                 flag_modified(character.character, 'data')
             if action_key == 'mutant_jump' and mutant_action_details:
@@ -12191,6 +13963,357 @@ class CombatService:
                         'difficulty': 15, 'success': success, 'stress': stress,
                     })
                 CombatService._mark_mutant_attack_used(character, current_round)
+            elif action_key == 'mutant_camouflage' and mutant_action_details:
+                combat_meta['mutantCamouflageActive'] = True
+                combat_meta['mutantCamouflageUsedRound'] = current_round
+                combat_meta['mutantCamouflageUntilRound'] = mutant_action_details['until_round']
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            elif action_key == 'mutant_psy_attack' and mutant_action_details:
+                target = mutant_action_details.pop('target')
+                target_data = target.character.data if target.character and isinstance(target.character.data, dict) else {}
+                attack_name = mutant_action_details['attack_name'].casefold()
+                psy_amount = 20 if attack_name == 'пси-удар' else (10 if attack_name == 'зомбирование' else 0)
+                mutant_action_details['psy_state'] = CombatService._increase_psy_state(
+                    target_data, psy_amount, attack_name, loc_char=target,
+                ) if psy_amount else None
+                difficulty = 15 if attack_name in {'пси-удар', 'приказ смерти'} else 18
+                save = CombatService._mutant_saving_throw(
+                    target, 'skills.physical.will', difficulty,
+                )
+                mutant_action_details['save'] = save
+                if attack_name == 'пси-удар' and not save['success']:
+                    apply_effect_to_health(target_data.setdefault('health', {}), {
+                        'type': 'concussion', 'name': 'Контузия',
+                        'remaining': 1, 'tick': 'turn_end',
+                        'source': 'psy_strike', 'roll_modifier': -3,
+                    })
+                    mutant_action_details['dropped'] = CombatService._apply_fall_or_drop(
+                        target, target_data, 'right_arm',
+                    )
+                elif attack_name == 'зомбирование' and not save['success']:
+                    health = target_data.setdefault('health', {})
+                    meta = health.setdefault('combatMeta', {})
+                    meta['zombificationPreviousController'] = target.controlled_by
+                    meta['zombificationController'] = location.lobby.gm_id
+                    target.controlled_by = location.lobby.gm_id
+                    apply_effect_to_health(health, {
+                        'type': 'zombification', 'name': 'Зомбирование',
+                        'source': 'psyionik', 'active': True,
+                    })
+                elif attack_name == 'приказ смерти':
+                    effects = normalize_effect_list(
+                        target_data.setdefault('health', {}).get('effects') or []
+                    )
+                    if not any(
+                        item.get('active', True) and item.get('type') == 'zombification'
+                        for item in effects
+                    ):
+                        raise ValidationError('Приказ смерти действует только на Зомбированного')
+                    if not save['success']:
+                        apply_effect_to_health(target_data['health'], {
+                            'type': 'death_order', 'name': 'Приказ смерти',
+                            'source': 'psyionik', 'active': True,
+                        })
+                target.character.data = target_data
+                flag_modified(target.character, 'data')
+                CombatService._sync_location_effects_from_character(target)
+            elif action_key == 'mutant_psy_roar' and mutant_action_details:
+                combat_participant_ids = set(state.turn_order or [])
+                for opponent in CombatService._unique_location_characters(
+                    LocationCharacter.query.filter_by(location_id=location_id).all()
+                ):
+                    if (
+                        opponent.id == character.id
+                        or opponent.id not in combat_participant_ids
+                        or not opponent.character
+                        or not CombatService._are_opponents(character, opponent)
+                        or CombatService._location_character_condition(opponent)['state'] == 'dead'
+                    ):
+                        continue
+                    opponent_data = opponent.character.data if isinstance(opponent.character.data, dict) else {}
+                    psy_state = CombatService._increase_psy_state(
+                        opponent_data, 7, 'psy_roar', loc_char=opponent,
+                    )
+                    save = CombatService._mutant_saving_throw(
+                        opponent, 'skills.physical.will', 16,
+                    )
+                    if not save['success']:
+                        bonus_psy = CombatService._increase_psy_state(
+                            opponent_data, 3, 'psy_roar_failed_save', loc_char=opponent,
+                        )
+                        apply_effect_to_health(opponent_data.setdefault('health', {}), {
+                            'type': 'psy_roar_disadvantage',
+                            'name': 'Последствия Пси-рёва',
+                            'remaining': 1,
+                            'tick': 'turn_end',
+                            'source': 'psy_roar',
+                            'disadvantage_skills': [
+                                'skills.physical.awareness',
+                                'skills.physical.will',
+                                'skills.physical.shooting',
+                            ],
+                        })
+                    else:
+                        bonus_psy = None
+                    opponent.character.data = opponent_data
+                    flag_modified(opponent.character, 'data')
+                    mutant_action_details['targets'].append({
+                        'character_id': opponent.character_id,
+                        'name': opponent.character.name,
+                        'psy_state': psy_state,
+                        'bonus_psy_state': bonus_psy,
+                        'save': save,
+                    })
+            elif action_key == 'mutant_psy_sleep' and mutant_action_details:
+                target = mutant_action_details.pop('target')
+                target_data = target.character.data if target.character and isinstance(target.character.data, dict) else {}
+                save = CombatService._mutant_saving_throw(
+                    target, 'skills.physical.will', 10,
+                )
+                mutant_action_details['save'] = save
+                if not save['success']:
+                    margin = max(1, 10 - save['total'])
+                    if margin < 4:
+                        effect = {
+                            'remaining': 1, 'tick': 'turn_end',
+                            'duration_label': '1 раунд',
+                        }
+                    elif margin < 7:
+                        effect = {
+                            'remaining': 10, 'time_unit': 'minute',
+                            'tick': 'time_elapsed', 'duration_label': '10 минут',
+                        }
+                    else:
+                        effect = {
+                            'remaining': 1, 'time_unit': 'hour',
+                            'tick': 'time_elapsed', 'duration_label': '1 час',
+                        }
+                    apply_effect_to_health(target_data.setdefault('health', {}), {
+                        'type': 'unconsciousness', 'name': 'Пси-сон',
+                        'source': 'psy_cat', **effect,
+                    })
+                    target.posture = 'prone'
+                    mutant_action_details['duration'] = effect['duration_label']
+                target.character.data = target_data
+                flag_modified(target.character, 'data')
+                CombatService._sync_location_effects_from_character(target)
+            elif action_key == 'mutant_object_attack' and mutant_action_details:
+                target = mutant_action_details.pop('target')
+                thrown_object = mutant_action_details.pop('object')
+                object_profile = mutant_action_details.pop('profile')
+                save = CombatService._mutant_saving_throw(
+                    target, 'skills.physical.agility',
+                    object_profile['difficulty'],
+                )
+                mutant_action_details['save'] = save
+                mutant_action_details['damage'] = 0
+                if not save['success']:
+                    base_damage = (
+                        object_profile['damage_multiplier']
+                        * mutant_action_details['object_weight']
+                    )
+                    damage_profile = {
+                        'damage': base_damage,
+                        'armor_piercing': 0,
+                        'damage_type': object_profile['damage_type'],
+                        'effective_range': 0,
+                    }
+                    if object_profile['damage_type'] == 'crushing':
+                        attack_result = CombatService._resolve_attack(
+                            target,
+                            character,
+                            {
+                                'weapon': {
+                                    'name': mutant_action_details['attack_name'],
+                                    'attributes': damage_profile,
+                                },
+                                'fire_mode': 'mutant_object',
+                                'hit_difficulty': 1,
+                                'automatic_firearm_hit': True,
+                                'target_distance': mutant_action_details['target_distance'],
+                                'round_number': current_round,
+                            },
+                            forced_roll=20,
+                            profile_override=damage_profile,
+                            profile_adjusted=True,
+                            ignore_cover=True,
+                            ignore_live_shield=True,
+                        )
+                    else:
+                        zone = CombatService._random_hit_zone(random.randint(1, 20))
+                        target_data = (
+                            target.character.data
+                            if target.character and isinstance(target.character.data, dict)
+                            else {}
+                        )
+                        protection = CombatService._target_elemental_protection(
+                            target_data, object_profile['damage_type'], zone,
+                        )
+                        final_damage = max(0, base_damage * (1 - protection / 100))
+                        attack_result = CombatService._apply_attack_damage(
+                            target,
+                            final_damage,
+                            zone,
+                            damage_profile,
+                            round_number=current_round,
+                            allow_bleeding=False,
+                            stress_trigger='anomalous_soul_projectile',
+                            attacker=character,
+                        )
+                        attack_result.update({
+                            'zone': zone,
+                            'base_damage': base_damage,
+                            'damage': final_damage,
+                            'protection': protection,
+                            'hit': True,
+                            'automatic_hit': True,
+                        })
+                        if object_profile.get('armor_damage_multiplier', 1) > 1:
+                            attack_result['armor_damage'] = (
+                                CombatService._apply_anomaly_equipment_damage(
+                                    target_data,
+                                    base_damage,
+                                    object_profile,
+                                )
+                            )
+                    mutant_action_details['attack_result'] = attack_result
+                    mutant_action_details['damage'] = attack_result.get('damage', 0)
+                    if object_profile.get('burning'):
+                        target_data = (
+                            target.character.data
+                            if target.character and isinstance(target.character.data, dict)
+                            else {}
+                        )
+                        apply_effect_to_health(target_data.setdefault('health', {}), {
+                            'type': 'burning', 'name': 'Горение',
+                            'remaining': 3, 'tick': 'turn_end',
+                            'source': 'anomalous_soul_projectile',
+                        })
+                        target.character.data = target_data
+                        flag_modified(target.character, 'data')
+                thrown_object.tile_x = target.pos_x
+                thrown_object.tile_y = target.pos_y
+                properties = dict(thrown_object.properties or {})
+                properties['weight_kg'] = mutant_action_details['object_weight']
+                thrown_object.properties = properties
+                flag_modified(thrown_object, 'properties')
+                mutant_action_details['object_event'] = 'updated'
+                CombatService._sync_location_effects_from_character(target)
+            elif action_key == 'mutant_anomaly_shield' and mutant_action_details:
+                combat_meta['mutantAnomalyShield'] = True
+                character.character.data = data
+                flag_modified(character.character, 'data')
+            elif action_key == 'mutant_steal_device' and mutant_action_details:
+                target = mutant_action_details.pop('target')
+                target_data = (
+                    target.character.data
+                    if target.character and isinstance(target.character.data, dict)
+                    else {}
+                )
+                stolen = CombatService._take_inventory_item(
+                    target_data,
+                    mutant_action_details['item_path'],
+                    1,
+                )
+                data.setdefault('inventory', {}).setdefault('backpack', []).append(stolen)
+                target.character.data = target_data
+                character.character.data = data
+                flag_modified(target.character, 'data')
+                flag_modified(character.character, 'data')
+                mutant_action_details['stolen_item'] = {
+                    'name': stolen.get('name') or mutant_action_details['item_name'],
+                    'quantity': stolen.get('quantity', 1),
+                }
+            elif action_key == 'mutant_clone' and mutant_action_details:
+                clone_data = deepcopy(data)
+                clone_data.setdefault('basic', {})['psi_clone_source_id'] = character.character_id
+                clone_data['basic']['is_psi_clone'] = True
+                clone_data['basic']['psi_clone_damage'] = mutant_action_details['clone_psy_damage']
+                clone_data['health'] = {
+                    'current': 1,
+                    'max': 1,
+                    'effects': [],
+                    'zones': {
+                        key: {'current': 1, 'max': 1}
+                        for key in ('leftArm', 'rightArm', 'leftLeg', 'rightLeg', 'chest', 'abdomen', 'head')
+                    },
+                }
+                mutant_data = clone_data.get('mutant') if isinstance(clone_data.get('mutant'), dict) else {}
+                mutant_data['traits'] = [
+                    trait for trait in (mutant_data.get('traits') or [])
+                    if 'Клонирование' not in str(trait)
+                ]
+                variant = mutant_data.get('variant') if isinstance(mutant_data.get('variant'), dict) else None
+                if variant:
+                    variant['traits'] = [
+                        trait for trait in (variant.get('traits') or [])
+                        if 'Клонирование' not in str(trait)
+                    ]
+                for clone_weapon in clone_data.get('weapons') or []:
+                    if not isinstance(clone_weapon, dict):
+                        continue
+                    clone_weapon['damage'] = 0
+                    clone_weapon['armor_piercing'] = 0
+                    attributes = clone_weapon.setdefault('attributes', {})
+                    attributes['damage'] = 0
+                    attributes['armor_piercing'] = 0
+                    attributes['psi_clone_attack'] = mutant_action_details['clone_psy_damage']
+                clone_number = 1 + sum(
+                    1 for item in LocationCharacter.query.filter_by(location_id=location_id).all()
+                    if item.character and isinstance(item.character.data, dict)
+                    and item.character.data.get('basic', {}).get('psi_clone_source_id') == character.character_id
+                )
+                clone_character = LobbyCharacter(
+                    lobby_id=location.lobby_id,
+                    owner_id=location.lobby.gm_id,
+                    name=f'{character.character.name} — копия {clone_number}',
+                    data=clone_data,
+                    visible_to=[],
+                    editable_to=[],
+                )
+                db.session.add(clone_character)
+                db.session.flush()
+                clone = LocationCharacter(
+                    location_id=location_id,
+                    character_id=clone_character.id,
+                    pos_x=mutant_action_details['spawn_tile'][0],
+                    pos_y=mutant_action_details['spawn_tile'][1],
+                    controlled_by=character.controlled_by,
+                    team_name=character.team_name,
+                    team_color=character.team_color,
+                    hp_zones={
+                        'head': {'current': 1, 'max': 1},
+                        'chest': {'current': 1, 'max': 1},
+                        'abdomen': {'current': 1, 'max': 1},
+                        'left_arm': {'current': 1, 'max': 1},
+                        'right_arm': {'current': 1, 'max': 1},
+                        'left_leg': {'current': 1, 'max': 1},
+                        'right_leg': {'current': 1, 'max': 1},
+                    },
+                    effects=[],
+                )
+                db.session.add(clone)
+                db.session.flush()
+                profile = CombatService._combat_profile(clone)
+                clone.initiative_bonus = profile['initiative_bonus']
+                clone.initiative_roll = character.initiative_roll
+                clone.initiative_total = character.initiative_total
+                clone.action_points_max = profile['action_points']
+                clone.action_points_current = profile['action_points']
+                clone.free_actions_max = profile['free_actions']
+                clone.free_actions_current = profile['free_actions']
+                clone.movement_points_max = profile['movement_points']
+                clone.movement_points_current = profile['movement_points']
+                if clone.id not in state.turn_order:
+                    insert_at = state.turn_order.index(character.id) + 1
+                    state.turn_order.insert(insert_at, clone.id)
+                mutant_action_details['clone'] = CombatService._serialize_character(
+                    clone,
+                    current_turn_id=state.current_location_character_id,
+                    combat_state=state,
+                )
+                mutant_action_details.pop('spawn_tile', None)
             if action_key == 'clear_weapon_jam' and clear_jam_details:
                 weapons = data.get('weapons') or []
                 cleared_weapon = weapons[clear_jam_details['weapon_index']]
@@ -12723,6 +14846,25 @@ class CombatService:
                     ))
             attack_details['results'] = resolved_hits
             attack_details['hits'] = sum(1 for item in resolved_hits if item.get('hit'))
+            if fire_mode and not attack_details.get('must_do_retry'):
+                fired_weapon = (data.get('weapons') or [])[attack_details['weapon_index']]
+                weapon_noise = CombatService._coerce_float(
+                    CombatService._template_attributes(fired_weapon).get(
+                        'noise', fired_weapon.get('noise', 0),
+                    ),
+                    0,
+                )
+                attack_details['noise'] = weapon_noise
+                attack_details['frightened_mutants'] = (
+                    CombatService._resolve_mutant_fear_from_noise(
+                        location, character, weapon_noise, current_round,
+                    )
+                )
+            evaporated_clones = CombatService._evaporate_dead_psi_clones(
+                location_id, state,
+            )
+            if evaporated_clones:
+                attack_details['evaporated_clones'] = evaporated_clones
             if action_key == 'attack':
                 CombatService._mark_mutant_attack_used(character, current_round)
             attack_details['damage_total'] = sum(
@@ -12903,6 +15045,14 @@ class CombatService:
                 character.character.data = data
                 flag_modified(character.character, 'data')
 
+        evaporated_action_clones = CombatService._evaporate_dead_psi_clones(
+            location_id, state,
+        )
+        if evaporated_action_clones:
+            if isinstance(explosive_details, dict):
+                explosive_details['evaporated_clones'] = evaporated_action_clones
+            elif isinstance(mutant_action_details, dict):
+                mutant_action_details['evaporated_clones'] = evaporated_action_clones
         CombatService._release_invalid_grapples(location_id)
         CombatService._release_invalid_gunpoints(location_id)
         if resumed_paid_action:
@@ -13140,11 +15290,31 @@ class CombatService:
             CombatService._validate_equipment_movement(character_data, movement_mode)
             if (
                 movement_mode == 'sprint'
+                and CombatService._mutant_has_trait(character_data, 'Медлительный')
+            ):
+                raise ValidationError('Этот мутант не может спринтовать')
+            if (
+                movement_mode == 'sprint'
                 and CombatService._disabled_limb_penalties(character_data)['sprint_blocked']
             ):
                 raise ValidationError("Sprinting is unavailable with a disabled leg")
 
             route_cost = CombatService._movement_route_cost(path, movement_mode, posture)
+            if movement_mode == 'backward_sideways':
+                CombatService._validate_backward_sideways_path(character, path)
+            if CombatService._mutant_has_trait(character_data, 'Полёт'):
+                terrain_distance = route_cost['distance']
+                divisor = mode['movement_divisor']
+                flight_cost = (
+                    0
+                    if divisor is None
+                    else math.ceil(
+                        terrain_distance
+                        * posture_profile['movement_multiplier']
+                        / divisor
+                    )
+                )
+                route_cost['movement_points'] = flight_cost + route_cost['climb_cost']
             distance = route_cost['distance']
             movement_cost = route_cost['movement_points']
             if distance <= 0:
@@ -13205,9 +15375,11 @@ class CombatService:
                 superior_runner = CombatService._mutant_has_trait(
                     character_data, 'Превосходный бегун',
                 )
-                receives_breathlessness = (
-                    not superior_runner
-                    or (selecting_mode and random.randint(1, 100) <= 50)
+                ideal_runner = CombatService._mutant_has_trait(
+                    character_data, 'Идеальный бегун',
+                )
+                receives_breathlessness = False if ideal_runner else (
+                    random.randint(1, 100) <= 50 if superior_runner and selecting_mode else not superior_runner
                 )
                 if receives_breathlessness:
                     character.strenuous_movement_blocked_until_round = max(
@@ -13239,11 +15411,14 @@ class CombatService:
             grapple_captive.braced_weapon_index = None
             CombatService._clear_aim(grapple_captive)
         path_tiles = path.get('path') or []
-        if len(path_tiles) >= 2:
+        preserve_facing = bool(
+            state and state.status == 'active' and movement_mode == 'backward_sideways'
+        )
+        if len(path_tiles) >= 2 and not preserve_facing:
             before_x, before_y = path_tiles[-2]
             character.facing_x = 0 if new_x == before_x else (1 if new_x > before_x else -1)
             character.facing_y = 0 if new_y == before_y else (1 if new_y > before_y else -1)
-        elif new_x != previous_x or new_y != previous_y:
+        elif (new_x != previous_x or new_y != previous_y) and not preserve_facing:
             character.facing_x = 0 if new_x == previous_x else (1 if new_x > previous_x else -1)
             character.facing_y = 0 if new_y == previous_y else (1 if new_y > previous_y else -1)
         CombatService._sync_grapple_facing(character)
@@ -13269,6 +15444,9 @@ class CombatService:
             character.character.data = moved_data
             flag_modified(character.character, 'data')
         if moved_meta.pop('mutantAmbushActive', None):
+            character.character.data = moved_data
+            flag_modified(character.character, 'data')
+        if moved_meta.pop('mutantRageAccuracy', None) is not None:
             character.character.data = moved_data
             flag_modified(character.character, 'data')
         CombatService._queue_opportunity_attacks(
@@ -13353,6 +15531,10 @@ class CombatService:
                 meta.pop('firedRound', None)
                 meta.pop('injuryRound', None)
                 meta.pop('reactionReserve', None)
+                meta.pop('mutantPackRollBonus', None)
+                meta.pop('mutantRageAccuracy', None)
+                meta.pop('mutantCamouflageActive', None)
+                meta.pop('mutantCamouflageUntilRound', None)
                 meta.pop('reactionActive', None)
                 meta.pop('gunpoint', None)
                 meta.pop('gunpointFailedRound', None)

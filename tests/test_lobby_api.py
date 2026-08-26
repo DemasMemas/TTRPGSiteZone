@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.models.templates import ItemTemplate
 from app.services.map import MapService
+from app.services.world_rules import mutant_character_data, mutant_profile
 
 
 def create_lobby(client, user, auth_headers, name="Rookie camp"):
@@ -144,7 +145,7 @@ def test_gm_can_assign_location_teams_and_players_cannot_edit_them(
     assert invalid_color.get_json()["characters"][0]["team_color"] is None
 
 
-def test_combat_facing_change_spends_resources_and_is_limited_per_round(
+def test_combat_facing_change_up_to_45_degrees_is_free_and_limited_per_round(
     client,
     create_user,
     auth_headers,
@@ -185,13 +186,13 @@ def test_combat_facing_change_spends_resources_and_is_limited_per_round(
             "action_key": "change_facing",
             "facing_x": 1,
             "facing_y": 1,
-            "payment": "free",
+            "payment": "free_turn",
         },
     )
     assert turned.status_code == 200
     db.session.refresh(location_character)
     assert (location_character.facing_x, location_character.facing_y) == (1, 1)
-    assert location_character.free_actions_current == 0
+    assert location_character.free_actions_current == 1
     assert location_character.facing_changed_round == 1
 
     repeated = client.post(
@@ -204,6 +205,96 @@ def test_combat_facing_change_spends_resources_and_is_limited_per_round(
             "facing_y": 0,
             "payment": "action",
         },
+    )
+    assert repeated.status_code == 400
+
+
+def test_exact_facing_vector_is_saved_outside_combat(client, create_user, auth_headers):
+    gm = create_user("exact-facing-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers)
+    location = Location(lobby_id=lobby["id"], name="Facing vector", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    placed = LocationCharacter(location_id=location.id, character_id=character["id"])
+    db.session.add(placed)
+    db.session.commit()
+
+    response = client.patch(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/characters/{character['id']}/facing",
+        headers=auth_headers(gm),
+        json={"facing_x": 2, "facing_y": 7},
+    )
+
+    assert response.status_code == 200
+    db.session.refresh(placed)
+    assert (placed.facing_x, placed.facing_y) == (2, 7)
+
+
+def test_dead_mutant_can_be_butchered_only_once(
+    client, create_user, auth_headers, monkeypatch,
+):
+    gm = create_user("butchering-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    actor_data = {
+        "health": {},
+        "skills": {"other": {"survival": {"base": 20, "bonus": 0}}},
+        "weapons": [{
+            "name": "Охотничий нож",
+            "category": "melee_weapon",
+            "attributes": {
+                "armor_piercing": 100,
+                "allowed_attacks": ["Колющий"],
+                "melee_damage_type": "Колющий",
+            },
+        }],
+        "inventory": {"pockets": [], "backpack": []},
+    }
+    actor = create_character(client, lobby, gm, auth_headers, actor_data)
+    dog_data = mutant_character_data(mutant_profile("Собака"))
+    dog_data["health"]["effects"] = [{"type": "death", "name": "Смерть", "active": True}]
+    mutant = create_character(client, lobby, gm, auth_headers, dog_data)
+    location = Location(lobby_id=lobby["id"], name="Butchering", world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    actor_placed = LocationCharacter(
+        location_id=location.id, character_id=actor["id"], pos_x=1, pos_y=1,
+        drawn_weapon_index=0,
+    )
+    mutant_placed = LocationCharacter(
+        location_id=location.id, character_id=mutant["id"], pos_x=2, pos_y=1,
+    )
+    db.session.add_all([actor_placed, mutant_placed])
+    db.session.commit()
+    monkeypatch.setattr("app.services.combat.random.randint", lambda _a, _b: 20)
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/characters/{mutant['id']}/butchering"
+
+    rolled = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={"actor_location_character_id": actor_placed.id},
+    )
+    assert rolled.status_code == 200
+    assert rolled.get_json()["roll"]["total"] == 17
+
+    completed = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={
+            "actor_location_character_id": actor_placed.id,
+            "confirm": True,
+            "allocation": {"meat": 2, "hide": 1, "limb": 1},
+        },
+    )
+    assert completed.status_code == 200
+    assert completed.get_json()["spent"] == 12
+    stored_actor = db.session.get(LobbyCharacter, actor["id"])
+    assert len(stored_actor.data["inventory"]["backpack"]) == 3
+
+    repeated = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={"actor_location_character_id": actor_placed.id},
     )
     assert repeated.status_code == 400
 
