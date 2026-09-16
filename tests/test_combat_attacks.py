@@ -647,14 +647,16 @@ def test_ranged_targets_must_stay_inside_the_facing_arc():
     ("shooter_mode", "target_mode", "penalty", "disadvantage"),
     [
         (None, None, 0, False),
-        ("walk", None, 2, False),
-        ("run", None, 2, True),
-        ("sprint", None, 2, True),
+        ("walk", None, 1, False),
+        ("backward_sideways", None, 1, False),
+        ("run", None, 2, False),
+        ("sprint", None, 3, False),
         (None, "correction", 0, False),
-        (None, "walk", 2, False),
-        (None, "run", 2, True),
-        (None, "sprint", 2, True),
-        ("walk", "run", 4, True),
+        (None, "walk", 0, False),
+        (None, "run", 1, False),
+        (None, "sprint", 2, False),
+        ("walk", "run", 2, False),
+        ("sprint", "sprint", 5, False),
     ],
 )
 def test_shooting_movement_modifiers_follow_combat_rules(
@@ -1433,6 +1435,25 @@ def test_cover_continuation_only_accepts_three_cells_on_the_shot_line():
     ) is None
 
 
+@pytest.mark.parametrize(
+    'shooter_position,target_position,on_ray',
+    [
+        ((0, 0), (4, 2), False),
+        ((0, 0), (4, 4), True),
+        ((0, 4), (4, 2), False),
+        ((0, 4), (4, 0), True),
+        ((2, 0), (4, 2), False),
+        ((2, 0), (2, 4), True),
+    ],
+)
+def test_cover_continuation_follows_shooter_direction_not_proximity(shooter_position, target_position, on_ray):
+    shooter = SimpleNamespace(pos_x=shooter_position[0], pos_y=shooter_position[1])
+    cover = SimpleNamespace(tile_x=2, tile_y=2, type='crate',
+                            properties={'dimensions': {'width': 1, 'depth': 1}})
+    target = SimpleNamespace(pos_x=target_position[0], pos_y=target_position[1])
+    assert (CombatService._cover_continuation_distance(shooter, cover, target) is not None) is on_ray
+
+
 def test_characters_behind_cover_include_second_and_third_cells(monkeypatch):
     shooter = SimpleNamespace(id=1, pos_x=0, pos_y=0)
     second_cell = SimpleNamespace(id=2, pos_x=4, pos_y=0)
@@ -1566,7 +1587,7 @@ def test_unaimed_blind_fire_miss_can_damage_cover(monkeypatch):
     assert "защита 20% → 10%, ОЗ 50/100" in summary
 
 
-def test_penetrated_cover_requires_disadvantaged_hit_roll_against_target(monkeypatch):
+def test_penetrated_cover_hits_nearest_target_without_another_accuracy_check(monkeypatch):
     attacker = SimpleNamespace(
         pos_x=0,
         pos_y=0,
@@ -1606,7 +1627,7 @@ def test_penetrated_cover_requires_disadvantaged_hit_roll_against_target(monkeyp
     def resolve_attack(*args, **kwargs):
         resolved["details"] = args[2]
         resolved["kwargs"] = kwargs
-        return {"hit": False, "roll": 4, "rolls": [15, 4], "damage": 0}
+        return {"hit": True, "automatic_hit": True, "damage": 10}
 
     monkeypatch.setattr(CombatService, "_resolve_attack", resolve_attack)
     monkeypatch.setattr(combat_module.random, "randint", lambda start, end: 20)
@@ -1626,15 +1647,17 @@ def test_penetrated_cover_requires_disadvantaged_hit_roll_against_target(monkeyp
         },
     )
 
-    assert resolved["details"]["shooting_disadvantage"] is True
-    assert resolved["details"]["hit_difficulty"] == 13
-    assert "forced_roll" not in resolved["kwargs"]
+    assert resolved["details"]["shooting_disadvantage"] is False
+    assert resolved["details"]["automatic_firearm_hit"] is True
+    assert resolved["kwargs"]["forced_roll"] == 20
+    assert resolved["kwargs"]["profile_override"]["armor_piercing"] == 20
+    assert "aimed_zone" not in resolved["kwargs"]
     assert result["automatic_cover_hit"] is True
     assert result["roll"] == 20
     assert result["rolls"] == [20]
     assert result["difficulty"] is None
-    assert result["target_behind_cover_result"]["hit"] is False
-    assert result["damage"] == 0
+    assert result["target_behind_cover_result"]["hit"] is True
+    assert result["damage"] == 10
 
 
 def test_aimed_head_miss_hits_live_shield_head(monkeypatch):

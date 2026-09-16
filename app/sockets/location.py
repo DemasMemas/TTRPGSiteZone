@@ -176,6 +176,7 @@ def handle_move_in_location(data):
             object_id,
             climb_mode,
             movement_mode,
+            evasion=data.get('evasion'),
         )
     except ServiceError as exc:
         db.session.rollback()

@@ -124,6 +124,7 @@ let characterTradeModal = null;
 const pendingCharacterInteractionResolvers = new Map();
 let armedMoveCharacterId = null;
 let armedMovementType = null;
+let armedMovementEvasion = false;
 let movementTypeMenu = null;
 let postureMenu = null;
 let facingMenu = null;
@@ -656,16 +657,19 @@ function getMovementModeRouteCost(route, movementType = 'walk') {
     };
 }
 
-function getMovementModeAvailability(movementType, route = null) {
+function getMovementModeAvailability(movementType, route = null, evasion = armedMovementEvasion) {
     const mode = COMBAT_MOVEMENT_TYPES[movementType] || COMBAT_MOVEMENT_TYPES.walk;
     const current = combatState?.current_character || {};
     const posture = current.posture || 'standing';
     const postureProfile = current.posture_modifiers || {};
-    const maxDistance = movementType === 'walk'
+    const baseMaxDistance = movementType === 'walk'
         ? Number(postureProfile.walk_max_distance) || COMBAT_POSTURES[posture]?.walkMaxDistance || mode.maxDistance
         : mode.maxDistance;
     const round = Math.max(1, Number(combatState?.round_number) || 1);
     const usedMode = current.movement_mode_this_turn || null;
+    const evading = usedMode ? Boolean(current.movement_evasion) : evasion;
+    const evasionReduction = evading ? ({ walk: 3, run: 5, sprint: 7 }[movementType] || 0) : 0;
+    const maxDistance = Math.max(0, baseMaxDistance - evasionReduction);
     const selectingMode = !usedMode;
     const modeActionPoints = selectingMode ? mode.actionPoints : 0;
     const modeFreeActions = selectingMode ? mode.freeActions : 0;
@@ -694,7 +698,9 @@ function getMovementModeAvailability(movementType, route = null) {
             return stepX * facingX + stepY * facingY > 0;
         });
 
-    if (routeMovesForward) {
+    if (evading && !['walk', 'run', 'sprint'].includes(movementType)) {
+        reason = 'Уклонение доступно при ходьбе, беге и спринте';
+    } else if (routeMovesForward) {
         reason = 'Этот режим допускает только шаги спиной или боком';
     } else if (usedMode && usedMode !== movementType) {
         reason = 'В этом ходу уже выбран другой вид движения';
@@ -1012,6 +1018,8 @@ function commitMovementPreview(clientX, clientY) {
             x: targetX,
             y: targetY,
             movement_mode: movementType,
+            evasion: combatState?.current_character?.movement_mode_this_turn
+                ? Boolean(combatState.current_character.movement_evasion) : armedMovementEvasion,
         });
     }
     clearMovementPreview();
@@ -3616,7 +3624,7 @@ function ensureMovementTypeMenu() {
     return movementTypeMenu;
 }
 
-function showMovementTypeMenu(characterId) {
+function showMovementTypeMenu(characterId, evasion = false) {
     const menu = ensureMovementTypeMenu();
     const current = combatState?.current_character || {};
     menu.innerHTML = `
@@ -3649,6 +3657,10 @@ function showMovementTypeMenu(characterId) {
                 grid-template-columns:repeat(auto-fit, minmax(230px, 1fr));
                 gap:10px;
             "></div>
+            <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px;">
+                <input type="checkbox" id="movement-evasion" ${evasion ? 'checked' : ''}>
+                <span>Уклонение на ходу: СЛ стрельбы по вам +2; дистанция ходьбы −3 м, бега −5 м, спринта −7 м. До следующего хода.</span>
+            </label>
             <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; opacity:0.9;">
                 <input type="checkbox" id="movement-gain-op-if-needed" checked>
                 <span>Получить ОП, если их нет</span>
@@ -3658,7 +3670,7 @@ function showMovementTypeMenu(characterId) {
 
     const options = menu.querySelector('.movement-type-options');
     Object.entries(COMBAT_MOVEMENT_TYPES).forEach(([key, mode]) => {
-        const availability = getMovementModeAvailability(key);
+        const availability = getMovementModeAvailability(key, null, evasion);
         const movementSummary = movementModeSummary(key, mode, current.posture || 'standing');
         const resourceCost = [
             mode.actionPoints ? `${mode.actionPoints} ОД` : null,
@@ -3717,17 +3729,22 @@ function showMovementTypeMenu(characterId) {
                 }
             }
             closeMovementTypeMenu();
-            beginCharacterMoveMode(characterId, key);
+            beginCharacterMoveMode(characterId, key, evasion);
         };
         options.appendChild(button);
     });
 
+    menu.querySelector('#movement-evasion').onchange = (event) => {
+        const gainOp = menu.querySelector('#movement-gain-op-if-needed').checked;
+        showMovementTypeMenu(characterId, event.target.checked);
+        menu.querySelector('#movement-gain-op-if-needed').checked = gainOp;
+    };
     const closeButton = menu.querySelector('.movement-type-close');
     if (closeButton) closeButton.onclick = closeMovementTypeMenu;
     menu.style.display = 'flex';
 }
 
-function beginCharacterMoveMode(characterId, movementType = 'walk') {
+function beginCharacterMoveMode(characterId, movementType = 'walk', evasion = false) {
     if (!isCurrentCombatTurnForCharacter(characterId)) {
         showNotification('Сейчас не ход этого персонажа', 'system');
         return false;
@@ -3737,8 +3754,10 @@ function beginCharacterMoveMode(characterId, movementType = 'walk') {
     clearAttackPreview();
     initializeMovementPreview(characterId);
     armedMovementType = movementType;
+    armedMovementEvasion = combatState?.current_character?.movement_mode_this_turn
+        ? Boolean(combatState.current_character.movement_evasion) : evasion;
     const label = COMBAT_MOVEMENT_TYPES[movementType]?.label || 'Движение';
-    showNotification(`${label}: выберите конечную клетку ЛКМ`, 'system');
+    showNotification(`${label}${armedMovementEvasion ? ' с уклонением' : ''}: выберите конечную клетку ЛКМ`, 'system');
     return true;
 }
 
@@ -4592,17 +4611,6 @@ function rememberFogContents(x, y) {
     const key = `${x}:${y}`;
     const memory = fogMemory.get(key);
     if (!memory) return false;
-    const characters = Array.from(characterModels.entries())
-        .filter(([, entry]) => Number(entry.posX) === x && Number(entry.posY) === y)
-        .map(([characterId, entry]) => ({
-            characterId: Number(characterId),
-            ownerId: Number(entry.ownerId) || 0,
-            posX: x,
-            posY: y,
-            posture: entry.posture || 'standing',
-            facingX: Number(entry.facingX) || 0,
-            facingY: Number(entry.facingY) || 1,
-        }));
     const structures = locationObjectMeshes
         .filter((mesh) => {
             const position = getObjectGridPosition(mesh.userData?.locationObject || {});
@@ -4611,9 +4619,8 @@ function rememberFogContents(x, y) {
         .map((mesh) => cloneFogSnapshot(mesh.userData.locationObject));
     const decorations = objectMeshes
         .filter((mesh) => Number(mesh.userData?.tileX) === x && Number(mesh.userData?.tileZ) === y);
-    const nextSignature = JSON.stringify({ characters, structures, decorations: decorations.map((mesh) => mesh.userData?.objType) });
+    const nextSignature = JSON.stringify({ structures, decorations: decorations.map((mesh) => mesh.userData?.objType) });
     const previousSignature = JSON.stringify({
-        characters: memory.characters || [],
         structures: memory.structures || [],
         decorations: memory.decorations || [],
     });
@@ -4623,10 +4630,42 @@ function rememberFogContents(x, y) {
         if (current) disposeObject(current);
         fogMemoryDecorationTemplates.set(decorationKey, setFogGhostAppearance(mesh.clone(true)));
     });
-    memory.characters = characters;
     memory.structures = structures;
     memory.decorations = decorations.map((mesh) => mesh.userData?.objType || 'object');
     return nextSignature !== previousSignature;
+}
+
+function rememberVisibleCharacters(sources) {
+    let changed = false;
+    const visible = new Map();
+    const byTile = new Map();
+    characterModels.forEach((entry, characterId) => {
+        if (!isCharacterVisibleToPlayer(entry, sources)) return;
+        const id = Number(characterId);
+        const x = Number(entry.posX);
+        const y = Number(entry.posY);
+        const key = `${x}:${y}`;
+        if (!fogMemory.has(key)) rememberFogTile(x, y);
+        const snapshot = {
+            characterId: id, ownerId: Number(entry.ownerId) || 0,
+            posX: x, posY: y, posture: entry.posture || 'standing',
+            facingX: Number(entry.facingX) || 0, facingY: Number(entry.facingY ?? 1),
+        };
+        visible.set(id, snapshot);
+        if (!byTile.has(key)) byTile.set(key, []);
+        byTile.get(key).push(snapshot);
+    });
+    fogMemory.forEach((memory, tileKey) => {
+        const previous = memory.characters || [];
+        const observed = byTile.get(tileKey) || [];
+        if (!previous.length && !observed.length) return;
+        const next = previous.filter(item => !visible.has(Number(item.characterId))).concat(observed);
+        if (JSON.stringify(previous) !== JSON.stringify(next)) {
+            memory.characters = next;
+            changed = true;
+        }
+    });
+    return changed;
 }
 
 function getFogGhost(key, createGhost) {
@@ -4660,7 +4699,7 @@ function syncFogMemoryGhosts(active, sources) {
         fogMemory.forEach((memory, tileKey) => {
             (memory.characters || []).forEach((snapshot) => {
                 const current = characterModels.get(snapshot.characterId);
-                if (current && isTileVisibleToPlayer(current.posX, current.posY, sources)) return;
+                if (current && isCharacterVisibleToPlayer(current, sources)) return;
                 desired.set(`character:${snapshot.characterId}`, {
                     create: () => createCharacterFogGhost({ ...snapshot, height: memory.height }),
                 });
@@ -4769,7 +4808,9 @@ function getFogVisionSources() {
 function blocksVision(object) {
     const properties = object?.properties || {};
     if (properties.blocks_vision === false) return false;
-    return properties.blocks_vision === true || String(object?.type || '').toLowerCase() === 'wall';
+    return properties.blocks_vision === true || [
+        'wall', 'cover', 'crate', 'chest', 'fence', 'rock', 'house', 'shelf', 'table', 'chair',
+    ].includes(String(object?.type || '').toLowerCase());
 }
 
 function getFogObjectHeight(object) {
@@ -4853,7 +4894,7 @@ function isPointVisibleToPlayer(x, y, targetHeight, sources) {
         if (!distance) return true;
         if (distance > FOG_VIEW_RADIUS) return false;
         const facingX = Number(source.facingX) || 0;
-        const facingY = Number(source.facingY) || 1;
+        const facingY = Number(source.facingY ?? 1);
         const facingLength = Math.hypot(facingX, facingY);
         const cosine = (dx * facingX + dy * facingY) / (distance * facingLength);
         if (cosine < Math.cos(FOG_VIEW_HALF_ANGLE)) return false;
@@ -4863,6 +4904,13 @@ function isPointVisibleToPlayer(x, y, targetHeight, sources) {
 
 function isTileVisibleToPlayer(x, y, sources) {
     return isPointVisibleToPlayer(x, y, getTileHeight(x, y) + 1.65, sources);
+}
+
+function isCharacterVisibleToPlayer(entry, sources) {
+    const height = { standing: 1.7, sitting: 1.1, prone: 0.4 }[entry.posture] ?? 1.7;
+    return isPointVisibleToPlayer(
+        Number(entry.posX), Number(entry.posY), getTileHeight(entry.posX, entry.posY) + height, sources,
+    );
 }
 
 function applyFogOfWar() {
@@ -4878,7 +4926,7 @@ function applyFogOfWar() {
         const key = `${tile.x}:${tile.y}`;
         if (visibleNow) {
             const remembered = rememberFogTile(tile.x, tile.y);
-            learnedNewTiles = remembered.changed || rememberFogContents(tile.x, tile.y) || learnedNewTiles;
+            learnedNewTiles = rememberFogContents(tile.x, tile.y) || remembered.changed || learnedNewTiles;
             mesh.visible = false;
             return;
         }
@@ -4896,9 +4944,10 @@ function applyFogOfWar() {
             mesh.position.y = getTileHeight(tile.x, tile.y) + 0.015;
         }
     });
+    if (active) learnedNewTiles = rememberVisibleCharacters(sources) || learnedNewTiles;
     if (learnedNewTiles) saveFogMemory();
     characterModels.forEach((entry) => {
-        const visible = !active || isTileVisibleToPlayer(entry.posX, entry.posY, sources);
+        const visible = !active || isCharacterVisibleToPlayer(entry, sources);
         entry.model.visible = visible;
         entry.label.visible = visible;
     });
@@ -5606,6 +5655,7 @@ function renderCombatHud() {
             <div>ОД: ${combatState.current_character?.action_points_current ?? 0}/${combatState.current_character?.action_points_max ?? 0}</div>
             <div>СД: ${combatState.current_character?.free_actions_current ?? 0}/${combatState.current_character?.free_actions_max ?? 0}</div>
             <div>ОП: ${combatState.current_character?.movement_points_current ?? 0}/${combatState.current_character?.movement_points_max ?? 0}</div>
+            ${combatState.current_character?.movement_evasion ? '<div>Уклонение на ходу: <strong>СЛ стрельбы по вам +2</strong></div>' : ''}
             ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong> · Точность +${combatState.current_character?.aim_accuracy_bonus || 0}</div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
             <div>Кровопотеря: ${currentBloodLabel} | Тяжесть: ${combatState.current_character?.bleeding_severity ?? 0} | Сложность: ${combatState.current_character?.bleeding_difficulty ?? 0}</div>

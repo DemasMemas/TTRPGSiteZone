@@ -704,9 +704,9 @@ class CombatService:
         if blocked_count == 0:
             grade, accuracy_penalty, disadvantage, targetable = 'none', 0, False, True
         elif blocked_count <= 3:
-            grade, accuracy_penalty, disadvantage, targetable = 'half', 2, False, True
+            grade, accuracy_penalty, disadvantage, targetable = 'half', 0, False, True
         elif blocked_count < total_zones:
-            grade, accuracy_penalty, disadvantage, targetable = 'three_quarters', 2, True, True
+            grade, accuracy_penalty, disadvantage, targetable = 'three_quarters', 0, False, True
         else:
             grade, accuracy_penalty, disadvantage, targetable = 'full', 0, False, False
         return grade, accuracy_penalty, disadvantage, targetable
@@ -2989,28 +2989,35 @@ class CombatService:
         return cosine >= math.cos(math.radians(half_angle_degrees))
 
     @staticmethod
-    def _shooting_movement_modifiers(shooter_mode=None, target_mode=None):
-        """Return the shared hit penalty and disadvantage from combat movement."""
+    def _shooting_movement_modifiers(shooter_mode=None, target_mode=None, target_evading=False):
+        """Movement changes accuracy, not the number of attack dice."""
         shooter_mode = str(shooter_mode or '').lower()
         target_mode = str(target_mode or '').lower()
-        difficulty_penalty = 0
-        disadvantage = False
-
-        if shooter_mode in {'walk', 'backward_sideways'}:
+        difficulty_penalty = {'walk': 1, 'backward_sideways': 1, 'run': 2, 'sprint': 3}.get(shooter_mode, 0)
+        difficulty_penalty += {'run': 1, 'sprint': 2}.get(target_mode, 0)
+        if target_evading and target_mode in {'walk', 'run', 'sprint'}:
             difficulty_penalty += 2
-        elif shooter_mode in {'run', 'sprint'}:
-            difficulty_penalty += 2
-            disadvantage = True
-
-        if target_mode and target_mode != 'correction':
-            difficulty_penalty += 2
-        if target_mode in {'run', 'sprint'}:
-            disadvantage = True
 
         return {
             'difficulty_penalty': difficulty_penalty,
-            'disadvantage': disadvantage,
+            'disadvantage': False,
         }
+
+    @staticmethod
+    def _movement_evasion_active(character):
+        if not character or getattr(character, 'movement_mode_this_turn', None) not in {'walk', 'run', 'sprint'}:
+            return False
+        data = character.character.data if character.character else {}
+        return bool((data or {}).get('health', {}).get('combatMeta', {}).get('movementEvasion'))
+
+    @staticmethod
+    def _movement_distance_limit(movement_mode, posture='standing', evading=False):
+        maximum = (
+            POSTURES[posture]['walk_max_distance']
+            if movement_mode == 'walk' else MOVEMENT_MODES[movement_mode]['max_distance']
+        )
+        reduction = {'walk': 3, 'run': 5, 'sprint': 7}.get(movement_mode, 0) if evading else 0
+        return max(0, maximum - reduction)
 
     @staticmethod
     def _opposed_roll(character_data, skill_path, attribute_paths=(), disadvantage=False):
@@ -7296,6 +7303,15 @@ class CombatService:
             else:
                 profile, _ = CombatService._ranged_damage_profile(weapon)
             difficulty = attack_details['hit_difficulty']
+            if attack_details.get('fire_mode') == 'area':
+                difficulty += CombatService._shooting_movement_modifiers(
+                    target_mode=getattr(target, 'movement_mode_this_turn', None),
+                    target_evading=CombatService._movement_evasion_active(target),
+                )['difficulty_penalty']
+                if getattr(target, 'location_id', None) is not None:
+                    attack_details = dict(attack_details, cover=CombatService._cover_analysis(
+                        target.location_id, attacker, target,
+                    ))
             stress_check_modifier = CombatService._consume_stress_check_modifier(
                 attacker_data, is_attack=True,
             )
@@ -7711,24 +7727,10 @@ class CombatService:
             abs(attacker.pos_x - target.pos_x), abs(attacker.pos_y - target.pos_y)
         )
         continued_details['target_distance'] = target_distance
-        continued_details['shooting_disadvantage'] = True
-        continued_difficulty = CombatService._coerce_int(
-            attack_details.get('continuation_hit_difficulty'),
-            12,
-        )
-        if getattr(target, 'movement_mode_this_turn', None) in {'run', 'sprint'}:
-            continued_difficulty += 2
-        weapon_range = CombatService._coerce_int(
-            attack_details.get('weapon_range'), 0
-        )
-        cover_distance = CombatService._coerce_int(
-            attack_details.get('target_distance'), 0
-        )
-        if weapon_range and target_distance > weapon_range >= cover_distance:
-            continued_difficulty += 2
-        continued_details['hit_difficulty'] = max(1, continued_difficulty)
+        continued_details['automatic_firearm_hit'] = True
         target_result = CombatService._resolve_attack(
             target, attacker, continued_details,
+            forced_roll=attack_roll,
             profile_override=continued_profile,
             profile_adjusted=True,
             ignore_cover=True,
@@ -9604,6 +9606,7 @@ class CombatService:
             health = data.get('health') if isinstance(data.get('health'), dict) else {}
             meta = health.setdefault('combatMeta', {})
             meta['consumableUsage'] = {}
+            meta.pop('movementEvasion', None)
             # A reserve is valid only until the character receives their next regular turn.
             reaction_reserve = meta.get('reactionReserve')
             deferred_help_cost = 0
@@ -9786,6 +9789,7 @@ class CombatService:
             'is_exoskeleton': CombatService._exoskeleton_power_profile(data)['is_exoskeleton'],
             'powered_exoskeleton': CombatService._exoskeleton_power_profile(data)['powered'],
             'movement_mode_this_turn': loc_char.movement_mode_this_turn,
+            'movement_evasion': CombatService._movement_evasion_active(loc_char),
             'movement_distance_this_turn': loc_char.movement_distance_this_turn or 0,
             'correction_distance_this_turn': loc_char.correction_distance_this_turn or 0,
             'strenuous_movement_blocked_until_round': loc_char.strenuous_movement_blocked_until_round or 0,
@@ -12453,6 +12457,8 @@ class CombatService:
                 stored_attack = retry.get('attack_details')
                 if not isinstance(stored_attack, dict):
                     raise ValidationError("The failed attack can no longer be repeated")
+                if stored_attack.get('suspected_position'):
+                    raise ValidationError('Этот способ стрельбы больше недоступен: выберите укрытие')
                 attack_details = deepcopy(stored_attack)
                 attack_details['must_do_retry'] = True
                 fire_mode = attack_details.get('fire_mode')
@@ -13495,6 +13501,8 @@ class CombatService:
                 combat_meta, current_round, weapon_index, weapon, shots,
             )
             target_object = None
+            if target_x is not None or target_y is not None:
+                raise ValidationError('Для стрельбы по скрытой цели выберите укрытие, а не запомненную клетку')
             if fire_mode == 'suppression':
                 target_object = LocationObject.query.filter_by(
                     id=target_object_id,
@@ -13604,6 +13612,7 @@ class CombatService:
             movement_modifiers = CombatService._shooting_movement_modifiers(
                 character.movement_mode_this_turn,
                 target_movement_mode,
+                CombatService._movement_evasion_active(range_target),
             )
             base_shooting_disadvantage = (
                 CombatService._has_roll_disadvantage(
@@ -13776,13 +13785,10 @@ class CombatService:
                 if not cover_analysis['targetable']:
                     cover_analysis['blind_fire'] = True
                     cover_analysis['targetable'] = True
-                    attack_details['shooting_disadvantage'] = True
-                    attack_details['base_shooting_disadvantage'] = True
                 attack_details['cover'] = cover_analysis
                 hit_difficulty += cover_analysis.get('accuracy_penalty', 0)
                 if range_target.grapple_live_shield and range_target.grapple_target_id:
                     live_shield = CombatService._live_shield_target(range_target)
-                    previous_penalty = cover_analysis.get('accuracy_penalty', 0)
                     live_shield_zones = [
                         zone for zone in HIT_ZONES if zone != 'head'
                     ]
@@ -13792,17 +13798,16 @@ class CombatService:
                             list(cover_analysis.get('blocked_zones') or [])
                             + live_shield_zones
                         )),
-                        'accuracy_penalty': max(2, previous_penalty),
-                        'disadvantage': True,
+                        'accuracy_penalty': 0,
+                        'disadvantage': False,
                         'targetable': True,
                         'live_shield': True,
                         'live_shield_character_id': (
                             live_shield.character_id if live_shield else None
                         ),
                     })
-                    hit_difficulty += max(0, 2 - previous_penalty)
-                    attack_details['shooting_disadvantage'] = True
-                    attack_details['base_shooting_disadvantage'] = True
+                if fire_mode == 'aimed' and target_zone in cover_analysis['blocked_zones']:
+                    raise ValidationError('Эта часть тела закрыта укрытием: прицельный выстрел невозможен')
             if fire_mode == 'aimed':
                 hit_difficulty += CombatService._aimed_zone_difficulty_penalty(target_zone)
             if target_object and not target_character_id:
@@ -15124,6 +15129,7 @@ class CombatService:
         object_id=None,
         climb_mode=None,
         movement_mode=None,
+        evasion=None,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -15324,6 +15330,11 @@ class CombatService:
             if used_mode and used_mode != movement_mode:
                 raise ValidationError("Movement modes cannot be mixed in one turn")
             selecting_mode = not used_mode
+            evading = CombatService._movement_evasion_active(character) if used_mode else evasion is True
+            if used_mode and evasion is not None and bool(evasion) != evading:
+                raise ValidationError('Уклонение нельзя менять после начала движения в этом ходу')
+            if evading and movement_mode not in {'walk', 'run', 'sprint'}:
+                raise ValidationError('Уклонение доступно при ходьбе, беге и спринте')
             mode_action_points = mode['action_points'] if selecting_mode else 0
             artifact_profile = artifact_passive_profile(character_data)
             if selecting_mode and movement_mode in {'run', 'sprint'}:
@@ -15334,11 +15345,7 @@ class CombatService:
             else:
                 used_distance = character.movement_distance_this_turn or 0
 
-            max_distance = (
-                posture_profile['walk_max_distance']
-                if movement_mode == 'walk'
-                else mode['max_distance']
-            )
+            max_distance = CombatService._movement_distance_limit(movement_mode, posture, evading)
             if used_distance + distance > max_distance:
                 raise ValidationError(
                     f"{mode['label']} distance is limited to {max_distance} meters per turn"
@@ -15364,6 +15371,9 @@ class CombatService:
 
             character.action_points_current -= mode_action_points
             character.free_actions_current -= mode_free_actions
+            character_data.setdefault('health', {}).setdefault('combatMeta', {})['movementEvasion'] = evading
+            character.character.data = character_data
+            flag_modified(character.character, 'data')
             if movement_mode == 'correction':
                 character.movement_mode_this_turn = movement_mode
                 character.correction_distance_this_turn = used_distance + distance
@@ -15526,6 +15536,7 @@ class CombatService:
                     if effect.get('scope') != 'combat' and effect.get('type') != 'shock'
                 ]
                 meta.pop('shockRecoveryRound', None)
+                meta.pop('movementEvasion', None)
                 meta.pop('painShockRecoveredRound', None)
                 meta.pop('painShockRecovered', None)
                 meta.pop('firedRound', None)
