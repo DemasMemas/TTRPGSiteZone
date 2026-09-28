@@ -24,6 +24,10 @@ SECTION_HEADER_NAMES = {
     "Травмы",
 }
 
+CANONICAL_CONSUMABLE_NAMES = {
+    "стимулятор мул": "Стимулятор Бык",
+}
+
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
@@ -66,6 +70,11 @@ def _normalize_consumable_name(value: Any) -> str:
     text = text.replace("регенаративный", "регенеративный")
     text = text.replace("б.о.л.т", "б.о.л.т.")
     return text
+
+
+def _canonical_consumable_name(value: Any) -> str:
+    name = _normalize_text(value)
+    return CANONICAL_CONSUMABLE_NAMES.get(name.lower().replace("ё", "е"), name)
 
 
 def _normalize_text(value: Any) -> str:
@@ -174,7 +183,7 @@ def parse_consumable_templates(workbook_path: Path) -> List[Dict[str, Any]]:
     current_section: Optional[str] = None
 
     for row in rows:
-        name = _normalize_text(row.get("A"))
+        name = _canonical_consumable_name(row.get("A"))
         col_b = _normalize_text(row.get("B"))
         col_c = _normalize_text(row.get("C"))
         col_d = _normalize_text(row.get("D"))
@@ -247,7 +256,7 @@ def parse_consumable_templates_v2(workbook_path: Path) -> List[Dict[str, Any]]:
         )
 
     for row in rows:
-        name = _normalize_text(row.get("A"))
+        name = _canonical_consumable_name(row.get("A"))
         col_b = _normalize_text(row.get("B"))
         col_c = _normalize_text(row.get("C"))
         col_d = _normalize_text(row.get("D"))

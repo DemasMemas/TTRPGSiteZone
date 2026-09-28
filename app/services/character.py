@@ -1,16 +1,95 @@
 # app/services/character.py
 import logging
 from collections import Counter
+from copy import deepcopy
+from dataclasses import dataclass
 from sqlalchemy.orm import joinedload
 from app.extensions import db
 from app.models import LobbyCharacter, Lobby, LobbyParticipant, LocationCharacter
-from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError, ConflictError
 from app.services.health import apply_health_maximums, health_zones_to_location
 from app.services.inventory import normalize_inventory_ammo_stacks
+from app.services.effects import normalize_effect_list, sync_health_derived_statuses
+from app.services.character_merge import clean_snapshot, merge_sheet_data
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class CharacterUpdate:
+    character: LobbyCharacter
+    posture_updates: list
+
+
 class CharacterService:
+    @staticmethod
+    def require_membership(lobby_id, user_id):
+        if user_id is None:
+            raise PermissionDenied("Access denied")
+        participant = db.session.get(LobbyParticipant, (lobby_id, user_id))
+        if not participant or participant.is_banned:
+            raise PermissionDenied("Access denied")
+
+    @staticmethod
+    def check_access(character, user_id, *, edit=False):
+        CharacterService.require_membership(character.lobby_id, user_id)
+        lobby = db.session.get(Lobby, character.lobby_id)
+        if character.owner_id == user_id or lobby.gm_id == user_id:
+            return
+        if user_id in (character.editable_to or []):
+            return
+        if not edit and user_id in (character.visible_to or []):
+            return
+        if LocationCharacter.query.filter_by(character_id=character.id, controlled_by=user_id).first():
+            return
+        raise PermissionDenied("Access denied")
+
+    @staticmethod
+    def _access_lists(visible_to, editable_to):
+        if not isinstance(visible_to, list) or not isinstance(editable_to, list):
+            raise ValidationError("Access lists must be lists of user IDs")
+        if any(type(value) is not int or value <= 0 for value in [*visible_to, *editable_to]):
+            raise ValidationError("Access lists must contain positive integer user IDs")
+        editable = list(dict.fromkeys(editable_to))
+        return list(dict.fromkeys([*visible_to, *editable])), editable
+
+    @staticmethod
+    def sync_location_health(character, health):
+        """Keep sheet effects, body zones and the placed model in sync."""
+        health['effects'] = normalize_effect_list(health.get('effects') or [])
+        sync_health_derived_statuses(health)
+        effect_types = {
+            effect.get('type') for effect in health['effects']
+            if isinstance(effect, dict) and effect.get('active', True)
+        }
+        zones = health.get('zones') or {}
+        vital_zone_zero = any(
+            float((zones.get(zone) or {}).get('max') or 0) > 0
+            and float((zones.get(zone) or {}).get('current') or 0) <= 0
+            for zone in ('head', 'chest')
+        )
+        total_zero = health.get('current') is not None and float(health['current']) <= 0
+        incapacitated = bool(
+            effect_types.intersection({'shock', 'unconsciousness', 'critical_condition', 'death'})
+            or total_zero or vital_zone_zero
+        )
+        posture_updates = []
+        for model in LocationCharacter.query.filter_by(character_id=character.id).all():
+            model.effects = deepcopy(health['effects'])
+            model.hp_zones = health_zones_to_location(health)
+            if incapacitated:
+                if model.posture != 'prone':
+                    posture_updates.append({
+                        'location_id': model.location_id,
+                        'character_id': character.id,
+                        'posture': 'prone',
+                    })
+                model.posture = 'prone'
+                model.cover_object_id = None
+                model.weapon_braced = False
+                model.braced_weapon_index = None
+        return posture_updates
+
     @staticmethod
     def apply_manual_field_resets(current_data, updated_data, manual_fields):
         """Treat explicitly edited health and skill fields as a new baseline."""
@@ -148,11 +227,9 @@ class CharacterService:
 
     @staticmethod
     def create_character(lobby_id, owner_id, name, data=None):
-        participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=owner_id).first()
-        if not participant:
-            raise PermissionDenied("You are not in this lobby")
+        CharacterService.require_membership(lobby_id, owner_id)
 
-        character_data = dict(data or {})
+        character_data = clean_snapshot(data or {})
         normalize_inventory_ammo_stacks(character_data)
         apply_health_maximums(character_data)
         character = LobbyCharacter(
@@ -176,67 +253,60 @@ class CharacterService:
         if not character:
             raise NotFoundError("Character not found")
 
-        lobby = Lobby.query.get(character.lobby_id)
-        participant = LobbyParticipant.query.filter_by(
-            lobby_id=character.lobby_id, user_id=user_id
-        ).first()
-        if not participant:
-            raise PermissionDenied("Access denied")
-        is_controller = LocationCharacter.query.filter_by(
-            character_id=character_id,
-            controlled_by=user_id,
-        ).first() is not None
-        if (
-            character.owner_id != user_id
-            and lobby.gm_id != user_id
-            and user_id not in (character.visible_to or [])
-            and user_id not in (character.editable_to or [])
-            and not is_controller
-        ):
-            raise PermissionDenied("Access denied")
-
+        CharacterService.check_access(character, user_id)
         return character
 
     @staticmethod
-    def update_character(character_id, user_id, updates):
-        """Обновление персонажа (любой участник лобби может менять поля, кроме visible_to)."""
+    def update_character(character_id, user_id, updates, *, commit=True):
+        """Validate and save a sheet identically for HTTP and Socket.IO."""
         character = LobbyCharacter.query.get(character_id)
         if not character:
             raise NotFoundError("Character not found")
 
-        # Проверяем, что пользователь вообще в лобби
-        participant = LobbyParticipant.query.filter_by(
-            lobby_id=character.lobby_id, user_id=user_id
-        ).first()
-        if not participant:
-            raise PermissionDenied("You are not in this lobby")
-
+        CharacterService.check_access(character, user_id, edit=True)
         lobby = Lobby.query.get(character.lobby_id)
-        is_controller = LocationCharacter.query.filter_by(
-            character_id=character.id,
-            controlled_by=user_id,
-        ).first() is not None
-        if (
-            character.owner_id != user_id
-            and lobby.gm_id != user_id
-            and user_id not in (character.editable_to or [])
-            and not is_controller
-        ):
-            raise PermissionDenied("Only owner or GM can update character")
-
         is_gm = lobby.gm_id == user_id
-
-        # Видимость персонажей является инструментом ведущего.
-        if 'visible_to' in updates:
+        allowed = {'name', 'data', 'visible_to', 'editable_to', '_manual_fields', '_save_id', '_base_data'}
+        if not isinstance(updates, dict) or set(updates) - allowed:
+            raise ValidationError("Unsupported character fields")
+        if 'data' in updates and not isinstance(updates['data'], dict):
+            raise ValidationError("Character data must be an object")
+        if '_base_data' in updates and not isinstance(updates['_base_data'], dict):
+            raise ValidationError("Base data must be an object")
+        if '_save_id' in updates and (not isinstance(updates['_save_id'], str) or len(updates['_save_id']) > 100):
+            raise ValidationError("Invalid save ID")
+        if 'name' in updates and (
+            not isinstance(updates['name'], str)
+            or not updates['name'].strip() or len(updates['name']) > 100
+        ):
+            raise ValidationError("Character name must contain 1 to 100 characters")
+        if '_manual_fields' in updates and (
+            not isinstance(updates['_manual_fields'], list)
+            or any(not isinstance(path, str) for path in updates['_manual_fields'])
+        ):
+            raise ValidationError("Manual fields must be a list of paths")
+        access = None
+        posture_updates = []
+        if 'visible_to' in updates or 'editable_to' in updates:
             if not is_gm:
                 raise PermissionDenied("Only GM can change visibility")
-            character.visible_to = list(updates['visible_to'])
-
-        # Разрешаем обновление остальных полей
-        if 'name' in updates:
-            character.name = updates['name']
+            access = CharacterService._access_lists(
+                updates.get('visible_to', character.visible_to or []),
+                updates.get('editable_to', character.editable_to or []),
+            )
         if 'data' in updates:
-            character_data = dict(updates['data'] or {})
+            character_data = clean_snapshot(updates['data'])
+            from app.services.deferred_action import preserve_action_payment
+            preserve_action_payment(character.data, character_data)
+            revision = updates['data'].get('_revision')
+            if type(revision) is not int or revision <= 0 or revision > character.revision:
+                raise ConflictError()
+            if revision != character.revision:
+                if '_base_data' not in updates:
+                    raise ConflictError()
+                base_data = clean_snapshot(updates['_base_data'])
+                preserve_action_payment(character.data, base_data)
+                character_data = merge_sheet_data(base_data, character_data, character.data)
             CharacterService.apply_manual_field_resets(
                 character.data,
                 character_data,
@@ -249,13 +319,16 @@ class CharacterService:
                     character_data,
                 )
             health = apply_health_maximums(character_data)
+            posture_updates = CharacterService.sync_location_health(character, health)
             character.data = character_data
-            for loc_char in LocationCharacter.query.filter_by(character_id=character.id).all():
-                loc_char.hp_zones = health_zones_to_location(health)
-
-        db.session.commit()
+        if 'name' in updates:
+            character.name = updates['name']
+        if access is not None:
+            character.visible_to, character.editable_to = access
+        if commit:
+            db.session.commit()
         logger.debug("Character %s updated by user %s", character_id, user_id)
-        return character
+        return CharacterUpdate(character, posture_updates)
 
     @staticmethod
     def delete_character(character_id, user_id):
@@ -263,7 +336,7 @@ class CharacterService:
         character = LobbyCharacter.query.get(character_id)
         if not character:
             raise NotFoundError("Character not found")
-
+        CharacterService.require_membership(character.lobby_id, user_id)
         lobby = Lobby.query.get(character.lobby_id)
         if character.owner_id != user_id and lobby.gm_id != user_id:
             raise PermissionDenied("Permission denied")
@@ -279,9 +352,7 @@ class CharacterService:
     @staticmethod
     def get_lobby_characters(lobby_id, user_id):
         """Возвращает список персонажей в комнаты, видимых пользователю."""
-        participant = LobbyParticipant.query.filter_by(lobby_id=lobby_id, user_id=user_id).first()
-        if not participant:
-            raise PermissionDenied("You are not in this lobby")
+        CharacterService.require_membership(lobby_id, user_id)
 
         lobby = Lobby.query.get(lobby_id)
         is_gm = (lobby.gm_id == user_id)
@@ -291,9 +362,20 @@ class CharacterService:
             joinedload(LobbyCharacter.owner)
         ).all()
 
+        controlled_ids = {
+            item.character_id
+            for item in LocationCharacter.query.join(LobbyCharacter).filter(
+                LocationCharacter.controlled_by == user_id,
+                LobbyCharacter.lobby_id == lobby_id,
+            ).all()
+        }
         result = []
         for c in characters:
-            if c.owner_id == user_id or is_gm or user_id in (c.visible_to or []) or user_id in (c.editable_to or []):
+            if (
+                c.owner_id == user_id or is_gm
+                or user_id in (c.visible_to or [])
+                or user_id in (c.editable_to or []) or c.id in controlled_ids
+            ):
                 result.append(c)
         return result
 
@@ -303,27 +385,17 @@ class CharacterService:
         character = LobbyCharacter.query.get(character_id)
         if not character:
             raise NotFoundError("Character not found")
-
+        CharacterService.require_membership(character.lobby_id, gm_id)
         lobby = Lobby.query.get(character.lobby_id)
         if lobby.gm_id != gm_id:
             raise PermissionDenied("Only GM can change visibility")
 
-        if not isinstance(visible_to, list):
-            raise ValidationError("visible_to must be a list")
         if editable_to is None:
             editable_to = character.editable_to or []
-        if not isinstance(editable_to, list):
-            raise ValidationError("editable_to must be a list")
-
-        editable = list(dict.fromkeys(int(user_id) for user_id in editable_to))
-        character.editable_to = editable
-        character.visible_to = list(dict.fromkeys([
-            *(int(user_id) for user_id in visible_to),
-            *editable,
-        ]))
+        character.visible_to, character.editable_to = CharacterService._access_lists(visible_to, editable_to)
         db.session.commit()
         logger.info(
             "Access of character %s set to visible=%s editable=%s by GM %s",
-            character_id, character.visible_to, editable, gm_id,
+            character_id, character.visible_to, character.editable_to, gm_id,
         )
         return character

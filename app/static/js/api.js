@@ -1,5 +1,6 @@
 // static/js/api.js
 import { getErrorMessage } from './utils.js';
+import { createCharacterSaver, getCharacterBase, rememberCharacterSnapshots } from './characterPersistence.js';
 
 const token = localStorage.getItem('access_token');
 
@@ -11,13 +12,82 @@ async function apiFetch(url, options = {}) {
     const response = await fetch(url, { ...options, headers });
     if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(getErrorMessage(data) || `HTTP error ${response.status}`);
+        const error = new Error(getErrorMessage(data) || `HTTP error ${response.status}`);
+        error.status = response.status;
+        throw error;
     }
     if (response.status === 204) return null;
-    return response.json();
+    const data = await response.json();
+    rememberCharacterSnapshots(data);
+    return data;
 }
 
+const characterSaver = createCharacterSaver((characterId, updates) => apiFetch(`/lobbies/characters/${characterId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+}), getCharacterBase);
+
 export const Server = {
+    async prepareDeferredConsumable(lobbyId, locationId, actionId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/deferred-consumable/${encodeURIComponent(actionId)}`);
+    },
+    async loadAmmunition(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/ammunition`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+
+    async installWeaponMagazine(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/magazine`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+    async cancelDeferredCombatAction(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/deferred-action/cancel`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+    isCharacterSaving: characterSaver.isSaving,
+    isOwnCharacterSave: characterSaver.isOwnSave,
+    waitForCharacterSave: characterSaver.whenIdle,
+
+    characterUpdatePayload(characterId, data) {
+        return { data, _base_data: getCharacterBase(characterId, data) };
+    },
+
+    async transferLocationItem(lobbyId, objectId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/objects/${objectId}/transfer`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+
+    async dropLocationItem(lobbyId, locationId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/drop-item`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+
+    async finishSheetTreatment(targetId, payload) {
+        return apiFetch(`/lobbies/characters/${targetId}/treatment`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+    async finishConsumableUse(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/consumable`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+    async applyMedicalProcedure(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/medical-procedure`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+    async applyGeneralConsumable(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/general-consumable`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
     // ----- Лобби (комнаты) -----
     async getLobbyInfo(lobbyId) {
         return apiFetch(`/lobbies/${lobbyId}`);
@@ -240,11 +310,7 @@ export const Server = {
     },
 
     async updateCharacter(characterId, updates) {
-        return apiFetch(`/lobbies/characters/${characterId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updates),
-        });
+        return characterSaver.save(characterId, updates);
     },
 
     async deleteCharacter(characterId) {
@@ -388,6 +454,14 @@ export const Server = {
 
     async changeCharacterEquipment(characterId, payload) {
         return apiFetch(`/lobbies/characters/${characterId}/equipment-action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
+    async changeCharacterEquipmentModule(characterId, payload) {
+        return apiFetch(`/lobbies/characters/${characterId}/equipment-module`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),

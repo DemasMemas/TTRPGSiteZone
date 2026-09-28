@@ -33,3 +33,6 @@ jobs:
           node --check app/static/js/characterSheet.js
           node --check app/static/js/locationScene.js
           node --check app/static/js/effects.js
+
+      - name: Run JavaScript behavior tests
+        run: node --test tests/*.test.cjs

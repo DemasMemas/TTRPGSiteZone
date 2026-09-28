@@ -26,6 +26,7 @@ EFFECT_TYPE_META = {
     "exhaustion": {"label": "Истощение", "group": "need"},
     "stress": {"label": "Стресс", "group": "mental"},
     "stress_effect": {"label": "Эффект стресса", "group": "mental"},
+    "stress_resistance": {"label": "Сопротивление стрессу", "group": "mental"},
     "stress_stupor": {"label": "Ступор", "group": "mental"},
     "phobia": {"label": "Фобия", "group": "mental"},
     "intoxication": {"label": "Опьянение", "group": "need"},
@@ -98,6 +99,7 @@ TYPE_ALIASES = {
     "истощение": "exhaustion",
     "stress": "stress",
     "stress_effect": "stress_effect",
+    "stress_resistance": "stress_resistance",
     "stress_stupor": "stress_stupor",
     "phobia": "phobia",
     "стресс": "stress",
@@ -159,6 +161,7 @@ TYPE_ALIASES = {
         "addiction_withdrawal",
         "withdrawal_support",
         "withdrawal_support_pending",
+        "stress_resistance",
     )},
 }
 

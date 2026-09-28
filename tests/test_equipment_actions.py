@@ -58,7 +58,7 @@ def test_armor_equipment_cost_includes_inventory_retrieval_and_preserves_item(ap
         "equip",
         "armor",
         item_path=["inventory", "backpack", 0],
-        retrieval_action_points=2,
+        retrieval_action_points=0,
         in_combat=True,
     )
     result = CombatService.apply_equipment_action(data, details)
@@ -98,7 +98,8 @@ def test_helmet_cost_uses_two_kilogram_boundary(app, weight, equip_cost, remove_
         item_path=["inventory", "backpack", 0],
         in_combat=True,
     )
-    assert equip["action_points"] == equip_cost
+    assert equip["action_points"] == equip_cost + 2
+    assert equip["inventory_access"]["source"] == "backpack"
     CombatService.apply_equipment_action(data, equip)
     remove = CombatService.equipment_action_details(
         data,

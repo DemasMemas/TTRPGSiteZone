@@ -298,5 +298,5 @@ def test_hand_grenade_action_spends_two_ap_and_consumes_one_item(app, monkeypatc
         assert result["explosive"]["impact"] == {"x": 8, "y": 5}
         assert result["explosive"]["detonated"] is False
         assert result["explosive"]["pending"]["trigger"] == "round_start"
-        assert placed.action_points_current == 3
+        assert placed.action_points_current == 2
         assert character.data["inventory"]["pockets"][0]["quantity"] == 1

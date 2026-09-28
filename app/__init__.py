@@ -25,8 +25,9 @@ from flask_socketio import SocketIO
 from app.extensions import db, migrate, jwt, socketio
 from app.config import config_by_name
 from app.services.exceptions import (
-    ServiceError, ValidationError, NotFoundError, PermissionDenied
+    ServiceError, ValidationError, NotFoundError, PermissionDenied, ConflictError
 )
+from sqlalchemy.orm.exc import StaleDataError
 from marshmallow import ValidationError as MarshmallowValidationError
 
 
@@ -152,22 +153,24 @@ def create_app(config_name='default'):
         )
 
     # ---- Централизованная обработка ошибок ----
+    @app.errorhandler(StaleDataError)
+    def handle_stale_write(error):
+        db.session.rollback()
+        return handle_service_error(ConflictError())
+
+    @app.errorhandler(ConflictError)
     @app.errorhandler(ValidationError)
     @app.errorhandler(NotFoundError)
     @app.errorhandler(PermissionDenied)
     def handle_service_error(error):
+        db.session.rollback()
         response = jsonify({
             'error': {
                 'code': getattr(error, 'code', 400),
                 'message': str(error)
             }
         })
-        if isinstance(error, NotFoundError):
-            response.status_code = 404
-        elif isinstance(error, PermissionDenied):
-            response.status_code = 403
-        else:
-            response.status_code = 400
+        response.status_code = error.code
         return response
 
     @app.errorhandler(MarshmallowValidationError)

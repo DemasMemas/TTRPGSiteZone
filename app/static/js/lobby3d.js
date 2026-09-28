@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { updateRain } from './weather.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
+import { createFpsCounter } from './fpsCounter.js';
 import {
     createCompatibleWebGLRenderer,
     createUnavailableRenderer,
@@ -236,6 +237,7 @@ renderer.shadowMap.enabled = !renderer.isUnavailableRenderer;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const globalCanvasContainer = document.getElementById('canvas-container');
 globalCanvasContainer.appendChild(renderer.domElement);
+const worldFpsCounter = createFpsCounter(globalCanvasContainer, 'Карта');
 if (renderer.isUnavailableRenderer) {
     window.webGLUnavailable = true;
     showWebGLUnavailable(globalCanvasContainer);
@@ -1393,10 +1395,15 @@ function updateGlobalCameraMovement(deltaSeconds) {
 
 function animate() {
     const now = performance.now();
-    const delta = (now - lastTime) / 1000;
+    const delta = Math.min(0.1, Math.max(0, (now - lastTime) / 1000));
     lastTime = now;
 
     requestAnimationFrame(animate);
+    // The sublocation has its own renderer; do not render the hidden world behind it.
+    if (document.hidden || window.isLocationActive) {
+        worldFpsCounter.pause();
+        return;
+    }
     if (!renderer.isUnavailableRenderer) {
         updateGlobalCameraMovement(Math.min(0.1, Math.max(0, delta)));
         controls.update();
@@ -1409,7 +1416,12 @@ function animate() {
         performRaycast(lastMouseX, lastMouseY);
     }
 
-    if (!renderer.isUnavailableRenderer) renderer.render(scene, camera);
+    if (!renderer.isUnavailableRenderer) {
+        renderer.render(scene, camera);
+        worldFpsCounter.frame(now);
+    } else {
+        worldFpsCounter.pause();
+    }
     postRenderCallbacks.forEach(cb => cb());
 }
 animate();

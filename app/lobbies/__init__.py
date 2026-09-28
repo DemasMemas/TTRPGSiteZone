@@ -15,6 +15,12 @@ from app.services.lobby import LobbyService
 from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
+from app.services.container_transfer import ContainerTransferService
+from app.services.treatment import TreatmentService
+from app.services.medical_procedure import MedicalProcedureService
+from app.services.general_consumable import GeneralConsumableService
+from app.services.exceptions import ConflictError, PermissionDenied
+from app.services.character_events import emit_character_update, publish_character_save
 from app.services.combat import CombatService
 from app.services.artifact_effects import apply_artifact_world_movement
 from app.services.character_interaction import CharacterInteractionService
@@ -571,14 +577,12 @@ def _emit_world_time_updates(lobby, characters):
     }
     socketio.emit('lobby_time_updated', payload, room=f"lobby_{lobby.id}")
     for character in characters:
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': character.id,
-                'updates': {'data': character.data},
+                'updates': {'data': character.data_snapshot()},
                 'updated_by': lobby.gm_id,
             },
-            room=f"character_{character.id}",
         )
     return payload
 
@@ -915,11 +919,9 @@ def search_world_anomaly_field(lobby_id, group_id, lobby, participant):
     )
     db.session.commit()
     if action == 'recover':
-        socketio.emit(
-            'character_data_updated',
-            {'character_id': character.id, 'updates': {'data': character.data},
+        emit_character_update(
+            {'character_id': character.id, 'updates': {'data': character.data_snapshot()},
              'updated_by': participant.user_id},
-            room=f'character_{character.id}',
         )
     return jsonify({
         'field': {
@@ -1113,14 +1115,12 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     )
     if not time_advanced:
         for character in travel_updated_characters:
-            socketio.emit(
-                'character_data_updated',
+            emit_character_update(
                 {
                     'character_id': character.id,
-                    'updates': {'data': character.data},
+                    'updates': {'data': character.data_snapshot()},
                     'updated_by': participant.user_id,
                 },
-                room=f"character_{character.id}",
             )
     socketio.emit('world_group_moved', group_payload, room=f"lobby_{lobby_id}")
     if event:
@@ -1285,14 +1285,12 @@ def update_lobby_time(lobby_id, lobby):
     payload = {'game_day': game_day, 'game_time_minutes': game_time_minutes}
     socketio.emit('lobby_time_updated', payload, room=f"lobby_{lobby_id}")
     for character in updated_characters:
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': character.id,
-                'updates': {'data': character.data},
+                'updates': {'data': character.data_snapshot()},
                 'updated_by': lobby.gm_id,
             },
-            room=f"character_{character.id}",
         )
     return jsonify(payload), 200
 
@@ -1494,14 +1492,12 @@ def start_lobby_rest(lobby_id, lobby):
     }
     socketio.emit('lobby_time_updated', time_payload, room=f"lobby_{lobby_id}")
     for character in characters:
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': character.id,
-                'updates': {'data': character.data},
+                'updates': {'data': character.data_snapshot()},
                 'updated_by': lobby.gm_id,
             },
-            room=f"character_{character.id}",
         )
     return jsonify({
         **time_payload,
@@ -1559,7 +1555,7 @@ def get_participants_characters(lobby_id, lobby, participant):
                 user_data['character'] = {
                     'id': char.id,
                     'name': char.name,
-                    'data': char.data
+                    'data': char.data_snapshot()
                 }
             else:
                 user_data['character'] = None
@@ -1657,7 +1653,7 @@ def create_lobby_character(lobby_id, lobby, participant):
         'name': character.name,
         'owner_id': character.owner_id,
         'owner_username': character.owner.username if character.owner else None,
-        'data': character.data
+        'data': character.data_snapshot()
     }, room=f"lobby_{lobby_id}")
 
     response_schema = CharacterSchema()
@@ -1688,33 +1684,9 @@ def get_character(character_id):
 def update_character(character_id):
     user_id = int(get_jwt_identity())
     data = request.get_json()
-    character = CharacterService.update_character(character_id, user_id, data)
-    saved_updates = dict(data or {})
-    saved_updates.pop('_manual_fields', None)
-    if 'data' in saved_updates:
-        saved_updates['data'] = character.data
-    socketio.emit(
-        'character_data_updated',
-        {
-            'character_id': character.id,
-            'updates': saved_updates,
-            'updated_by': user_id,
-        },
-        room=f"character_{character.id}",
-    )
-    lobby = db.session.get(Lobby, character.lobby_id)
-    if lobby:
-        location_ids = {
-            item.location_id
-            for item in LocationCharacter.query.filter_by(character_id=character.id).all()
-        }
-        for location_id in location_ids:
-            socketio.emit(
-                'combat_state_updated',
-                CombatService.get_state(location_id, lobby.gm_id),
-                room=f"location_{location_id}",
-            )
-    return jsonify({'message': 'Character updated'}), 200
+    result = CharacterService.update_character(character_id, user_id, data)
+    publish_character_save(result, data, user_id)
+    return jsonify({'message': 'Character updated', 'data': result.character.data_snapshot()}), 200
 
 
 @lobbies_bp.route('/characters/<int:character_id>/equipment-action', methods=['POST'])
@@ -1759,14 +1731,12 @@ def change_character_equipment_outside_combat(character_id):
     for loc_char in LocationCharacter.query.filter_by(character_id=character.id).all():
         loc_char.hp_zones = health_zones_to_location(health)
     db.session.commit()
-    socketio.emit(
-        'character_data_updated',
+    emit_character_update(
         {
             'character_id': character.id,
-            'updates': {'data': character.data},
+            'updates': {'data': character.data_snapshot()},
             'source': 'equipment_action',
         },
-        room=f"character_{character.id}",
     )
     lobby = db.session.get(Lobby, character.lobby_id)
     if lobby:
@@ -1778,7 +1748,29 @@ def change_character_equipment_outside_combat(character_id):
                 CombatService.get_state(location_id, lobby.gm_id),
                 room=f"location_{location_id}",
             )
-    return jsonify({'equipment_change': result, 'data': character.data}), 200
+    return jsonify({'equipment_change': result, 'data': character.data_snapshot()}), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/equipment-module', methods=['POST'])
+@jwt_required()
+def change_character_equipment_module(character_id):
+    from app.services.equipment_module import change_outside_combat
+
+    user_id = int(get_jwt_identity())
+    character, result = change_outside_combat(
+        character_id,
+        user_id,
+        request.get_json(silent=True) or {},
+    )
+    emit_character_update({
+        'character_id': character.id,
+        'updates': {'data': character.data_snapshot()},
+        'source': 'equipment_module',
+    })
+    return jsonify({
+        'module_change': result,
+        'data': character.data_snapshot(),
+    }), 200
 
 
 def _character_edit_allowed(character, user_id):
@@ -1838,14 +1830,12 @@ def repair_character_equipment(character_id):
     character.data = character_data
     flag_modified(character, 'data')
     db.session.commit()
-    socketio.emit(
-        'character_data_updated',
+    emit_character_update(
         {
             'character_id': character.id,
-            'updates': {'data': character.data},
+            'updates': {'data': character.data_snapshot()},
             'updated_by': user_id,
         },
-        room=f"character_{character.id}",
     )
     _emit_lobby_chat_message(
         lobby.id,
@@ -1860,7 +1850,7 @@ def repair_character_equipment(character_id):
     return jsonify({
         'message': 'Снаряжение отремонтировано',
         'result': result,
-        'character_data': character.data,
+        'character_data': character.data_snapshot(),
         'time_advanced': False,
     }), 200
 
@@ -1930,14 +1920,12 @@ def check_character_addiction_withdrawal(character_id, addiction_key):
     character.data = character_data
     flag_modified(character, 'data')
     db.session.commit()
-    socketio.emit(
-        'character_data_updated',
+    emit_character_update(
         {
             'character_id': character.id,
-            'updates': {'data': character.data},
+            'updates': {'data': character.data_snapshot()},
             'source': 'withdrawal_check',
         },
-        room=f"character_{character.id}",
     )
     _emit_lobby_chat_message(
         character.lobby_id,
@@ -1947,7 +1935,7 @@ def check_character_addiction_withdrawal(character_id, addiction_key):
         f"{'успех' if result['success'] else 'провал'}.",
         username='Зависимость',
     )
-    return jsonify({'result': result, 'data': character.data}), 200
+    return jsonify({'result': result, 'data': character.data_snapshot()}), 200
 
 @lobbies_bp.route('/characters/<int:character_id>', methods=['DELETE'])
 @jwt_required()
@@ -2440,6 +2428,11 @@ def update_location_object(lobby_id, object_id, lobby, participant):
         return jsonify({'error': 'Access denied'}), 403
 
     data = request.get_json() or {}
+    if 'contents' in (data.get('properties') or {}):
+        if participant.user_id != lobby.gm_id:
+            raise PermissionDenied('Use the item transfer action')
+        if type(data.get('revision')) is not int or data['revision'] != obj.revision:
+            raise ConflictError()
     if 'tile_x' in data:
         obj.tile_x = data['tile_x']
     if 'tile_y' in data:
@@ -2757,6 +2750,130 @@ def change_character_posture_outside_combat(
     return jsonify(payload), 200
 
 
+@lobbies_bp.route('/<int:lobby_id>/locations/objects/<int:object_id>/transfer', methods=['POST'])
+@jwt_required()
+@requires_participant
+def transfer_location_item(lobby_id, object_id, lobby, participant):
+    character, obj, deleted = ContainerTransferService.transfer(
+        lobby_id, object_id, participant.user_id, request.get_json() or {},
+    )
+    emit_character_update({'character_id': character.id, 'updates': {'data': character.data}, 'source': 'container_transfer'})
+    payload = None if deleted else LocationObjectSchema().dump(obj)
+    socketio.emit('location_object_deleted' if deleted else 'location_object_updated',
+                  {'location_id': obj.location_id, 'object_id': object_id, 'object': payload},
+                  room=f'location_{obj.location_id}')
+    return jsonify({'data': character.data_snapshot(), 'object': payload, 'deleted': deleted}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/drop-item', methods=['POST'])
+@jwt_required()
+@requires_participant
+def drop_location_item(lobby_id, location_id, lobby, participant):
+    character, obj, created = ContainerTransferService.drop(
+        lobby_id, location_id, participant.user_id, request.get_json() or {},
+    )
+    emit_character_update({'character_id': character.id, 'updates': {'data': character.data}, 'source': 'drop_item'})
+    payload = LocationObjectSchema().dump(obj)
+    socketio.emit('location_object_created' if created else 'location_object_updated',
+                  {'location_id': location_id, 'object': payload}, room=f'location_{location_id}')
+    return jsonify({'data': character.data_snapshot(), 'object': payload, 'created': created}), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/treatment', methods=['POST'])
+@jwt_required()
+def finish_sheet_treatment(character_id):
+    user_id = int(get_jwt_identity())
+    payload = request.get_json() or {}
+    actor, target, use_result = TreatmentService.finish_sheets(user_id, character_id, payload)
+    publish_character_save(actor, payload['actor_updates'], user_id)
+    publish_character_save(target, payload['target_updates'], user_id)
+    return jsonify({'actor_data': actor.character.data_snapshot(), 'target_data': target.character.data_snapshot(), 'consumable_result': use_result}), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/consumable', methods=['POST'])
+@jwt_required()
+def finish_self_consumable(character_id):
+    user_id = int(get_jwt_identity())
+    payload = request.get_json() or {}
+    result, use_result = TreatmentService.finish_self(user_id, character_id, payload)
+    publish_character_save(result, payload['actor_updates'], user_id)
+    return jsonify({'data': result.character.data_snapshot(), 'consumable_result': use_result}), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/medical-procedure', methods=['POST'])
+@jwt_required()
+def apply_medical_procedure(character_id):
+    user_id = int(get_jwt_identity())
+    payload = request.get_json() or {}
+    operation = MedicalProcedureService.apply(user_id, character_id, payload)
+    emit_character_update({
+        'character_id': operation.actor.id,
+        'updates': {'data': operation.actor.data},
+        'source': 'medical_procedure',
+    })
+    if operation.target.id != operation.actor.id:
+        emit_character_update({
+            'character_id': operation.target.id,
+            'updates': {'data': operation.target.data},
+            'source': 'medical_procedure',
+        })
+    for posture_update in operation.posture_updates:
+        socketio.emit('location_character_posture_updated', posture_update,
+                      room=f"location_{posture_update['location_id']}")
+    location_id = payload.get('combat_location_id')
+    if type(location_id) is int:
+        state = CombatService.get_state(location_id, user_id)
+        socketio.emit('combat_state_updated', state, room=f'location_{location_id}')
+    return jsonify({
+        'actor_data': operation.actor.data_snapshot(),
+        'target_data': operation.target.data_snapshot(),
+        'medical_result': operation.result,
+    }), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/general-consumable', methods=['POST'])
+@jwt_required()
+def apply_general_consumable(character_id):
+    payload = request.get_json() or {}
+    operation = GeneralConsumableService.apply(
+        int(get_jwt_identity()), character_id, payload,
+    )
+    emit_character_update({
+        'character_id': operation.character.id,
+        'updates': {'data': operation.character.data},
+        'source': 'general_consumable',
+    })
+    for posture_update in operation.posture_updates:
+        socketio.emit('location_character_posture_updated', posture_update,
+                      room=f"location_{posture_update['location_id']}")
+    location_id = payload.get('combat_location_id')
+    if type(location_id) is int:
+        state = CombatService.get_state(location_id, int(get_jwt_identity()))
+        socketio.emit('combat_state_updated', state, room=f'location_{location_id}')
+    return jsonify({
+        'data': operation.character.data_snapshot(),
+        'consumable_result': operation.result,
+    }), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/magazine', methods=['POST'])
+@jwt_required()
+def install_character_magazine(character_id):
+    from app.services.magazine import install_outside_combat
+    character = install_outside_combat(character_id, int(get_jwt_identity()), request.get_json() or {})
+    emit_character_update({'character_id': character.id, 'updates': {'data': character.data}, 'source': 'reload'})
+    return jsonify({'data': character.data_snapshot()}), 200
+
+
+@lobbies_bp.route('/characters/<int:character_id>/ammunition', methods=['POST'])
+@jwt_required()
+def load_character_ammunition(character_id):
+    from app.services.ammo_loading import load_outside_combat
+    character, result = load_outside_combat(character_id, int(get_jwt_identity()), request.get_json() or {})
+    emit_character_update({'character_id': character.id, 'updates': {'data': character.data}, 'source': 'reload'})
+    return jsonify({'data': character.data_snapshot(), 'loading': result}), 200
+
+
 @lobbies_bp.route(
     '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/facing',
     methods=['PATCH'],
@@ -2858,14 +2975,12 @@ def butcher_location_mutant(
         allocation=data.get('allocation') if data.get('confirm') else None,
     )
     if result.get('completed'):
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': result['actor_character_id'],
                 'updates': {'data': result['actor_data']},
                 'source': 'mutant_butchering',
             },
-            room=f"character_{result['actor_character_id']}",
         )
         loot_text = ', '.join(
             f"{item['name']} x{item['quantity']}" for item in result.get('loot') or []
@@ -2904,25 +3019,21 @@ def loot_incapacitated_location_character(
         data.get('item_path'),
         data.get('amount', 1),
     )
-    socketio.emit(
-        'character_data_updated',
+    emit_character_update(
         {
             'character_id': character_id,
             'updates': {'data': result['target_data']},
             'updated_by': participant.user_id,
         },
-        room=f"character_{character_id}",
     )
     actor = db.session.get(LocationCharacter, actor_location_character_id)
     if actor and actor.character:
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': actor.character.id,
                 'updates': {'data': actor.character.data},
                 'updated_by': participant.user_id,
             },
-            room=f"character_{actor.character.id}",
         )
     return jsonify(result), 200
 
@@ -2940,38 +3051,31 @@ def treat_incapacitated_location_character(
     lobby,
     participant,
 ):
+    if not Location.query.filter_by(id=location_id, lobby_id=lobby_id).first():
+        return jsonify({'error': 'Location not found'}), 404
     data = request.get_json() or {}
     actor_location_character_id = data.get('actor_location_character_id')
     if not actor_location_character_id:
         return jsonify({'error': 'actor_location_character_id is required'}), 400
-    result = CombatService.update_incapacitated_character_health(
-        location_id,
-        participant.user_id,
-        actor_location_character_id,
-        character_id,
-        data.get('health'),
-        data.get('interaction_request_id'),
+    actor_result, target, interaction_result, use_result = TreatmentService.finish(
+        location_id, participant.user_id, character_id, data,
     )
-    if data.get('interaction_request_id'):
-        interaction_result = CharacterInteractionService.complete_treatment(
-            data.get('interaction_request_id'),
-            participant.user_id,
-        )
+    if interaction_result:
         socketio.emit(
             'character_interaction_resolved',
             interaction_result,
             room=f"user_{interaction_result['target_user_id']}",
         )
-    socketio.emit(
-        'character_data_updated',
+    publish_character_save(actor_result, data['actor_updates'], participant.user_id)
+    emit_character_update(
         {
             'character_id': character_id,
-            'updates': {'data': result['target_data']},
+            'updates': {'data': target.character.data},
             'updated_by': participant.user_id,
         },
-        room=f"character_{character_id}",
     )
-    return jsonify(result), 200
+    socketio.emit('combat_state_updated', CombatService.get_state(location_id, lobby.gm_id), room=f'location_{location_id}')
+    return jsonify({'actor_data': actor_result.character.data_snapshot(), 'target_data': target.character.data_snapshot(), 'consumable_result': use_result}), 200
 
 
 @lobbies_bp.route(
@@ -3009,14 +3113,12 @@ def create_character_interaction(lobby_id, location_id, lobby, participant):
         ):
             location_character = db.session.get(LocationCharacter, location_character_id)
             if location_character and location_character.character:
-                socketio.emit(
-                    'character_data_updated',
+                emit_character_update(
                     {
                         'character_id': location_character.character_id,
                         'updates': {'data': location_character.character.data},
                         'updated_by': participant.user_id,
                     },
-                    room=f"character_{location_character.character_id}",
                 )
         state = CombatService.get_state(location_id, participant.user_id)
         socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
@@ -3051,14 +3153,12 @@ def respond_character_interaction(lobby_id, request_id, lobby, participant):
         target = db.session.get(LocationCharacter, result['target_location_character_id'])
         for location_character in (actor, target):
             if location_character and location_character.character:
-                socketio.emit(
-                    'character_data_updated',
+                emit_character_update(
                     {
                         'character_id': location_character.character_id,
                         'updates': {'data': location_character.character.data},
                         'updated_by': participant.user_id,
                     },
-                    room=f"character_{location_character.character_id}",
                 )
         state = CombatService.get_state(result['location_id'], participant.user_id)
         socketio.emit('combat_state_updated', state, room=f"location_{result['location_id']}")
@@ -3168,14 +3268,12 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
         character = loc_char.character
         if not character or not isinstance(character.data, dict):
             continue
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': character.id,
-                'updates': {'data': character.data},
+                'updates': {'data': character.data_snapshot()},
                 'updated_by': 0,
             },
-            room=f"character_{character.id}",
         )
     return jsonify(state), 200
 
@@ -3286,14 +3384,12 @@ def apply_location_gm_event(lobby_id, location_id, lobby):
     db.session.commit()
     for item in changed:
         character = db.session.get(LobbyCharacter, item['character_id'])
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': item['character_id'],
-                'updates': {'data': character.data},
+                'updates': {'data': character.data_snapshot()},
                 'updated_by': lobby.gm_id,
             },
-            room=f"character_{item['character_id']}",
         )
     state = CombatService.get_state(location_id, lobby.gm_id)
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
@@ -3354,14 +3450,12 @@ def resolve_location_stress_effect(lobby_id, location_id, lobby):
     db.session.commit()
     state = CombatService.get_state(location_id, lobby.gm_id)
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
-    socketio.emit(
-        'character_data_updated',
+    emit_character_update(
         {
             'character_id': loc_char.character.id,
-            'updates': {'data': loc_char.character.data},
+            'updates': {'data': loc_char.character.data_snapshot()},
             'source': 'stress_resolution',
         },
-        room=f"character_{loc_char.character.id}",
     )
     return jsonify(state), 200
 
@@ -3391,18 +3485,16 @@ def adjust_location_character_stress(lobby_id, location_id, character_id, lobby)
     db.session.commit()
     state = CombatService.get_state(location_id, lobby.gm_id)
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
-    socketio.emit(
-        'character_data_updated',
+    emit_character_update(
         {
             'character_id': loc_char.character.id,
-            'updates': {'data': loc_char.character.data},
+            'updates': {'data': loc_char.character.data_snapshot()},
             'source': 'stress_adjustment',
         },
-        room=f"character_{loc_char.character.id}",
     )
     return jsonify({
         'stress': result,
-        'data': loc_char.character.data,
+        'data': loc_char.character.data_snapshot(),
         'combat_state': state,
     }), 200
 
@@ -3482,14 +3574,12 @@ def resolve_location_opportunity_attack(lobby_id, location_id, lobby, participan
         character_id = serialized.get('character_id') if isinstance(serialized, dict) else None
         character = db.session.get(LobbyCharacter, character_id) if character_id else None
         if character:
-            socketio.emit(
-                'character_data_updated',
+            emit_character_update(
                 {
                     'character_id': character.id,
-                    'updates': {'data': character.data},
+                    'updates': {'data': character.data_snapshot()},
                     'source': 'opportunity_attack',
                 },
-                room=f"character_{character.id}",
             )
     if result.get('attack'):
         summary = CombatService.format_attack_summary(result)
@@ -3509,14 +3599,12 @@ def end_location_combat(lobby_id, location_id, lobby):
         character = loc_char.character
         if not character or not isinstance(character.data, dict):
             continue
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': character.id,
-                'updates': {'data': character.data},
+                'updates': {'data': character.data_snapshot()},
                 'updated_by': 0,
             },
-            room=f"character_{character.id}",
         )
     return jsonify(state), 200
 
@@ -3525,6 +3613,8 @@ def end_location_combat(lobby_id, location_id, lobby):
 @jwt_required()
 @requires_participant
 def spend_location_combat_resources(lobby_id, location_id, lobby, participant):
+    if not Location.query.filter_by(id=location_id, lobby_id=lobby_id).first():
+        return jsonify({'error': 'Location not found'}), 404
     data = request.get_json() or {}
     location_character_id = data.get('location_character_id')
     if not location_character_id:
@@ -3540,11 +3630,22 @@ def spend_location_combat_resources(lobby_id, location_id, lobby, participant):
         allow_deferred=bool(data.get('allow_deferred')),
         pending_action_id=data.get('pending_action_id'),
         pending_action_label=data.get('pending_action_label'),
+        consumable_selection=data.get('consumable_selection'),
     )
     state = updated_character.pop('state', None) or CombatService.get_state(location_id, participant.user_id)
     socketio.emit('combat_character_updated', updated_character, room=f"location_{location_id}")
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     return jsonify(updated_character), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/deferred-consumable/<string:action_id>', methods=['GET'])
+@jwt_required()
+@requires_participant
+def prepare_deferred_consumable(lobby_id, location_id, action_id, lobby, participant):
+    from app.services.deferred_consumable import preparation
+    if not Location.query.filter_by(id=location_id, lobby_id=lobby_id).first():
+        return jsonify({'error': 'Location not found'}), 404
+    return jsonify(preparation(action_id, participant.user_id, location_id)), 200
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/adjust', methods=['POST'])
@@ -3568,10 +3669,31 @@ def adjust_location_combat_resources(lobby_id, location_id, lobby, participant):
     return jsonify(updated_character), 200
 
 
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/deferred-action/cancel', methods=['POST'])
+@jwt_required()
+@requires_participant
+def cancel_location_deferred_action(lobby_id, location_id, lobby, participant):
+    from app.services.deferred_action import cancel_deferred_action
+    data = request.get_json() or {}
+    actor = LocationCharacter.query.filter_by(id=data.get('location_character_id'), location_id=location_id).first()
+    if not actor or actor.location.lobby_id != lobby_id:
+        return jsonify({'error': 'Character not found'}), 404
+    if not CombatService._can_end_turn_for_character(actor, participant.user_id, is_gm=lobby.gm_id == participant.user_id):
+        raise PermissionDenied('Вы не управляете этим персонажем')
+    cancel_deferred_action(actor, data.get('action_id'))
+    db.session.commit()
+    emit_character_update({'character_id': actor.character_id, 'updates': {'data': actor.character.data}, 'source': 'combat'})
+    state = CombatService.get_state(location_id, participant.user_id)
+    socketio.emit('combat_state_updated', state, room=f'location_{location_id}')
+    return jsonify(state), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/action', methods=['POST'])
 @jwt_required()
 @requires_participant
 def perform_location_combat_action(lobby_id, location_id, lobby, participant):
+    if not Location.query.filter_by(id=location_id, lobby_id=lobby_id).first():
+        return jsonify({'error': 'Location not found'}), 404
     data = request.get_json() or {}
     location_character_id = data.get('location_character_id')
     action_key = data.get('action_key')
@@ -3602,6 +3724,8 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         target_zone=data.get('target_zone'),
         payment=data.get('payment'),
         magazine_template_id=data.get('magazine_template_id'),
+        magazine_selection=data.get('magazine_selection'),
+        loading=data.get('loading'),
         inventory_retrieval_action_points=data.get('inventory_retrieval_action_points'),
         inventory_use_action_discount=data.get('inventory_use_action_discount'),
         attribute_choice=data.get('attribute_choice'),
@@ -3617,6 +3741,10 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         explosive_fuse_mode=data.get('explosive_fuse_mode'),
         equipment_operation=data.get('equipment_operation'),
         equipment_slot=data.get('equipment_slot'),
+        module_operation=data.get('module_operation'),
+        module_slot_type=data.get('module_slot_type'),
+        module_target_path=data.get('module_target_path'),
+        module_selection=data.get('module_selection'),
     )
     socketio.emit('combat_character_updated', result['character'], room=f"location_{location_id}")
     socketio.emit('combat_state_updated', result['state'], room=f"location_{location_id}")
@@ -3655,15 +3783,28 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
         )
     actor = db.session.get(LobbyCharacter, result['character'].get('character_id'))
     if actor:
-        socketio.emit(
-            'character_data_updated',
+        emit_character_update(
             {
                 'character_id': actor.id,
                 'updates': {'data': actor.data},
                 'source': 'combat',
             },
-            room=f"character_{actor.id}",
         )
+    medical_retry_result = (result.get('must_do_it') or {}).get('medical_result')
+    if isinstance(medical_retry_result, dict):
+        posture_updates = medical_retry_result.pop('_posture_updates', [])
+        target = db.session.get(LobbyCharacter, medical_retry_result.get('target_character_id'))
+        if target and (not actor or target.id != actor.id):
+            emit_character_update({
+                'character_id': target.id,
+                'updates': {'data': target.data},
+                'source': 'medical_procedure',
+            })
+        for posture_update in posture_updates:
+            socketio.emit(
+                'location_character_posture_updated', posture_update,
+                room=f"location_{posture_update['location_id']}",
+            )
     mutant_action = result.get('mutant_action')
     if isinstance(mutant_action, dict) and isinstance(mutant_action.get('clone'), dict):
         clone = mutant_action['clone']
@@ -3709,14 +3850,12 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             )
             if not target_character:
                 continue
-            socketio.emit(
-                'character_data_updated',
+            emit_character_update(
                 {
                     'character_id': target_character.id,
                     'updates': {'data': target_character.data},
                     'source': 'mutant_battle_cry',
                 },
-                room=f"character_{target_character.id}",
             )
         checks = '; '.join(
             f"{item.get('name')}: d20 {item.get('roll')} "
@@ -3747,14 +3886,12 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
             target_character = db.session.get(LobbyCharacter, affected_id)
             if not target_character:
                 continue
-            socketio.emit(
-                'character_data_updated',
+            emit_character_update(
                 {
                     'character_id': target_character.id,
                     'updates': {'data': target_character.data},
                     'source': mutant_action.get('kind'),
                 },
-                room=f"character_{target_character.id}",
             )
 
         if mutant_action.get('kind') == 'psy_attack':
@@ -3902,14 +4039,12 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
     for character_id in affected_character_ids:
         target = db.session.get(LobbyCharacter, character_id)
         if target:
-            socketio.emit(
-                'character_data_updated',
+            emit_character_update(
                 {
                     'character_id': target.id,
                     'updates': {'data': target.data},
                     'source': 'combat',
                 },
-                room=f"character_{target.id}",
             )
             location_target = LocationCharacter.query.filter_by(
                 location_id=location_id,

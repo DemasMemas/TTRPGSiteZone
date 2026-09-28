@@ -313,7 +313,7 @@ class CharacterInteractionService:
         return CharacterInteractionService._serialize(request_row)
 
     @staticmethod
-    def complete_treatment(request_id, user_id):
+    def complete_treatment(request_id, user_id, *, commit=True):
         request_row = db.session.get(CharacterInteractionRequest, request_id)
         if not request_row or request_row.kind != 'treatment':
             raise NotFoundError('Treatment request not found')
@@ -323,7 +323,8 @@ class CharacterInteractionService:
             raise ValidationError('Treatment request is not active')
         request_row.status = 'completed'
         request_row.resolved_at = datetime.now(timezone.utc)
-        db.session.commit()
+        if commit:
+            db.session.commit()
         return CharacterInteractionService._serialize(request_row)
 
     @staticmethod
@@ -341,20 +342,24 @@ class CharacterInteractionService:
 
     @staticmethod
     def movement_locked(location_character_id):
-        request_row = CharacterInteractionRequest.query.filter(
+        requests = CharacterInteractionRequest.query.filter(
             CharacterInteractionRequest.target_location_character_id == location_character_id,
             CharacterInteractionRequest.kind == 'treatment',
             CharacterInteractionRequest.status == 'in_progress',
-        ).first()
-        if not request_row:
-            return False
-        actor = db.session.get(LocationCharacter, request_row.actor_location_character_id)
-        actor_data = actor.character.data if actor and actor.character and isinstance(actor.character.data, dict) else {}
-        pending_action = ((actor_data.get('health') or {}).get('combatMeta') or {}).get('pendingAction') or {}
-        expected_id = str((request_row.payload or {}).get('pending_action_id') or '')
-        if expected_id and str(pending_action.get('id') or '') == expected_id:
-            return True
-        request_row.status = 'cancelled'
-        request_row.resolved_at = datetime.now(timezone.utc)
-        db.session.commit()
+        ).all()
+        for request_row in requests:
+            actor = db.session.get(LocationCharacter, request_row.actor_location_character_id)
+            actor_data = actor.character.data if actor and actor.character and isinstance(actor.character.data, dict) else {}
+            meta = (actor_data.get('health') or {}).get('combatMeta') or {}
+            pending_action = meta.get('pendingAction') or {}
+            expected_id = str((request_row.payload or {}).get('pending_action_id') or '')
+            combat = LocationCombatState.query.filter_by(location_id=request_row.location_id).first()
+            # Full payment is not completion: keep the patient still until effects are committed.
+            if combat and combat.status == 'active' and actor and actor.id in (combat.turn_order or []) and expected_id and expected_id in {
+                str(pending_action.get('id') or ''), str(meta.get('completedPendingActionId') or ''),
+            }:
+                return True
+            request_row.status = 'cancelled'
+            request_row.resolved_at = datetime.now(timezone.utc)
+        # The caller owns the transaction; movement validation must not commit unrelated changes.
         return False

@@ -31,6 +31,8 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    from app.services.character_events import forget_subscription
+    forget_subscription(request.sid)
     # Отменяем таймер аутентификации, если он ещё не сработал
     if request.sid in pending_auth:
         pending_auth[request.sid].cancel()

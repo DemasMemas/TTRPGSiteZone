@@ -10,5 +10,7 @@ class LocationObject(db.Model):
     tile_x = db.Column(db.Integer, nullable=False)
     tile_y = db.Column(db.Integer, nullable=False)
     properties = db.Column(db.JSON, default=empty_dict)  # {'locked': False, 'health': 50}
+    revision = db.Column(db.Integer, nullable=False, default=1, server_default='1')
+    __mapper_args__ = {'version_id_col': revision}
 
     location = db.relationship('Location', backref='objects')

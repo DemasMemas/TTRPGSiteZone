@@ -23,21 +23,26 @@ import { Server } from './api.js';
 import { showNotification } from './utils.js';
 import { lobbyParticipants } from './ui.js';
 import { getSocket } from './socketHandlers.js';
+import { consumeChangedSheetInputs, rememberCharacterSnapshots } from './characterPersistence.js';
+import { diffCharacterData, pathTouches } from './characterSheetSync.js';
 import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
 
 // ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
 let currentCharacterId = null;
 let currentCharacterData = null;
 let currentCharacterCanEdit = false;
+let sheetSaveBlocked = false;
+let medicalOperationInProgress = false;
+let medicalRemoteUpdate = null;
+let pendingSheetRemoteUpdate = null;
+let remoteSheetUpdateQueue = Promise.resolve();
 let autoSaveTimer = null;
 let stressAdjustmentPending = false;
 const pendingManualFieldPaths = new Set();
 const AUTO_SAVE_DELAY = 500;
-const pendingConsumableActions = new Map();
-const pendingReloadActions = new Map();
-const pendingMagazineLoadingActions = new Map();
 const pendingWeaponJamActions = new Map();
 let equipmentRenderVersion = 0;
+let equipmentOpenPanels = new Set();
 
 // ========== DRAG-AND-DROP ==========
 let draggedItem = null;
@@ -57,6 +62,7 @@ let vestTemplateEditorPouches = [];
 let templatesCache = {};
 let currentLobbyId = null;
 export function setCurrentLobbyId(id) {
+    if (currentLobbyId !== id) allTemplatesCache = null;
     currentLobbyId = id;
 }
 
@@ -485,9 +491,11 @@ function initializeDelayedItemTooltips() {
     document._itemTooltipBound = true;
     let timer = null;
     let activeAnchor = null;
+    let lastPointerDown = 0;
     let pointer = { x: 0, y: 0 };
     const tooltip = document.createElement('div');
     tooltip.id = 'delayed-item-tooltip';
+    tooltip.setAttribute('role', 'tooltip');
     tooltip.style.cssText = 'display:none;position:fixed;z-index:20000;pointer-events:none;max-width:430px;max-height:55vh;overflow:hidden;padding:10px 12px;border:1px solid rgba(190,180,125,.45);border-radius:7px;background:rgba(18,20,17,.97);color:#ddd;box-shadow:0 12px 30px rgba(0,0,0,.55);';
     document.body.appendChild(tooltip);
 
@@ -495,6 +503,7 @@ function initializeDelayedItemTooltips() {
         clearTimeout(timer);
         timer = null;
         activeAnchor = null;
+        tooltip.classList.remove('equipment-slot-tooltip');
         tooltip.style.display = 'none';
     };
     const position = () => {
@@ -504,27 +513,39 @@ function initializeDelayedItemTooltips() {
         tooltip.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, pointer.x + margin))}px`;
         tooltip.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, pointer.y + margin))}px`;
     };
-    const findAnchor = target => target?.closest?.('[data-item-template-id], select[name$=".templateId"]');
-    document.addEventListener('pointermove', (event) => {
-        pointer = { x: event.clientX, y: event.clientY };
-        if (tooltip.style.display !== 'none') position();
-    }, true);
-    document.addEventListener('pointerover', (event) => {
-        const anchor = findAnchor(event.target);
+    const findAnchor = target => target?.closest?.('[data-item-template-id], select[name$=".templateId"], .loadout-slot');
+    const schedule = anchor => {
         if (!anchor || anchor === activeAnchor) return;
         hide();
         activeAnchor = anchor;
         timer = setTimeout(async () => {
             if (activeAnchor !== anchor || !anchor.isConnected) return;
+            if (anchor.classList.contains('loadout-slot')) {
+                const content = anchor.querySelector('.loadout-slot-tooltip');
+                if (!content) return;
+                tooltip.innerHTML = content.innerHTML;
+                tooltip.classList.add('equipment-slot-tooltip');
+                tooltip.style.display = 'block';
+                position();
+                return;
+            }
             const templateId = Number(anchor.dataset.itemTemplateId || anchor.value);
             if (!Number.isFinite(templateId) || templateId <= 0) return;
             const templates = await getAllItemTemplates();
             const template = templates.find(item => Number(item.id) === templateId);
             if (!template || activeAnchor !== anchor) return;
             tooltip.innerHTML = buildItemTooltipHtml(template);
+            tooltip.classList.remove('equipment-slot-tooltip');
             tooltip.style.display = 'block';
             position();
-        }, 1000);
+        }, anchor.classList.contains('loadout-slot') ? 500 : 1000);
+    };
+    document.addEventListener('pointermove', (event) => {
+        pointer = { x: event.clientX, y: event.clientY };
+        if (tooltip.style.display !== 'none') position();
+    }, true);
+    document.addEventListener('pointerover', (event) => {
+        schedule(findAnchor(event.target));
     }, true);
     document.addEventListener('pointerout', (event) => {
         const anchor = findAnchor(event.target);
@@ -532,8 +553,22 @@ function initializeDelayedItemTooltips() {
         if (anchor.contains(event.relatedTarget)) return;
         hide();
     }, true);
-    document.addEventListener('pointerdown', hide, true);
+    document.addEventListener('focusin', event => {
+        const anchor = event.target?.closest?.('.loadout-slot');
+        if (!anchor || performance.now() - lastPointerDown < 500) return;
+        const rect = anchor.getBoundingClientRect();
+        pointer = { x: rect.right, y: rect.top };
+        schedule(anchor);
+    }, true);
+    document.addEventListener('focusout', event => {
+        if (event.target === activeAnchor) hide();
+    }, true);
+    document.addEventListener('pointerdown', () => {
+        lastPointerDown = performance.now();
+        hide();
+    }, true);
     document.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
 }
 
 initializeDelayedItemTooltips();
@@ -792,7 +827,7 @@ function updateDataFromFields() {
     const form = document.getElementById('character-sheet-form');
     if (!form) return;
 
-    const inputs = form.querySelectorAll('input, select, textarea');
+    const inputs = consumeChangedSheetInputs(form);
     inputs.forEach(input => {
         const name = input.getAttribute('name');
         if (!name) return;
@@ -868,64 +903,213 @@ function formatProtectionPercent(value) {
     return `${protectionPercentValue(value)}%`;
 }
 
+async function refreshSavedSheet(characterId) {
+    if (Number(currentCharacterId) !== Number(characterId)) return;
+    await Promise.all([
+        renderInventoryTab(currentCharacterData),
+        renderEquipmentTab(currentCharacterData),
+    ]);
+    if (Number(currentCharacterId) !== Number(characterId)) return;
+    const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
+    if (activeTab === 'health') refreshHealthPanel();
+    else if (activeTab === 'basic') renderBasicTab(currentCharacterData);
+    else if (activeTab === 'skills') renderSkillsTab(currentCharacterData);
+    else if (activeTab === 'settings') renderSettingsTab(currentCharacterData);
+    else if (activeTab === 'notes') renderNotesTab(currentCharacterData);
+    applySheetEditPermissions();
+}
+
+function applySheetEditPermissions(root = document.getElementById('character-sheet-modal')) {
+    if (currentCharacterCanEdit || !root) return;
+    root.querySelectorAll('input, select, textarea').forEach(control => {
+        control.disabled = true;
+    });
+    root.querySelectorAll('button').forEach(button => {
+        if (
+            !button.classList.contains('tab-btn')
+            && !button.classList.contains('close')
+            && !button.hasAttribute('data-sheet-control')
+        ) {
+            button.disabled = true;
+        }
+    });
+}
+
+function characterValueAtPath(data, path) {
+    return path.split('.').reduce(
+        (value, part) => value && typeof value === 'object' ? value[part] : undefined,
+        data,
+    );
+}
+
+function setRemoteControlValue(control, rawValue) {
+    let value = rawValue;
+    if (control.dataset?.protectionPercent === 'true' && value !== null && value !== undefined) {
+        value = protectionPercentValue(value);
+    }
+    if (control.dataset?.transientBonus && value !== null && value !== undefined) {
+        value = Number(value || 0) + Number(control.dataset.transientBonus || 0);
+    }
+    if (control.type === 'checkbox') {
+        control.checked = Boolean(value);
+        control.defaultChecked = control.checked;
+        return;
+    }
+    if (control.type === 'radio') {
+        control.checked = String(control.value) === String(value ?? '');
+        control.defaultChecked = control.checked;
+        return;
+    }
+    const displayValue = value === null || value === undefined ? '' : String(value);
+    control.value = displayValue;
+    if (control.tagName === 'SELECT') {
+        Array.from(control.options).forEach(option => {
+            option.defaultSelected = option.selected;
+        });
+    } else {
+        control.defaultValue = displayValue;
+    }
+}
+
+function patchRemoteScalarFields(data, paths) {
+    const form = document.getElementById('character-sheet-form');
+    if (!form) return new Set(paths);
+    const controlsByName = new Map();
+    form.querySelectorAll('input[name], select[name], textarea[name]').forEach(control => {
+        const name = control.getAttribute('name');
+        if (!controlsByName.has(name)) controlsByName.set(name, []);
+        controlsByName.get(name).push(control);
+    });
+    const missing = new Set();
+    paths.forEach(path => {
+        const controls = controlsByName.get(path);
+        if (!controls?.length) {
+            missing.add(path);
+            return;
+        }
+        const value = characterValueAtPath(data, path);
+        controls.forEach(control => setRemoteControlValue(control, value));
+    });
+    return missing;
+}
+
+async function applyRemoteSheetData(remoteData, characterId = currentCharacterId) {
+    if (!remoteData || Number(currentCharacterId) !== Number(characterId)) return false;
+    if (Number(remoteData._revision) < Number(currentCharacterData?._revision)) return false;
+
+    const previousData = currentCharacterData || {};
+    for (const key of ['ownerId', 'ownerUsername', 'visible_to', 'editable_to']) {
+        if (remoteData[key] === undefined && previousData[key] !== undefined) {
+            remoteData[key] = previousData[key];
+        }
+    }
+    normalizeCharacterEffects(remoteData);
+    const changes = diffCharacterData(previousData, remoteData);
+    currentCharacterData = remoteData;
+
+    const allPaths = [...changes.scalarPaths, ...changes.structuralPaths];
+    if (!allPaths.length) return true;
+    const missingFields = patchRemoteScalarFields(remoteData, changes.scalarPaths);
+    const touches = root => allPaths.some(path => pathTouches(path, root));
+    const structuralTouches = root => changes.structuralPaths.some(path => pathTouches(path, root));
+    const missingTouches = root => [...missingFields].some(path => pathTouches(path, root));
+    const tasks = [];
+    const rerenderBasic = structuralTouches('basic') || missingTouches('basic');
+
+    if ((touches('health') || touches('skills.physical.will')) && !rerenderBasic) {
+        refreshHealthPanel(remoteData);
+    }
+    if (rerenderBasic) tasks.push(renderBasicTab(remoteData));
+    if (
+        structuralTouches('skills')
+        || missingTouches('skills')
+        || changes.scalarPaths.some(path => /^skills\..+\.(base|xp)$/.test(path))
+        || touches('features')
+    ) tasks.push(renderSkillsTab(remoteData));
+    if (touches('equipment') || touches('weapons') || touches('activeWeaponIndex')) {
+        tasks.push(renderEquipmentTab(remoteData));
+    }
+    if (
+        structuralTouches('inventory')
+        || changes.scalarPaths.some(path => pathTouches(path, 'inventory') && path !== 'inventory.money')
+        || touches('equipment')
+        || changes.scalarPaths.some(path => pathTouches(path, 'skills.physical.strength'))
+    ) tasks.push(renderInventoryTab(remoteData));
+    if (touches('ownerId') || touches('ownerUsername') || touches('visible_to') || touches('editable_to')) {
+        renderSettingsTab(remoteData);
+    }
+    if (missingTouches('notes')) renderNotesTab(remoteData);
+
+    await Promise.all(tasks);
+    if (Number(currentCharacterId) !== Number(characterId)) return false;
+    applySheetEditPermissions();
+    return true;
+}
+
+function queueRemoteSheetData(remoteData, characterId = currentCharacterId) {
+    const task = remoteSheetUpdateQueue
+        .catch(() => false)
+        .then(() => applyRemoteSheetData(remoteData, characterId));
+    remoteSheetUpdateQueue = task;
+    return task;
+}
+
+function rememberPendingSheetRemoteUpdate(data) {
+    if (!data || typeof data !== 'object') return;
+    if (
+        !pendingSheetRemoteUpdate
+        || Number(data._revision) > Number(pendingSheetRemoteUpdate._revision)
+    ) {
+        pendingSheetRemoteUpdate = data;
+    }
+}
+
+async function applyPendingSheetRemoteUpdate(characterId) {
+    if (Number(currentCharacterId) !== Number(characterId)) return false;
+    if (autoSaveTimer || Server.isCharacterSaving(characterId) || sheetSaveBlocked) return false;
+    const remote = pendingSheetRemoteUpdate;
+    pendingSheetRemoteUpdate = null;
+    if (!remote || Number(remote._revision) < Number(currentCharacterData?._revision)) return false;
+    return queueRemoteSheetData(remote, characterId);
+}
+
+function persistCurrentSheet() {
+    if (medicalOperationInProgress) return;
+    if (!currentCharacterCanEdit || !currentCharacterId || !currentCharacterData) return;
+    updateDataFromFields();
+    const characterId = currentCharacterId;
+    const draft = currentCharacterData;
+    return Server.updateCharacter(characterId, {
+        data: draft, _manual_fields: consumeManualFieldPaths(),
+    }).then(async () => {
+        const appliedRemote = await applyPendingSheetRemoteUpdate(characterId);
+        if (!appliedRemote && currentCharacterData === draft && !autoSaveTimer && !Server.isCharacterSaving(characterId)) {
+            return refreshSavedSheet(characterId);
+        }
+    }).catch(error => {
+        if (Number(currentCharacterId) !== Number(characterId)) return;
+        if (autoSaveTimer) clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+        currentCharacterCanEdit = false;
+        sheetSaveBlocked = true;
+        showNotification('Сохранение остановлено: ' + error.message
+            + ' Ваша копия остаётся в листе: её можно экспортировать. Затем переоткройте лист.', 'system');
+    });
+}
+
 function scheduleAutoSave() {
     if (!currentCharacterCanEdit) return;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
         autoSaveTimer = null;
-        if (currentCharacterId) {
-            updateDataFromFields();
-            const manualFields = consumeManualFieldPaths();
-            const updates = { data: currentCharacterData, _manual_fields: manualFields };
-            const socket = getSocket();
-            if (socket) {
-                socket.emit('update_character_data', {
-                    token: localStorage.getItem('access_token'),
-                    character_id: currentCharacterId,
-                    updates,
-                });
-            } else {
-                Server.updateCharacter(currentCharacterId, updates)
-                    .then(() => console.log('Auto-saved via HTTP'))
-                    .catch(err => showNotification('Ошибка автосохранения: ' + err.message));
-            }
-        }
+        persistCurrentSheet();
     }, AUTO_SAVE_DELAY);
 }
 
 function forceSyncCharacter() {
-    if (!currentCharacterCanEdit) return;
-    if (autoSaveTimer) {
-        clearTimeout(autoSaveTimer);
-        autoSaveTimer = null;
-    }
-    const characterId = currentCharacterId;
-    if (!characterId || !currentCharacterData) return;
-    updateDataFromFields();
-    const dataSnapshot = JSON.parse(JSON.stringify(currentCharacterData));
-    const manualFields = consumeManualFieldPaths();
-    const updates = { data: dataSnapshot, _manual_fields: manualFields };
-    let fallbackStarted = false;
-    const persistViaHttp = () => {
-        if (fallbackStarted) return;
-        fallbackStarted = true;
-        Server.updateCharacter(characterId, updates)
-            .catch(error => showNotification('Ошибка сохранения: ' + error.message));
-    };
-    const socket = getSocket();
-    if (socket?.connected) {
-        const fallbackTimer = setTimeout(persistViaHttp, 2000);
-        socket.emit('update_character_data', {
-            token: localStorage.getItem('access_token'),
-            character_id: characterId,
-            updates,
-        }, response => {
-            clearTimeout(fallbackTimer);
-            if (!response?.ok) persistViaHttp();
-        });
-    } else {
-        persistViaHttp();
-    }
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    return persistCurrentSheet();
 }
 
 // ========== УНИВЕРСАЛЬНАЯ МОДЕЛЬ ПРЕДМЕТА ==========
@@ -937,11 +1121,22 @@ function generateItemId() {
 
 // Получить доступные слоты предмета на основе его шаблона.
 function getItemSlots(item) {
+    if (!item) return [];
+    if (Array.isArray(item.attributes?.slots)) return item.attributes.slots;
     const templateId = item.templateId || item.type; // подсумки используют type
     if (!templateId) return [];
-    const templates = allTemplatesCache || [];
-    const template = templates.find(t => t.id === templateId);
-    return template?.attributes?.slots || [];
+    const cachedGroups = [
+        allTemplatesCache,
+        ...Object.entries(templatesCache)
+            .filter(([key]) => key.startsWith(`${currentLobbyId}_`))
+            .map(([, templates]) => templates),
+    ];
+    for (const templates of cachedGroups) {
+        if (!Array.isArray(templates)) continue;
+        const template = templates.find(candidate => candidate.id == templateId);
+        if (template) return template.attributes?.slots || [];
+    }
+    return [];
 }
 
 function getEffectiveTorsoProtection() {
@@ -1499,6 +1694,58 @@ function hasHealthRollDisadvantage(data, skillPath) {
     ) || (
         skillPath === 'physical.will' && psyState >= 40
     );
+}
+
+function getDeafnessLevel(data) {
+    const health = data?.health || {};
+    const values = [Number(health.deafness) || 0];
+    const psyState = Number(health.psyState ?? health.psy_state) || 0;
+    if (psyState >= 40) values.push(100);
+    else if (psyState >= 20) values.push(50);
+    (Array.isArray(health.effects) ? health.effects : []).forEach(effect => {
+        if (effect?.active === false || effect?.type !== 'deafness') return;
+        values.push(Number(effect.value) || 0);
+    });
+    return Math.max(0, ...values);
+}
+
+function getConsumableStatValue(data, statName) {
+    const modifiers = data?.health?.combatMeta?.consumableModifiers;
+    if (!Array.isArray(modifiers)) return 0;
+    return modifiers.reduce((total, modifier) => {
+        if (!modifier || ![statName, `${statName}_delta`].includes(modifier.stat)) return total;
+        if (modifier.remaining !== undefined && Number(modifier.remaining) <= 0) return total;
+        return total + (Number(modifier.value) || 0);
+    }, 0);
+}
+
+function getAwarenessModeChoices(data) {
+    const headphones = Number(
+        data?.equipment?.headphones?.awarenessBonus
+        ?? data?.equipment?.headphones?.awareness_bonus,
+    ) || 0;
+    const vision = getConsumableStatValue(data, 'vision_awareness');
+    const deafness = getDeafnessLevel(data);
+    const signed = value => `${value >= 0 ? '+' : ''}${value}`;
+    const visualParts = [
+        vision ? `препараты ${signed(vision)}` : '',
+    ].filter(Boolean);
+    const hearingParts = [
+        headphones ? `наушники ${signed(headphones)}` : '',
+    ].filter(Boolean);
+    return [
+        {
+            label: `Зрение: ${signed(vision)}${visualParts.length ? ` (${visualParts.join(', ')})` : ''}`,
+            mode: 'visual',
+        },
+        {
+            label: deafness >= 90
+                ? `Слух: невозможно (глухота ${deafness})`
+                : `Слух: ${signed(headphones)}${hearingParts.length ? ` (${hearingParts.join(', ')})` : ''}${deafness ? `, глухота ${deafness}` : ''}`,
+            mode: 'hearing',
+            disabled: deafness >= 90,
+        },
+    ];
 }
 
 function getWeightPerMovementPenalty(data) {
@@ -3478,6 +3725,10 @@ async function renderEquipmentTab(data) {
     const renderVersion = ++equipmentRenderVersion;
     const container = document.getElementById('sheet-tab-equipment');
     if (!container) return;
+    equipmentOpenPanels = new Set(
+        [...container.querySelectorAll('details[data-equipment-panel][open]')]
+            .map(panel => panel.dataset.equipmentPanel)
+    );
 
     const eq = data.equipment || {};
     if (armorHasIntegratedHelmet(eq.armor)) {
@@ -3559,7 +3810,7 @@ async function renderEquipmentTab(data) {
     }
 
     let html = `
-        <div class="equipment-group">
+        <div class="equipment-group" data-equipment-group="weapons">
             <div class="equipment-header"><h4>Оружие</h4></div>
             <div class="equipment-row" style="flex-direction:column;">
                 <div id="weapons-container"></div>
@@ -3568,7 +3819,7 @@ async function renderEquipmentTab(data) {
         </div>
 
         <!-- Шлем -->
-        <div class="equipment-group">
+        <div class="equipment-group" data-equipment-group="helmet">
             <div class="equipment-row" style="display: flex; gap: 10px;">
                 <div class="equipment-main-block helmet-main-block">
                     <div class="block-header">
@@ -3652,7 +3903,7 @@ async function renderEquipmentTab(data) {
         </div>
 
         <!-- Противогаз -->
-        <div class="equipment-group">
+        <div class="equipment-group" data-equipment-group="gasMask">
             <div class="equipment-row">
                 <div class="equipment-main-block">
                     <div class="block-header">
@@ -3700,7 +3951,7 @@ async function renderEquipmentTab(data) {
         </div>
 
         <!-- Броня -->
-        <div class="equipment-group">
+        <div class="equipment-group" data-equipment-group="armor">
             <div class="equipment-row" style="display: flex; gap: 10px;">
                 <div class="equipment-main-block" style="flex: 2;">
                     <div class="block-header">
@@ -3801,7 +4052,7 @@ async function renderEquipmentTab(data) {
         </div>
 
         <!-- Детектор аномалий -->
-        <div class="equipment-group">
+        <div class="equipment-group" data-equipment-group="detector">
             <div class="equipment-row">
                 <div class="equipment-main-block">
                     <div class="block-header">
@@ -3824,7 +4075,7 @@ async function renderEquipmentTab(data) {
         </div>
 
         <!-- Косметическая экипировка -->
-        <div class="equipment-group">
+        <div class="equipment-group" data-equipment-group="cosmetic">
             <h4>Косметическая экипировка</h4>
             <!-- Первая строка: наушники, очки, перчатки (3 колонки) -->
             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px;">
@@ -3932,7 +4183,7 @@ async function renderEquipmentTab(data) {
             </div>
         </div>
 
-        <div class="equipment-group">
+        <div class="equipment-group" data-equipment-group="pda">
             <div style="display:flex; align-items:center;">
                 <h4 style="margin:0;">Модификации КПК</h4>
                 <button type="button" class="btn btn-sm btn-secondary" onclick="addPdaItem()" style="padding:2px 8px;">➕</button>
@@ -3943,6 +4194,287 @@ async function renderEquipmentTab(data) {
 
     container.innerHTML = html;
     await renderWeapons(weapons, weaponTemplates, weaponModuleTemplates, weaponModTemplates);
+    renderEquipmentLoadout(container, data, weaponTemplates, helmetTemplates, gasMaskTemplates, armorTemplates);
+}
+
+function equipmentModule(item, slotType) {
+    const modules = Array.isArray(item?.installedModules) ? item.installedModules : [];
+    return modules.find(module => (
+        module?.slotType === slotType || module?.attributes?.slot_type === slotType
+    ));
+}
+
+function equipmentStatusLines(equipment, helmetTemplates, gasMaskTemplates) {
+    const lines = [];
+    const supportsFilter = (item, templates) => Boolean(
+        hasFilterSlot(item)
+        || (item?.attributes?.slots || []).some(slot => slot?.type === 'filter')
+        || templates.find(template => template.id == item?.templateId)?.attributes?.slots?.some(slot => slot?.type === 'filter')
+    );
+    const filterOwner = [equipment.gasMask, equipment.helmet]
+        .find((item, index) => item?.templateId && supportsFilter(item, index === 0 ? gasMaskTemplates : helmetTemplates));
+    if (filterOwner) {
+        const filter = equipmentModule(filterOwner, 'filter');
+        lines.push(filter
+            ? `Фильтр: ${filter.durability ?? filter.attributes?.durability ?? 0}/${filter.maxDurability ?? filter.attributes?.max_durability ?? '?'} (${filterOwner.name || 'противогаз'})`
+            : 'Фильтр: не установлен');
+    }
+    if (equipment.detector?.templateId) {
+        const battery = equipmentModule(equipment.detector, 'battery');
+        lines.push(battery
+            ? `Детектор: заряд ${battery.attributes?.power ?? battery.power ?? '?'}%`
+            : 'Детектор: батарея не установлена');
+    }
+    if (getExoskeletonPowerProfile({ equipment }).isExoskeleton) {
+        const battery = equipmentModule(equipment.armor, 'exoskeleton_battery');
+        const days = Number(battery?.attributes?.remaining_days) || 0;
+        lines.push(battery ? `Экзоскелет: ${days > 0 ? `${days} сут. заряда` : 'аккумулятор разряжен'}` : 'Экзоскелет: аккумулятор не установлен');
+    }
+    return lines;
+}
+
+function equipmentSlotMetrics(item, kind, template = null) {
+    if (!item) return [];
+    const attributes = template?.attributes || item.attributes || {};
+    const metrics = [];
+    const add = (label, value, suffix = '') => {
+        if (value !== undefined && value !== null && value !== '') metrics.push(`${label}: ${value}${suffix}`);
+    };
+    if (kind === 'weapon') {
+        add('Прочность', item.durability ?? attributes.durability);
+        if (item.category === 'melee_weapon' || template?.category === 'melee_weapon') {
+            add('Урон', attributes.damage);
+            add('Точность', attributes.accuracy);
+        } else {
+            add('Калибр', item.caliber ?? attributes.caliber);
+            add('Патроны', getWeaponAmmoCount(item));
+            add('Точность', item.accuracy ?? attributes.accuracy);
+            add('Эргономика', item.ergonomics ?? attributes.ergonomics);
+        }
+    } else {
+        add('Прочность', item.durability);
+        if (item.protection) {
+            add('Физ. защита', formatProtectionPercent(item.protection.physical || 0));
+            add('Рад. защита', formatProtectionPercent(item.protection.radiation || 0));
+        }
+        if (kind === 'detector') add('Бонус при встрече с аномалией', item.bonus);
+        if (kind === 'cosmetic') add('Бонус харизмы', item.charismaBonus);
+    }
+    return metrics;
+}
+
+function equipmentFigureAppearance(equipment, armorTemplates, helmetTemplates) {
+    const armor = equipment.armor;
+    const helmet = equipment.helmet;
+    const armorTemplate = armorTemplates.find(template => template.id == armor?.templateId);
+    const helmetTemplate = helmetTemplates.find(template => template.id == helmet?.templateId);
+    const normalize = value => String(value || '').toLowerCase().replace(/ё/g, 'е').trim();
+    const armorName = normalize(armor?.name || armorTemplate?.name);
+    const armorClass = normalize([
+        armorTemplate?.item_class, armorTemplate?.subcategory,
+        armorTemplate?.attributes?.armor_class, armor?.item_class,
+        armor?.subcategory, armor?.attributes?.armor_class,
+    ].filter(Boolean).join(' '));
+    let armorKind = 'none';
+    if (armor?.templateId) {
+        if (armor?.isExoskeleton || armorTemplate?.attributes?.is_exoskeleton || armorName.includes('экзоскелет')) {
+            armorKind = 'exo';
+        } else if (/аномальн|аномал/.test(armorClass) || /купол|гроб|химзащиты/.test(armorName)) {
+            armorKind = 'anomalous';
+        } else if (armorName === 'броня путника') {
+            armorKind = 'medium';
+        } else if (/тяжел/.test(armorClass) || /весы|страж|затвор|пшнх|литейщик/.test(armorName)) {
+            armorKind = 'heavy';
+        } else if (/легк/.test(armorClass) || /кожаная|бандитская/.test(armorName)) {
+            armorKind = 'light';
+        } else {
+            armorKind = 'medium';
+        }
+    }
+    let helmetKind = 'none';
+    if (helmet?.templateId) {
+        const helmetName = normalize(helmet.name || helmetTemplate?.name);
+        const zones = helmetTemplate?.attributes?.protection_zones || helmet?.attributes?.protection_zones;
+        const hasFilter = helmetTemplate?.attributes?.requires_filter
+            || helmetTemplate?.attributes?.slots?.some(slot => slot.type === 'filter')
+            || helmet?.attributes?.requires_filter;
+        if (helmet.integratedWithArmor && armorKind === 'anomalous') {
+            helmetKind = 'anomalous';
+        } else if (hasFilter || helmetName.includes('противогазо')) {
+            helmetKind = 'sealed';
+        } else if (helmet.integratedWithArmor
+            || helmet?.installedModules?.some(module => module.slotType === 'visor')
+            || (Array.isArray(zones) ? zones.includes('face') : helmetTemplate?.attributes?.integrated_visor)) {
+            helmetKind = 'visor';
+        } else {
+            helmetKind = 'open';
+        }
+    }
+    return { armorKind, helmetKind };
+}
+
+function renderEquipmentFigure(equipment, armorTemplates, helmetTemplates) {
+    const { armorKind, helmetKind } = equipmentFigureAppearance(equipment, armorTemplates, helmetTemplates);
+    const occupied = item => Boolean(item?.templateId || item?.model);
+    const flags = {
+        'data-armor': armorKind,
+        'data-helmet': helmetKind,
+        'data-mask': occupied(equipment.gasMask),
+        'data-vest': occupied(equipment.vest),
+        'data-belt': occupied(equipment.belt),
+        'data-backpack': occupied(equipment.backpack),
+        'data-detector': occupied(equipment.detector),
+        'data-headphones': occupied(equipment.headphones),
+        'data-glasses': occupied(equipment.glasses),
+        'data-gloves': occupied(equipment.gloves),
+        'data-jewelry': ['ring', 'necklace', 'earrings', 'bracelet1', 'bracelet2'].some(key => occupied(equipment[key])),
+    };
+    const attributes = Object.entries(flags).map(([key, value]) => `${key}="${value}"`).join(' ');
+    return `<div class="loadout-figure" ${attributes}>
+        <svg class="loadout-figure-art" viewBox="0 0 180 306" role="img" aria-label="Внешний вид надетого снаряжения">
+            <g class="loadout-art-backpack"><path d="M59 91 Q44 91 43 108 L43 164 Q44 174 55 174 L125 174 Q136 174 137 164 L137 108 Q136 91 121 91Z"/><path d="M49 111 L49 157 M131 111 L131 157"/></g>
+            <g class="loadout-art-base">
+                <path d="M77 69 L103 69 L106 83 L74 83Z" class="loadout-art-skin"/>
+                <path d="M69 25 Q72 13 90 13 Q108 13 111 25 L109 46 Q106 62 90 65 Q74 62 71 46Z" class="loadout-art-skin"/>
+                <path d="M64 79 Q75 73 90 76 Q105 73 116 79 L126 163 Q111 175 90 172 Q69 175 54 163Z"/>
+                <path d="M63 83 L51 88 L38 146 L40 177 L52 180 L57 150 L72 103Z M117 83 L129 88 L142 146 L140 177 L128 180 L123 150 L108 103Z"/>
+                <path d="M58 164 L88 170 L86 222 L78 284 L57 284 L55 226Z M122 164 L92 170 L94 222 L102 284 L123 284 L125 226Z"/>
+                <path d="M55 283 L80 283 L79 292 L52 292Z M100 283 L125 283 L128 292 L101 292Z" class="loadout-art-boots"/>
+            </g>
+            <g class="loadout-art-face"><path d="M77 36 L84 36 M96 36 L103 36 M90 39 L88 47 L92 47 M84 54 Q90 57 96 54"/></g>
+            <g class="loadout-art-armor loadout-art-armor-light"><path d="M63 82 L77 77 L90 94 L103 77 L117 82 L125 157 Q90 173 55 157Z"/><path d="M75 81 L89 108 L105 81 M89 108 L90 159" class="loadout-art-detail"/></g>
+            <g class="loadout-art-armor loadout-art-armor-medium"><path d="M62 84 L76 78 L104 78 L118 84 L120 149 L109 163 L71 163 L60 149Z"/><path d="M74 91 L106 91 L110 135 L70 135Z M75 141 L105 141 L105 154 L75 154Z" class="loadout-art-plate"/><path d="M58 87 L70 82 L74 99 L59 105Z M122 87 L110 82 L106 99 L121 105Z" class="loadout-art-plate"/></g>
+            <g class="loadout-art-armor loadout-art-armor-heavy"><path d="M56 83 L74 75 L106 75 L124 83 L132 115 L119 126 L119 160 L102 174 L78 174 L61 160 L61 126 L48 115Z"/><path d="M72 87 L108 87 L113 116 L105 145 L75 145 L67 116Z M74 149 L106 149 L106 166 L74 166Z M57 176 L84 179 L82 216 L56 220Z M96 179 L123 176 L124 220 L98 216Z" class="loadout-art-plate"/><path d="M44 115 L56 120 L51 152 L38 149Z M136 115 L124 120 L129 152 L142 149Z" class="loadout-art-plate"/></g>
+            <g class="loadout-art-armor loadout-art-armor-anomalous"><path d="M65 81 L76 75 L104 75 L115 81 L127 160 L120 175 L120 279 L101 282 L94 184 L86 184 L79 282 L60 279 L60 175 L53 160Z"/><path d="M72 61 Q90 68 108 61 L114 86 L66 86Z" class="loadout-art-seal"/><path d="M69 88 L111 88 L116 151 L90 163 L64 151Z M64 174 L80 179 L76 273 M116 174 L100 179 L104 273 M90 88 L90 161" class="loadout-art-detail"/><circle cx="90" cy="114" r="9" class="loadout-art-core"/></g>
+            <g class="loadout-art-armor loadout-art-armor-exo"><path d="M54 80 L70 73 L110 73 L126 80 L133 115 L117 127 L117 163 L105 179 L75 179 L63 163 L63 127 L47 115Z"/><path d="M69 87 L111 87 L113 139 L90 151 L67 139Z M72 151 L108 151 L106 168 L74 168Z" class="loadout-art-plate"/><path d="M47 119 L36 176 L44 182 L57 133 M133 119 L144 176 L136 182 L123 133 M61 177 L49 223 L52 279 L63 279 L68 222 M119 177 L131 223 L128 279 L117 279 L112 222" class="loadout-art-exo-rail"/><circle cx="58" cy="179" r="7"/><circle cx="122" cy="179" r="7"/><circle cx="59" cy="222" r="7"/><circle cx="121" cy="222" r="7"/></g>
+            <g class="loadout-art-vest"><path d="M66 84 L77 79 L103 79 L114 84 L117 145 L105 154 L75 154 L63 145Z"/><path d="M76 82 L76 153 M104 82 L104 153 M77 119 L103 119" class="loadout-art-detail"/></g>
+            <g class="loadout-art-belt"><path d="M58 158 Q90 168 122 158 L122 171 Q90 180 58 171Z"/><path d="M84 158 L96 158 L96 175 L84 175Z" class="loadout-art-plate"/></g>
+            <g class="loadout-art-headphones"><path d="M64 37 Q65 4 90 4 Q115 4 116 37"/><path d="M60 35 L69 35 L69 51 L60 51Z M111 35 L120 35 L120 51 L111 51Z"/></g>
+            <g class="loadout-art-mask"><path d="M67 30 Q67 10 90 9 Q113 10 113 30 L111 50 Q108 64 90 70 Q72 64 69 50Z"/><circle cx="79" cy="37" r="8" class="loadout-art-lens"/><circle cx="101" cy="37" r="8" class="loadout-art-lens"/><path d="M90 45 L90 52" class="loadout-art-detail"/><circle cx="90" cy="57" r="9" class="loadout-art-filter"/><circle cx="90" cy="57" r="4" class="loadout-art-filter-center"/></g>
+            <g class="loadout-art-helmet loadout-art-helmet-open"><path d="M64 37 Q63 7 90 7 Q117 7 116 37 L111 42 L110 32 L70 32 L69 42Z"/><path d="M66 38 L76 44 M114 38 L104 44" class="loadout-art-detail"/></g>
+            <g class="loadout-art-helmet loadout-art-helmet-visor"><path d="M62 35 Q62 6 90 6 Q118 6 118 35 L113 55 L105 63 L75 63 L67 55Z"/><path d="M70 29 L110 29 L107 47 L73 47Z" class="loadout-art-lens"/><path d="M78 53 L102 53" class="loadout-art-detail"/></g>
+            <g class="loadout-art-helmet loadout-art-helmet-sealed"><path d="M61 36 Q61 5 90 5 Q119 5 119 36 L113 58 L102 68 L78 68 L67 58Z"/><path d="M69 28 L111 28 L106 44 L74 44Z" class="loadout-art-lens"/><circle cx="90" cy="53" r="7"/><path d="M77 51 L83 58 M103 51 L97 58" class="loadout-art-detail"/></g>
+            <g class="loadout-art-helmet loadout-art-helmet-anomalous"><path d="M90 5 C108 5 118 18 118 36 C118 56 108 70 90 70 C72 70 62 56 62 36 C62 18 72 5 90 5Z"/><ellipse cx="90" cy="37" rx="24" ry="28" class="loadout-art-visor-frame"/><ellipse cx="90" cy="37" rx="21" ry="25" class="loadout-art-visor-glass"/><path d="M74 28 Q76 19 83 16" class="loadout-art-glass-highlight"/></g>
+            <g class="loadout-art-glasses"><path d="M73 32 L87 32 L85 42 L75 42Z M93 32 L107 32 L105 42 L95 42Z M87 35 L93 35"/></g>
+            <g class="loadout-art-gloves"><path d="M39 167 L52 168 L52 183 L47 190 L38 184Z M128 168 L141 167 L142 184 L133 190 L128 183Z"/></g>
+            <g class="loadout-art-detector"><path d="M45 115 L57 117 L55 140 L43 138Z"/><circle cx="49" cy="124" r="3" class="loadout-art-core"/></g>
+            <g class="loadout-art-jewelry"><circle cx="90" cy="80" r="4"/><circle cx="69" cy="52" r="3"/><circle cx="111" cy="52" r="3"/></g>
+        </svg>
+    </div>`;
+}
+
+function renderEquipmentLoadout(container, data, weaponTemplates, helmetTemplates, gasMaskTemplates, armorTemplates) {
+    const groups = [...container.querySelectorAll(':scope > .equipment-group[data-equipment-group]')];
+    if (groups.length < 7) return;
+    const equipment = data.equipment || {};
+    const weapons = data.weapons || [];
+    const weaponEntries = weapons.map((item, index) => ({
+        item, index,
+        template: weaponTemplates.find(template => template.id == item.templateId),
+    }));
+    const melee = weaponEntries.filter(entry => entry.template?.category === 'melee_weapon' || entry.item.category === 'melee_weapon');
+    const ranged = weaponEntries.filter(entry => !melee.includes(entry));
+    const slot = (label, item, panel, code, kind = 'cosmetic', template = null, status = '') => {
+        const metrics = equipmentSlotMetrics(item, kind, template);
+        return `<button type="button" class="loadout-slot ${item ? 'is-equipped' : 'is-empty'}" data-sheet-control data-equipment-open="${escapeHtml(panel)}" aria-label="${escapeHtml(`${label}: ${item?.name || item?.model || 'пусто'}`)}">
+            <span class="loadout-slot-mark" aria-hidden="true">${escapeHtml(code)}</span>
+            <span class="loadout-slot-text"><span class="loadout-slot-label">${escapeHtml(label)}</span><strong>${escapeHtml(item?.name || item?.model || 'Пусто')}</strong>${status ? `<small>${escapeHtml(status)}</small>` : ''}</span>
+            <span class="loadout-slot-tooltip" role="tooltip"><strong>${escapeHtml(item?.name || label)}</strong>${metrics.length ? metrics.map(metric => `<span>${escapeHtml(metric)}</span>`).join('') : '<span>Нажмите, чтобы открыть слот</span>'}</span>
+        </button>`;
+    };
+    const weaponSlot = (label, entry, code, panel) => slot(
+        label, entry?.item, entry ? `weapon-${entry.index}` : panel,
+        code, 'weapon', entry?.template,
+        entry && !(entry.template?.category === 'melee_weapon' || entry.item.category === 'melee_weapon')
+            ? `${getWeaponAmmoCount(entry.item)} патр.` : ''
+    );
+    const cosmetics = [
+        ['Наушники', 'headphones', 'Н'], ['Очки', 'glasses', 'О'],
+        ['Перчатки', 'gloves', 'П'], ['Кольцо', 'ring', 'К'],
+        ['Амулет', 'necklace', 'А'], ['Серьги', 'earrings', 'С'],
+        ['Браслет I', 'bracelet1', 'I'], ['Браслет II', 'bracelet2', 'II'],
+    ];
+    const extraWeapons = [...ranged.slice(2), ...melee.slice(1)];
+    const statusLines = equipmentStatusLines(equipment, helmetTemplates, gasMaskTemplates);
+    const filterStatus = item => {
+        const filter = equipmentModule(item, 'filter');
+        return filter ? `Фильтр ${filter.durability ?? filter.attributes?.durability ?? 0}/${filter.maxDurability ?? filter.attributes?.max_durability ?? '?'}` : '';
+    };
+    const exoskeletonBattery = equipmentModule(equipment.armor, 'exoskeleton_battery');
+    container.insertAdjacentHTML('afterbegin', `<section class="equipment-loadout" aria-label="Экипировка персонажа">
+        <div class="loadout-heading"><div><span class="loadout-eyebrow">Снаряжение</span><h4>Экипировка персонажа</h4></div><span class="loadout-hint">Наведите для характеристик · нажмите для действий</span></div>
+        <div class="loadout-main">
+            <div class="loadout-column">
+                ${slot('Шлем', equipment.helmet?.templateId ? equipment.helmet : null, 'helmet', 'Ш', 'helmet', null,
+                    equipment.helmet?.integratedWithArmor ? 'Встроен в броню' : filterStatus(equipment.helmet))}
+                ${slot('Противогаз', equipment.gasMask?.templateId ? equipment.gasMask : null, 'gasMask', 'Г', 'gasMask', null, filterStatus(equipment.gasMask))}
+                ${slot('Броня', equipment.armor?.templateId ? equipment.armor : null, 'armor', 'Б', 'armor', null,
+                    exoskeletonBattery ? `${Number(exoskeletonBattery.attributes?.remaining_days) || 0} сут. заряда` : '')}
+                ${slot('Детектор', equipment.detector?.templateId ? equipment.detector : null, 'detector', 'Д', 'detector', null,
+                    equipmentModule(equipment.detector, 'battery') ? `${equipmentModule(equipment.detector, 'battery').attributes?.power ?? '?'}% заряда` : '')}
+                ${slot('Пояс', equipment.belt?.templateId || equipment.belt?.model ? equipment.belt : null, 'inventory', 'П')}
+            </div>
+            ${renderEquipmentFigure(equipment, armorTemplates, helmetTemplates)}
+            <div class="loadout-column">
+                ${weaponSlot('Оружие I', ranged[0], 'I', 'weapons')}
+                ${weaponSlot('Оружие II', ranged[1], 'II', 'weapons')}
+                ${weaponSlot('Ближний бой', melee[0], 'ББ', 'weapon--1')}
+                ${slot('Разгрузка', equipment.vest?.templateId || equipment.vest?.model ? equipment.vest : null, 'inventory', 'Р')}
+                ${slot('Рюкзак', equipment.backpack?.templateId ? equipment.backpack : null, 'inventory', 'РК')}
+            </div>
+        </div>
+        ${extraWeapons.length ? `<div class="loadout-extra"><span>Дополнительное оружие</span>${extraWeapons.map(entry => weaponSlot('Оружие', entry, 'О', 'weapons')).join('')}</div>` : ''}
+        <div class="loadout-cosmetics"><span class="loadout-section-label">Косметика</span><div class="loadout-cosmetics-grid">${cosmetics.map(([label, key, code]) => slot(label, equipment[key]?.templateId ? equipment[key] : null, 'cosmetic', code)).join('')}</div></div>
+        ${statusLines.length ? `<div class="loadout-resources">${statusLines.map(line => `<span>${escapeHtml(line)}</span>`).join('')}</div>` : ''}
+    </section>`);
+
+    const panelLabels = {
+        weapons: 'Оружие и действия', helmet: 'Шлем', gasMask: 'Противогаз',
+        armor: 'Броня', detector: 'Детектор', cosmetic: 'Косметика', pda: 'Модификации КПК',
+    };
+    groups.forEach(group => {
+        const key = group.dataset.equipmentGroup;
+        const details = document.createElement('details');
+        details.className = 'equipment-detail';
+        details.dataset.equipmentPanel = key;
+        details.open = equipmentOpenPanels.has(key) || (key === 'weapons' && weapons.some(weapon => !weapon?.templateId && !weapon?.model));
+        const summary = document.createElement('summary');
+        summary.textContent = panelLabels[key];
+        group.before(details);
+        details.append(summary, group);
+    });
+    container.querySelectorAll('#weapons-container > [data-weapon-index]').forEach(card => {
+        const key = `weapon-${card.dataset.weaponIndex}`;
+        const details = document.createElement('details');
+        details.className = 'loadout-weapon-details';
+        details.dataset.equipmentPanel = key;
+        const index = Number(card.dataset.weaponIndex);
+        const weapon = index >= 0 ? weapons[index] : null;
+        details.open = equipmentOpenPanels.has(key) || (index >= 0 && !weapon?.templateId && !weapon?.model);
+        const summary = document.createElement('summary');
+        summary.textContent = weapon
+            ? `${weapon.name || 'Оружие'}${melee.some(entry => entry.index === index) ? '' : ` · ${getWeaponAmmoCount(weapon)} патр.`}`
+            : 'Кулаки';
+        card.before(details);
+        details.append(summary, card);
+    });
+    container.querySelectorAll('[data-equipment-open]').forEach(button => {
+        button.addEventListener('click', () => {
+            const key = button.dataset.equipmentOpen;
+            if (key === 'inventory') {
+                switchSheetTab('inventory');
+                document.getElementById('sheet-tab-inventory')?.scrollTo({ top: 0, behavior: 'smooth' });
+                return;
+            }
+            const weaponPanel = key.startsWith('weapon-')
+                ? container.querySelector(`[data-equipment-panel="${key}"]`) : null;
+            const panel = container.querySelector(`[data-equipment-panel="${weaponPanel ? 'weapons' : key}"]`);
+            if (!panel) return;
+            panel.open = true;
+            if (weaponPanel) weaponPanel.open = true;
+            (weaponPanel || panel).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+    });
 }
 
 /**
@@ -4265,6 +4797,9 @@ function getWeaponAmmoCount(weapon) {
             (sum, stack) => sum + (Number(stack.quantity) || 0),
             0
         );
+    }
+    if (Array.isArray(weapon.fixedAmmo) && weapon.fixedAmmo.length) {
+        return weapon.fixedAmmo.reduce((sum, stack) => sum + (Number(stack.quantity) || 0), 0);
     }
     return Math.max(0, Number(weapon.ammo) || 0);
 }
@@ -4670,7 +5205,7 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
     const strengthBonus = Math.floor((strengthValue - 10) / 2);
     const fistDamage = Math.max(10, 10 * strengthBonus);
     weaponsHtml.push(`
-        <div style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
+        <div data-weapon-index="-1" style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
             <div style="font-weight:bold; margin-bottom:5px;">Кулаки</div>
             <div style="display:grid; grid-template-columns:repeat(4, minmax(90px, 1fr)); gap:8px; margin-bottom:10px; background:rgba(0,0,0,0.1); padding:8px; border-radius:4px;">
                 <div><strong>Урон:</strong> ${fistDamage}</div>
@@ -4943,28 +5478,30 @@ async function renderWeapons(weapons, weaponTemplates, moduleTemplates, weaponMo
         });
 
         weaponsHtml.push(`
-            <div ${weapon.templateId ? `data-item-template-id="${weapon.templateId}"` : ''} style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
+            <div data-weapon-index="${index}" ${weapon.templateId ? `data-item-template-id="${weapon.templateId}"` : ''} style="border:1px solid var(--panel-border); padding:10px; margin-bottom:10px;">
                 ${renderCreatedByPlayerBadge(weapon)}
                 ${modelBlock}
-                ${fieldsHtml}
-                ${slotsHtml}
-                ${magazineHtml}
                 ${jamHtml}
-                <div style="margin-top:10px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+                <div class="loadout-weapon-actions">
                     ${attackButtonsHtml}
                     ${grenadeLauncherHtml}
-                    ${weapon.naturalWeapon ? '' : `<button type="button" class="btn btn-sm btn-danger" onclick="unequipWeapon(${index})" style="margin-left: auto;">Снять</button>`}
                 </div>
-                ${!isMelee ? `
-                <div style="margin-top:10px;">
-                    <div style="display: flex; align-items: center;">
-                        <label style="margin: 0;">Модификации</label>
-                        <button type="button" class="btn btn-sm" onclick="addWeaponModification(${index})" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                ${magazineHtml}
+                <details class="loadout-weapon-stats" data-equipment-panel="weapon-stats-${index}" ${equipmentOpenPanels.has(`weapon-stats-${index}`) ? 'open' : ''}>
+                    <summary>Характеристики и модули</summary>
+                    ${fieldsHtml}
+                    ${slotsHtml}
+                    ${!isMelee ? `
+                    <div style="margin-top:10px;">
+                        <div style="display: flex; align-items: center;">
+                            <label style="margin: 0;">Модификации</label>
+                            <button type="button" class="btn btn-sm" onclick="addWeaponModification(${index})" title="Добавить модификацию" style="padding: 2px 8px;">➕</button>
+                        </div>
+                        <div id="modifications-${index}">${modificationsHtml}</div>
                     </div>
-                    <div id="modifications-${index}">${modificationsHtml}</div>
-                </div>
-                ` : ''}
-                ${weapon.naturalWeapon ? '' : `<button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})" style="margin-top:10px;">Удалить оружие</button>`}
+                    ` : ''}
+                </details>
+                ${weapon.naturalWeapon ? '' : `<div class="loadout-weapon-management"><button type="button" class="btn btn-sm btn-danger" onclick="unequipWeapon(${index})">Снять</button><button type="button" class="btn btn-sm btn-danger" onclick="removeWeapon(${index})">Удалить оружие</button></div>`}
             </div>
         `);
     }
@@ -5294,123 +5831,62 @@ window.equipMagazineToWeapon = async function(weaponIndex) {
     modal.style.display = 'flex';
 };
 
-async function confirmEquipMagazineDirect(weaponIndex, selected, options = {}) {
-    const weapon = currentCharacterData.weapons[weaponIndex];
-    if (!weapon) return;
-
-    // Проверка совместимости по списку оружий
-    const compatible = getMagazineCompatibleWeaponIds(selected.item);
-    if (compatible.length > 0) {
-        const weaponTemplateId = Number(weapon.templateId);
-        if (!compatible.includes(weaponTemplateId)) {
-            showNotification('Этот магазин не подходит к данному оружию');
-            return;
-        }
-    }
-
-    const combatState = window.locationCombatState;
-    if (combatState?.status === 'active' && !options.skipCombatPayment) {
-        const actor = combatState.current_character;
-        if (actor?.character_id !== currentCharacterId) {
-            showNotification('Сменить магазин можно только в свой ход', 'system');
-            return;
-        }
-        try {
+async function confirmEquipMagazineDirect(weaponIndex, selected) {
+    if (medicalOperationInProgress) return;
+    const characterId = currentCharacterId;
+    const weapon = currentCharacterData?.weapons?.[weaponIndex];
+    if (!weapon || !selected?.item) return;
+    const identity = item => Object.fromEntries(['id', 'templateId', 'name'].filter(key => item[key] !== undefined).map(key => [key, item[key]]));
+    const selection = JSON.parse(JSON.stringify({ magazine: identity(selected.item), weapon: identity(weapon) }));
+    let locked = false;
+    const sheet = document.getElementById('character-sheet-modal');
+    const wasInert = sheet?.inert || false;
+    try {
+        if (autoSaveTimer) await forceSyncCharacter();
+        await Server.waitForCharacterSave(characterId);
+        if (currentCharacterId !== characterId || medicalOperationInProgress) return;
+        if (sheetSaveBlocked) throw new Error('Переоткройте лист перед перезарядкой');
+        medicalOperationInProgress = locked = true;
+        medicalRemoteUpdate = null;
+        if (sheet) sheet.inert = true;
+        const payload = {
+            weapon_index: weaponIndex, item_path: selected.path,
+            magazine_template_id: selected.item.templateId, magazine_selection: selection,
+        };
+        const state = window.locationCombatState;
+        if (state?.status === 'active') {
+            const actor = state.current_character;
+            if (actor?.character_id !== characterId) throw new Error('Сменить магазин можно только в свой ход');
             const access = await calculateInventoryAccess(selected.item, selected.path);
-            const pendingActionId = `reload-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            const payload = {
-                location_character_id: actor.location_character_id,
-                action_key: 'reload_weapon',
-                weapon_index: weaponIndex,
-                magazine_template_id: selected.item.templateId,
+            const result = await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
+                ...payload, location_character_id: actor.location_character_id, action_key: 'reload_weapon',
                 inventory_retrieval_action_points: access.retrievalActionPoints,
                 inventory_use_action_discount: access.useActionDiscount,
-                pending_action_id: pendingActionId,
-            };
-            const result = await Server.performLocationCombatAction(
-                window.currentLobbyId,
-                window.currentLocationId,
-                payload,
-            );
-            if (result?.pending_action) {
-                pendingReloadActions.set(result.pending_action_id, {
-                    characterId: currentCharacterId,
-                    weaponIndex,
-                    itemId: selected.item.id,
-                    itemPath: selected.path,
-                    payload,
-                });
-                showNotification(
-                    'Перезарядка начата. Магазин будет установлен после полной оплаты ОД.',
-                    'system',
-                );
-                return;
+                pending_action_id: `reload-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            });
+            // Installation is entirely server-side, including after a future turn's payment.
+            const fresh = await Server.getCharacter(characterId);
+            currentCharacterData = fresh.data;
+            showNotification(result?.pending_action ? 'Перезарядка начата. Магазин будет установлен после полной оплаты ОД.' : 'Магазин установлен', 'system');
+        } else {
+            const result = await Server.installWeaponMagazine(characterId, { ...payload, character_revision: currentCharacterData._revision });
+            currentCharacterData = result.data;
+            showNotification('Магазин установлен', 'success');
+        }
+    } catch (error) {
+        showNotification(error.message || 'Не удалось сменить магазин', 'system');
+    } finally {
+        if (locked) {
+            if (medicalRemoteUpdate?.character_id === Number(characterId)
+                && Number(medicalRemoteUpdate.data?._revision) > Number(currentCharacterData?._revision)) {
+                currentCharacterData = medicalRemoteUpdate.data;
             }
-        } catch (error) {
-            showNotification(error.message || 'Не удалось сменить магазин', 'system');
-            return;
+            medicalRemoteUpdate = null;
+            medicalOperationInProgress = false;
+            if (sheet) sheet.inert = wasInert;
+            await refreshSavedSheet(characterId);
         }
     }
-
-    const oldMag = weapon.installedMagazine;
-
-    // Удаляем новый магазин из инвентаря
-    if (!removeItemByPath(selected.path)) {
-        showNotification('Не удалось найти магазин в инвентаре');
-        return;
-    }
-
-    // Если был старый магазин, возвращаем его на место нового
-    if (oldMag) {
-        const oldItem = {
-            id: oldMag.id,
-            templateId: oldMag.templateId,
-            name: oldMag.name,
-            category: 'magazine',
-            weight: 0,
-            volume: 0.2,
-            quantity: 1,
-            ammo: oldMag.ammo ? oldMag.ammo.map(a => ({ ...a })) : [],
-            emptyWeight: oldMag.emptyWeight || 0,
-            loadedWeight: oldMag.loadedWeight || 0,
-            attributes: {
-                caliber: getItemCaliber(oldMag),
-                capacity: oldMag.capacity,
-                emptyWeight: oldMag.emptyWeight,
-                loadedWeight: oldMag.loadedWeight,
-                ergonomics: oldMag.ergonomics || 0,
-                reload_time_od: oldMag.reloadTimeActionPoints || 0
-            }
-        };
-        Object.defineProperty(oldItem, 'currentAmmo', {
-            get() { return this.ammo.reduce((sum, a) => sum + a.quantity, 0); },
-            enumerable: true
-        });
-        updateMagazineWeight(oldItem);
-        restoreItemToPath(oldItem, selected.path);
-    }
-
-    // Устанавливаем новый магазин
-    weapon.installedMagazine = {
-        id: selected.item.id,
-        templateId: selected.item.templateId,
-        name: selected.item.name,
-        caliber: getItemCaliber(selected.item),
-        capacity: selected.item.attributes?.capacity || 30,
-        emptyWeight: selected.item.emptyWeight || 0,
-        loadedWeight: selected.item.loadedWeight || 0,
-        ergonomics: selected.item.attributes?.ergonomics || 0,
-        reloadTimeActionPoints: selected.item.attributes?.reload_time_od || 0,
-        ammo: selected.item.ammo ? selected.item.ammo.map(a => ({ ...a })) : [],
-        sourcePath: selected.path
-    };
-    weapon.ammo = weapon.installedMagazine.ammo.reduce((sum, a) => sum + a.quantity, 0);
-
-    renderEquipmentTab(currentCharacterData);
-    renderInventoryTab(currentCharacterData);
-    scheduleAutoSave();
-    forceSyncCharacter();
-    showNotification('Магазин установлен', 'success');
 }
 
 window.reloadInstalledMagazine = async function(weaponIndex) {
@@ -5648,7 +6124,7 @@ window.reloadFixedMagazine = async function(weaponIndex) {
 
     const fullReloadButton = modal.querySelector('#reload-fixed-full-btn');
     if (fullReloadButton) {
-        fullReloadButton.onclick = () => {
+        fullReloadButton.onclick = async () => {
             const selectedLoaderIdx = loaderSelect.value;
             const selectedAmmoIdx = ammoSelect.value;
             const selected = selectedLoaderIdx !== '' && loaderItems.length > 0
@@ -5663,22 +6139,11 @@ window.reloadFixedMagazine = async function(weaponIndex) {
                 showNotification(`Нет патронов калибра ${caliber}`);
                 return;
             }
-            const fixedMagazine = { ammo: Array.isArray(weapon.fixedAmmo) ? weapon.fixedAmmo : [] };
-            transferAmmoFromSource(fixedMagazine, selected.item, amount);
-            weapon.fixedAmmo = fixedMagazine.ammo;
-            weapon.ammo = currentAmmo + amount;
-            if (ammoLoadingKind(selected.item) === 'loose') {
-                if (selected.item.quantity <= 0) removeItemByPath(selected.path);
-                else updateAmmoWeight(selected.item);
-            } else {
-                updateMagazineWeight(selected.item);
-            }
-            modal.remove();
-            renderEquipmentTab(currentCharacterData);
-            renderInventoryTab(currentCharacterData);
-            scheduleAutoSave();
-            forceSyncCharacter();
-            showNotification(`Магазин заполнен: добавлено ${amount} патронов`, 'success');
+            const result = await submitAmmunitionLoading({
+                weapon_index: weaponIndex, source_path: selected.path, full: true,
+                selection: { weapon, source_path: selected.item },
+            });
+            if (result) modal.remove();
         };
     }
 
@@ -5724,138 +6189,18 @@ window.reloadFixedMagazine = async function(weaponIndex) {
             paymentGroups.push(await inventoryItemPreparationPayments(selected.item, selected.path, 'ammo'));
         }
         paymentGroups.push(plan.payments);
-        let payment;
-        try {
-            payment = await chooseAndSpendDeferredCombatPayment(
-                'Оплата перезарядки',
-                paymentGroups,
-                `Зарядка: ${weapon.name || weaponTemplate.name || 'оружие'}`,
-            );
-            if (!payment) return;
-        } catch (error) {
-            showNotification(error.message || 'Не хватает ОД или СД', 'system');
-            return;
-        }
-
-        const completeLoading = async () => {
-            const liveWeapon = currentCharacterData?.weapons?.[weaponIndex];
-            const sourceEntry = resolveInventoryEntry(selected.item.id, selected.path);
-            if (!liveWeapon || !sourceEntry?.item) {
-                showNotification('Зарядка оплачена, но оружие или патроны больше не найдены', 'system');
-                return;
-            }
-            const liveSource = sourceEntry.item;
-            const liveMagazine = { ammo: Array.isArray(liveWeapon.fixedAmmo) ? liveWeapon.fixedAmmo : [] };
-            const availableSpace = Math.max(0, maxAmmo - getMagazineAmmoCount(liveMagazine));
-            const quantity = Math.min(plan.quantity, ammoSourceCount(liveSource), availableSpace);
-            if (quantity <= 0) {
-                showNotification('Зарядка оплачена, но заряжать уже нечего', 'system');
-                return;
-            }
-            transferAmmoFromSource(liveMagazine, liveSource, quantity);
-            liveWeapon.fixedAmmo = liveMagazine.ammo;
-            liveWeapon.ammo = getMagazineAmmoCount(liveMagazine);
-            if (ammoLoadingKind(liveSource) === 'loose') {
-                if (liveSource.quantity <= 0) removeItemByPath(sourceEntry.path);
-                else updateAmmoWeight(liveSource);
-            }
-            currentCharacterData.combatMagazineLoading = {
-                targetType: 'fixed',
-                weaponIndex,
-                sourceId: sourceKey,
-            };
-            if (liveWeapon.ammo >= maxAmmo || ammoSourceCount(liveSource) <= 0) {
-                delete currentCharacterData.combatMagazineLoading;
-            }
-            modal.remove();
-            renderEquipmentTab(currentCharacterData);
-            renderInventoryTab(currentCharacterData);
-            scheduleAutoSave();
-            forceSyncCharacter();
-            showNotification(`Заряжено ${quantity} патронов (${liveSource.name})`, 'success');
-        };
-        if (payment.deferred) {
-            pendingMagazineLoadingActions.set(payment.pendingActionId, {
-                characterId: currentCharacterId,
-                complete: completeLoading,
-            });
-            modal.remove();
-            showNotification('Зарядка начата. Остаток ОД спишется в следующих ходах.', 'system');
-            return;
-        }
-        await completeLoading();
+        const result = await submitAmmunitionLoading({
+            weapon_index: weaponIndex, source_path: selected.path, quantity: plan.quantity,
+            selection: { weapon, source_path: selected.item },
+        }, paymentGroups);
+        if (result) modal.remove();
     };
 
     modal.style.display = 'flex';
 };
 
-window.confirmFixedReload = async function(weaponIndex) {
-    const modal = document.getElementById('fixed-reload-modal');
-    const weapon = currentCharacterData.weapons[weaponIndex];
-    if (!weapon) return;
-
-    // Получаем шаблон оружия для максимальной ёмкости
-    const weaponTemplates = await loadTemplatesForLobby('weapon');
-    const weaponTemplate = weaponTemplates.find(t => t.id == weapon.templateId);
-    const maxAmmo = weaponTemplate?.attributes?.magazine_size || 0;
-    const currentAmmo = weapon.ammo || 0;
-    const needed = maxAmmo - currentAmmo;
-    if (needed <= 0) {
-        showNotification('Магазин уже полон');
-        modal.style.display = 'none';
-        return;
-    }
-
-    const loaderSelect = document.getElementById('loader-select');
-    const ammoSelect = document.getElementById('fixed-ammo-select');
-    const selectedLoaderIdx = loaderSelect.value;
-    const selectedAmmoIdx = ammoSelect.value;
-
-    // Приоритет: спидлоадер
-    if (selectedLoaderIdx !== '' && modal._loaderList && modal._loaderList.length > 0) {
-        const selected = modal._loaderList[selectedLoaderIdx];
-        const loader = selected.item;
-        const roundsInLoader = loader.currentAmmo || 0;
-        const toTake = Math.min(needed, roundsInLoader);
-
-        weapon.ammo = currentAmmo + toTake;
-        loader.currentAmmo = roundsInLoader - toTake;
-        updateMagazineWeight(loader);
-
-        modal.style.display = 'none';
-        renderEquipmentTab(currentCharacterData);
-        renderInventoryTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification(`Заряжено ${toTake} патронов из спидлоадера`, 'success');
-        return;
-    }
-
-    // Иначе патроны
-    if (selectedAmmoIdx !== '' && modal._ammoList && modal._ammoList.length > 0) {
-        const selected = modal._ammoList[selectedAmmoIdx];
-        const ammoItem = selected.item;
-        const available = ammoItem.quantity || 1;
-        const toTake = Math.min(needed, available);
-
-        weapon.ammo = currentAmmo + toTake;
-        ammoItem.quantity -= toTake;
-        if (ammoItem.quantity <= 0) {
-            removeItemByPath(selected.path);
-        } else {
-            updateAmmoWeight(ammoItem);
-        }
-
-        modal.style.display = 'none';
-        renderEquipmentTab(currentCharacterData);
-        renderInventoryTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification(`Заряжено ${toTake} патронов (${ammoItem.name})`, 'success');
-        return;
-    }
-
-    showNotification('Выберите спидлоадер или патроны');
+window.confirmFixedReload = async function() {
+    return document.querySelector('#confirm-fixed-reload-btn')?.onclick?.();
 };
 
 function updateArmorContainerSlots(newSlotCount) {
@@ -6027,45 +6372,7 @@ window.changeMagazineAmmo = async function(pathStr, delta) {
     else targetArray = currentCharacterData.inventory.backpack;
 
     if (delta > 0) {
-        // +1: взять один патрон из инвентаря
-        if (totalAmmo >= cap) { showNotification('Магазин полон'); return; }
-        const caliber = getItemCaliber(mag);
-        if (!caliber) { showNotification('Неизвестный калибр'); return; }
-
-        // Ищем патроны
-        const ammoItems = [];
-        const collectAmmo = (items, path) => {
-            if (!Array.isArray(items)) return;
-            items.forEach((item, idx) => {
-                if (['ammo', 'grenade'].includes(item.category) && getItemCaliber(item) === caliber && item.quantity > 0) {
-                    ammoItems.push({ item, path: path.concat(idx) });
-                }
-                if (item.contents) collectAmmo(item.contents, path.concat(idx, 'contents'));
-            });
-        };
-        collectAmmo(currentCharacterData.inventory?.backpack, ['inventory', 'backpack']);
-        collectAmmo(currentCharacterData.inventory?.pockets, ['inventory', 'pockets']);
-        const beltPouches = currentCharacterData.equipment?.belt?.pouches || [];
-        beltPouches.forEach((pouch, i) => collectAmmo(pouch.contents, ['equipment', 'belt', 'pouches', i, 'contents']));
-        const vestPouches = currentCharacterData.equipment?.vest?.pouches || [];
-        vestPouches.forEach((pouch, i) => collectAmmo(pouch.contents, ['equipment', 'vest', 'pouches', i, 'contents']));
-
-        if (ammoItems.length === 0) { showNotification(`Нет патронов ${caliber}`); return; }
-
-        const selected = ammoItems[0];
-        const ammoItem = selected.item;
-        try {
-            await spendInventoryAccessForCombat(ammoItem, selected.path, 0);
-        } catch (error) {
-            showNotification(error.message || 'Не хватает ОД, чтобы достать патрон', 'system');
-            return;
-        }
-        ammoItem.quantity -= 1;
-        if (ammoItem.quantity <= 0) removeItemByPath(selected.path);
-        else updateAmmoWeight(ammoItem);
-
-        addAmmoToMagazine(mag, ammoItem, 1);
-        showNotification(`+1 патрон (${ammoItem.name})`, 'success', 'bottom-left');
+        return window.reloadMagazineFromInventory(pathStr);
     } else if (delta < 0) {
         // -1: извлечь один патрон из магазина
         if (totalAmmo <= 0) { showNotification('Магазин пуст'); return; }
@@ -6246,7 +6553,7 @@ window.reloadMagazineFromInventory = async function(pathStr) {
     const fullReloadButton = modal.querySelector('#reload-inventory-full-btn');
     if (fullReloadButton) {
         fullReloadButton.style.display = window.locationCombatState?.status === 'active' ? 'none' : '';
-        fullReloadButton.onclick = () => {
+        fullReloadButton.onclick = async () => {
             const selected = modal._ammoList[select.value];
             const targetPath = modal._magPath.split(',').map(p => isNaN(p) ? p : parseInt(p));
             const target = getItemByPath(targetPath);
@@ -6259,22 +6566,11 @@ window.reloadMagazineFromInventory = async function(pathStr) {
                 showNotification('Магазин уже полон или источник пуст');
                 return;
             }
-            transferAmmoFromSource(target, selected.item, amount);
-            if (!getItemCaliber(target)) {
-                target.attributes = target.attributes || {};
-                target.attributes.caliber = getItemCaliber(selected.item);
-            }
-            if (ammoLoadingKind(selected.item) === 'loose') {
-                if (selected.item.quantity <= 0) removeItemByPath(selected.path);
-                else updateAmmoWeight(selected.item);
-            } else {
-                updateMagazineWeight(selected.item);
-            }
-            modal.style.display = 'none';
-            renderInventoryTab(currentCharacterData);
-            scheduleAutoSave();
-            forceSyncCharacter();
-            showNotification(`Магазин заполнен: добавлено ${amount} патронов`, 'success');
+            const result = await submitAmmunitionLoading({
+                target_path: targetPath, source_path: selected.path, full: true,
+                selection: { target_path: target, source_path: selected.item },
+            });
+            if (result) modal.style.display = 'none';
         };
     }
     modal.style.display = 'flex';
@@ -6339,69 +6635,12 @@ window.confirmReloadMagazine = async function(pathStr) {
         paymentGroups.push(await inventoryItemPreparationPayments(feederTool.item, feederTool.path, 'ammo'));
     }
     paymentGroups.push(plan.payments);
-    let payment;
-    try {
-        payment = await chooseAndSpendDeferredCombatPayment(
-            'Оплата зарядки магазина',
-            paymentGroups,
-            `Зарядка магазина: ${mag.name || 'магазин'}`,
-        );
-        if (!payment) return;
-    } catch (error) {
-        showNotification(error.message || 'Не хватает ОД или СД');
-        return;
-    }
-    const completeLoading = async () => {
-        const targetEntry = resolveInventoryEntry(mag.id, targetPath);
-        const sourceEntry = resolveInventoryEntry(ammoItem.id, selected.path);
-        if (!targetEntry?.item || !sourceEntry?.item) {
-            showNotification('Зарядка оплачена, но магазин или патроны больше не найдены', 'system');
-            return;
-        }
-        const liveMagazine = targetEntry.item;
-        const liveSource = sourceEntry.item;
-        const availableSpace = Math.max(0, cap - getMagazineAmmoCount(liveMagazine));
-        const quantity = Math.min(plan.quantity, ammoSourceCount(liveSource), availableSpace);
-        if (quantity <= 0) {
-            showNotification('Зарядка оплачена, но заряжать уже нечего', 'system');
-            return;
-        }
-        if (!sameMagazine) await stowActiveWeaponForLoading();
-        transferAmmoFromSource(liveMagazine, liveSource, quantity);
-        if (!getItemCaliber(liveMagazine)) {
-            liveMagazine.attributes = liveMagazine.attributes || {};
-            liveMagazine.attributes.caliber = getItemCaliber(liveSource);
-        }
-        if (ammoLoadingKind(liveSource) === 'loose') {
-            if (liveSource.quantity <= 0) removeItemByPath(sourceEntry.path);
-            else updateAmmoWeight(liveSource);
-        }
-        updateMagazineWeight(liveMagazine);
-        currentCharacterData.combatMagazineLoading = {
-            targetType: 'inventory',
-            targetId: targetKey,
-            sourceId: sourceKey,
-            feederId: feederKey,
-        };
-        if (getMagazineAmmoCount(liveMagazine) >= cap || ammoSourceCount(liveSource) <= 0) {
-            delete currentCharacterData.combatMagazineLoading;
-        }
-        modal.style.display = 'none';
-        renderInventoryTab(currentCharacterData);
-        scheduleAutoSave();
-        forceSyncCharacter();
-        showNotification(`Заряжено ${quantity} патронов (${liveSource.name})`, 'success');
-    };
-    if (payment.deferred) {
-        pendingMagazineLoadingActions.set(payment.pendingActionId, {
-            characterId: currentCharacterId,
-            complete: completeLoading,
-        });
-        modal.style.display = 'none';
-        showNotification('Зарядка начата. Остаток ОД спишется в следующих ходах.', 'system');
-        return;
-    }
-    await completeLoading();
+    const result = await submitAmmunitionLoading({
+        target_path: targetPath, source_path: selected.path, quantity: plan.quantity,
+        ...(feederTool ? { feeder_path: feederTool.path } : {}),
+        selection: { target_path: mag, source_path: selected.item, ...(feederTool ? { feeder_path: feederTool.item } : {}) },
+    }, paymentGroups);
+    if (result) modal.style.display = 'none';
 };
 
 async function returnAmmoStacksToInventory(ammoStacks, targetArray) {
@@ -6518,28 +6757,6 @@ function formatAmmoStackLabel(ammoItem) {
     return variant ? `${ammoItem.name} (${getAmmoVariantLabel(variant)})` : ammoItem.name;
 }
 
-function addAmmoToMagazine(mag, ammoItem, count) {
-    if (!mag.ammo) mag.ammo = [];
-    const ammoVariant = normalizeAmmoVariant(ammoItem?.attributes?.ammo_variant || ammoItem?.ammo_variant || ammoItem?.attributes?.ammo_kind || ammoItem?.attributes?.special_version || ammoItem?.attributes?.effect);
-    const ammoKey = getAmmoStackKey(ammoItem);
-    const existing = mag.ammo.find(a => getAmmoStackKey(a) === ammoKey);
-    if (existing) {
-        existing.quantity += count;
-    } else {
-        mag.ammo.push({
-            templateId: ammoItem.templateId,
-            name: ammoItem.name,
-            category: ammoItem.category,
-            quantity: count,
-            ammo_variant: ammoVariant || null,
-            attributes: { ...(ammoItem.attributes || {}) },
-            damage: ammoItem.damage ?? ammoItem.attributes?.damage ?? null,
-            penetration: ammoItem.penetration ?? ammoItem.attributes?.penetration ?? null,
-            range: ammoItem.attributes?.range ?? null,
-        });
-    }
-    updateMagazineWeight(mag);
-};
 
 window.openVisorModificationsModal = async function(itemPathStr, slotType) {
     const targetPath = JSON.parse(itemPathStr);
@@ -6962,6 +7179,61 @@ async function runEquipmentAction(operation, slot, itemPath = null) {
             : `Экипировка ${verb}`,
         'success',
     );
+    return result;
+}
+
+async function runEquipmentModuleAction(operation, targetPath, slotType, itemPath = null) {
+    await Server.waitForCharacterSave(currentCharacterId);
+    const target = getItemByPath(targetPath);
+    const source = itemPath ? getItemByPath(itemPath) : null;
+    const identity = item => item ? Object.fromEntries(
+        ['id', 'templateId', 'name', 'category']
+            .filter(key => item[key] !== undefined)
+            .map(key => [key, item[key]])
+    ) : null;
+    const selection = { target: identity(target), source: identity(source) };
+    const combatState = window.locationCombatState;
+    let result;
+    if (combatState?.status === 'active') {
+        const actor = combatState.current_character;
+        if (!actor || Number(actor.character_id) !== Number(currentCharacterId)) {
+            throw new Error('Сейчас не ход этого персонажа');
+        }
+        const pendingActionId = `equipment-module-${actor.location_character_id}-${Date.now()}`;
+        const payload = {
+            location_character_id: actor.location_character_id,
+            action_key: 'change_equipment_module',
+            module_operation: operation,
+            module_slot_type: slotType,
+            module_target_path: targetPath,
+            module_selection: selection,
+            item_path: itemPath,
+            pending_action_id: pendingActionId,
+        };
+        result = await Server.performLocationCombatAction(
+            window.currentLobbyId,
+            window.currentLocationId,
+            payload,
+        );
+        if (result?.pending_action) {
+            const sceneModule = await import('./locationScene.js');
+            sceneModule.registerDeferredCombatAction(result.pending_action_id, payload);
+            showNotification('Установка фильтра начата и продолжится в следующем ходу', 'system');
+            return result;
+        }
+        await refreshCharacterAfterEquipmentAction();
+    } else {
+        result = await Server.changeCharacterEquipmentModule(currentCharacterId, {
+            operation,
+            slot_type: slotType,
+            target_path: targetPath,
+            module_selection: selection,
+            item_path: itemPath,
+            character_revision: currentCharacterData._revision,
+        });
+        await refreshCharacterAfterEquipmentAction(result.data);
+    }
+    showNotification(operation === 'install' ? 'Фильтр установлен' : 'Фильтр снят', 'success');
     return result;
 }
 
@@ -8816,6 +9088,9 @@ window.reloadGrenadeLauncher = async function(weaponIndex) {
 // Использование предмета из инвентаря (для расходников, гранат и т.д.)
 async function useItem(item, itemPath, options = {}) {
     if (item.category === 'consumable') {
+        if (!options.consumableSideEffects) {
+            return useCharacterInventoryItem(currentCharacterId, itemPath, options);
+        }
         return await useConsumable(item, itemPath, options);
     } else if (item.category === 'grenade') {
         return await useGrenade(item, itemPath, options);
@@ -9183,7 +9458,8 @@ async function calculateInventoryAccess(item, itemPath) {
         const pouch = getInventoryValueByPath(currentCharacterData, path.slice(0, 4));
         if (isItemCompatibleWithPouch(item, pouch)) {
             baseActionPoints = 1;
-            const tactics = Number(currentCharacterData?.skills?.other?.tactics?.base) || 0;
+            const tactics = (Number(currentCharacterData?.skills?.other?.tactics?.base) || 0)
+                + (Number(currentCharacterData?.skills?.other?.tactics?.bonus) || 0);
             quickAccessDiscount = tactics >= 15 ? 2 : 1;
             source = 'compatible_pouch';
         } else {
@@ -9214,7 +9490,7 @@ async function calculateInventoryAccess(item, itemPath) {
     };
 }
 
-async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints = 0, pendingActionId = null) {
+async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints = 0, pendingActionId = null, consumableSelection = null) {
     const combatState = window.locationCombatState;
     if (!combatState || combatState.status !== 'active') {
         return { totalActionPoints: 0, access: null };
@@ -9237,6 +9513,7 @@ async function spendInventoryAccessForCombat(item, itemPath, baseUseActionPoints
         allow_deferred: true,
         pending_action_id: resolvedPendingActionId,
         pending_action_label: `Использование: ${item?.name || 'предмет'}`,
+        consumable_selection: consumableSelection,
     });
     return { totalActionPoints, useActionPoints, access, payment, pendingActionId: resolvedPendingActionId };
 }
@@ -9286,10 +9563,10 @@ async function chooseAndSpendCombatPayment(title, groups) {
     return true;
 }
 
-async function chooseAndSpendDeferredCombatPayment(title, groups, pendingLabel) {
+async function chooseAmmunitionPayment(title, groups) {
     const combatState = window.locationCombatState;
     if (!combatState || combatState.status !== 'active') {
-        return { deferred: false, pendingActionId: null };
+        return { actionPoints: 0, freeActions: 0 };
     }
     const actor = combatState.current_character;
     if (!actor || actor.character_id !== currentCharacterId) {
@@ -9314,37 +9591,62 @@ async function chooseAndSpendDeferredCombatPayment(title, groups, pendingLabel) 
         });
     if (!choices.length) throw new Error('Не хватает СД');
 
-    const selected = await chooseConsumableApplication(title, choices);
-    if (!selected) return null;
-    const pendingActionId = `magazine-loading-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const payment = await Server.spendLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
-        location_character_id: actor.location_character_id,
-        action_points: selected.actionPoints,
-        free_actions: selected.freeActions,
-        allow_deferred: true,
-        pending_action_id: pendingActionId,
-        pending_action_label: pendingLabel,
-    });
-    return {
-        deferred: payment?.payment_complete === false,
-        pendingActionId,
-    };
+    return chooseConsumableApplication(title, choices);
 }
 
-async function stowActiveWeaponForLoading() {
-    const combatState = window.locationCombatState;
-    if (combatState?.status === 'active') {
-        const actor = combatState.current_character;
-        if (!actor || actor.character_id !== currentCharacterId) {
-            throw new Error('Сейчас не ход этого персонажа');
+async function submitAmmunitionLoading(request, paymentGroups = []) {
+    if (medicalOperationInProgress) return null;
+    const characterId = currentCharacterId;
+    const loading = JSON.parse(JSON.stringify(request));
+    const sheet = document.getElementById('character-sheet-modal');
+    const wasInert = sheet?.inert || false;
+    let locked = false;
+    try {
+        if (autoSaveTimer) await forceSyncCharacter();
+        await Server.waitForCharacterSave(characterId);
+        if (currentCharacterId !== characterId || medicalOperationInProgress) return null;
+        if (sheetSaveBlocked) throw new Error('Переоткройте лист перед зарядкой');
+        medicalOperationInProgress = locked = true;
+        medicalRemoteUpdate = null;
+        if (sheet) sheet.inert = true;
+        const payment = await chooseAmmunitionPayment('Оплата зарядки', paymentGroups);
+        if (!payment) return null;
+        const state = window.locationCombatState;
+        let result;
+        if (state?.status === 'active') {
+            const actor = state.current_character;
+            if (actor?.character_id !== characterId) throw new Error('Сейчас не ход этого персонажа');
+            result = await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
+                action_key: 'load_ammunition', location_character_id: actor.location_character_id,
+                loading: { ...loading, action_points: payment.actionPoints, free_actions: payment.freeActions },
+                pending_action_id: `loading-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            });
+            currentCharacterData = (await Server.getCharacter(characterId)).data;
+        } else {
+            result = await Server.loadAmmunition(characterId, { loading, character_revision: currentCharacterData._revision });
+            currentCharacterData = result.data;
         }
-        await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
-            location_character_id: actor.location_character_id,
-            action_key: 'stow_weapon',
-        });
+        showNotification(result?.pending_action
+            ? 'Зарядка начата. Патроны будут заряжены после полной оплаты ОД.'
+            : 'Патроны заряжены', 'system');
+        return result;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось зарядить патроны', 'system');
+        return null;
+    } finally {
+        if (locked) {
+            if (medicalRemoteUpdate?.character_id === Number(characterId)
+                && Number(medicalRemoteUpdate.data?._revision) > Number(currentCharacterData?._revision)) {
+                currentCharacterData = medicalRemoteUpdate.data;
+            }
+            medicalRemoteUpdate = null;
+            medicalOperationInProgress = false;
+            if (sheet) sheet.inert = wasInert;
+            await refreshSavedSheet(characterId);
+        }
     }
-    delete currentCharacterData.activeWeaponIndex;
 }
+
 
 async function inventoryItemPreparationPayments(item, itemPath, role) {
     const access = await calculateInventoryAccess(item, itemPath);
@@ -9354,9 +9656,13 @@ async function inventoryItemPreparationPayments(item, itemPath, role) {
             ? [{ actionPoints: 0, freeActions: 1 }, { actionPoints: 1, freeActions: 0 }]
             : [{ actionPoints: Math.max(1, access.retrievalActionPoints), freeActions: 0 }];
     }
+    const retrieval = Math.max(1, Number(access.retrievalActionPoints || 0));
     return quick
         ? [{ actionPoints: 0, freeActions: 1 }, { actionPoints: 1, freeActions: 0 }]
-        : [{ actionPoints: 1, freeActions: 1 }, { actionPoints: 2, freeActions: 0 }];
+        : [
+            { actionPoints: Math.max(0, retrieval - 1), freeActions: 1 },
+            { actionPoints: retrieval, freeActions: 0 },
+        ];
 }
 
 function ammoLoadingKind(item) {
@@ -9530,27 +9836,6 @@ function magazineLoadingPlans(source, needed, targetMagazine = null, hasFeeder =
     return plans;
 }
 
-function transferAmmoFromSource(magazine, source, quantity) {
-    let remaining = quantity;
-    if (ammoLoadingKind(source) === 'loose') {
-        addAmmoToMagazine(magazine, source, quantity);
-        source.quantity -= quantity;
-        return;
-    }
-    magazine.ammo = Array.isArray(magazine.ammo) ? magazine.ammo : [];
-    source.ammo = Array.isArray(source.ammo) ? source.ammo : [];
-    while (remaining > 0 && source.ammo.length) {
-        const stack = source.ammo[source.ammo.length - 1];
-        const moved = Math.min(remaining, Number(stack.quantity || 0));
-        const target = magazine.ammo.find(entry => getAmmoStackKey(entry) === getAmmoStackKey(stack));
-        if (target) target.quantity += moved;
-        else magazine.ammo.push({ ...stack, quantity: moved });
-        stack.quantity -= moved;
-        remaining -= moved;
-        if (stack.quantity <= 0) source.ammo.pop();
-    }
-    updateMagazineWeight(source);
-}
 
 function weaponSpecializationKey(template) {
     const category = String(template?.subcategory || '').toLowerCase();
@@ -9715,6 +10000,7 @@ function chooseConsumableApplication(title, choices, { alwaysShow = false } = {}
             button.className = 'btn btn-secondary';
             button.style.textAlign = 'left';
             button.textContent = choice.label;
+            button.disabled = choice.disabled === true;
             button.onclick = () => finish(choice);
             modal.querySelector('.consumable-application-list').appendChild(button);
         });
@@ -9816,6 +10102,22 @@ async function resolveMedicalApplication(direct, health, itemName, costContext =
                 actionPoints,
             });
         });
+        Object.entries(health.zones || {}).forEach(([area, zone]) => {
+            if (!['leftArm', 'rightArm', 'leftLeg', 'rightLeg'].includes(area)
+                || Number(zone?.current || 0) > 0) return;
+            if (effects.some(effect =>
+                ['mangled_limb', 'amputation'].includes(effect?.type)
+                && effect.area === area
+                && effect.active !== false
+            )) return;
+            choices.push({
+                label: `Восстановить выбитую конечность: ${getEffectAreaLabel(area)} · 1 зар. · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
+                effect: { type: 'damaged_zone', area },
+                treatmentMode: 'restore_disabled_limb',
+                application: { item_uses: 1 },
+                actionPoints,
+            });
+        });
         if (!choices.length) throw new Error('Нет травмы, которую можно восстановить этим набором');
         const selected = await chooseConsumableApplication(
             `Выберите операцию: ${itemName}`,
@@ -9858,7 +10160,7 @@ async function resolveMedicalApplication(direct, health, itemName, costContext =
         const allowedTypes = new Set();
         if (direct.fracture_splint || direct.cure_fracture) allowedTypes.add('fracture');
         if (direct.suppress_limb_trauma) allowedTypes.add('fracture');
-        if (direct.restore_missing_part || direct.target_body_part) {
+        if ((direct.restore_missing_part || direct.target_body_part) && !direct.surgical_kit) {
             allowedTypes.add('amputation');
             allowedTypes.add('organ_loss');
         }
@@ -9897,13 +10199,21 @@ async function resolveMedicalApplication(direct, health, itemName, costContext =
                     direct.temporary_limb_health_minutes || direct.temporary_limb_health_turns
                 ) && !direct.restore_missing_part;
                 if (requiresKnockedOutLimb ? current > 0 : current >= maximum) return;
+                if (direct.surgical_kit && current > 0) return;
+                if (direct.surgical_kit && effects.some(effect =>
+                    ['mangled_limb', 'amputation'].includes(effect?.type)
+                    && effect.area === area
+                    && effect.active !== false
+                )) return;
                 const effect = { type: 'damaged_zone', area };
                 choices.push({
                     label: separateSplintRestoration
                         ? `Временно восстановить до 1 ОЗ: ${getEffectAreaLabel(area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`
                         : `${getInjuryEffectLabel(effect)}: ${getEffectAreaLabel(area)} · ${getMedicalApplicationCostLabel(actionPoints, costContext)}`,
                     effect,
-                    treatmentMode: separateSplintRestoration ? 'restore_limb' : 'treat_injury',
+                    treatmentMode: separateSplintRestoration
+                        ? 'restore_limb'
+                        : (direct.surgical_kit ? 'restore_disabled_limb' : 'treat_injury'),
                     actionPoints,
                 });
             });
@@ -10080,7 +10390,7 @@ async function useConsumable(item, itemPath, options = {}) {
         direct.intoxication_delta = -10;
         direct.exhaustion_delta = -0.5;
         if (direct.uses === undefined) direct.uses = 3;
-        if (!Number.isFinite(Number(item.uses)) || Number(item.uses) <= 0) {
+        if (!template?.id && (!Number.isFinite(Number(item.uses)) || Number(item.uses) <= 0)) {
             item.uses = 3;
             item.maxUses = 3;
             item.attributes = item.attributes || {};
@@ -10237,38 +10547,161 @@ async function useConsumable(item, itemPath, options = {}) {
         options.treatmentRequestId = consent.requestId;
     }
 
+    const unsupportedSelfMedicalFields = [
+        'applications', 'requires_injury', 'target_body_part', 'target_required',
+        'requires_infusion_tool', 'blood_compatibility_required', 'blood_collection',
+        'blood_type_test', 'requires_shock', 'fracture_splint', 'surgical_kit',
+        'catastrophic_limb_surgery', 'special_limb_treatment', 'restore_missing_part',
+        'restore_full_body_part', 'restore_limb_health', 'close_area_bleeding',
+        'filter_charges', 'requires_gas_mask', 'wound_treatment', 'tourniquet',
+        'limb_only', 'bleeding_stop_light_cost', 'bleeding_stop_medium_cost',
+    ];
+    const serverSelfMedicalProcedure = Boolean(
+        application.kind === 'self'
+        && (direct.medical_difficulty !== undefined || direct.application_form === 'injectable')
+        && !unsupportedSelfMedicalFields.some(key => Boolean(direct[key]))
+    );
+    const serverInfusionProcedure = Boolean(
+        application.kind === 'self'
+        && direct.requires_infusion_tool
+        && !direct.blood_collection
+        && !direct.blood_type_test
+    );
+    const serverSpecialProcedure = Boolean(
+        (application.kind === 'blood_type_test' && direct.blood_type_test)
+        || (application.kind === 'self' && direct.blood_collection)
+        || (application.kind === 'self' && direct.requires_shock)
+    );
+    const serverMedicalProcedure = Boolean(
+        !options.skipMedicineCheck
+        && template?.id
+        && (
+            serverSelfMedicalProcedure
+            || serverInfusionProcedure
+            || serverSpecialProcedure
+            ||
+            application.kind === 'bleeding'
+            || (application.kind === 'wound' && direct.wound_treatment)
+            || (application.kind === 'injury' && direct.special_limb_treatment)
+            || (application.kind === 'injury' && direct.catastrophic_limb_surgery)
+            || (application.kind === 'injury' && direct.surgical_kit)
+            || (
+                application.kind === 'injury'
+                && direct.fracture_splint
+                && ['fix_fracture', 'restore_limb'].includes(application.treatmentMode)
+            )
+        )
+    );
+    const unsupportedGeneralFields = [
+        'applications', 'requires_injury', 'target_body_part', 'target_required',
+        'requires_infusion_tool', 'blood_compatibility_required', 'blood_collection',
+        'blood_type_test', 'requires_shock',
+        'fracture_splint', 'surgical_kit', 'catastrophic_limb_surgery',
+        'special_limb_treatment', 'restore_missing_part', 'restore_full_body_part',
+        'restore_limb_health', 'temporary_limb_health_minutes', 'temporary_limb_health_turns',
+        'affects_all_limbs', 'close_area_bleeding', 'filter_charges', 'requires_gas_mask',
+        'wound_treatment', 'tourniquet', 'limb_only', 'stop_all_bleeding',
+        'bleeding_stop_light_cost', 'bleeding_stop_medium_cost',
+    ];
+    const serverGeneralConsumable = Boolean(
+        template?.id
+        && application.kind === 'self'
+        && !serverMedicalProcedure
+        && direct.medical_difficulty === undefined
+        && direct.application_form !== 'injectable'
+        && !unsupportedGeneralFields.some(key => Boolean(direct[key]))
+    );
+    let medicalOperationId = options.deferredActionId || null;
     if (isCombatActive && !options.skipCombatPayment) {
         let pendingActionId = null;
         try {
-            // Register before the request: a deferred payment advances combat on
-            // the server and can emit its completion socket event immediately.
+            // Persist the selection with payment before the server advances the turn.
             pendingActionId = `inventory-${combatState.current_character.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            pendingConsumableActions.set(pendingActionId, {
-                characterId: currentCharacterId,
-                itemId: item.id,
-                itemPath: [...itemPath],
-                application,
-                options: { ...options, targetData },
-            });
+            medicalOperationId = pendingActionId;
+            const selection = {
+                source: { path: [...itemPath], snapshot: JSON.parse(JSON.stringify(item)) },
+                application: JSON.parse(JSON.stringify(application)),
+                target_character_id: Number(options.targetCharacterId || currentCharacterId),
+                treatment_request_id: options.treatmentRequestId || null,
+                server_authoritative: serverMedicalProcedure || serverGeneralConsumable,
+                server_operation: serverMedicalProcedure
+                    ? 'medical'
+                    : (serverGeneralConsumable ? 'general' : null),
+            };
             const payment = await spendInventoryAccessForCombat(
-                item, itemPath, application.actionPoints, pendingActionId
+                item, itemPath, application.actionPoints, pendingActionId, selection
             );
             if (payment.payment?.payment_complete === false) {
-                if (options.treatmentRequestId && options.onTreatmentDeferred) {
-                    await options.onTreatmentDeferred(options.treatmentRequestId, payment.pendingActionId);
-                }
                 showNotification(
                     `Начато длительное действие «${item.name}». Остаток ОД будет списан в следующих ходах.`,
                     'system'
                 );
                 return false;
             }
-            pendingConsumableActions.delete(pendingActionId);
         } catch (error) {
-            // The action was never accepted by the server, so it must not be
-            // resumed from a stale client-side pending entry.
-            if (pendingActionId) pendingConsumableActions.delete(pendingActionId);
             showNotification(error.message || 'Не хватает ОД');
+            return false;
+        }
+    }
+    if (serverMedicalProcedure) {
+        try {
+            const actor = combatState?.current_character;
+            const response = await Server.applyMedicalProcedure(currentCharacterId, {
+                operation_id: medicalOperationId
+                    || `medical-${currentCharacterId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                deferred_action_id: isCombatActive ? medicalOperationId : null,
+                target_character_id: Number(options.targetCharacterId || currentCharacterId),
+                source: { path: [...itemPath], snapshot: JSON.parse(JSON.stringify(item)) },
+                application: JSON.parse(JSON.stringify(application)),
+                combat_location_id: isCombatActive ? Number(window.currentLocationId) : null,
+                actor_location_character_id: isCombatActive
+                    ? Number(options.interactionContext?.actorLocationCharacterId || actor?.location_character_id)
+                    : null,
+                interaction_request_id: options.treatmentRequestId || null,
+            });
+            options.serverMedicalResult = response;
+            const result = response.medical_result || {};
+            const details = result.roll == null
+                ? ''
+                : ` d20: ${result.roll}, СЛ: ${result.difficulty}`;
+            if (result.success && result.roll == null) {
+                showNotification(`${item.name} использован`, 'success');
+            } else if (result.success) {
+                showNotification(`Проверка Медицины успешна. ${details}`, 'success');
+            } else {
+                showNotification(`Проверка Медицины провалена. ${details}. Расходник потрачен.`);
+            }
+            return true;
+        } catch (error) {
+            showNotification(error.message || 'Не удалось применить медикамент');
+            return false;
+        }
+    }
+    if (serverGeneralConsumable) {
+        try {
+            const actor = combatState?.current_character;
+            const response = await Server.applyGeneralConsumable(currentCharacterId, {
+                operation_id: medicalOperationId
+                    || `consumable-${currentCharacterId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                deferred_action_id: isCombatActive ? medicalOperationId : null,
+                source: { path: [...itemPath], snapshot: JSON.parse(JSON.stringify(item)) },
+                application: JSON.parse(JSON.stringify(application)),
+                combat_location_id: isCombatActive ? Number(window.currentLocationId) : null,
+                actor_location_character_id: isCombatActive
+                    ? Number(options.interactionContext?.actorLocationCharacterId || actor?.location_character_id)
+                    : null,
+            });
+            options.serverConsumableResult = response;
+            const addiction = response.consumable_result?.consumable?.addiction;
+            if (addiction?.acquired) {
+                showNotification(`Получена зависимость: ${addiction.profile.label}`, 'system');
+            } else if (addiction?.applicable && addiction.blocked) {
+                showNotification('«Котик» заблокировал появление зависимости', 'success');
+            }
+            showNotification(`${item.name} использован`, 'success');
+            return true;
+        } catch (error) {
+            showNotification(error.message || 'Не удалось применить расходник');
             return false;
         }
     }
@@ -10295,7 +10728,9 @@ async function useConsumable(item, itemPath, options = {}) {
             }
         }
         const difficulty = Math.max(1, baseDifficulty - medicineSkillBonus - medicationBonus);
-        const roll = Math.floor(Math.random() * 20) + 1;
+        const roll = Number.isInteger(options.medicineRoll) && options.medicineRoll >= 1 && options.medicineRoll <= 20
+            ? options.medicineRoll
+            : Math.floor(Math.random() * 20) + 1;
         const checkDetails = `d20: ${roll}, СЛ: ${difficulty} (база ${baseDifficulty}, Медицина ${medicineSkillBonus >= 0 ? '+' : ''}${medicineSkillBonus}, медикамент ${medicationBonus >= 0 ? '+' : ''}${medicationBonus})`;
         if (roll < difficulty) {
             const medicalRetry = {
@@ -10928,50 +11363,21 @@ async function useConsumable(item, itemPath, options = {}) {
         return;
     }
 
-    const addictionCharacterId = Number(options.targetCharacterId || currentCharacterId);
-    if (addictionCharacterId) {
-        try {
-            const addictionResponse = await Server.registerCharacterAddictionExposure(addictionCharacterId, {
-                item_name: item.name,
-                price: Number(template?.price ?? item.price ?? item.attributes?.price ?? 0),
-                intoxication: Math.max(0, Number(direct.intoxication_delta || 0)),
-                exhaustion_relief: Math.max(0, -Number(direct.exhaustion_delta || 0)),
-                addiction_block_hours: Math.max(0, Number(direct.addiction_block_hours || 0)),
-            });
-            health.addictions = addictionResponse?.addictions || health.addictions || {};
-            if (Array.isArray(addictionResponse?.withdrawal_effects)) {
-                health.effects = normalizeEffectList(health.effects || [])
-                    .filter(effect => effect.type !== 'addiction_withdrawal')
-                    .concat(addictionResponse.withdrawal_effects);
-            }
-            const addictionResult = addictionResponse?.result;
-            if (addictionResult?.acquired) {
-                showNotification(`Получена зависимость: ${addictionResult.profile.label}`, 'system');
-            } else if (addictionResult?.applicable && addictionResult?.blocked) {
-                showNotification('«Котик» заблокировал появление зависимости', 'success');
-            }
-            hasChanges = true;
-        } catch (error) {
-            showNotification(error.message || 'Не удалось проверить появление зависимости');
-            return false;
-        }
-    }
+    options.consumableSideEffects.exposure = {
+        item_name: item.name,
+        price: Number(template?.price ?? item.price ?? item.attributes?.price ?? 0),
+        intoxication: Math.max(0, Number(direct.intoxication_delta || 0)),
+        exhaustion_relief: Math.max(0, -Number(direct.exhaustion_delta || 0)),
+        addiction_block_hours: Math.max(0, Number(direct.addiction_block_hours || 0)),
+    };
 
     if (!direct.not_consumed && !options.skipItemConsumption) {
         spendInventoryItemUses({ item, path: itemPath }, Number(application.application?.item_uses || 1));
     }
     if (isCombatActive && Number(direct.action_points_delta || 0) !== 0) {
-        const actor = combatState?.current_character;
-        try {
-            await Server.adjustLocationCombatResources(window.currentLobbyId, window.currentLocationId, {
-                location_character_id: actor.location_character_id,
-                action_points: Number(direct.action_points_delta || 0),
-            });
-        } catch (error) {
-            showNotification(error.message || 'Не удалось изменить ОД');
-        }
+        options.consumableSideEffects.action_points_delta = Number(direct.action_points_delta);
     }
-    showNotification(`${item.name} использован`, 'success');
+    if (options.save !== false) showNotification(`${item.name} использован`, 'success');
     if (options.render !== false) {
         renderInventoryTab(currentCharacterData);
         refreshHealthPanel();
@@ -11039,7 +11445,35 @@ async function useGrenade(item, itemPath, options = {}) {
     return false;
 }
 
+export async function resumeDeferredConsumable(lobbyId, locationId, actionId) {
+    if (medicalOperationInProgress) return false;
+    const saved = await Server.prepareDeferredConsumable(lobbyId, locationId, actionId);
+    if (medicalOperationInProgress) return false;
+    const selection = saved.selection;
+    const applied = await useCharacterInventoryItem(saved.actor_character_id, selection.source.path, {
+        forceReload: true,
+        targetCharacterId: selection.target_character_id,
+        targetData: saved.target_data,
+        preselectedApplication: selection.application,
+        deferredActionId: saved.id,
+        medicineRoll: saved.medicine_roll,
+        treatmentConsentGranted: true,
+        treatmentRequestId: selection.treatment_request_id,
+        skipCombatPayment: true,
+        interactionContext: {
+            lobbyId, locationId, actorLocationCharacterId: saved.actor_location_character_id,
+        },
+    });
+    if (!applied) throw new Error('Процедура не завершена. Проверьте условия применения или отмените действие.');
+    return true;
+}
+
 export async function useCharacterInventoryItem(characterId, itemPath, options = {}) {
+    if (medicalOperationInProgress) throw new Error('Дождитесь завершения применения предмета');
+    if (autoSaveTimer) await forceSyncCharacter();
+    if (sheetSaveBlocked && Number(characterId) === Number(currentCharacterId)) throw new Error('Переоткройте лист перед применением предмета');
+    await Server.waitForCharacterSave(characterId);
+    if (medicalOperationInProgress) throw new Error('Дождитесь завершения применения предмета');
     const normalizedPath = Array.isArray(itemPath)
         ? itemPath
         : String(itemPath || '')
@@ -11055,6 +11489,14 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
     const activeData = !options.forceReload && !shouldRestorePreviousState && currentCharacterData
         ? currentCharacterData
         : null;
+    medicalOperationInProgress = true;
+    medicalRemoteUpdate = null;
+    const sheetModal = document.getElementById('character-sheet-modal');
+    const sheetWasInert = sheetModal?.inert || false;
+    if (sheetModal) sheetModal.inert = true;
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    let appliedData = null;
 
     try {
         if (options.forceReload || shouldRestorePreviousState || !currentCharacterData) {
@@ -11066,13 +11508,15 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
         if (!allTemplatesCache) {
             await getAllItemTemplates();
         }
+        // Work on a draft. A rejected compound save must not leave a spent item locally.
+        currentCharacterData = JSON.parse(JSON.stringify(currentCharacterData));
         normalizeCharacterEffects(currentCharacterData);
 
         let targetData = currentCharacterData;
         const targetCharacterId = Number(options.targetCharacterId || characterId);
         if (targetCharacterId !== Number(characterId)) {
             if (options.targetData && typeof options.targetData === 'object') {
-                targetData = options.targetData;
+                targetData = JSON.parse(JSON.stringify(options.targetData));
             } else {
                 const loadedTarget = await Server.getCharacter(targetCharacterId);
                 targetData = loadedTarget?.data || {};
@@ -11098,6 +11542,15 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
         }
 
     let preselectedApplication = options.preselectedApplication;
+    if (options.deferredActionId && preselectedApplication?.kind === 'blood_type_test'
+        && preselectedApplication.target === 'packet') {
+        const entry = preselectedApplication.entry;
+        const packet = getItemByPath(entry?.path || []);
+        if (!packet || ['id', 'templateId', 'name'].some(key => packet[key] !== entry.item?.[key])) {
+            throw new Error('Пакет крови изменился. Отмените старую процедуру.');
+        }
+        preselectedApplication = { ...preselectedApplication, entry: { ...entry, item: packet } };
+    }
     if (preselectedApplication?.effect) {
         const storedEffect = preselectedApplication.effect;
         const currentEffect = (targetData.health?.effects || []).find(effect =>
@@ -11109,6 +11562,8 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
         );
         if (currentEffect) {
             preselectedApplication = { ...preselectedApplication, effect: currentEffect };
+        } else if (options.deferredActionId && !['damaged_zone', 'body_zone'].includes(storedEffect.type)) {
+            throw new Error('Выбранная травма больше не найдена. Отмените старую процедуру.');
         }
     }
     const useOptions = {
@@ -11117,13 +11572,37 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
         targetData,
         render: false,
         save: false,
+        consumableSideEffects: {},
     };
+    const consumableSource = item.category === 'consumable' && !options.skipItemConsumption
+        ? { path: [...resolvedPath], snapshot: JSON.parse(JSON.stringify(item)) }
+        : undefined;
     const applied = await useItem(item, resolvedPath, useOptions);
-    if (applied === false) return false;
-    await Server.updateCharacter(characterId, { data: currentCharacterData });
+    if (applied !== true) return false;
+    if (useOptions.serverMedicalResult || useOptions.serverConsumableResult) {
+        currentCharacterData = useOptions.serverMedicalResult?.actor_data
+            || useOptions.serverConsumableResult?.data;
+        appliedData = currentCharacterData;
+        showNotification('Применение предмета сохранено', 'system');
+        if (currentCharacterId === characterId) {
+            renderInventoryTab(currentCharacterData);
+            refreshHealthPanel();
+        }
+        return true;
+    }
+    const consumableUse = item.category === 'consumable' ? {
+        id: options.deferredActionId || `consumable-${characterId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        deferred_action_id: options.deferredActionId,
+        side_effects: useOptions.consumableSideEffects,
+        source: consumableSource,
+        combat_location_id: window.locationCombatState?.status === 'active' ? Number(window.currentLocationId) : null,
+    } : undefined;
+    let consumableResult = null;
     if (targetCharacterId !== Number(characterId)) {
+        const actorUpdates = Server.characterUpdatePayload(characterId, currentCharacterData);
+        let response;
         if (options.interactionContext?.actorLocationCharacterId) {
-            await Server.treatLocationCharacter(
+            response = await Server.treatLocationCharacter(
                 options.interactionContext.lobbyId,
                 options.interactionContext.locationId,
                 targetCharacterId,
@@ -11131,23 +11610,69 @@ export async function useCharacterInventoryItem(characterId, itemPath, options =
                     actor_location_character_id: options.interactionContext.actorLocationCharacterId,
                     health: targetData.health || {},
                     interaction_request_id: useOptions.treatmentRequestId,
+                    actor_updates: actorUpdates,
+                    target_revision: targetData._revision,
+                    target_base_health: Server.characterUpdatePayload(targetCharacterId, targetData)._base_data?.health,
+                    consumable_use: consumableUse,
                 }
             );
         } else {
-            await Server.updateCharacter(targetCharacterId, { data: targetData });
+            response = await Server.finishSheetTreatment(targetCharacterId, {
+                actor_character_id: Number(characterId), actor_updates: actorUpdates,
+                target_updates: Server.characterUpdatePayload(targetCharacterId, targetData),
+                consumable_use: consumableUse,
+            });
         }
+        currentCharacterData = response.actor_data;
+        consumableResult = response.consumable_result;
+    } else if (consumableUse) {
+        const response = await Server.finishConsumableUse(characterId, {
+            actor_updates: Server.characterUpdatePayload(characterId, currentCharacterData),
+            consumable_use: consumableUse,
+        });
+        currentCharacterData = response.data;
+        consumableResult = response.consumable_result;
+    } else {
+        const response = await Server.updateCharacter(characterId, { data: currentCharacterData });
+        currentCharacterData = response.data;
     }
+    appliedData = currentCharacterData;
+    if (consumableResult?.addiction?.acquired) {
+        showNotification(`Получена зависимость: ${consumableResult.addiction.profile.label}`, 'system');
+    } else if (consumableResult?.addiction?.applicable && consumableResult.addiction.blocked) {
+        showNotification('«Котик» заблокировал появление зависимости', 'success');
+    }
+    showNotification('Применение предмета сохранено', 'system');
     if (currentCharacterId === characterId) {
         renderInventoryTab(currentCharacterData);
         refreshHealthPanel();
     }
     } finally {
+        medicalOperationInProgress = false;
         if (shouldRestorePreviousState) {
             currentCharacterId = previousCharacterId;
             currentCharacterData = previousCharacterData;
         } else if (activeData) {
+            if (appliedData) {
+                Object.keys(activeData).forEach(key => delete activeData[key]);
+                Object.assign(activeData, appliedData);
+            }
             currentCharacterData = activeData;
+        } else if (!appliedData) {
+            currentCharacterData = previousCharacterData;
         }
+        if (medicalRemoteUpdate?.character_id === Number(currentCharacterId)
+            && Number(medicalRemoteUpdate.data?._revision) > Number(currentCharacterData?._revision)) {
+            currentCharacterData = medicalRemoteUpdate.data;
+        }
+        medicalRemoteUpdate = null;
+        if (sheetModal) sheetModal.inert = sheetWasInert;
+        if (currentCharacterId && currentCharacterData) {
+            await refreshSavedSheet(currentCharacterId).catch(error => {
+                console.error('Could not refresh the sheet after item use', error);
+            });
+        }
+        window.dispatchEvent?.(new CustomEvent('character-item-operation-finished'));
     }
     return true;
 }
@@ -12789,6 +13314,13 @@ function setBackpackItemQuantityAtPath(path, quantity) {
 }
 
 window.dropBackpackItemAtPath = async function(pathStr) {
+    if (medicalOperationInProgress) return;
+    if (autoSaveTimer) await forceSyncCharacter();
+    if (sheetSaveBlocked) {
+        showNotification('Переоткройте лист перед переносом предметов', 'system');
+        return;
+    }
+    const actorId = Number(currentCharacterId);
     const path = pathStr.split(',').map(p => (p === '' || Number.isNaN(Number(p)) ? p : parseInt(p, 10)));
     if (path.length === 0) return;
 
@@ -12803,67 +13335,31 @@ window.dropBackpackItemAtPath = async function(pathStr) {
         amount = Math.max(1, Math.min(parseInt(response, 10) || 1, currentQuantity));
     }
 
-    const itemClone = JSON.parse(JSON.stringify(item));
-    itemClone.quantity = amount;
     const locationCharacterId = currentCharacterId || window.currentLocationCharacterId || null;
     const locationPosition = window.isLocationActive && typeof window.getLocationCharacterPosition === 'function'
         ? window.getLocationCharacterPosition(locationCharacterId)
         : null;
 
-    if (
-        window.isLocationActive
-        && ['weapon', 'melee_weapon'].includes(String(itemClone.category || ''))
-    ) {
-        const maximum = Number(itemClone.maxDurability ?? itemClone.attributes?.max_durability ?? 100) || 100;
-        const current = Number(itemClone.durability ?? maximum);
-        itemClone.maxDurability = maximum;
-        itemClone.durability = Math.max(0, current - 3);
-    }
-
     if (window.isLocationActive && window.currentLocationId && locationPosition) {
         try {
-            const existingGroundItem = typeof window.getGroundItemObjectAtPosition === 'function'
-                ? window.getGroundItemObjectAtPosition(locationPosition.x, locationPosition.y)
-                : null;
-
-            if (existingGroundItem) {
-                const existingContents = Array.isArray(existingGroundItem.properties?.contents)
-                    ? [...existingGroundItem.properties.contents]
-                    : [];
-                existingContents.push(itemClone);
-                const updatedGroundItem = await Server.updateLocationObject(window.currentLobbyId, existingGroundItem.id, {
-                    properties: {
-                        contents: existingContents,
-                        is_ground_item: true,
-                        passable: true,
-                        interactions: ['open_container'],
-                    },
-                });
-                if (typeof window.updateLocationObject === 'function' && updatedGroundItem) {
-                    window.updateLocationObject(updatedGroundItem);
-                }
-            } else {
-                const createdGroundItem = await Server.createLocationObject(window.currentLobbyId, window.currentLocationId, {
-                    name: 'Пол',
-                    type: 'ground_item',
-                    tile_x: locationPosition.x,
-                    tile_y: locationPosition.y,
-                    properties: {
-                        contents: [itemClone],
-                        is_ground_item: true,
-                        passable: true,
-                        dropped_by_character_id: currentCharacterId || null,
-                        interactions: ['open_container'],
-                    },
-                });
-                if (typeof window.addLocationObject === 'function' && createdGroundItem) {
-                    window.addLocationObject(createdGroundItem);
-                }
+            await Server.waitForCharacterSave(actorId);
+            if (Number(currentCharacterId) !== actorId) return;
+            const result = await Server.dropLocationItem(window.currentLobbyId, window.currentLocationId, {
+                character_id: actorId, character_revision: currentCharacterData._revision,
+                item_path: path, expected_item: item, amount,
+            });
+            if (result.created) window.addLocationObject?.(result.object);
+            else window.updateLocationObject?.(result.object);
+            if (Number(currentCharacterId) === actorId) {
+                currentCharacterData = result.data;
+                await renderInventoryTab(currentCharacterData);
+                recalculateInventoryTotals();
             }
+            showNotification('Предмет выброшен', 'success');
         } catch (error) {
             showNotification(error.message || 'Не удалось выбросить предмет', 'system');
-            return;
         }
+        return;
     }
 
     if (amount >= currentQuantity) {
@@ -12874,9 +13370,6 @@ window.dropBackpackItemAtPath = async function(pathStr) {
         recalculateInventoryTotals();
         scheduleAutoSave();
         forceSyncCharacter();
-    }
-    if (window.isLocationActive && window.currentLocationId && locationPosition) {
-        showNotification('Предмет выброшен', 'success');
     }
 };
 
@@ -14381,14 +14874,18 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         useBtn.style.padding = '0';
         useBtn.style.fontSize = '14px';
         useBtn.style.lineHeight = '1';
-        useBtn.onclick = (e) => {
+        useBtn.onclick = async (e) => {
             e.stopPropagation();
             const currentEntry = item.id ? findInventoryItemById(currentCharacterData, item.id) : { item: getItemByPath(itemPath), path: itemPath };
             if (!currentEntry) {
                 showNotification('Предмет больше не найден в инвентаре');
                 return;
             }
-            useItem(currentEntry.item, currentEntry.path);
+            try {
+                await useItem(currentEntry.item, currentEntry.path);
+            } catch (error) {
+                showNotification(error.message || 'Не удалось применить предмет', 'system');
+            }
         };
         actionsDiv.appendChild(useBtn);
     }
@@ -14817,6 +15314,10 @@ window.deleteCharacterFromSheet = function() {
 
 // ========== 9. ПУБЛИЧНЫЕ ФУНКЦИИ ==========
 export async function openCharacterSheet(characterId, tabId = 'basic') {
+    if (medicalOperationInProgress) {
+        showNotification('Дождитесь завершения применения предмета', 'system');
+        return;
+    }
     currentCharacterId = characterId;
     window.currentCharacterId = characterId;
     localStorage.setItem('currentCharacterId', String(characterId));
@@ -14831,6 +15332,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
             return;
         }
         currentCharacterCanEdit = character.can_edit === true;
+        sheetSaveBlocked = false;
         currentCharacterData = character.data || {};
         normalizeCharacterEffects(currentCharacterData);
 
@@ -14874,21 +15376,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
         currentCharacterData.editable_to = character.editable_to || [];
         await getAllItemTemplates();
         await renderCharacterSheet(character.name, currentCharacterData);
-        if (!currentCharacterCanEdit) {
-            const sheet = document.getElementById('character-sheet-modal');
-            sheet?.querySelectorAll('input, select, textarea').forEach(control => {
-                control.disabled = true;
-            });
-            sheet?.querySelectorAll('button').forEach(button => {
-                if (
-                    !button.classList.contains('tab-btn')
-                    && !button.classList.contains('close')
-                    && !button.hasAttribute('data-sheet-control')
-                ) {
-                    button.disabled = true;
-                }
-            });
-        }
+        applySheetEditPermissions();
         switchSheetTab(tabId);
         document.getElementById('character-sheet-modal').style.display = 'flex';
 
@@ -14897,23 +15385,21 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
             socket.emit('join_character', { token: localStorage.getItem('access_token'), character_id: characterId });
             socket.off('character_data_updated');
             socket.on('character_data_updated', async (data) => {
+                rememberCharacterSnapshots(data);
                 if (Number(data.character_id) === Number(currentCharacterId)) {
-                    currentCharacterData = data.updates.data || currentCharacterData;
-                    normalizeCharacterEffects(currentCharacterData);
-
-                    // Принудительно обновляем инвентарь и экипировку (они всегда в DOM)
-                    await Promise.all([
-                        renderInventoryTab(currentCharacterData),
-                        renderEquipmentTab(currentCharacterData),
-                    ]);
-
-                    // Обновляем активную вкладку для немедленного отображения
-                    const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
-                    if (activeTab === 'health') refreshHealthPanel();
-                    if (activeTab === 'basic') renderBasicTab(currentCharacterData);
-                    else if (activeTab === 'skills') renderSkillsTab(currentCharacterData);
-                    else if (activeTab === 'settings') renderSettingsTab(currentCharacterData);
-                    else if (activeTab === 'notes') renderNotesTab(currentCharacterData);
+                    if (Server.isOwnCharacterSave(data.save_id)) return;
+                    if (medicalOperationInProgress) {
+                        if (!medicalRemoteUpdate || Number(data.updates.data?._revision) > Number(medicalRemoteUpdate.data?._revision)) {
+                            medicalRemoteUpdate = { character_id: Number(data.character_id), data: data.updates.data };
+                        }
+                        return;
+                    }
+                    if (autoSaveTimer || Server.isCharacterSaving(currentCharacterId) || sheetSaveBlocked) {
+                        rememberPendingSheetRemoteUpdate(data.updates.data);
+                        return;
+                    }
+                    if (Number(data.updates.data?._revision) < Number(currentCharacterData?._revision)) return;
+                    await queueRemoteSheetData(data.updates.data, currentCharacterId);
                 }
             });
         }
@@ -14923,6 +15409,10 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
 }
 
 export function closeCharacterSheet() {
+    if (medicalOperationInProgress) {
+        showNotification('Дождитесь завершения применения предмета', 'system');
+        return;
+    }
     const socket = getSocket();
     if (socket && currentCharacterId) {
         socket.emit('leave_character', { token: localStorage.getItem('access_token'), character_id: currentCharacterId });
@@ -14930,6 +15420,7 @@ export function closeCharacterSheet() {
     document.getElementById('character-sheet-modal').style.display = 'none';
     currentCharacterId = null;
     currentCharacterData = null;
+    pendingSheetRemoteUpdate = null;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = null;
     draggedItem = null;
@@ -14952,6 +15443,8 @@ export function importCharacter(file) {
     reader.onload = async (e) => {
         try {
             const importedData = JSON.parse(e.target.result);
+            importedData._revision = currentCharacterData?._revision;
+            importedData._character_id = currentCharacterData?._character_id;
             currentCharacterData = importedData;
             const nameEl = document.getElementById('character-sheet-name');
             if (nameEl) {
@@ -14965,8 +15458,19 @@ export function importCharacter(file) {
     reader.readAsText(file);
 }
 
-window.rollSkill = function(skillPath, skillLabel) {
+window.rollSkill = async function(skillPath, skillLabel) {
     if (!currentCharacterData) return;
+    let awarenessMode = null;
+    if (skillPath === 'physical.awareness') {
+        const choice = await chooseConsumableApplication(
+            'Проверка Внимательности',
+            getAwarenessModeChoices(currentCharacterData),
+            { alwaysShow: true },
+        );
+        if (!choice) return;
+        awarenessMode = choice.mode;
+        skillLabel = `${skillLabel} (${awarenessMode === 'visual' ? 'зрение' : 'слух'})`;
+    }
     const parts = skillPath.split('.');
     let skillObj = currentCharacterData.skills;
     for (const part of parts) {
@@ -15005,10 +15509,14 @@ window.rollSkill = function(skillPath, skillLabel) {
         equipmentBonus += eqBonus;
     }
 
-    // --- Бонус к Внимательности (от наушников и детектора) ---
+    // --- Канальные бонусы к Внимательности ---
     if (skillPath === 'physical.awareness') {
-        if (eq.headphones?.awarenessBonus) equipmentBonus += eq.headphones.awarenessBonus;
-        if (eq.detector?.bonus) equipmentBonus += eq.detector.bonus;
+        if (awarenessMode === 'hearing' && eq.headphones?.awarenessBonus) {
+            equipmentBonus += eq.headphones.awarenessBonus;
+        }
+        if (awarenessMode === 'visual') {
+            equipmentBonus += getConsumableStatValue(currentCharacterData, 'vision_awareness');
+        }
     }
 
     // Можно добавить другие бонусы по необходимости (например, от артефактов, контейнеров и т.д.)
@@ -15016,8 +15524,10 @@ window.rollSkill = function(skillPath, skillLabel) {
     const statusModifier = getHealthRollModifier(currentCharacterData, skillPath);
     const totalBonus = selfMod + charismaMod + equipmentBonus + statusModifier;
 
-    const firstDice = Math.floor(Math.random() * 20) + 1;
-    const disadvantaged = hasHealthRollDisadvantage(currentCharacterData, skillPath);
+    const deafness = awarenessMode === 'hearing' ? getDeafnessLevel(currentCharacterData) : 0;
+    const hearingBlocked = awarenessMode === 'hearing' && deafness >= 90;
+    const firstDice = hearingBlocked ? 0 : Math.floor(Math.random() * 20) + 1;
+    const disadvantaged = !hearingBlocked && hasHealthRollDisadvantage(currentCharacterData, skillPath);
     const secondDice = disadvantaged ? Math.floor(Math.random() * 20) + 1 : firstDice;
     const dice = disadvantaged ? Math.min(firstDice, secondDice) : firstDice;
     const total = dice + totalBonus;
@@ -15028,11 +15538,12 @@ window.rollSkill = function(skillPath, skillLabel) {
     if (statusModifier !== 0) modStr += ` + состояния = ${statusModifier}`;
 
     const disadvantageText = disadvantaged ? ', Помеха' : '';
-    showNotification(`🎲 ${skillLabel}: бросок к20 = ${dice}${disadvantaged ? ` (${firstDice}/${secondDice})` : ''}${disadvantageText}, ${modStr}, итог = ${total}`, 'system');
+    const blockedText = hearingBlocked ? ', персонаж не слышит' : '';
+    showNotification(`🎲 ${skillLabel}: бросок к20 = ${dice}${disadvantaged ? ` (${firstDice}/${secondDice})` : ''}${disadvantageText}${blockedText}, ${modStr}, итог = ${total}`, 'system');
 
     const socket = getSocket();
     if (socket && currentLobbyId) {
-        const message = `🎲 ${skillLabel}: бросок к20 = ${dice}${disadvantaged ? ` (${firstDice}/${secondDice}), Помеха` : ''}, ${modStr}, итог = **${total}**`;
+        const message = `🎲 ${skillLabel}: бросок к20 = ${dice}${disadvantaged ? ` (${firstDice}/${secondDice}), Помеха` : ''}${blockedText}, ${modStr}, итог = **${total}**`;
         socket.emit('send_message', {
             token: localStorage.getItem('access_token'),
             lobby_id: currentLobbyId,
@@ -15138,6 +15649,15 @@ window.universalInstallModulePrompt = async function(targetPath, slotType) {
         const selected = candidateModules[idx];
         modal.remove();
 
+        if (slotType === 'filter') {
+            try {
+                await runEquipmentModuleAction('install', targetPath, slotType, selected.path);
+            } catch (error) {
+                showNotification(error.message || 'Не удалось установить фильтр');
+            }
+            return;
+        }
+
         updateDataFromFields();
         const success = universalInstallModule(targetItem, targetPath, selected.item, selected.path, slotType);
         if (success) {
@@ -15207,6 +15727,14 @@ function universalUninstallModule(targetItem, targetPath, slotType) {
 }
 
 window.universalUninstallModuleByPath = async function(targetPath, slotType) {
+    if (slotType === 'filter') {
+        try {
+            await runEquipmentModuleAction('uninstall', targetPath, slotType);
+        } catch (error) {
+            showNotification(error.message || 'Не удалось снять фильтр');
+        }
+        return;
+    }
     updateDataFromFields();
     const targetItem = getItemByPath(targetPath);
     if (!targetItem) {
@@ -15588,10 +16116,18 @@ function setupDropTarget(containerDiv, containerPath, containerItem) {
 
 window.getAllItemTemplates = getAllItemTemplates;
 
-window.addEventListener('combat-state-updated', async (event) => {
-    const current = event.detail?.current_character;
+async function resumeClientPendingItem(event) {
+    // A payment may finish synchronously while the initiating request still holds the sheet lock.
+    if (medicalOperationInProgress) return;
+    const state = event.detail || window.locationCombatState;
+    if (state?.status && state.status !== 'active') return;
+    const current = state?.current_character;
     const actionId = current?.completed_pending_action_id;
     const pendingJam = actionId ? pendingWeaponJamActions.get(actionId) : null;
+    if (current?.deferred_action?.server_executable || current?.deferred_action?.client_executable) {
+        pendingWeaponJamActions.delete(actionId);
+        return;
+    }
     if (pendingJam && pendingJam.characterId === currentCharacterId) {
         pendingWeaponJamActions.delete(actionId);
         await window.clearWeaponJam(pendingJam.weaponIndex, {
@@ -15600,75 +16136,7 @@ window.addEventListener('combat-state-updated', async (event) => {
         });
         return;
     }
-    const pendingReload = actionId ? pendingReloadActions.get(actionId) : null;
-    if (pendingReload && pendingReload.characterId === currentCharacterId) {
-        pendingReloadActions.delete(actionId);
-        let item = getInventoryValueByPath(currentCharacterData, pendingReload.itemPath);
-        let itemPath = pendingReload.itemPath;
-        if (!item || (pendingReload.itemId != null && item.id !== pendingReload.itemId)) {
-            const found = collectInventoryEntries(
-                currentCharacterData,
-                entry => pendingReload.itemId != null && entry?.id === pendingReload.itemId,
-            )[0];
-            item = found?.item;
-            itemPath = found?.path;
-        }
-        if (!item || !itemPath) {
-            showNotification('Перезарядка оплачена, но выбранный магазин больше не найден');
-            return;
-        }
-        try {
-            await Server.performLocationCombatAction(
-                window.currentLobbyId,
-                window.currentLocationId,
-                {
-                    ...pendingReload.payload,
-                    pending_action_id: undefined,
-                    resume_pending_action_id: actionId,
-                },
-            );
-            await confirmEquipMagazineDirect(
-                pendingReload.weaponIndex,
-                { item, path: itemPath },
-                { skipCombatPayment: true },
-            );
-        } catch (error) {
-            showNotification(error.message || 'Не удалось завершить перезарядку', 'system');
-        }
-        return;
-    }
-    const pendingMagazineLoading = actionId ? pendingMagazineLoadingActions.get(actionId) : null;
-    if (pendingMagazineLoading && pendingMagazineLoading.characterId === currentCharacterId) {
-        pendingMagazineLoadingActions.delete(actionId);
-        try {
-            await pendingMagazineLoading.complete();
-        } catch (error) {
-            showNotification(error.message || 'Не удалось завершить зарядку', 'system');
-        }
-        return;
-    }
-    const pending = actionId ? pendingConsumableActions.get(actionId) : null;
-    if (!pending || pending.characterId !== currentCharacterId) return;
-    pendingConsumableActions.delete(actionId);
+}
 
-    let item = getInventoryValueByPath(currentCharacterData, pending.itemPath);
-    let itemPath = pending.itemPath;
-    if (!item || (pending.itemId != null && item.id !== pending.itemId)) {
-        const found = collectInventoryEntries(
-            currentCharacterData,
-            entry => pending.itemId != null && entry?.id === pending.itemId
-        )[0];
-        item = found?.item;
-        itemPath = found?.path;
-    }
-    if (!item || !itemPath) {
-        showNotification('Длительное действие завершено, но предмет больше не найден в инвентаре');
-        return;
-    }
-    await useCharacterInventoryItem(pending.characterId, itemPath, {
-        ...pending.options,
-        itemId: pending.itemId,
-        preselectedApplication: pending.application,
-        skipCombatPayment: true,
-    });
-});
+window.addEventListener('combat-state-updated', resumeClientPendingItem);
+window.addEventListener('character-item-operation-finished', resumeClientPendingItem);

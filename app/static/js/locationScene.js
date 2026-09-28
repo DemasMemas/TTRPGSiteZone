@@ -10,7 +10,9 @@ import {
 import { showNotification } from './utils.js';
 import { getUserColor, getUserColorHex } from './colors.js';
 import { Server } from './api.js';
+import { createDeferredActionResumer } from './deferredCombatActions.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
+import { createFpsCounter } from './fpsCounter.js';
 
 function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, (character) => ({
@@ -40,6 +42,112 @@ const NARRATIVE_SKILLS = [
     ['skills.other.tactics', 'Тактика'],
     ['skills.other.survival', 'Выживание'],
 ];
+const AWARENESS_SKILL_PATH = 'skills.physical.awareness';
+
+function activeConsumableModifier(data, stat) {
+    const modifiers = data?.health?.combatMeta?.consumableModifiers;
+    if (!Array.isArray(modifiers)) return 0;
+    return modifiers.reduce((total, modifier) => {
+        if (!modifier || ![stat, `${stat}_delta`].includes(String(modifier.stat || ''))) return total;
+        if (modifier.remaining !== null && modifier.remaining !== undefined && Number(modifier.remaining) <= 0) return total;
+        return total + (Number(modifier.value) || 0);
+    }, 0);
+}
+
+function characterDeafness(data) {
+    const health = data?.health || {};
+    const values = [Number(health.deafness) || 0];
+    const psyState = Math.max(0, Number(health.psyState ?? health.psy_state) || 0);
+    if (psyState >= 40) values.push(100);
+    else if (psyState >= 20) values.push(50);
+    (Array.isArray(health.effects) ? health.effects : []).forEach(effect => {
+        if (effect?.active !== false && String(effect?.type || '').toLowerCase() === 'deafness') {
+            values.push(Number(effect.value) || 0);
+        }
+    });
+    return Math.max(0, ...values);
+}
+
+function signedModifier(value) {
+    const number = Number(value) || 0;
+    return `${number >= 0 ? '+' : ''}${number}`;
+}
+
+function awarenessModePath(form) {
+    const skillPath = form?.elements?.skill_path?.value;
+    if (skillPath !== AWARENESS_SKILL_PATH) return skillPath;
+    const mode = form.elements.awareness_mode?.value === 'hearing' ? 'hearing' : 'visual';
+    return `${AWARENESS_SKILL_PATH}.${mode}`;
+}
+
+function awarenessModeRowHtml() {
+    return `
+        <label data-awareness-mode-row style="display:none;gap:5px;margin-top:8px;">
+            <span>Вид проверки Внимательности</span>
+            <select name="awareness_mode" class="form-control">
+                <option value="visual">Зрение</option>
+                <option value="hearing">Слух</option>
+            </select>
+            <small data-awareness-mode-note style="opacity:.72;line-height:1.35;">
+                Общие состояния и бонус навыка рассчитываются сервером.
+            </small>
+        </label>`;
+}
+
+function bindAwarenessMode(form, getCharacterId) {
+    const skillInput = form?.elements?.skill_path;
+    const modeInput = form?.elements?.awareness_mode;
+    const row = form?.querySelector?.('[data-awareness-mode-row]');
+    const note = form?.querySelector?.('[data-awareness-mode-note]');
+    if (!skillInput || !modeInput || !row) return;
+    let requestVersion = 0;
+
+    const updateProfile = async () => {
+        const visible = skillInput.value === AWARENESS_SKILL_PATH && !skillInput.disabled;
+        row.style.display = visible ? 'grid' : 'none';
+        modeInput.disabled = !visible;
+        if (!visible) return;
+        const version = ++requestVersion;
+        const characterId = Number(getCharacterId?.());
+        if (!Number.isFinite(characterId)) return;
+        try {
+            const character = await Server.getCharacter(characterId);
+            if (version !== requestVersion || skillInput.value !== AWARENESS_SKILL_PATH) return;
+            const data = character?.data || {};
+            const headphones = Number(
+                data.equipment?.headphones?.awarenessBonus
+                ?? data.equipment?.headphones?.awareness_bonus,
+            ) || 0;
+            const vision = activeConsumableModifier(data, 'vision_awareness');
+            const deafness = characterDeafness(data);
+            const visualParts = [
+                vision ? `препараты ${signedModifier(vision)}` : '',
+            ].filter(Boolean);
+            const hearingParts = [
+                headphones ? `наушники ${signedModifier(headphones)}` : '',
+            ].filter(Boolean);
+            modeInput.options[0].textContent = `Зрение: ${signedModifier(vision)}${visualParts.length ? ` (${visualParts.join(', ')})` : ''}`;
+            modeInput.options[1].textContent = deafness >= 90
+                ? `Слух: невозможно (глухота ${deafness})`
+                : `Слух: ${signedModifier(headphones)}${hearingParts.length ? ` (${hearingParts.join(', ')})` : ''}${deafness ? `, глухота ${deafness}` : ''}`;
+            modeInput.options[1].disabled = deafness >= 90;
+            if (modeInput.options[1].disabled && modeInput.value === 'hearing') {
+                modeInput.value = 'visual';
+            }
+            if (note) {
+                note.textContent = 'Указаны отдельные модификаторы канала. Бонус навыка и общие состояния добавит сервер.';
+            }
+        } catch (error) {
+            if (note && version === requestVersion) {
+                note.textContent = 'Не удалось загрузить модификаторы; итог всё равно рассчитает сервер.';
+            }
+        }
+    };
+
+    skillInput.addEventListener('change', updateProfile);
+    updateProfile();
+    return updateProfile;
+}
 
 // ========== Глобальные переменные ==========
 let scene, camera, renderer, labelRenderer, controls;
@@ -94,6 +202,7 @@ let processedTilesForObjects = new Set();
 let lastHighlightCoords = null;
 window.locationEditMode = false;
 let animationFrameId = null;
+let locationFpsCounter = null;
 const FOG_VIEW_RADIUS = 25;
 const FOG_VIEW_HALF_ANGLE = Math.PI / 3;
 let combatState = null;
@@ -1464,13 +1573,6 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
                                     procedure,
                                 )
                                 : undefined,
-                            onTreatmentDeferred: forcedTargetCharacterId
-                                ? (requestId, pendingActionId) => Server.startCharacterTreatment(
-                                    window.currentLobbyId,
-                                    requestId,
-                                    pendingActionId,
-                                )
-                                : undefined,
                             interactionContext: forcedTargetCharacterId ? {
                                 lobbyId: window.currentLobbyId,
                                 locationId: getCurrentLocationId(),
@@ -1549,6 +1651,7 @@ function showNarrativeActionModal(characterId) {
                 <input name="difficulty" class="form-control number-input" type="number" min="1" max="40" value="10" disabled>
             </label>
             </div>
+            ${awarenessModeRowHtml()}
             <div style="display:flex; justify-content:flex-end; gap:8px;">
                 <button type="button" class="btn btn-secondary" data-narrative-cancel>Отмена</button>
                 <button type="submit" class="btn btn-primary">Выполнить</button>
@@ -1560,10 +1663,12 @@ function showNarrativeActionModal(characterId) {
     const skillInput = form.elements.skill_path;
     const difficultyInput = form.elements.difficulty;
     const skillRow = modal.querySelector('[data-narrative-skill-row]');
+    const updateAwarenessMode = bindAwarenessMode(form, () => characterId);
     rollInput.addEventListener('change', () => {
         skillInput.disabled = !rollInput.checked;
         difficultyInput.disabled = !rollInput.checked;
         skillRow.style.opacity = rollInput.checked ? '1' : '.45';
+        updateAwarenessMode?.();
     });
     modal.querySelector('[data-narrative-cancel]').onclick = closeNarrativeActionModal;
     modal.addEventListener('pointerdown', event => {
@@ -1590,7 +1695,7 @@ function showNarrativeActionModal(characterId) {
             action_points: actionPoints,
             narrative_action_name: actionName,
             narrative_roll_required: rollInput.checked,
-            narrative_skill_path: rollInput.checked ? skillInput.value : null,
+            narrative_skill_path: rollInput.checked ? awarenessModePath(form) : null,
             narrative_difficulty: rollInput.checked ? Number.parseInt(difficultyInput.value, 10) : null,
             pending_action_id: actionId,
         };
@@ -1702,10 +1807,16 @@ function showHelpReserveMenu(character) {
             <label style="display:grid;gap:5px;margin-bottom:10px;max-width:140px;">Стоимость, ОД<input name="action_points" type="number" min="1" max="30" value="1"></label>
             <label style="display:grid;gap:5px;margin-bottom:10px;">Действие<input name="action_label" type="text" maxlength="200" required placeholder="Например: придерживаю рану"></label>
             <label style="display:grid;gap:5px;">Подходящий навык<select name="skill_path">${skillOptions}</select></label>
+            ${awarenessModeRowHtml()}
             <button type="submit" class="btn btn-primary" style="width:100%;margin-top:15px;">Заявить помощь</button>
         </form>
     `;
     const form = modal.querySelector('form');
+    const updateAwarenessMode = bindAwarenessMode(
+        form,
+        () => Number(form.elements.target_character_id.value),
+    );
+    form.elements.target_character_id.addEventListener('change', () => updateAwarenessMode?.());
     modal.querySelector('.help-close').onclick = () => { modal.style.display = 'none'; };
     modal.onpointerdown = event => {
         if (event.target === modal) modal.style.display = 'none';
@@ -1729,7 +1840,7 @@ function showHelpReserveMenu(character) {
                 trigger: `Помощь: ${form.elements.action_label.value.trim()}`,
                 help_target_character_id: Number(form.elements.target_character_id.value),
                 help_action_label: form.elements.action_label.value.trim(),
-                help_skill_path: form.elements.skill_path.value,
+                help_skill_path: awarenessModePath(form),
             });
             modal.style.display = 'none';
             showNotification('Помощь заявлена и ожидает подходящего действия', 'success');
@@ -1879,11 +1990,13 @@ function showManualMustDoModal(actor) {
             <label style="display:grid;gap:5px;"><span>Навык</span><select name="skill_path" class="form-control">${NARRATIVE_SKILLS.map(([path, label]) => `<option value="${path}">${label}</option>`).join('')}</select></label>
             <label style="display:grid;gap:5px;"><span>Сложность</span><input name="difficulty" class="form-control number-input" type="number" min="1" max="40" value="10" required></label>
         </div>
+        ${awarenessModeRowHtml()}
         <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" class="btn btn-secondary">Отмена</button><button type="submit" class="btn btn-primary">Бросить</button></div>
     </form>`;
     document.body.appendChild(modal);
     const close = () => modal.remove();
     const form = modal.querySelector('form');
+    bindAwarenessMode(form, () => actor.character_id);
     modal.querySelector('[type="button"]').onclick = close;
     modal.onpointerdown = event => { if (event.target === modal) close(); };
     modal.onkeydown = event => {
@@ -1898,7 +2011,7 @@ function showManualMustDoModal(actor) {
         submit.disabled = true;
         const payload = {
             narrative_action_name: form.elements.action_name.value.trim(),
-            narrative_skill_path: form.elements.skill_path.value,
+            narrative_skill_path: awarenessModePath(form),
             narrative_difficulty: Number.parseInt(form.elements.difficulty.value, 10),
         };
         const succeeded = await performMustDoRetry(actor, payload);
@@ -1934,7 +2047,7 @@ async function performMustDoRetry(actor, manualPayload = null) {
         const uses = Number.isFinite(Number(details.uses_remaining))
             ? ` Осталось применений: ${details.uses_remaining}/${details.use_limit}.`
             : '';
-        if (details.kind === 'medical') {
+        if (details.kind === 'medical' && details.medical_retry) {
             const sheet = await import('./characterSheet.js');
             await sheet.resolveMustDoMedicalRetry(details.medical_retry, Boolean(check.success));
         }
@@ -5597,6 +5710,9 @@ function renderCombatHud() {
         (character.stress_effects || []).filter(effect => effect.gmPending).map(effect => ({ character, effect }))
     ) : [];
     const currentMustDoUsage = getMustDoUsage(combatState.current_character);
+    const deferredCharacters = (combatState.characters || []).filter(character => character.deferred_action && (
+        window.isGM || Number(character.controlled_by ?? character.owner_id) === getCurrentUserId()
+    ));
     const currentMustDoRetry = combatState.current_character?.must_do_retry;
     const isCombatActive = combatState.status === 'active';
     const combatStatusLabel = COMBAT_STATUS_LABELS[combatState.status] || 'Не активен';
@@ -5655,6 +5771,14 @@ function renderCombatHud() {
             <div>ОД: ${combatState.current_character?.action_points_current ?? 0}/${combatState.current_character?.action_points_max ?? 0}</div>
             <div>СД: ${combatState.current_character?.free_actions_current ?? 0}/${combatState.current_character?.free_actions_max ?? 0}</div>
             <div>ОП: ${combatState.current_character?.movement_points_current ?? 0}/${combatState.current_character?.movement_points_max ?? 0}</div>
+            ${deferredCharacters.map(character => `<div style="margin-top:6px;padding:8px;border:1px solid rgba(255,255,255,.15);border-radius:8px;">
+                <strong>${escapeHtml(character.name)}: ${escapeHtml(character.deferred_action.label)}</strong>
+                <div>${character.deferred_action.status === 'ready' ? 'Оплачено; ожидает завершения' : `Осталось оплатить: ${character.deferred_action.remaining_action_points} ОД`}</div>
+                ${character.deferred_action.status === 'ready' && (character.deferred_action.server_executable || character.deferred_action.client_executable) && character.location_character_id === combatState.current_character?.location_character_id
+                    ? '<button type="button" class="btn btn-sm btn-secondary combat-deferred-retry">Завершить</button>' : ''}
+                ${!character.deferred_action.server_executable && !character.deferred_action.client_executable ? '<div>Старое действие без сохранённого выбора магазина. Отмените его и начните заново.</div>' : ''}
+                <button type="button" class="btn btn-sm btn-secondary combat-deferred-cancel" data-character="${character.location_character_id}" data-action="${escapeHtml(character.deferred_action.id)}" title="Без возврата уже потраченных ОД">Отменить действие</button>
+            </div>`).join('')}
             ${combatState.current_character?.movement_evasion ? '<div>Уклонение на ходу: <strong>СЛ стрельбы по вам +2</strong></div>' : ''}
             ${aimedTarget ? `<div>Прицел: <strong>${aimedTarget.name || 'цель'}</strong> · Точность +${combatState.current_character?.aim_accuracy_bonus || 0}</div>` : ''}
             <div>Боль: ${combatState.current_character?.pain_level ?? 0} | Истощение: ${combatState.current_character?.exhaustion ?? 0}</div>
@@ -5693,6 +5817,20 @@ function renderCombatHud() {
         </div>
     `;
     ensureCombatHudDragging();
+    combatHud.querySelector('.combat-deferred-retry')?.addEventListener('click', () => resumeCompletedCombatAction(combatState, true));
+    combatHud.querySelectorAll('.combat-deferred-cancel').forEach(button => {
+        button.onclick = async () => {
+            button.disabled = true;
+            try {
+                await Server.cancelDeferredCombatAction(window.currentLobbyId, getCurrentLocationId(), {
+                    location_character_id: Number(button.dataset.character), action_id: button.dataset.action,
+                });
+            } catch (error) {
+                showNotification(error.message || 'Не удалось отменить действие', 'system');
+                button.disabled = false;
+            }
+        };
+    });
     combatHud.querySelectorAll('.combat-remove-participant-btn').forEach(button => {
         button.onclick = async (event) => {
             event.preventDefault();
@@ -5954,9 +6092,27 @@ window.addEventListener('must-do-retry-registered', event => {
     renderCombatHud();
 });
 
-async function resumeCompletedCombatAction(state) {
+const resumeSavedCombatAction = createDeferredActionResumer({
+    send: payload => Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), payload),
+    resumeConsumable: async actionId => {
+        const module = await import('./characterSheet.js');
+        return module.resumeDeferredConsumable(window.currentLobbyId, getCurrentLocationId(), actionId);
+    },
+    canResume: actor => canActWithCombatCharacter(actor),
+    notify: showNotification,
+});
+
+window.addEventListener('character-item-operation-finished', () => {
+    resumeSavedCombatAction(combatState);
+});
+
+async function resumeCompletedCombatAction(state, force = false) {
     const current = state?.current_character;
     const actionId = current?.completed_pending_action_id;
+    if (current?.deferred_action) {
+        deferredCombatActions.delete(current.deferred_action.id);
+        return resumeSavedCombatAction(state, { force });
+    }
     const payload = actionId ? deferredCombatActions.get(actionId) : null;
     if (!payload) return;
     deferredCombatActions.delete(actionId);
@@ -6003,6 +6159,7 @@ export function initLocationScene(containerId) {
     renderer.shadowMap.enabled = !renderer.isUnavailableRenderer;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
+    locationFpsCounter = createFpsCounter(container, 'Подлокация');
     if (renderer.isUnavailableRenderer) {
         window.webGLUnavailable = true;
         showWebGLUnavailable(container);
@@ -6055,10 +6212,18 @@ export function initLocationScene(containerId) {
         animationFrameId = requestAnimationFrame(animate);
         const deltaSeconds = Math.min(0.1, Math.max(0, (frameTime - previousFrameTime) / 1000));
         previousFrameTime = frameTime;
+        if (document.hidden) {
+            locationFpsCounter.pause();
+            return;
+        }
         updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
         animateAnomalyEffects(anomalyEffectMeshes, performance.now());
-        if (renderer && scene && camera) renderer.render(scene, camera);
+        if (renderer && scene && camera) {
+            renderer.render(scene, camera);
+            if (!renderer.isUnavailableRenderer) locationFpsCounter.frame(frameTime);
+            else locationFpsCounter.pause();
+        }
         if (labelRenderer) labelRenderer.render(scene, camera);
     }
     animate();
@@ -8041,7 +8206,16 @@ function buildTransferRow(entry, directionLabel, onTransfer) {
         line-height:1;
         flex:0 0 auto;
     `;
-    transferBtn.onclick = () => onTransfer(Math.max(1, Math.min(parseInt(qtyInput.value || '1', 10) || 1, currentQuantity)));
+    transferBtn.onclick = async () => {
+        transferBtn.disabled = true;
+        try {
+            await onTransfer(Math.max(1, Math.min(parseInt(qtyInput.value || '1', 10) || 1, currentQuantity)));
+        } catch (error) {
+            showNotification(error.message || 'Перенос не выполнен. Обновите содержимое контейнера.', 'system');
+        } finally {
+            transferBtn.disabled = false;
+        }
+    };
 
     row.appendChild(info);
     row.appendChild(transferBtn);
@@ -9865,6 +10039,8 @@ export function setEditButtonVisible(visible) {
 }
 
 export function destroyLocationScene() {
+    locationFpsCounter?.destroy();
+    locationFpsCounter = null;
     closeNarrativeActionModal();
     closeFacingMenu();
     clearFogMeshes();
@@ -10150,6 +10326,31 @@ async function showContainerInteractionMenu(object) {
         const character = selectedCharacterId ? await Server.getCharacter(selectedCharacterId).catch(() => null) : null;
         const characterData = character?.data || null;
         const characterEntries = characterData ? getCharacterTransferEntries(characterData) : [];
+        let transferring = false;
+        const transferEntry = async (entry, amount, direction) => {
+            if (transferring) return;
+            transferring = true;
+            try {
+                await Server.waitForCharacterSave(selectedCharacterId);
+                const fresh = await Server.getCharacter(selectedCharacterId);
+                const result = await Server.transferLocationItem(window.currentLobbyId, object.id, {
+                    character_id: selectedCharacterId, character_revision: fresh.data._revision,
+                    object_revision: object.revision, direction, item_path: entry.path,
+                    expected_item: entry.item, amount,
+                });
+                if (result.deleted) {
+                    removeLocationObject(object.id);
+                    closeContainerInteractionMenu();
+                } else {
+                    object = result.object;
+                    updateLocationObject(object);
+                    await showContainerInteractionMenu(object);
+                }
+                showNotification('Предмет перемещён', 'success');
+            } finally {
+                transferring = false;
+            }
+        };
 
         body.innerHTML = '';
         const leftPanel = document.createElement('div');
@@ -10183,30 +10384,7 @@ async function showContainerInteractionMenu(object) {
         } else {
             characterEntries.forEach((entry) => {
                 sourceList.appendChild(buildTransferRow(entry, '→', async (amount = 1) => {
-                    const fresh = await Server.getCharacter(selectedCharacterId).catch(() => null);
-                    const freshData = fresh?.data || null;
-                    if (!freshData) {
-                        showNotification('Не удалось загрузить персонажа', 'system');
-                        return;
-                    }
-                    const removed = takeItemByPathFromRoot(freshData, entry.path, amount);
-                    if (!removed) {
-                        showNotification('Не удалось переместить предмет', 'system');
-                        return;
-                    }
-                    const updatedContents = [...getContainerItems(object), cloneTransferItem(removed)];
-                    await Promise.all([
-                        Server.updateCharacter(selectedCharacterId, { data: freshData }),
-                        Server.updateLocationObject(window.currentLobbyId, object.id, { properties: { contents: updatedContents } }),
-                    ]);
-                    object.properties = { ...(object.properties || {}), contents: updatedContents };
-                    if (!updatedContents.length && (object.type === 'ground_item' || object.properties?.is_ground_item)) {
-                        await Server.deleteLocationObject(window.currentLobbyId, object.id);
-                        closeContainerInteractionMenu();
-                        return;
-                    }
-                    showNotification('Предмет перемещён', 'success');
-                    await showContainerInteractionMenu(object);
+                    await transferEntry(entry, amount, 'to_container');
                 }));
             });
         }
@@ -10225,32 +10403,7 @@ async function showContainerInteractionMenu(object) {
                         showNotification('Выберите персонажа', 'system');
                         return;
                     }
-                    const fresh = await Server.getCharacter(selectedCharacterId).catch(() => null);
-                    const freshData = fresh?.data || null;
-                    if (!freshData) {
-                        showNotification('Не удалось загрузить персонажа', 'system');
-                        return;
-                    }
-                    const containerRoot = { contents: [...getContainerItems(object)] };
-                    const removed = takeItemByPathFromRoot(containerRoot, entry.path, amount);
-                    if (!removed) {
-                        showNotification('Не удалось переместить предмет', 'system');
-                        return;
-                    }
-                    const inventory = getCharacterInventoryRoot(freshData);
-                    inventory.backpack.push(cloneTransferItem(removed));
-                    await Promise.all([
-                        Server.updateCharacter(selectedCharacterId, { data: freshData }),
-                        Server.updateLocationObject(window.currentLobbyId, object.id, { properties: { contents: containerRoot.contents } }),
-                    ]);
-                    object.properties = { ...(object.properties || {}), contents: containerRoot.contents };
-                    if (!containerRoot.contents.length && (object.type === 'ground_item' || object.properties?.is_ground_item)) {
-                        await Server.deleteLocationObject(window.currentLobbyId, object.id);
-                        closeContainerInteractionMenu();
-                        return;
-                    }
-                    showNotification('Предмет перемещён', 'success');
-                    await showContainerInteractionMenu(object);
+                    await transferEntry(entry, amount, 'to_character');
                 }));
             });
         };
@@ -10268,10 +10421,11 @@ async function showContainerInteractionMenu(object) {
                     title: `Добавить предмет: ${object.name || object.type || 'Контейнер'}`,
                     onSelect: async (newItem) => {
                         const updatedContents = [...getContainerItems(object), newItem];
-                        await Server.updateLocationObject(window.currentLobbyId, object.id, {
+                        object = await Server.updateLocationObject(window.currentLobbyId, object.id, {
+                            revision: object.revision,
                             properties: { contents: updatedContents },
                         });
-                        object.properties = { ...(object.properties || {}), contents: updatedContents };
+                        updateLocationObject(object);
                         showNotification('Предмет добавлен в контейнер', 'success');
                         renderContainerEntries();
                         return true;

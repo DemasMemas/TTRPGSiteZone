@@ -23,7 +23,7 @@ def test_alcohol_and_tobacco_addiction_chances(name, price, chance):
 def test_stimulants_are_assigned_to_their_rule_groups():
     assert addictions.addiction_profile('Стимулятор Болид')['key'] == 'accelerating_stimulants'
     assert addictions.addiction_profile('Стимулятор Орёл')['key'] == 'combat_stimulants'
-    assert addictions.addiction_profile('Стимулятор Мул') is None
+    assert addictions.addiction_profile('Стимулятор Бык') is None
     assert addictions.addiction_profile('Стимулятор Геракл') is None
     assert addictions.addiction_profile('Стимулятор Гора') is None
 

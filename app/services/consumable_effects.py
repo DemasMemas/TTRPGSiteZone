@@ -214,6 +214,7 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
         profile["notes"].append("inhibitor_cleanup")
     if "подавитель эмоций" in lower:
         profile["direct"]["stress_advantage"] = True
+        profile["direct"]["stress_attack_block_chance"] = 50
         profile["direct"]["psy_delta"] = -25
     if "стимулятор котик" in lower:
         profile["direct"]["addiction_block_hours"] = 24
@@ -239,6 +240,8 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
         profile["direct"]["stress_delta"] = -3
         profile["direct"]["psy_delta"] = -20
         profile["direct"]["stress_advantage"] = True
+        profile["direct"]["duration"] = 30
+        profile["direct"]["duration_phase"] = "time_elapsed"
     if "стимулятор гора-д" in lower:
         profile["direct"]["strength_delta"] = 2
         profile["direct"]["weight_delta"] = -3
@@ -273,7 +276,7 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
         profile["direct"]["requires_water_fraction"] = 1 / 3
         profile["direct"]["exhaustion_if_no_water"] = 1
         profile["notes"].append("hematogen_bleeding_reduction")
-    if "выход из болевого шока" in lower and "не тратится" in lower:
+    if re.search(r"выход\w* из болевого шока", lower) and "не тратится" in lower:
         profile["direct"]["will_shock_bonus"] = 2
         profile["direct"]["will_shock_advantage"] = True
         profile["direct"]["not_consumed"] = True
@@ -707,7 +710,7 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
     if 'кровоостанавливающее "желе"' in lower:
         remove_effect_types("bleeding_block")
         effect("blood_loss_freeze", 1, name="Стабилизация кровопотери", remaining=5, tick="turn_end")
-    if 'кровоостанавливающее "хлопок"' in lower:
+    if 'кровоостанавливающее' in lower and 'хлопок' in lower:
         remove_effect_types("bleeding_block")
         direct["stop_all_bleeding"] = True
         direct["exhaustion_delta"] = 1
@@ -743,9 +746,10 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
         direct.update({"blood_collection": True, "target_required": True, "blood_stage_delta": 2,
                        "exhaustion_delta": 2})
     if "бутылек нашатыря" in lower:
-        direct.update({"target_required": True, "requires_shock": True, "not_consumed": True})
-    if "бутылек нашатыря" in lower:
-        direct.update({"target_required": True, "requires_shock": True, "not_consumed": True})
+        direct.update({
+            "target_required": True, "requires_shock": True, "not_consumed": True,
+            "will_shock_bonus": 2, "will_shock_advantage": True,
+        })
 
     # Painkillers and delayed drugs.
     painkillers = {
@@ -861,12 +865,14 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
         direct.update({"fracture_splint": True, "fracture_restore_health": 1,
                        "temporary_limb_health_turns": 4, "action_points_cost": 6,
                        "requires_injury": True})
-    if any(name in lower for name in ("шина.", '"химера"', '"вторая жизнь"', "хирургический набор",
+    if any(name in lower for name in ("шина.", "химера", "вторая жизнь", "хирургический набор",
                                       'кустарный набор "айболит"', "набор полного восстановления конечности")):
         direct["requires_injury"] = True
         direct["target_body_part"] = True
-    if 'кустарный набор "айболит"' in lower:
+    if "кустарный набор" in lower and "айболит" in lower:
         direct["surgical_kit"] = True
+        direct["requires_injury"] = True
+        direct["target_body_part"] = True
     if "набор полного восстановления конечности" in lower:
         direct.update({
             "surgical_kit": True,
@@ -874,7 +880,7 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
             "restore_missing_part": True,
             "restore_full_body_part": True,
         })
-    if 'хирургический набор "хирург"' in lower:
+    if "хирургический набор" in lower:
         direct.update({
             "surgical_kit": True,
             "catastrophic_limb_surgery": "surgeon",
@@ -885,11 +891,11 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
         action_match = re.search(r"время использования\s*-\s*(\d+)\s*од", lower)
         direct["action_points_cost"] = _to_int(action_match.group(1), 1) if action_match else 1
         direct["restore_missing_part"] = True
-    if '"химера"' in lower:
+    if "химера" in lower:
         direct.update({"cure_fracture": True, "close_area_bleeding": True, "delay": 1,
                        "delayed_limb_treatment_minutes": 1, "special_limb_treatment": "chimera",
                        "invalid_limb_damage": -200, "head_lethal": True})
-    if '"вторая жизнь"' in lower:
+    if "вторая жизнь" in lower:
         direct.update({"cure_fracture": True, "restore_limb_health": 50, "close_area_bleeding": True,
                        "pain_delta": 5, "delay": 1, "delayed_limb_treatment_minutes": 1,
                        "special_limb_treatment": "second_life"})

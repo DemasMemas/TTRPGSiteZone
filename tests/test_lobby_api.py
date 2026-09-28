@@ -2242,7 +2242,7 @@ def test_edit_permission_implies_visibility_and_allows_sheet_update(
     updated = client.put(
         f"/lobbies/characters/{character['id']}",
         headers=auth_headers(editor),
-        json={"data": {"notes": "Shared edit"}},
+        json={"data": {"notes": "Shared edit", "_revision": opened.get_json()['data']['_revision']}},
     )
 
     stored = db.session.get(LobbyCharacter, character["id"])
@@ -2538,6 +2538,11 @@ def test_reload_can_be_paid_across_combat_turns(
     )
     db.session.add_all([location, magazine])
     db.session.flush()
+    reload_character = db.session.get(LobbyCharacter, actor_character['id'])
+    reload_character.data = {**reload_character.data, 'inventory': {'backpack': [{
+        'id': 'reload-magazine', 'templateId': magazine.id, 'name': magazine.name,
+        'category': 'magazine', 'quantity': 1, 'ammo': [],
+    }]}}
     actor_loc_char = LocationCharacter(
         location_id=location.id,
         character_id=actor_character["id"],
@@ -2573,6 +2578,7 @@ def test_reload_can_be_paid_across_combat_turns(
             "weapon_index": 0,
             "magazine_template_id": magazine.id,
             "pending_action_id": "reload-test-1",
+            "item_path": ["inventory", "backpack", 0],
         },
     )
 
@@ -2581,7 +2587,8 @@ def test_reload_can_be_paid_across_combat_turns(
     db.session.refresh(actor_loc_char)
     assert actor_loc_char.action_points_current == 0
     pending = actor_loc_char.character.data["health"]["combatMeta"]["pendingAction"]
-    assert pending["remaining_action_points"] == 4
+    # Reloading costs 6 AP plus 2 AP to retrieve the magazine from the backpack.
+    assert pending["remaining_action_points"] == 6
 
     next_turn = client.post(
         f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
@@ -2590,7 +2597,19 @@ def test_reload_can_be_paid_across_combat_turns(
     )
     assert next_turn.status_code == 200
     db.session.refresh(actor_loc_char)
-    assert actor_loc_char.action_points_current == 1
+    assert actor_loc_char.action_points_current == 0
+    assert actor_loc_char.character.data["health"]["combatMeta"][
+        "pendingAction"
+    ]["remaining_action_points"] == 1
+
+    other_ends = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(other),
+        json={},
+    )
+    assert other_ends.status_code == 200
+    db.session.refresh(actor_loc_char)
+    assert actor_loc_char.action_points_current == 4
     assert actor_loc_char.character.data["health"]["combatMeta"][
         "completedPendingActionId"
     ] == "reload-test-1"
@@ -2608,10 +2627,12 @@ def test_reload_can_be_paid_across_combat_turns(
     )
 
     assert completed.status_code == 200
-    assert completed.get_json()["reload_weapon"]["action_points"] == 6
+    assert completed.get_json()["reload_weapon"]["action_points"] == 8
     db.session.refresh(actor_loc_char)
-    assert actor_loc_char.action_points_current == 1
+    assert actor_loc_char.action_points_current == 4
     assert "completedPendingActionId" not in actor_loc_char.character.data["health"]["combatMeta"]
+    assert actor_loc_char.character.data['weapons'][0]['installedMagazine']['id'] == 'reload-magazine'
+    assert actor_loc_char.character.data['inventory']['backpack'] == []
 
 
 def test_narrative_combat_action_spends_ap_rolls_and_writes_chat(
@@ -2934,6 +2955,7 @@ def test_player_may_move_and_add_marked_player_item(
     )
     endpoint = f"/lobbies/characters/{character['id']}"
     moved_data = {
+        '_revision': character['data']['_revision'],
         "inventory": {"pockets": [], "backpack": [existing_item]},
     }
 
@@ -2947,6 +2969,7 @@ def test_player_may_move_and_add_marked_player_item(
         headers=auth_headers(owner),
         json={
             "data": {
+                '_revision': moved.get_json()['data']['_revision'],
                 "inventory": {
                     "pockets": [],
                     "backpack": [
@@ -2975,6 +2998,7 @@ def test_player_may_move_and_add_marked_player_item(
         headers=auth_headers(gm),
         json={
             "data": {
+                '_revision': player_add.get_json()['data']['_revision'],
                 "inventory": {
                     "pockets": [],
                     "backpack": [

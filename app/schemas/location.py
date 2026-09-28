@@ -29,6 +29,7 @@ class LocationSchema(Schema):
     updated_at = fields.DateTime(dump_only=True)
 
 class LocationObjectSchema(Schema):
+    revision = fields.Int(dump_only=True)
     id = fields.Int(dump_only=True)
     location_id = fields.Int(load_only=True)
     name = fields.Str()

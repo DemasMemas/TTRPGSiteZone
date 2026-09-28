@@ -1,5 +1,6 @@
 # app/models/character.py
 from datetime import datetime, timezone
+from copy import deepcopy
 from app.extensions import db
 from app.utils.defaults import empty_dict, empty_list
 
@@ -15,6 +16,14 @@ class LobbyCharacter(db.Model):
     time_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now(timezone.utc))
+    revision = db.Column(db.Integer, nullable=False, default=1, server_default='1')
+    __mapper_args__ = {'version_id_col': revision}
 
     lobby = db.relationship('Lobby', backref='characters')
     owner = db.relationship('User', foreign_keys=[owner_id])
+
+    def data_snapshot(self):
+        data = deepcopy(self.data or {})
+        data['_revision'] = self.revision
+        data['_character_id'] = self.id
+        return data

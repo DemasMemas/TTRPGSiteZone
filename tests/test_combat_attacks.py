@@ -615,6 +615,68 @@ def test_stress_decrease_expires_tension_effects(monkeypatch):
     assert target.character.data["health"]["effects"][0]["active"] is False
 
 
+def test_emotion_suppressor_can_block_stress_from_attack(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 25)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"will": {"base": 10, "bonus": 0}}},
+            "health": {
+                "stress": 0,
+                "effects": [{
+                    "type": "stress_resistance",
+                    "active": True,
+                    "remaining": 6,
+                    "stress_advantage": True,
+                    "stress_attack_block_chance": 50,
+                }],
+            },
+        }),
+        posture="standing",
+    )
+
+    result = CombatService.apply_stress_trigger(
+        target, 1, trigger="direct_attack",
+    )
+
+    assert result["blocked"] is True
+    assert result["attack_stress_block_chance"] == 50
+    assert result["attack_stress_block_roll"] == 25
+    assert result["after"] == 0
+    assert "rolls" not in result
+
+
+def test_stress_resistance_advantage_applies_to_manifestation_not_non_attack_block(monkeypatch):
+    rolls = iter([2, 18])
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"will": {"base": 10, "bonus": 0}}},
+            "health": {
+                "stress": 0,
+                "effects": [{
+                    "type": "stress_resistance",
+                    "active": True,
+                    "remaining": 6,
+                    "stress_advantage": True,
+                    "stress_attack_block_chance": 50,
+                }],
+            },
+        }),
+        posture="standing",
+    )
+
+    result = CombatService.apply_stress_trigger(target, 1, trigger="fright")
+
+    assert result["blocked"] is False
+    assert result["attack_stress_block_chance"] == 0
+    assert result["after"] == 1
+    assert result["rolls"] == [2, 18]
+    assert result["roll"] == 18
+    assert result["manifested"] is False
+
+
 def test_forced_stress_manifestation_uses_current_level_table(monkeypatch):
     rolls = iter([20, 12])
     monkeypatch.setattr(combat_module.random, "randint", lambda *_: next(rolls))
@@ -3482,6 +3544,57 @@ def test_narrative_social_check_adds_charisma_modifier(monkeypatch):
     assert check["skill_modifier"] == 1
     assert check["related_modifier"] == 2
     assert check["total"] == 13
+
+
+def test_awareness_channels_use_only_their_matching_bonuses(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 10)
+    character_data = {
+        "skills": {"physical": {"awareness": {"base": 10, "bonus": 0}}},
+        "equipment": {
+            "headphones": {"awarenessBonus": 3},
+            "detector": {"bonus": 2},
+        },
+        "health": {
+            "effects": [],
+            "combatMeta": {"consumableModifiers": [{
+                "stat": "vision_awareness", "value": 4, "remaining": 3,
+            }]},
+        },
+    }
+
+    visual = CombatService._narrative_skill_check(
+        character_data, "skills.physical.awareness.visual",
+    )
+    hearing = CombatService._narrative_skill_check(
+        character_data, "skills.physical.awareness.hearing",
+    )
+
+    assert visual["awareness_mode"] == "visual"
+    assert visual["equipment_modifier"] == 4
+    assert visual["total"] == 14
+    assert hearing["awareness_mode"] == "hearing"
+    assert hearing["equipment_modifier"] == 3
+    assert hearing["total"] == 13
+
+
+def test_hearing_awareness_automatically_fails_at_ninety_deafness(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 20)
+    character_data = {
+        "skills": {"physical": {"awareness": {"base": 20, "bonus": 0}}},
+        "equipment": {"headphones": {"awarenessBonus": 10}},
+        "health": {
+            "effects": [{"type": "deafness", "value": 90, "active": True}],
+        },
+    }
+
+    check = CombatService._narrative_skill_check(
+        character_data, "skills.physical.awareness.hearing",
+    )
+
+    assert check["automatic_failure"] is True
+    assert check["failure_reason"] == "Персонаж не слышит"
+    assert check["rolls"] == [0]
+    assert check["roll"] == 0
 
 
 def test_weapon_fire_rate_counts_shots_per_weapon_and_resets_each_round():

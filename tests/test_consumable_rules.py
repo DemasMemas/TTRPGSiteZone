@@ -442,6 +442,27 @@ def test_movement_duration_is_applied_to_stat_modifier():
     assert strength["remaining"] == 3
 
 
+def test_emotion_suppressor_blocks_attack_stress_and_grants_manifestation_advantage():
+    direct = parse_consumable_effects(
+        "Подавитель эмоций. Действует 6 перемещений. -25 Пси-состояний."
+    )["direct"]
+
+    assert direct["stress_advantage"] is True
+    assert direct["stress_attack_block_chance"] == 50
+    assert direct["duration"] == 6
+    assert direct["duration_phase"] == "movement_end"
+
+
+def test_harmony_grants_stress_manifestation_advantage_for_thirty_minutes():
+    direct = parse_consumable_effects(
+        "Стимулятор Гармония. -3 Стресса. -20 Пси-состояний. Действует 30 минут."
+    )["direct"]
+
+    assert direct["stress_advantage"] is True
+    assert direct["duration"] == 30
+    assert direct["duration_phase"] == "time_elapsed"
+
+
 def test_pain_block_returns_accumulated_pain_on_expiry():
     health = {"painLevel": 1, "exhaustion": 0, "combatMeta": {"blockedPain": 3}, "effects": []}
     effect = {

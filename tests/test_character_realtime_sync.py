@@ -61,6 +61,7 @@ def test_magazine_install_http_fallback_is_broadcast_to_character_viewers(
         },
     )
     updated_data = {
+        '_revision': character['data']['_revision'],
         "inventory": {"pockets": [], "backpack": []},
         "weapons": [{"name": "Pistol", "installedMagazine": magazine}],
     }
