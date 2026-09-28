@@ -6,7 +6,10 @@ export function createFpsCounter(container, label) {
     caption.textContent = `${label} · FPS`;
     const value = document.createElement('strong');
     value.textContent = '—';
-    badge.append(caption, value);
+    const details = document.createElement('span');
+    details.className = 'scene-render-details';
+    details.hidden = true;
+    badge.append(caption, value, details);
     container.appendChild(badge);
 
     let startedAt = null;
@@ -50,6 +53,10 @@ export function createFpsCounter(container, label) {
     return {
         frame,
         pause,
+        setDetails(message) {
+            details.textContent = message || '';
+            details.hidden = !message;
+        },
         destroy() {
             document.removeEventListener('visibilitychange', pause);
             badge.remove();

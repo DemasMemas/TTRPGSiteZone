@@ -151,6 +151,7 @@ body {
 .scene-fps-counter strong { color: #a8d69f; font: 700 17px Consolas, monospace; font-variant-numeric: tabular-nums; }
 .scene-fps-counter[data-fps-level="medium"] strong { color: #e1c47c; }
 .scene-fps-counter[data-fps-level="low"] strong { color: #ed907e; }
+.scene-fps-counter .scene-render-details { color: #b7b9a5; font: 11px Consolas, monospace; font-variant-numeric: tabular-nums; }
 
 /* Слой интерфейса поверх 3D */
 .ui-overlay {

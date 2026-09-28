@@ -15,6 +15,20 @@ export const chunksMap = new Map();
 let lastMouseX = 0, lastMouseY = 0;
 let lastModifiers = { alt: false, shift: false };
 const globalCameraKeys = new Set();
+let lastChunkVisibilityAt = -Infinity;
+let lastHoverRaycastAt = -Infinity;
+const CHUNK_VISIBILITY_REFRESH_MS = 500;
+const HOVER_RAYCAST_REFRESH_MS = 250;
+const MOVING_CAMERA_RAYCAST_REFRESH_MS = 100;
+const SHADOW_REFRESH_MS = 250;
+let cameraDragActive = false;
+let hoverRaycastPending = false;
+let worldShadowsDirty = false;
+let lastWorldShadowAt = -Infinity;
+let shadowRefreshesSinceSample = 0;
+let worldPerfSampleAt = performance.now();
+let worldFrameWorkMs = 0;
+let worldSampleFrames = 0;
 
 let postRenderCallbacks = [];
 
@@ -232,9 +246,13 @@ const renderer = createCompatibleWebGLRenderer(THREE, {
     logarithmicDepthBuffer: true,
 }) || createUnavailableRenderer();
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
 renderer.shadowMap.enabled = !renderer.isUnavailableRenderer;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+if (!renderer.isUnavailableRenderer) {
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;
+}
 const globalCanvasContainer = document.getElementById('canvas-container');
 globalCanvasContainer.appendChild(renderer.domElement);
 const worldFpsCounter = createFpsCounter(globalCanvasContainer, 'Карта');
@@ -255,6 +273,19 @@ controls.mouseButtons = {
     MIDDLE: THREE.MOUSE.PAN,
     RIGHT: THREE.MOUSE.ROTATE
 };
+
+function markWorldShadowsDirty() {
+    if (!renderer.isUnavailableRenderer) worldShadowsDirty = true;
+}
+
+function refreshWorldShadows(now, cameraMoved) {
+    if (!worldShadowsDirty || renderer.isUnavailableRenderer) return;
+    if (cameraMoved && now - lastWorldShadowAt < SHADOW_REFRESH_MS) return;
+    renderer.shadowMap.needsUpdate = true;
+    worldShadowsDirty = false;
+    lastWorldShadowAt = now;
+    shadowRefreshesSinceSample += 1;
+}
 
 let isMouseDown = false;
 let lastProcessedTileKey = null;
@@ -614,27 +645,88 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
     nearGroup.position.set(0, 0, 0);
     lod.addLevel(nearGroup, 0);
 
-    const midGroup = createAnomalyEffect(type, color, scale);
-    midGroup.position.set(0, 0, 0);
-    lod.addLevel(midGroup, 80);
-
-    const farGeo = new THREE.SphereGeometry(0.2, 4);
-    const farMat = new THREE.MeshStandardMaterial({ color: color, emissive: color.clone().multiplyScalar(0.3) });
-    const farMesh = new THREE.Mesh(farGeo, farMat);
-    farMesh.scale.set(scale, scale, scale);
-    farMesh.position.set(0, 0, 0);
-    lod.addLevel(farMesh, 200);
-
     lod.position.set(x, y, z);
+    lod.userData.farColor = color;
+    lod.userData.farScale = scale;
+    lod.userData.cullRadius = Math.max(1, 4 * scale);
     return lod;
 }
 
+const FAR_ANOMALY_DISTANCE_SQ = 200 * 200;
+const farAnomalyGeo = new THREE.SphereGeometry(0.2, 4);
+const farAnomalyMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+const visibleNearAnomalies = [];
+
+function createFarAnomalyInstances(lods) {
+    if (!lods.length) return null;
+    const mesh = new THREE.InstancedMesh(farAnomalyGeo, farAnomalyMat, lods.length);
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(lods.length * 3), 3);
+    mesh.count = 0;
+    mesh.visible = false;
+    mesh.frustumCulled = false;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    scene.add(mesh);
+    return mesh;
+}
+
+function disposeChunkAnomalyLODs(lods) {
+    (lods || []).forEach(lod => {
+        scene.remove(lod);
+        lod.traverse(node => {
+            node.geometry?.dispose();
+            const materials = Array.isArray(node.material) ? node.material : [node.material];
+            materials.forEach(material => {
+                material?.map?.dispose();
+                material?.dispose();
+            });
+        });
+    });
+}
+
+function updateFarAnomalyInstances(chunk, visible) {
+    if (!chunk.anomalyLODs?.length) return;
+    if (!visible) {
+        chunk.anomalyLODs.forEach(lod => lod.visible = false);
+        if (chunk.farAnomalies) chunk.farAnomalies.visible = false;
+        return;
+    }
+    const far = [];
+    for (const lod of chunk.anomalyLODs) {
+        anomalyVisibilitySphere.center.copy(lod.position);
+        anomalyVisibilitySphere.radius = lod.userData.cullRadius;
+        if (!chunkFrustum.intersectsSphere(anomalyVisibilitySphere)) {
+            lod.visible = false;
+            continue;
+        }
+        const distant = lod.position.distanceToSquared(camera.position) >= FAR_ANOMALY_DISTANCE_SQ;
+        lod.visible = !distant;
+        if (distant) far.push(lod);
+        else visibleNearAnomalies.push(lod);
+    }
+    const mesh = chunk.farAnomalies;
+    if (!mesh) return;
+    const previous = chunk.farAnomalyActive || [];
+    const changed = far.length !== previous.length || far.some((lod, index) => lod !== previous[index]);
+    if (changed) {
+        const dummy = new THREE.Object3D();
+        far.forEach((lod, index) => {
+            dummy.position.copy(lod.position);
+            dummy.scale.setScalar(lod.userData.farScale);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(index, dummy.matrix);
+            mesh.setColorAt(index, lod.userData.farColor);
+        });
+        mesh.count = far.length;
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        chunk.farAnomalyActive = far;
+    }
+    mesh.visible = mesh.count > 0;
+}
+
 function animateChunkAnomalies(time) {
-    const nearby = [];
-    chunksMap.forEach(entry => (entry.anomalyLODs || []).forEach(anomaly => {
-        if (anomaly.position.distanceToSquared(camera.position) < 220 * 220) nearby.push(anomaly);
-    }));
-    animateAnomalyEffects(nearby, time);
+    animateAnomalyEffects(visibleNearAnomalies, time);
 }
 
 // --- Вода: простой цветной материал (без текстуры) ---
@@ -644,6 +736,51 @@ const waterMat = new THREE.MeshStandardMaterial({
     transparent: false,
     opacity: 1.0
 });
+const groundGeo = new THREE.BoxGeometry(1, 1, 1);
+const planeGeo = new THREE.PlaneGeometry(0.99, 0.99);
+planeGeo.rotateX(-Math.PI / 2);
+const groundMat = new THREE.MeshStandardMaterial();
+
+function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, visible = true) {
+    const size = tilesData.length;
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+    const groundIndices = new Int16Array(size * size).fill(-1);
+    const waterIndices = new Int16Array(size * size).fill(-1);
+    let landCount = 0;
+    let waterCount = 0;
+
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            const tile = tilesData[y][x];
+            const tileIndex = y * size + x;
+            const height = tile.height || 1.0;
+            dummy.position.set(chunkX * size + x + 0.5, height / 2, chunkY * size + y + 0.5);
+            if (tile.terrain === 'water') {
+                dummy.scale.set(1, 1, 1);
+                dummy.updateMatrix();
+                waterIndices[tileIndex] = waterCount;
+                water.setMatrixAt(waterCount++, dummy.matrix);
+            } else {
+                dummy.scale.set(1, height, 1);
+                dummy.updateMatrix();
+                groundIndices[tileIndex] = landCount;
+                ground.setMatrixAt(landCount, dummy.matrix);
+                color.setHex(terrainColors[tile.terrain] || 0x3a5f0b);
+                ground.setColorAt(landCount++, color);
+            }
+        }
+    }
+
+    ground.count = landCount;
+    water.count = waterCount;
+    ground.visible = visible && landCount > 0;
+    water.visible = visible && waterCount > 0;
+    ground.instanceMatrix.needsUpdate = landCount > 0;
+    ground.instanceColor.needsUpdate = landCount > 0;
+    water.instanceMatrix.needsUpdate = waterCount > 0;
+    return { groundIndices, waterIndices };
+}
 
 // --- Функции для чанков ---
 export function addChunk(cx, cy, tilesData) {
@@ -654,12 +791,6 @@ export function addChunk(cx, cy, tilesData) {
 
     const size = tilesData.length;
     const totalTiles = size * size;
-
-    const groundGeo = new THREE.BoxGeometry(1, 1, 1);
-    const planeGeo = new THREE.PlaneGeometry(0.99, 0.99);
-    planeGeo.rotateX(-Math.PI / 2);
-
-    const groundMat = new THREE.MeshStandardMaterial();
 
     const groundInstances = new THREE.InstancedMesh(groundGeo, groundMat, totalTiles);
     groundInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalTiles * 3), 3);
@@ -709,7 +840,6 @@ export function addChunk(cx, cy, tilesData) {
     const dummy = new THREE.Object3D();
     let minX = Infinity, maxX = -Infinity, minY = 0, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
 
-    let groundIdx = 0, waterIdx = 0;
     let treeIdx = 0, houseIdx = 0, fenceIdx = 0;
     const anomalyLODs = [];
 
@@ -732,30 +862,6 @@ export function addChunk(cx, cy, tilesData) {
             maxY = Math.max(maxY, height + 0.5);
             minZ = Math.min(minZ, worldZ - 0.5);
             maxZ = Math.max(maxZ, worldZ + 0.5);
-
-            dummy.rotation.set(0, 0, 0);
-            dummy.position.set(worldX, height / 2, worldZ);
-            if (tile.terrain === 'water') {
-                dummy.scale.set(0, 0, 0);
-            } else {
-                dummy.scale.set(1, height, 1);
-            }
-            dummy.updateMatrix();
-            groundInstances.setMatrixAt(groundIdx, dummy.matrix);
-            groundIdx++;
-
-            const color = new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b);
-            groundInstances.setColorAt(tileIndex, color);
-
-            dummy.rotation.set(0, 0, 0);
-            dummy.position.set(worldX, height / 2, worldZ);
-            if (tile.terrain === 'water') {
-                dummy.scale.set(1, 1, 1);
-            } else {
-                dummy.scale.set(0, 0, 0);
-            }
-            dummy.updateMatrix();
-            waterInstances.setMatrixAt(waterIdx++, dummy.matrix);
 
             if (tile.objects) {
                 tile.objects.forEach(obj => {
@@ -819,9 +925,7 @@ export function addChunk(cx, cy, tilesData) {
         }
     }
 
-    groundInstances.instanceMatrix.needsUpdate = true;
-    groundInstances.instanceColor.needsUpdate = true;
-    waterInstances.instanceMatrix.needsUpdate = true;
+    const terrainIndices = fillChunkTerrainInstances(groundInstances, waterInstances, tilesData, cx, cy);
 
     if (treeInstances) {
         treeInstances.instanceMatrix.needsUpdate = true;
@@ -842,6 +946,8 @@ export function addChunk(cx, cy, tilesData) {
     if (houseInstances) scene.add(houseInstances);
     if (fenceInstances) scene.add(fenceInstances);
 
+    const farAnomalies = createFarAnomalyInstances(anomalyLODs);
+
     const box = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ));
     chunkBounds.push({ box, mesh: groundInstances, key });
     if (waterInstances) chunkBounds.push({ box, mesh: waterInstances, key });
@@ -856,19 +962,30 @@ export function addChunk(cx, cy, tilesData) {
         houses: houseInstances,
         fences: fenceInstances,
         anomalyLODs: anomalyLODs,
+        farAnomalies,
+        farAnomalyActive: [],
         tilesData: tilesData,
         chunkX: cx,
         chunkY: cy,
+        terrainVisible: true,
+        ...terrainIndices,
         bounds: box.clone(),
         objectIndices: objectIndices,
         pendingRebuild: null
     });
+    lastChunkVisibilityAt = -Infinity;
+    lastHoverRaycastAt = -Infinity;
+    markWorldShadowsDirty();
 }
 
 export function removeChunk(cx, cy) {
     const key = `${cx},${cy}`;
     const entry = chunksMap.get(key);
     if (!entry) return;
+    if (entry.pendingRebuild) {
+        cancelAnimationFrame(entry.pendingRebuild);
+        entry.pendingRebuild = null;
+    }
 
     for (let i = chunkBounds.length - 1; i >= 0; i--) {
         if (chunkBounds[i].key === key) chunkBounds.splice(i, 1);
@@ -879,16 +996,21 @@ export function removeChunk(cx, cy) {
     if (entry.trees) scene.remove(entry.trees);
     if (entry.houses) scene.remove(entry.houses);
     if (entry.fences) scene.remove(entry.fences);
-    if (entry.anomalyLODs) {
-        entry.anomalyLODs.forEach(lod => scene.remove(lod));
+    entry.ground.dispose();
+    entry.water.dispose();
+    entry.trees?.dispose();
+    entry.houses?.dispose();
+    entry.fences?.dispose();
+    disposeChunkAnomalyLODs(entry.anomalyLODs);
+    if (entry.farAnomalies) {
+        scene.remove(entry.farAnomalies);
+        entry.farAnomalies.dispose();
     }
 
-    entry.ground.geometry.dispose();
-    entry.ground.material.dispose();
-    entry.water.geometry.dispose();
-    entry.water.material.dispose();
-
     chunksMap.delete(key);
+    lastChunkVisibilityAt = -Infinity;
+    lastHoverRaycastAt = -Infinity;
+    markWorldShadowsDirty();
 }
 
 // --- Функция для обновления позиций объектов на тайле при изменении высоты ---
@@ -937,11 +1059,22 @@ function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
 
 // --- Функция для полного перестроения объектов чанка (при изменении объектов) ---
 function rebuildChunkObjects(entry) {
-    if (entry.trees) scene.remove(entry.trees);
-    if (entry.houses) scene.remove(entry.houses);
-    if (entry.fences) scene.remove(entry.fences);
-    if (entry.anomalyLODs) {
-        entry.anomalyLODs.forEach(lod => scene.remove(lod));
+    if (entry.trees) {
+        scene.remove(entry.trees);
+        entry.trees.dispose();
+    }
+    if (entry.houses) {
+        scene.remove(entry.houses);
+        entry.houses.dispose();
+    }
+    if (entry.fences) {
+        scene.remove(entry.fences);
+        entry.fences.dispose();
+    }
+    disposeChunkAnomalyLODs(entry.anomalyLODs);
+    if (entry.farAnomalies) {
+        scene.remove(entry.farAnomalies);
+        entry.farAnomalies.dispose();
     }
 
     const tilesData = entry.tilesData;
@@ -1082,7 +1215,12 @@ function rebuildChunkObjects(entry) {
     entry.houses = houseInstances;
     entry.fences = fenceInstances;
     entry.anomalyLODs = anomalyLODs;
+    entry.farAnomalies = createFarAnomalyInstances(anomalyLODs);
+    entry.farAnomalyActive = [];
     entry.objectIndices = objectIndices;
+    lastChunkVisibilityAt = -Infinity;
+    lastHoverRaycastAt = -Infinity;
+    markWorldShadowsDirty();
 }
 
 export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
@@ -1092,50 +1230,40 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
 
     const tile = entry.tilesData[tileY][tileX];
     Object.assign(tile, updates);
+    lastHoverRaycastAt = -Infinity;
 
-    if (entry.ground) {
-        const index = tileY * CHUNK_SIZE + tileX;
-        const dummy = new THREE.Object3D();
-        const worldX = chunkX * CHUNK_SIZE + tileX + 0.5;
-        const worldZ = chunkY * CHUNK_SIZE + tileY + 0.5;
-        const height = tile.height || 1.0;
-
-        dummy.position.set(worldX, height / 2, worldZ);
-        if (tile.terrain === 'water') {
-            dummy.scale.set(0, 0, 0);
+    if (updates.terrain !== undefined || updates.height !== undefined) {
+        const tileIndex = tileY * CHUNK_SIZE + tileX;
+        const groundIndex = entry.groundIndices[tileIndex];
+        const waterIndex = entry.waterIndices[tileIndex];
+        const isWater = tile.terrain === 'water';
+        if ((isWater && groundIndex >= 0) || (!isWater && waterIndex >= 0)) {
+            Object.assign(entry, fillChunkTerrainInstances(
+                entry.ground, entry.water, entry.tilesData, chunkX, chunkY, entry.terrainVisible,
+            ));
         } else {
-            dummy.scale.set(1, height, 1);
+            const dummy = new THREE.Object3D();
+            const height = tile.height || 1.0;
+            dummy.position.set(chunkX * CHUNK_SIZE + tileX + 0.5, height / 2, chunkY * CHUNK_SIZE + tileY + 0.5);
+            if (isWater) {
+                dummy.scale.set(1, 1, 1);
+                dummy.updateMatrix();
+                entry.water.setMatrixAt(waterIndex, dummy.matrix);
+                entry.water.instanceMatrix.needsUpdate = true;
+            } else {
+                dummy.scale.set(1, height, 1);
+                dummy.updateMatrix();
+                entry.ground.setMatrixAt(groundIndex, dummy.matrix);
+                entry.ground.setColorAt(groundIndex, new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b));
+                entry.ground.instanceMatrix.needsUpdate = true;
+                entry.ground.instanceColor.needsUpdate = true;
+            }
         }
-        dummy.updateMatrix();
-        entry.ground.setMatrixAt(index, dummy.matrix);
-
-        const color = new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b);
-        entry.ground.setColorAt(index, color);
-
-        entry.ground.instanceMatrix.needsUpdate = true;
-        entry.ground.instanceColor.needsUpdate = true;
-    }
-
-    if (entry.water) {
-        const index = tileY * CHUNK_SIZE + tileX;
-        const dummy = new THREE.Object3D();
-        const worldX = chunkX * CHUNK_SIZE + tileX + 0.5;
-        const worldZ = chunkY * CHUNK_SIZE + tileY + 0.5;
-        const height = tile.height || 1.0;
-
-        dummy.position.set(worldX, height / 2, worldZ);
-        if (tile.terrain === 'water') {
-            dummy.scale.set(1, 1, 1);
-        } else {
-            dummy.scale.set(0, 0, 0);
-        }
-        dummy.updateMatrix();
-        entry.water.setMatrixAt(index, dummy.matrix);
-        entry.water.instanceMatrix.needsUpdate = true;
     }
 
     if (updates.height !== undefined) {
         updateTileObjectsPositions(entry, tileX, tileY, tile.height);
+        markWorldShadowsDirty();
     }
 
     if (updates.objects !== undefined) {
@@ -1151,39 +1279,64 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
 
 export function setBrushRadius(radius) {
     currentBrushRadius = radius;
+    lastHoverRaycastAt = -Infinity;
 }
 
-const MAX_RENDER_DISTANCE = 800;
+const TERRAIN_RENDER_DISTANCE = 380;
+const NATURAL_DETAIL_DISTANCE = 190;
+const STRUCTURE_DETAIL_DISTANCE = 280;
+const ANOMALY_DETAIL_DISTANCE = 320;
+const chunkFrustum = new THREE.Frustum();
+const chunkProjectionMatrix = new THREE.Matrix4();
+const anomalyVisibilitySphere = new THREE.Sphere();
+
+function chunkWithinHorizontalDistance(bounds, focus, distance) {
+    const nearestX = Math.max(bounds.min.x, Math.min(focus.x, bounds.max.x));
+    const nearestZ = Math.max(bounds.min.z, Math.min(focus.z, bounds.max.z));
+    const dx = focus.x - nearestX;
+    const dz = focus.z - nearestZ;
+    return dx * dx + dz * dz <= distance * distance;
+}
 
 function updateChunkVisibility() {
     camera.updateMatrixWorld();
-    const frustum = new THREE.Frustum();
-    frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    chunkFrustum.setFromProjectionMatrix(chunkProjectionMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    visibleNearAnomalies.length = 0;
 
     chunksMap.forEach((chunk) => {
         if (!chunk.bounds) return;
 
-        const center = chunk.bounds.getCenter(new THREE.Vector3());
-        const dist = camera.position.distanceTo(center);
-        if (dist > MAX_RENDER_DISTANCE) {
+        if (!chunkWithinHorizontalDistance(chunk.bounds, controls.target, TERRAIN_RENDER_DISTANCE)) {
             setVisible(chunk, false);
             return;
         }
 
-        const visible = frustum.intersectsBox(chunk.bounds);
-        setVisible(chunk, visible);
+        const visible = chunkFrustum.intersectsBox(chunk.bounds);
+        setVisible(
+            chunk,
+            visible,
+            visible && chunkWithinHorizontalDistance(chunk.bounds, controls.target, NATURAL_DETAIL_DISTANCE),
+            visible && chunkWithinHorizontalDistance(chunk.bounds, controls.target, STRUCTURE_DETAIL_DISTANCE),
+            visible && chunkWithinHorizontalDistance(chunk.bounds, controls.target, ANOMALY_DETAIL_DISTANCE),
+        );
     });
 }
 
-function setVisible(chunk, visible) {
-    if (chunk.ground) chunk.ground.visible = visible;
-    if (chunk.water) chunk.water.visible = visible;
-    if (chunk.trees) chunk.trees.visible = visible;
-    if (chunk.houses) chunk.houses.visible = visible;
-    if (chunk.fences) chunk.fences.visible = visible;
-    if (chunk.anomalyLODs) {
-        chunk.anomalyLODs.forEach(lod => lod.visible = visible);
-    }
+function setVisible(chunk, visible, naturalVisible = false, structureVisible = false, anomalyVisible = false) {
+    const groundVisible = visible && chunk.ground?.count !== 0;
+    const waterVisible = visible && chunk.water?.count !== 0;
+    const visibilityChanged = (chunk.ground && chunk.ground.visible !== groundVisible)
+        || (chunk.trees && chunk.trees.visible !== naturalVisible)
+        || (chunk.houses && chunk.houses.visible !== structureVisible)
+        || (chunk.fences && chunk.fences.visible !== naturalVisible);
+    chunk.terrainVisible = visible;
+    if (chunk.ground) chunk.ground.visible = groundVisible;
+    if (chunk.water) chunk.water.visible = waterVisible;
+    if (chunk.trees) chunk.trees.visible = naturalVisible;
+    if (chunk.houses) chunk.houses.visible = structureVisible;
+    if (chunk.fences) chunk.fences.visible = naturalVisible;
+    updateFarAnomalyInstances(chunk, anomalyVisible);
+    if (visibilityChanged) markWorldShadowsDirty();
 }
 
 export function setEditMode(enabled) {
@@ -1200,11 +1353,12 @@ export function setWorldTravelTileClickCallback(callback) {
 
 function performRaycast(clientX, clientY) {
     if (window.isLocationActive) return;
+    lastHoverRaycastAt = performance.now();
     mouse.x = (clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
 
-    const candidates = chunkBounds.filter(entry => raycaster.ray.intersectsBox(entry.box)).map(e => e.mesh);
+    const candidates = chunkBounds.filter(entry => entry.mesh.visible && raycaster.ray.intersectsBox(entry.box)).map(e => e.mesh);
     const intersects = raycaster.intersectObjects(candidates);
 
     if (hoveredTile) {
@@ -1402,23 +1556,51 @@ function animate() {
     // The sublocation has its own renderer; do not render the hidden world behind it.
     if (document.hidden || window.isLocationActive) {
         worldFpsCounter.pause();
+        worldPerfSampleAt = now;
+        worldFrameWorkMs = 0;
+        worldSampleFrames = 0;
+        shadowRefreshesSinceSample = 0;
         return;
     }
+    const frameWorkStartedAt = performance.now();
     if (!renderer.isUnavailableRenderer) {
         updateGlobalCameraMovement(Math.min(0.1, Math.max(0, delta)));
-        controls.update();
-        updateChunkVisibility();
+        const cameraMoved = controls.update();
+        if (cameraMoved || now - lastChunkVisibilityAt >= CHUNK_VISIBILITY_REFRESH_MS) {
+            updateChunkVisibility();
+            lastChunkVisibilityAt = now;
+        }
         updateRain(delta);
         animateChunkAnomalies(now);
-    }
 
-    if (!renderer.isUnavailableRenderer && (lastMouseX !== 0 || lastMouseY !== 0)) {
-        performRaycast(lastMouseX, lastMouseY);
+        if ((lastMouseX !== 0 || lastMouseY !== 0)
+            && !cameraDragActive
+            && (hoverRaycastPending
+                || (cameraMoved && now - lastHoverRaycastAt >= MOVING_CAMERA_RAYCAST_REFRESH_MS)
+                || now - lastHoverRaycastAt >= HOVER_RAYCAST_REFRESH_MS)) {
+            performRaycast(lastMouseX, lastMouseY);
+            hoverRaycastPending = false;
+        }
+        refreshWorldShadows(now, cameraMoved);
     }
 
     if (!renderer.isUnavailableRenderer) {
         renderer.render(scene, camera);
         worldFpsCounter.frame(now);
+        worldFrameWorkMs += performance.now() - frameWorkStartedAt;
+        worldSampleFrames += 1;
+        if (now - worldPerfSampleAt >= 1000) {
+            const renderInfo = renderer.info?.render;
+            if (renderInfo) {
+                worldFpsCounter.setDetails(
+                    `calls ${renderInfo.calls} | tris ${Math.round(renderInfo.triangles / 1000)}k | CPU ${(worldFrameWorkMs / worldSampleFrames).toFixed(1)}ms | shadows ${shadowRefreshesSinceSample}`
+                );
+            }
+            worldPerfSampleAt = now;
+            worldFrameWorkMs = 0;
+            worldSampleFrames = 0;
+            shadowRefreshesSinceSample = 0;
+        }
     } else {
         worldFpsCounter.pause();
     }
@@ -1468,6 +1650,11 @@ window.addEventListener('pointermove', (event) => {
     lastModifiers.alt = event.altKey;
     lastModifiers.shift = event.shiftKey;
 
+    cameraDragActive = Boolean(event.buttons & 6);
+    if (cameraDragActive) {
+        hoverRaycastPending = true;
+        return;
+    }
     performRaycast(event.clientX, event.clientY);
 
     if ((event.buttons === 1) && editMode && hoveredTile && window.applyBrush) {
@@ -1484,6 +1671,11 @@ window.addEventListener('pointermove', (event) => {
         }
     }
 }, { capture: true });
+
+window.addEventListener('pointerup', () => {
+    cameraDragActive = false;
+    hoverRaycastPending = true;
+});
 
 window.addEventListener('keydown', (e) => {
     const isTyping = Boolean(e.target?.closest?.('input, textarea, select, [contenteditable="true"]'));

@@ -61,3 +61,12 @@ test('hidden tab and long gaps reset the sample instead of reporting a false dro
     assert.equal(badge.removed, true);
     assert.equal(listeners.has('visibilitychange'), false);
 });
+
+test('render details can be shown on the world counter without changing the FPS value', () => {
+    const { counter, badge } = setup();
+    counter.setDetails('calls 100 | tris 200k');
+    assert.equal(badge.children[2].textContent, 'calls 100 | tris 200k');
+    assert.equal(badge.children[2].hidden, false);
+    counter.setDetails('');
+    assert.equal(badge.children[2].hidden, true);
+});
