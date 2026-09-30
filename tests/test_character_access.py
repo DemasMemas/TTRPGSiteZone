@@ -54,6 +54,19 @@ def headers(case, user):
     return {'Authorization': f"Bearer {case['tokens'][user.id]}"}
 
 
+def test_socket_authentication_reports_gm_role(access_case, app):
+    case = access_case
+    for user, expected in ((case['gm'], True), (case['owner'], False)):
+        connection = socketio.test_client(app)
+        connection.emit('authenticate', {
+            'token': case['tokens'][user.id], 'lobby_id': case['lobby'].id,
+        })
+        events = connection.get_received()
+        authenticated = next(event for event in events if event['name'] == 'authenticated')
+        assert authenticated['args'][0]['is_gm'] is expected
+        connection.disconnect()
+
+
 def update(case, client, user, updates, transport):
     updates = deepcopy(updates)
     if isinstance(updates.get('data'), dict):

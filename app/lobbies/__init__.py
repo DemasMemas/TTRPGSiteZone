@@ -15,11 +15,12 @@ from app.services.lobby import LobbyService
 from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
+from app.services.character_roles import can_join_world_group, follows_world_time
 from app.services.container_transfer import ContainerTransferService
 from app.services.treatment import TreatmentService
 from app.services.medical_procedure import MedicalProcedureService
 from app.services.general_consumable import GeneralConsumableService
-from app.services.exceptions import ConflictError, PermissionDenied
+from app.services.exceptions import ConflictError, PermissionDenied, ValidationError, NotFoundError
 from app.services.character_events import emit_character_update, publish_character_save
 from app.services.combat import CombatService
 from app.services.artifact_effects import apply_artifact_world_movement
@@ -57,6 +58,7 @@ from app.models import (
     LobbyCharacter,
     LobbyParticipant,
     LocationCombatState,
+    CharacterInteractionRequest,
     User,
     WorldGroup,
     WorldMapEvent,
@@ -246,11 +248,7 @@ def _body_carry_profile(member_ids, characters_by_id):
     return profiles, rope_count, assignments
 
 
-def _serialize_world_group(group):
-    pending_event = next(
-        (event for event in group.travel_events if event.status == 'pending'),
-        None,
-    )
+def _eligible_world_group_characters(group):
     member_ids = [
         int(value) for value in (group.member_character_ids or [])
         if str(value).isdigit()
@@ -262,6 +260,20 @@ def _serialize_world_group(group):
             LobbyCharacter.id.in_(member_ids),
         ).all()
     } if member_ids else {}
+    member_ids = [
+        character_id for character_id in member_ids
+        if character_id in characters_by_id
+        and can_join_world_group(characters_by_id[character_id])
+    ]
+    return member_ids, {character_id: characters_by_id[character_id] for character_id in member_ids}
+
+
+def _serialize_world_group(group):
+    pending_event = next(
+        (event for event in group.travel_events if event.status == 'pending'),
+        None,
+    )
+    member_ids, characters_by_id = _eligible_world_group_characters(group)
     carry_profiles, rope_count, carry_assignments = _body_carry_profile(
         member_ids,
         characters_by_id,
@@ -511,6 +523,8 @@ def _advance_world_time(lobby, minutes):
     )
     updated_characters = []
     for character in character_query.all():
+        if not follows_world_time(character):
+            continue
         character_data = dict(character.data or {})
         health = character_data.get('health')
         if not isinstance(health, dict):
@@ -603,6 +617,7 @@ def list_world_groups(lobby_id, lobby, participant):
             {'id': character.id, 'name': character.name}
             for character in LobbyCharacter.query.filter_by(lobby_id=lobby_id)
             .order_by(LobbyCharacter.name, LobbyCharacter.id).all()
+            if can_join_world_group(character)
         ]
     map_events = []
     if is_gm:
@@ -715,14 +730,16 @@ def update_world_group_members(lobby_id, group_id, lobby):
         member_ids = list(dict.fromkeys(int(value) for value in (data.get('character_ids') or [])))
     except (TypeError, ValueError):
         return jsonify({'error': 'character_ids must contain integers'}), 400
-    existing_ids = {
-        character_id for (character_id,) in db.session.query(LobbyCharacter.id).filter(
+    existing_characters = {
+        character.id: character for character in LobbyCharacter.query.filter(
             LobbyCharacter.lobby_id == lobby_id,
             LobbyCharacter.id.in_(member_ids),
         ).all()
-    } if member_ids else set()
-    if set(member_ids) != existing_ids:
+    } if member_ids else {}
+    if set(member_ids) != set(existing_characters):
         return jsonify({'error': 'Character does not belong to this lobby'}), 400
+    if any(not can_join_world_group(character) for character in existing_characters.values()):
+        return jsonify({'error': 'Mutants and non-joining NPCs cannot join a world group'}), 400
     group.member_character_ids = member_ids
     db.session.commit()
     payload = _serialize_world_group(group)
@@ -806,10 +823,7 @@ def search_world_anomaly_field(lobby_id, group_id, lobby, participant):
         character_id = int(payload.get('character_id'))
     except (TypeError, ValueError):
         return jsonify({'error': 'Choose a group member'}), 400
-    member_ids = {
-        int(value) for value in (group.member_character_ids or [])
-        if str(value).isdigit()
-    }
+    member_ids, _ = _eligible_world_group_characters(group)
     if character_id not in member_ids:
         return jsonify({'error': 'The character is not a member of this group'}), 400
     character = LobbyCharacter.query.filter_by(id=character_id, lobby_id=lobby_id).first()
@@ -1020,10 +1034,7 @@ def move_world_group(lobby_id, group_id, lobby, participant):
     filter_updates = []
     radiation_updates = []
     radiation_consequences = []
-    member_ids = {
-        int(value) for value in (group.member_character_ids or [])
-        if str(value).isdigit()
-    }
+    member_ids, _ = _eligible_world_group_characters(group)
     group_characters = (
         LobbyCharacter.query.filter(
             LobbyCharacter.lobby_id == lobby_id,
@@ -1268,6 +1279,8 @@ def update_lobby_time(lobby_id, lobby):
             lobby_id=lobby_id,
             time_active=True,
         ).all():
+            if not follows_world_time(character):
+                continue
             character_data = dict(character.data or {})
             health = character_data.get('health')
             if not isinstance(health, dict):
@@ -1393,11 +1406,13 @@ def update_time_active_characters(lobby_id, lobby):
     except (TypeError, ValueError):
         return jsonify({'error': 'character_ids must contain integers'}), 400
     characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).all()
-    existing_ids = {character.id for character in characters}
+    existing_ids = {
+        character.id for character in characters if follows_world_time(character)
+    }
     if not active_ids.issubset(existing_ids):
-        return jsonify({'error': 'Character does not belong to this lobby'}), 400
+        return jsonify({'error': 'Only player characters can be active in world time'}), 400
     for character in characters:
-        character.time_active = character.id in active_ids
+        character.time_active = follows_world_time(character) and character.id in active_ids
     db.session.commit()
     socketio.emit(
         'character_time_activity_updated',
@@ -1424,7 +1439,10 @@ def start_lobby_rest(lobby_id, lobby):
         return jsonify({'error': 'Select at least one character'}), 400
 
     all_characters = LobbyCharacter.query.filter_by(lobby_id=lobby_id).all()
-    characters = [character for character in all_characters if character.time_active]
+    characters = [
+        character for character in all_characters
+        if character.time_active and follows_world_time(character)
+    ]
     existing_ids = {character.id for character in characters}
     if not selected_ids.issubset(existing_ids):
         return jsonify({'error': 'Rest participants must be active characters'}), 400
@@ -2276,6 +2294,8 @@ def get_location_detail(lobby_id, location_id, lobby, participant):
         'name': location.name,
         'description': location.description,
         'type': location.type,
+        'world_tile_x': location.world_tile_x,
+        'world_tile_z': location.world_tile_z,
         'grid_width': location.grid_width,
         'grid_height': location.grid_height,
         'tiles_data': location.tiles_data,
@@ -2294,7 +2314,18 @@ def update_location(lobby_id, location_id, lobby):
 
     data = request.get_json() or {}
     delete_structures = data.get('delete_structures') is True
-    allowed = ['name', 'description', 'type', 'grid_width', 'grid_height', 'tiles_data', 'spawn_points', 'world_radius']
+    if 'name' in data:
+        if not isinstance(data['name'], str) or not 1 <= len(data['name'].strip()) <= 100:
+            return jsonify({'error': 'Location name must contain 1 to 100 characters'}), 400
+        data['name'] = data['name'].strip()
+    for field, limit in (
+        ('world_tile_x', lobby.chunks_width * 32),
+        ('world_tile_z', lobby.chunks_height * 32),
+    ):
+        if field in data and (type(data[field]) is not int or not 0 <= data[field] < limit):
+            return jsonify({'error': f'{field} must be a tile within the world map'}), 400
+    allowed = ['name', 'description', 'type', 'grid_width', 'grid_height', 'tiles_data',
+               'spawn_points', 'world_radius', 'world_tile_x', 'world_tile_z']
     for field in allowed:
         if field in data:
             setattr(location, field, data[field])
@@ -2321,24 +2352,33 @@ def update_location(lobby_id, location_id, lobby):
                 db.session.delete(structure)
     db.session.commit()
 
-    all_updates = []
-    for z, row in enumerate(location.tiles_data):
-        for x, tile in enumerate(row):
-            all_updates.append({
-                'x': x,
-                'z': z,
-                'terrain': tile.get('terrain'),
-                'height': tile.get('height'),
-                'objects': tile.get('objects', [])
-            })
-    socketio.emit('location_tiles_updated', {
-        'location_id': location.id,
-        'updates': all_updates
-    }, room=f"location_{location.id}")
+    if any(field in data for field in ('tiles_data', 'grid_width', 'grid_height')):
+        all_updates = []
+        for z, row in enumerate(location.tiles_data):
+            for x, tile in enumerate(row):
+                all_updates.append({
+                    'x': x,
+                    'z': z,
+                    'terrain': tile.get('terrain'),
+                    'height': tile.get('height'),
+                    'objects': tile.get('objects', [])
+                })
+        socketio.emit('location_tiles_updated', {
+            'location_id': location.id,
+            'updates': all_updates
+        }, room=f"location_{location.id}")
+
+    location_marker = {
+        'id': location.id,
+        'name': location.name,
+        'world_tile_x': location.world_tile_x,
+        'world_tile_z': location.world_tile_z,
+    }
 
     socketio.emit('location_updated', {
         'lobby_id': lobby_id,
         'location_id': location.id,
+        'location': location_marker,
         'updates': {k: data[k] for k in allowed if k in data}
     }, room=f"lobby_{lobby_id}")
 
@@ -2350,6 +2390,7 @@ def update_location(lobby_id, location_id, lobby):
 
     return jsonify({
         'message': 'Location updated',
+        'location': location_marker,
         'deleted_structure_count': len(deleted_structure_ids),
     }), 200
 
@@ -2362,13 +2403,17 @@ def delete_location(lobby_id, location_id, lobby):
     if location.lobby_id != lobby_id:
         return jsonify({'error': 'Access denied'}), 403
 
-    socketio.emit('location_deleted', {
-        'lobby_id': lobby_id,
-        'location_id': location.id
-    }, room=f"lobby_{lobby_id}")
-
+    CharacterInteractionRequest.query.filter_by(location_id=location.id).delete(synchronize_session=False)
+    LocationCombatState.query.filter_by(location_id=location.id).delete(synchronize_session=False)
+    LocationCharacter.query.filter_by(location_id=location.id).delete(synchronize_session=False)
+    LocationObject.query.filter_by(location_id=location.id).delete(synchronize_session=False)
     db.session.delete(location)
     db.session.commit()
+
+    socketio.emit('location_deleted', {
+        'lobby_id': lobby_id,
+        'location_id': location_id
+    }, room=f"lobby_{lobby_id}")
     return jsonify({'message': 'Location deleted'}), 200
 
 
@@ -3193,19 +3238,34 @@ def get_location_combat_state(lobby_id, location_id, lobby, participant):
     return jsonify(state), 200
 
 
-@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/start', methods=['POST'])
-@jwt_required()
-@requires_gm
-def start_location_combat(lobby_id, location_id, lobby):
-    data = request.get_json(silent=True) or {}
-    state = CombatService.start_combat(
-        location_id,
-        lobby.gm_id,
-        location_character_ids=data.get('location_character_ids'),
-        initiator_location_character_id=data.get(
-            'initiator_location_character_id'
-        ),
-    )
+def _combat_start_request_payload(start_request):
+    actor = db.session.get(LocationCharacter, start_request.actor_location_character_id)
+    return {
+        'id': start_request.id,
+        'location_id': start_request.location_id,
+        'actor_location_character_id': start_request.actor_location_character_id,
+        'actor_character_id': actor.character_id if actor else None,
+        'actor_name': actor.character.name if actor and actor.character else 'Персонаж',
+        'actor_user_id': start_request.actor_user_id,
+        'status': start_request.status,
+    }
+
+
+def _resolve_combat_start_requests(location_id, *, approved_id=None):
+    pending = CharacterInteractionRequest.query.filter_by(
+        location_id=location_id, kind='combat_start', status='pending',
+    ).all()
+    for start_request in pending:
+        start_request.status = 'approved' if start_request.id == approved_id else 'cancelled'
+        start_request.resolved_at = datetime.now(timezone.utc)
+    db.session.commit()
+    for start_request in pending:
+        payload = _combat_start_request_payload(start_request)
+        for user_id in {start_request.actor_user_id, start_request.target_user_id}:
+            socketio.emit('combat_start_request_resolved', payload, room=f'user_{user_id}')
+
+
+def _publish_combat_start(lobby_id, location_id, gm_id, state):
     socketio.emit('combat_state_updated', state, room=f"location_{location_id}")
     for detonation in state.get('detonations') or []:
         socketio.emit(
@@ -3216,7 +3276,7 @@ def start_location_combat(lobby_id, location_id, lobby):
         summary = CombatService.format_explosion_summary({'explosive': detonation})
         if summary:
             _emit_lobby_chat_message(
-                lobby_id, participant.user_id, summary, username='\u0412\u0437\u0440\u044b\u0432',
+                lobby_id, gm_id, summary, username='\u0412\u0437\u0440\u044b\u0432',
             )
     participants = [
         character
@@ -3237,9 +3297,123 @@ def start_location_combat(lobby_id, location_id, lobby):
         )
     _emit_lobby_chat_message(
         lobby_id,
-        lobby.gm_id,
+        gm_id,
         '\n'.join(initiative_lines),
     )
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/start-requests', methods=['POST'])
+@jwt_required()
+@requires_participant
+def request_location_combat_start(lobby_id, location_id, lobby, participant):
+    location = Location.query.filter_by(id=location_id, lobby_id=lobby_id).first()
+    if not location:
+        raise NotFoundError('Подлокация не найдена')
+    data = request.get_json(silent=True) or {}
+    actor_id = CombatService._coerce_int(data.get('actor_location_character_id'), 0)
+    actor = LocationCharacter.query.filter_by(id=actor_id, location_id=location_id).first()
+    if not actor or not CombatService._can_end_turn_for_character(actor, participant.user_id):
+        raise PermissionDenied('Вы не управляете этим персонажем')
+    if not CombatService._can_take_combat_turn(actor):
+        raise ValidationError('Этот персонаж не может начать бой')
+    state = LocationCombatState.query.filter_by(location_id=location_id).first()
+    if state and state.status == 'active':
+        raise ConflictError('Бой уже начался')
+    existing = CharacterInteractionRequest.query.filter_by(
+        location_id=location_id, actor_location_character_id=actor.id,
+        kind='combat_start', status='pending',
+    ).first()
+    if existing:
+        return jsonify(_combat_start_request_payload(existing)), 200
+    start_request = CharacterInteractionRequest(
+        location_id=location_id,
+        actor_location_character_id=actor.id,
+        target_location_character_id=actor.id,
+        actor_user_id=participant.user_id,
+        target_user_id=lobby.gm_id,
+        kind='combat_start',
+        status='pending',
+        payload={},
+    )
+    db.session.add(start_request)
+    db.session.commit()
+    payload = _combat_start_request_payload(start_request)
+    socketio.emit('combat_start_requested', payload, room=f'user_{lobby.gm_id}')
+    return jsonify(payload), 201
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/start-requests', methods=['GET'])
+@jwt_required()
+@requires_gm
+def list_location_combat_start_requests(lobby_id, location_id, lobby):
+    if not Location.query.filter_by(id=location_id, lobby_id=lobby_id).first():
+        raise NotFoundError('Подлокация не найдена')
+    pending = CharacterInteractionRequest.query.filter_by(
+        location_id=location_id, kind='combat_start', status='pending',
+    ).order_by(CharacterInteractionRequest.created_at).all()
+    return jsonify([_combat_start_request_payload(item) for item in pending]), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/start-requests/<int:request_id>/response', methods=['POST'])
+@jwt_required()
+@requires_gm
+def respond_location_combat_start_request(lobby_id, location_id, request_id, lobby):
+    if not Location.query.filter_by(id=location_id, lobby_id=lobby_id).first():
+        raise NotFoundError('Подлокация не найдена')
+    start_request = CharacterInteractionRequest.query.filter_by(
+        id=request_id, location_id=location_id, kind='combat_start',
+    ).first()
+    if not start_request:
+        raise NotFoundError('Запрос на начало боя не найден')
+    if start_request.status != 'pending':
+        raise ConflictError('Запрос уже обработан')
+    data = request.get_json(silent=True) or {}
+    decision = data.get('decision')
+    if decision not in {'approve', 'reject'}:
+        raise ValidationError('Выберите подтверждение или отказ')
+    if decision == 'reject':
+        start_request.status = 'rejected'
+        start_request.resolved_at = datetime.now(timezone.utc)
+        db.session.commit()
+        payload = _combat_start_request_payload(start_request)
+        for user_id in {start_request.actor_user_id, lobby.gm_id}:
+            socketio.emit('combat_start_request_resolved', payload, room=f'user_{user_id}')
+        return jsonify(payload), 200
+    selected_ids = data.get('location_character_ids')
+    if selected_ids is not None and (
+        not isinstance(selected_ids, list)
+        or start_request.actor_location_character_id not in selected_ids
+    ):
+        raise ValidationError('Атакующий должен участвовать в бою')
+    initiator_first = data.get('initiator_first', True)
+    if not isinstance(initiator_first, bool):
+        raise ValidationError('Укажите, должен ли атакующий ходить первым')
+    state = CombatService.start_combat(
+        location_id,
+        lobby.gm_id,
+        location_character_ids=selected_ids,
+        initiator_location_character_id=(
+            start_request.actor_location_character_id if initiator_first else None
+        ),
+    )
+    _resolve_combat_start_requests(location_id, approved_id=start_request.id)
+    _publish_combat_start(lobby_id, location_id, lobby.gm_id, state)
+    return jsonify(state), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/start', methods=['POST'])
+@jwt_required()
+@requires_gm
+def start_location_combat(lobby_id, location_id, lobby):
+    data = request.get_json(silent=True) or {}
+    state = CombatService.start_combat(
+        location_id,
+        lobby.gm_id,
+        location_character_ids=data.get('location_character_ids'),
+        initiator_location_character_id=data.get('initiator_location_character_id'),
+    )
+    _resolve_combat_start_requests(location_id)
+    _publish_combat_start(lobby_id, location_id, lobby.gm_id, state)
     return jsonify(state), 200
 
 

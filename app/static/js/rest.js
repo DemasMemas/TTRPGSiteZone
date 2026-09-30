@@ -18,6 +18,18 @@ function activeCharacterIds() {
         .filter(Number.isFinite);
 }
 
+function isRestEligible(character) {
+    const data = character.data || {};
+    const basic = data.basic || {};
+    const mutantLabels = [data.character_type, data.characterType, data.species,
+        basic.character_type, basic.characterType, basic.species];
+    return data.is_mutant !== true && data.isMutant !== true
+        && basic.is_mutant !== true && basic.isMutant !== true
+        && !mutantLabels.some(value => String(value || '').toLowerCase().includes('мутант'))
+        && data.is_npc !== true && basic.is_npc !== true
+        && data.character_type !== 'npc' && basic.character_type !== 'npc';
+}
+
 export async function openLobbyRestModal() {
     if (!window.isGM) return;
     const dialog = modal();
@@ -26,7 +38,8 @@ export async function openLobbyRestModal() {
     dialog.style.display = 'flex';
     list.innerHTML = '<div>Загрузка персонажей...</div>';
     try {
-        const characters = await Server.getLobbyCharacters(window.currentLobbyId);
+        const characters = (await Server.getLobbyCharacters(window.currentLobbyId))
+            .filter(isRestEligible);
         list.innerHTML = '';
         if (!characters.length) {
             list.innerHTML = '<div>В комнате нет персонажей.</div>';

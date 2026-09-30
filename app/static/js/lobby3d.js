@@ -1424,7 +1424,8 @@ function canvasMouseDownHandler(event) {
     isMouseDown = true;
     lastProcessedTileKey = null;
 
-    const isEditing = editMode && (event.altKey || event.shiftKey || window.eraserMode);
+    const isEditing = editMode && !window.isWorldTravelSelectionActive?.()
+        && (event.altKey || event.shiftKey || ['terrain', 'height', 'erase'].includes(window.worldEditorTool));
 
     if (isEditing) {
         event.preventDefault();
@@ -1447,6 +1448,7 @@ function canvasMouseDownHandler(event) {
                 isDoubleClick: false,
                 isDrag: false
             });
+            lastProcessedTileKey = `${hoveredTile.chunk.chunkX},${hoveredTile.chunk.chunkY},${hoveredTile.tileX},${hoveredTile.tileY}`;
         }
 
         if (!globalMouseUpHandler) {
@@ -1484,20 +1486,6 @@ window.addEventListener('click', (event) => {
             event
         });
         if (consumed) return;
-    }
-    if (editMode && hoveredTile && window.tileClickCallback) {
-        window.tileClickCallback({
-            tile: {
-                chunkX: hoveredTile.chunk.chunkX,
-                chunkY: hoveredTile.chunk.chunkY,
-                tileX: hoveredTile.tileX,
-                tileY: hoveredTile.tileY,
-                tileData: hoveredTile.tileData
-            },
-            event,
-            isDoubleClick: false,
-            isDrag: false
-        });
     }
 });
 
@@ -1657,7 +1645,9 @@ window.addEventListener('pointermove', (event) => {
     }
     performRaycast(event.clientX, event.clientY);
 
-    if ((event.buttons === 1) && editMode && hoveredTile && window.applyBrush) {
+    if ((event.buttons === 1) && brushActive && editMode && hoveredTile && window.applyBrush) {
+        const tileKey = `${hoveredTile.chunk.chunkX},${hoveredTile.chunk.chunkY},${hoveredTile.tileX},${hoveredTile.tileY}`;
+        if (lastProcessedTileKey === tileKey) return;
         const updates = {};
         if (window.eraserMode) {
             updates.objects = [];
@@ -1665,8 +1655,13 @@ window.addEventListener('pointermove', (event) => {
             updates.terrain = window.currentTileType;
         } else if (event.shiftKey) {
             updates.height = window.tileHeight;
+        } else if (window.worldEditorTool === 'terrain') {
+            updates.terrain = window.currentTileType;
+        } else if (window.worldEditorTool === 'height') {
+            updates.height = window.tileHeight;
         }
         if (Object.keys(updates).length > 0) {
+            lastProcessedTileKey = tileKey;
             window.applyBrush(hoveredTile, updates, window.brushRadius);
         }
     }

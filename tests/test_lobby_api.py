@@ -1401,6 +1401,112 @@ def test_gm_configures_persisted_world_group_members(
     ]
 
 
+def test_mutants_and_npcs_do_not_join_rest_or_world_time_without_npc_opt_in(
+    client, create_user, auth_headers
+):
+    gm = create_user("world-roles-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    human = create_character(client, lobby, gm, auth_headers, data={"health": {}})
+    def timed_health():
+        return {"stress": 5, "effects": [{
+            "type": "delayed_adjustment", "remaining": 10,
+            "remaining_seconds": 600, "time_unit": "minute",
+            "tick": "time_elapsed",
+            "adjustments": [{"field": "stress", "delta": -2, "min": 0}],
+        }]}
+
+    mutant = create_character(client, lobby, gm, auth_headers, data={
+        "is_mutant": True, "basic": {"is_mutant": True},
+        "health": timed_health(),
+    })
+    npc = create_character(client, lobby, gm, auth_headers, data={
+        "basic": {"is_npc": True}, "health": timed_health(),
+    })
+    joining_npc = create_character(client, lobby, gm, auth_headers, data={
+        "basic": {"is_npc": True, "can_join_group": True},
+        "health": timed_health(),
+    })
+    for character in (mutant, npc, joining_npc):
+        assert db.session.get(LobbyCharacter, character["id"]).time_active is False
+
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={"name": "Eligible party", "tile_x": 3, "tile_y": 3},
+    ).get_json()
+    group_url = f"/lobbies/{lobby['id']}/world-groups/{group['id']}/members"
+    available = client.get(
+        f"/lobbies/{lobby['id']}/world-groups", headers=auth_headers(gm),
+    ).get_json()["available_characters"]
+    assert {entry["id"] for entry in available} == {human["id"], joining_npc["id"]}
+    for forbidden in (mutant, npc):
+        assert client.patch(
+            group_url, headers=auth_headers(gm),
+            json={"character_ids": [human["id"], forbidden["id"]]},
+        ).status_code == 400
+    assert client.patch(
+        group_url, headers=auth_headers(gm),
+        json={"character_ids": [human["id"], joining_npc["id"]]},
+    ).status_code == 200
+
+    # Older saves may already contain prohibited members and active flags.
+    stored_group = db.session.get(WorldGroup, group["id"])
+    stored_group.member_character_ids = [
+        human["id"], mutant["id"], npc["id"], joining_npc["id"],
+    ]
+    for character in (mutant, npc, joining_npc):
+        db.session.get(LobbyCharacter, character["id"]).time_active = True
+    db.session.commit()
+    visible_group = client.get(
+        f"/lobbies/{lobby['id']}/world-groups", headers=auth_headers(gm),
+    ).get_json()["groups"][0]
+    assert {member["id"] for member in visible_group["members"]} == {
+        human["id"], joining_npc["id"],
+    }
+
+    activity_url = f"/lobbies/{lobby['id']}/characters/time-active"
+    rest_url = f"/lobbies/{lobby['id']}/rest"
+    assert client.patch(
+        activity_url, headers=auth_headers(gm),
+        json={"character_ids": [human["id"], npc["id"]]},
+    ).status_code == 400
+    assert client.post(
+        rest_url, headers=auth_headers(gm),
+        json={"type": "rest", "character_ids": [mutant["id"]]},
+    ).status_code == 400
+    assert client.post(
+        rest_url, headers=auth_headers(gm),
+        json={"type": "rest", "character_ids": [joining_npc["id"]]},
+    ).status_code == 400
+    assert client.patch(
+        f"/lobbies/{lobby['id']}/time", headers=auth_headers(gm),
+        json={"game_day": 1, "game_time_minutes": 490},
+    ).status_code == 200
+    moved = client.post(
+        f"/lobbies/{lobby['id']}/world-groups/{group['id']}/move",
+        headers=auth_headers(gm), json={"tile_x": 4, "tile_y": 3},
+    )
+    assert moved.status_code == 200
+    for character in (mutant, npc, joining_npc):
+        health = db.session.get(LobbyCharacter, character["id"]).data["health"]
+        assert health["stress"] == 5
+        assert health["effects"][0]["remaining_seconds"] == 600
+    assert client.post(
+        rest_url, headers=auth_headers(gm),
+        json={"type": "rest", "character_ids": [human["id"]]},
+    ).status_code == 200
+    for character in (mutant, npc, joining_npc):
+        health = db.session.get(LobbyCharacter, character["id"]).data["health"]
+        assert health["stress"] == 5
+        assert health["effects"][0]["remaining_seconds"] == 600
+    assert client.patch(
+        activity_url, headers=auth_headers(gm),
+        json={"character_ids": [human["id"]]},
+    ).status_code == 200
+    for character in (mutant, npc, joining_npc):
+        assert db.session.get(LobbyCharacter, character["id"]).time_active is False
+
+
 def test_world_group_carries_incapacitated_member_and_uses_available_rope(
     client, create_user, auth_headers
 ):
@@ -2185,6 +2291,126 @@ def test_combat_start_rolls_tactics_initiative_only_for_selected_characters(
     assert "Инициатива:" in chat_message.message
     assert "Test character: d20 10 +4 = 14" in chat_message.message
     assert excluded_state["initiative_total"] is None
+
+
+def test_attack_start_request_requires_gm_approval_and_preserves_ammo(
+    client, create_user, auth_headers,
+):
+    gm = create_user('combat-request-gm')
+    player = create_user('combat-request-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    attacker = create_character(
+        client, lobby, player, auth_headers,
+        data={'weapons': [{'name': 'Тестовое оружие', 'ammo': 5}]},
+    )
+    defender = create_character(client, lobby, gm, auth_headers)
+    location = Location(lobby_id=lobby['id'], name='Attack request', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    actor = LocationCharacter(location_id=location.id, character_id=attacker['id'])
+    target = LocationCharacter(location_id=location.id, character_id=defender['id'])
+    db.session.add_all([actor, target])
+    db.session.commit()
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start-requests"
+
+    created = client.post(
+        url, headers=auth_headers(player),
+        json={'actor_location_character_id': actor.id},
+    )
+    assert created.status_code == 201
+    request_id = created.get_json()['id']
+    repeated = client.post(
+        url, headers=auth_headers(player),
+        json={'actor_location_character_id': actor.id},
+    )
+    assert repeated.status_code == 200
+    assert repeated.get_json()['id'] == request_id
+    assert db.session.get(LobbyCharacter, attacker['id']).data['weapons'][0]['ammo'] == 5
+    assert client.get(url, headers=auth_headers(player)).status_code == 403
+    assert len(client.get(url, headers=auth_headers(gm)).get_json()) == 1
+
+    response_url = f'{url}/{request_id}/response'
+    assert client.post(
+        response_url, headers=auth_headers(player), json={'decision': 'approve'},
+    ).status_code == 403
+    rejected = client.post(
+        response_url, headers=auth_headers(gm), json={'decision': 'reject'},
+    )
+    assert rejected.status_code == 200
+    assert rejected.get_json()['status'] == 'rejected'
+    assert client.get(url, headers=auth_headers(gm)).get_json() == []
+
+    created_again = client.post(
+        url, headers=auth_headers(player),
+        json={'actor_location_character_id': actor.id},
+    )
+    approved = client.post(
+        f"{url}/{created_again.get_json()['id']}/response",
+        headers=auth_headers(gm),
+        json={'decision': 'approve', 'location_character_ids': [actor.id, target.id]},
+    )
+    assert approved.status_code == 200
+    state = approved.get_json()
+    assert state['status'] == 'active'
+    assert state['turn_order'][0] == actor.id
+    assert state['current_character']['character_id'] == attacker['id']
+    assert db.session.get(LobbyCharacter, attacker['id']).data['weapons'][0]['ammo'] == 5
+    assert client.get(url, headers=auth_headers(gm)).get_json() == []
+
+
+def test_attack_start_request_can_use_normal_initiative_when_gm_unchecks_first(
+    client, create_user, auth_headers, monkeypatch,
+):
+    gm = create_user('combat-roll-gm')
+    player = create_user('combat-roll-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    attacker = create_character(client, lobby, player, auth_headers)
+    defender = create_character(
+        client, lobby, gm, auth_headers,
+        data={'skills': {'other': {'tactics': {'base': 16, 'bonus': 2}}}},
+    )
+    location = Location(lobby_id=lobby['id'], name='Rolled initiative', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    actor = LocationCharacter(location_id=location.id, character_id=attacker['id'])
+    target = LocationCharacter(location_id=location.id, character_id=defender['id'])
+    db.session.add_all([actor, target])
+    db.session.commit()
+    monkeypatch.setattr('app.services.combat.random.randint', lambda _low, _high: 10)
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start-requests"
+    created = client.post(
+        url, headers=auth_headers(player),
+        json={'actor_location_character_id': actor.id},
+    )
+    assert created.status_code == 201
+    response_url = f"{url}/{created.get_json()['id']}/response"
+    excluded = client.post(
+        response_url, headers=auth_headers(gm),
+        json={
+            'decision': 'approve', 'location_character_ids': [target.id],
+            'initiator_first': False,
+        },
+    )
+    assert excluded.status_code == 400
+
+    approved = client.post(
+        response_url, headers=auth_headers(gm),
+        json={
+            'decision': 'approve', 'location_character_ids': [actor.id, target.id],
+            'initiator_first': False,
+        },
+    )
+    assert approved.status_code == 200
+    state = approved.get_json()
+    assert state['turn_order'] == [target.id, actor.id]
+    initiatives = {
+        item['location_character_id']: item['initiative_total']
+        for item in state['characters']
+    }
+    assert initiatives[target.id] > initiatives[actor.id]
 
 
 def test_only_gm_can_change_character_visibility(

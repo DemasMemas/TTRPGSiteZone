@@ -8711,7 +8711,11 @@ window.useWeaponFromEquipment = function(
     ).toLowerCase();
     if (weaponCategory.includes('гранатом')) {
         if (!isCombatActive) {
-            showNotification('Стрельба из гранатомёта выполняется на боевой подлокации', 'system');
+            if (window.isLocationActive) {
+                import('./locationScene.js').then(scene => scene.requestCombatStartForAttack(actorCharacterId));
+            } else {
+                showNotification('Стрельба из гранатомёта выполняется на боевой подлокации', 'system');
+            }
             return;
         }
         if (!['unaimed', 'aimed'].includes(fireMode)) {
@@ -8801,6 +8805,10 @@ window.useWeaponFromEquipment = function(
     };
 
     if (!isCombatActive) {
+        if (window.isLocationActive) {
+            import('./locationScene.js').then(scene => scene.requestCombatStartForAttack(actorCharacterId));
+            return;
+        }
         spendAmmo();
         return;
     }
@@ -8859,6 +8867,10 @@ window.useMeleeAttack = function(weaponIndex, attackType, aimed = false) {
         return;
     }
     if (!isCombatActive) {
+        if (window.isLocationActive) {
+            import('./locationScene.js').then(scene => scene.requestCombatStartForAttack(actorCharacterId));
+            return;
+        }
         showNotification(`Атака «${attackLabel}»: ${weaponLabel}. Урон: ${modifiers.damage}, Бронебойность: ${modifiers.ap}%`, 'system');
         return;
     }
@@ -8910,7 +8922,12 @@ window.fireGrenadeLauncher = async function(weaponIndex) {
         return;
     }
     if (!window.locationCombatState || window.locationCombatState.status !== 'active') {
-        showNotification('Стрельба из подствольника выполняется на боевой подлокации', 'system');
+        if (window.isLocationActive) {
+            const scene = await import('./locationScene.js');
+            await scene.requestCombatStartForAttack(currentCharacterId);
+        } else {
+            showNotification('Стрельба из подствольника выполняется на боевой подлокации', 'system');
+        }
         return;
     }
 
@@ -11439,6 +11456,11 @@ async function useGrenade(item, itemPath, options = {}) {
                 });
             };
         });
+        return true;
+    }
+    if (window.isLocationActive) {
+        const scene = await import('./locationScene.js');
+        await scene.requestCombatStartForAttack(currentCharacterId);
         return true;
     }
     showNotification('Метание гранаты доступно на боевой подлокации', 'system');
@@ -15406,6 +15428,30 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
     } catch (error) {
         showNotification(error.message);
     }
+}
+
+export async function openCharacterAttackSheet(characterId) {
+    await openCharacterSheet(characterId, 'equipment');
+    if (Number(currentCharacterId) !== Number(characterId)) return;
+    const tab = document.getElementById('sheet-tab-equipment');
+    const weaponsPanel = tab?.querySelector('[data-equipment-panel="weapons"]');
+    if (!weaponsPanel) return;
+    weaponsPanel.open = true;
+
+    const combatCharacter = window.locationCombatState?.status === 'active'
+        ? window.locationCombatState.characters?.find(item => Number(item.character_id) === Number(characterId))
+        : null;
+    const equippedIndex = combatCharacter?.drawn_weapon_index ?? currentCharacterData?.activeWeaponIndex;
+    const weaponPanel = equippedIndex !== null && equippedIndex !== undefined
+        && Number.isInteger(Number(equippedIndex)) && Number(equippedIndex) >= 0
+        ? tab.querySelector(`[data-equipment-panel="weapon-${Number(equippedIndex)}"]`)
+        : null;
+    if (weaponPanel) weaponPanel.open = true;
+    requestAnimationFrame(() => {
+        if (tab.classList.contains('active')) {
+            (weaponPanel || weaponsPanel).scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    });
 }
 
 export function closeCharacterSheet() {

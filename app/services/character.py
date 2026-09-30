@@ -11,6 +11,7 @@ from app.services.health import apply_health_maximums, health_zones_to_location
 from app.services.inventory import normalize_inventory_ammo_stacks
 from app.services.effects import normalize_effect_list, sync_health_derived_statuses
 from app.services.character_merge import clean_snapshot, merge_sheet_data
+from app.services.character_roles import follows_world_time
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,7 @@ class CharacterService:
             data=character_data,
             visible_to=[],
             editable_to=[],
+            time_active=follows_world_time(character_data),
         )
         db.session.add(character)
         db.session.commit()

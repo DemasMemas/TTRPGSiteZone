@@ -603,6 +603,32 @@ export const Server = {
         });
     },
 
+    async requestLocationCombatStart(lobbyId, locationId, actorLocationCharacterId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start-requests`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ actor_location_character_id: actorLocationCharacterId }),
+        });
+    },
+
+    async getLocationCombatStartRequests(lobbyId, locationId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start-requests`);
+    },
+
+    async respondLocationCombatStartRequest(
+        lobbyId, locationId, requestId, decision, locationCharacterIds = null, initiatorFirst = true,
+    ) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start-requests/${requestId}/response`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                decision,
+                location_character_ids: locationCharacterIds,
+                initiator_first: initiatorFirst,
+            }),
+        });
+    },
+
     async endLocationCombat(lobbyId, locationId) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/end`, {
             method: 'POST',

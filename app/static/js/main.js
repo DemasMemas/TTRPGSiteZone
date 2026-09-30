@@ -7,6 +7,7 @@ saveVisibility, unbanUserHandler, closeSettings, openSettings, updateParticipant
 import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush, openTileEditModal, closeTileEditModal,
  applyTerrainChange, applyHeightChange, addObjectToTile, clearObjectsFromTile, removeObjectFromTile, highlightObject,
  getEditMode, setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, updateTileEditHeight,
+ selectWorldEditorTool,
  updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
  applyNameChange, applyRadiationChange, updateTileEditRadiation, applyAnomalyFieldChange,
  updateAnomalyFieldRankOptions} from './mapEdit.js';
@@ -14,7 +15,11 @@ import { hideObjectHighlight, camera, getHoveredTile } from './lobby3d.js';
 import { hideGlobalCanvas, showGlobalCanvas, controls as globalControls } from './lobby3d.js';
 import { showNotification, getErrorMessage } from './utils.js';
 import { Server } from './api.js';
-import AppState, { initDraggablePanels, initHotkeys } from './ui_interactions.js';
+import AppState, {
+    expandMapToolsPanelOnToolChange, initDraggablePanels, initHotkeys,
+    syncMapEditorAutoExpandCheckbox,
+} from './ui_interactions.js';
+import { initMapEditorQuickMenu, closeMapEditorQuickMenu } from './mapEditorQuickMenu.js';
 import { initWeather, applyWeather } from './weather.js';
 import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
@@ -23,6 +28,7 @@ import { openCharacterSheet, closeCharacterSheet, exportCharacter, importCharact
 import { setCurrentLobbyId as setCharLobbyId } from './characterSheet.js';
 import {
     initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
+    loadCombatStartRequests, handleCombatStartRequest, handleCombatStartRequestResolved,
     addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible, destroyLocationScene,
     setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationEraserMode, setLocationEditMode,
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
@@ -165,6 +171,15 @@ window.toggleEditMode = function() {
     }
 };
 
+initMapEditorQuickMenu({
+    isEnabled: () => Boolean(window.isGM && (window.isLocationActive ? getLocationEditMode() : getEditMode())),
+    isLocation: () => Boolean(window.isLocationActive),
+    selectTool: tool => {
+        if (window.isLocationActive) window.selectLocationEditorTool?.(tool);
+        else selectWorldEditorTool(tool);
+    },
+});
+
 // Также перенаправляем функции applyBrush, если они вызываются из UI (но для локации они не используются)
 // Оставим как есть, так как applyBrush в локации не нужна.
 
@@ -172,6 +187,7 @@ window.toggleEditMode = function() {
 let currentLocationData = null;
 
 window.enterLocation = async function(locationId) {
+    closeMapEditorQuickMenu();
     if (window._locationEventCleanup) {
         window._locationEventCleanup();
         window._locationEventCleanup = null;
@@ -182,6 +198,7 @@ window.enterLocation = async function(locationId) {
         }
         // Устанавливаем флаг, что мы в локации
         window.isLocationActive = true;
+        window.locationEditorTool = 'select';
         window.currentLocationId = locationId;
 
         // Скрываем глобальную информационную панель
@@ -214,6 +231,7 @@ window.enterLocation = async function(locationId) {
                 character_id: null,
             });
         }
+        if (window.isGM) loadCombatStartRequests();
 
         if (window.isGM) {
             const locationWorldRules = await Server.getWorldRules(currentLobbyId).catch(() => ({ anomalies: [] }));
@@ -226,6 +244,7 @@ window.enterLocation = async function(locationId) {
 
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) {
+                toolsPanel.classList.add('is-location-editor');
                 if (!window._originalToolsContent) {
                     window._originalToolsContent = toolsPanel.querySelector('.panel-content').innerHTML;
                 }
@@ -333,13 +352,14 @@ window.enterLocation = async function(locationId) {
                 `;
 
                 const toolsRoot = panelContent.firstElementChild;
-                toolsRoot.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr)); gap:10px; align-items:start;';
+                toolsRoot.className = 'map-editor map-editor-inspector-grid';
+                toolsRoot.style.cssText = '';
                 const createToolSection = (title, elements) => {
                     const section = document.createElement('section');
-                    section.style.cssText = 'display:flex; flex-direction:column; gap:8px; padding:10px; border:1px solid rgba(130, 100, 60, .45); border-radius:8px; background:rgba(25, 22, 18, .32);';
+                    section.className = 'map-editor-section';
                     const heading = document.createElement('strong');
                     heading.textContent = title;
-                    heading.style.cssText = 'font-size:13px; color:#e0c08a;';
+                    heading.className = 'map-editor-section-heading';
                     section.appendChild(heading);
                     elements.forEach(element => {
                         const node = document.getElementById(element);
@@ -352,13 +372,91 @@ window.enterLocation = async function(locationId) {
                         section.appendChild(block);
                     });
                     toolsRoot.appendChild(section);
+                    return section;
                 };
-                createToolSection('Режим', ['loc-edit-toggle-checkbox', 'loc-build-mode', 'loc-eraser']);
-                createToolSection('Ландшафт', ['loc-edit-terrain', 'loc-edit-radius', 'loc-edit-height']);
-                createToolSection('Строительство', ['loc-structure-preset']);
-                createToolSection('Декор', ['loc-obj-mode', 'loc-obj-type', 'loc-obj-offset-x']);
-                createToolSection('Эффекты', ['loc-rad-mode', 'loc-edit-radiation']);
-                toolsRoot.querySelectorAll('hr').forEach(element => element.remove());
+                const sections = {
+                    mode: createToolSection('Режим', ['loc-edit-toggle-checkbox']),
+                    select: createToolSection('Выбор', []),
+                    brush: createToolSection('Кисть', ['loc-edit-radius']),
+                    terrain: createToolSection('Ландшафт', ['loc-edit-terrain']),
+                    height: createToolSection('Высота', ['loc-edit-height']),
+                    structure: createToolSection('Строительство', ['loc-structure-preset']),
+                    decor: createToolSection('Объекты и аномалии', ['loc-obj-type', 'loc-obj-offset-x']),
+                    radiation: createToolSection('Радиация', ['loc-edit-radiation']),
+                };
+                const autoExpandLabel = document.createElement('label');
+                autoExpandLabel.innerHTML = '<input type="checkbox" data-map-editor-auto-expand> Раскрывать панель при смене инструмента';
+                sections.select.appendChild(autoExpandLabel);
+                syncMapEditorAutoExpandCheckbox();
+                const legacyControls = document.createElement('div');
+                legacyControls.hidden = true;
+                Array.from(toolsRoot.children)
+                    .filter(node => !Object.values(sections).includes(node))
+                    .forEach(node => legacyControls.appendChild(node));
+                toolsRoot.appendChild(legacyControls);
+
+                const toolbar = document.createElement('div');
+                toolbar.className = 'map-editor-toolbar';
+                toolbar.setAttribute('role', 'toolbar');
+                toolbar.setAttribute('aria-label', 'Инструмент подлокации');
+                toolbar.innerHTML = `
+                    <button type="button" data-location-tool="select">Выбор</button>
+                    <button type="button" data-location-tool="terrain">Ландшафт</button>
+                    <button type="button" data-location-tool="height">Высота</button>
+                    <button type="button" data-location-tool="decor">Объекты</button>
+                    <button type="button" data-location-tool="radiation">Радиация</button>
+                    <button type="button" data-location-tool="structure">Постройки</button>
+                    <button type="button" data-location-tool="erase">Ластик</button>
+                `;
+                const hint = document.createElement('p');
+                hint.className = 'map-editor-hint';
+                const shortcuts = document.createElement('p');
+                shortcuts.className = 'map-editor-shortcuts';
+                shortcuts.textContent = 'Удерживайте Q, наведите на сектор и отпустите · 1–7: инструмент · E: редактор · R: ластик';
+                toolsRoot.prepend(toolbar);
+                toolbar.after(hint);
+                hint.after(shortcuts);
+
+                const eraseSettings = document.createElement('section');
+                eraseSettings.className = 'map-editor-section';
+                eraseSettings.innerHTML = '<strong class="map-editor-section-heading">Ластик</strong><label><input type="checkbox" id="loc-erase-structures"> Также удалять постройки</label>';
+                eraseSettings.hidden = true;
+                toolsRoot.appendChild(eraseSettings);
+
+                const selectLocationTool = tool => {
+                    if (!sections[tool] && !['select', 'erase'].includes(tool)) return;
+                    const previousTool = window.locationEditorTool;
+                    window.locationEditorTool = tool;
+                    expandMapToolsPanelOnToolChange(previousTool, tool);
+                    toolbar.querySelectorAll('button').forEach(button => {
+                        button.setAttribute('aria-pressed', String(button.dataset.locationTool === tool));
+                    });
+                    Object.entries(sections).forEach(([name, section]) => {
+                        section.hidden = name !== 'mode' && name !== tool
+                            && !(name === 'brush' && ['terrain', 'height', 'decor', 'radiation', 'erase'].includes(tool));
+                    });
+                    eraseSettings.hidden = tool !== 'erase';
+                    setLocationBuildMode(tool === 'structure' ? 'structure' : 'terrain');
+                    setLocationEraserMode(tool === 'erase');
+                    setLocationBrushObjectMode(tool === 'decor');
+                    const radCheck = document.getElementById('loc-rad-mode');
+                    if (radCheck) radCheck.checked = tool === 'radiation';
+                    hint.textContent = {
+                        select: 'Выберите объект или персонажа без рисования.',
+                        terrain: 'Кликните по клетке или проведите кистью, чтобы сменить покрытие.',
+                        height: 'Кликните по клетке или проведите кистью, чтобы изменить высоту.',
+                        decor: 'Кликните по клетке, чтобы разместить объект или аномалию.',
+                        radiation: 'Кликните по клетке или проведите кистью, чтобы задать радиацию.',
+                        structure: 'Кликните по клетке, чтобы разместить постройку.',
+                        erase: 'Удаляет декор. Поставьте галочку, чтобы удалять и постройки на выбранной клетке.',
+                    }[tool];
+                    if (tool !== 'select' && !getLocationEditMode()) setLocationEditMode(true);
+                };
+                toolbar.addEventListener('click', event => {
+                    const button = event.target.closest('[data-location-tool]');
+                    if (button) selectLocationTool(button.dataset.locationTool);
+                });
+                window.selectLocationEditorTool = selectLocationTool;
 
                 // Получаем элементы
                 const editCheckbox = document.getElementById('loc-edit-toggle-checkbox');
@@ -476,6 +574,7 @@ window.enterLocation = async function(locationId) {
                 };
 
                 eraserCheck.onchange = (e) => setLocationEraserMode(e.target.checked);
+                selectLocationTool('select');
             }
         } else {
             // Обычные игроки: скрываем панель инструментов
@@ -491,7 +590,7 @@ async function deleteCurrentLocation(locationId) {
     try {
         await Server.deleteLocation(currentLobbyId, locationId);
         showNotification('Локация удалена', 'success');
-        exitLocation();
+        if (Number(getCurrentLocationId()) === Number(locationId)) exitLocation();
         if (socket) socket.emit('get_markers', { token, lobby_id: currentLobbyId });
     } catch (err) {
         showNotification(err.message);
@@ -499,6 +598,7 @@ async function deleteCurrentLocation(locationId) {
 }
 
 window.exitLocation = function() {
+    closeMapEditorQuickMenu();
     // Очищаем события локации, если они были установлены
     if (window._locationEventCleanup) {
         window._locationEventCleanup();
@@ -515,6 +615,8 @@ window.exitLocation = function() {
     }
     // Сбрасываем флаг локации
     window.isLocationActive = false;
+    window.locationEditorTool = 'select';
+    delete window.selectLocationEditorTool;
     window.currentLocationId = null;
     window.currentLocationCharacterId = null;
 
@@ -536,7 +638,14 @@ window.exitLocation = function() {
     if (window.isGM && window._originalToolsContent) {
         const toolsPanel = document.getElementById('panel-tools');
         if (toolsPanel) {
+            toolsPanel.classList.remove('is-location-editor');
             toolsPanel.querySelector('.panel-content').innerHTML = window._originalToolsContent;
+            syncMapEditorAutoExpandCheckbox();
+            selectWorldEditorTool('select', { autoExpand: false });
+            originalSetBrushRadiusFromInput(window.brushRadius);
+            originalSetTileHeightFromInput(window.tileHeight);
+            document.getElementById('tile-type-select').value = window.currentTileType;
+            setEditMode(getEditMode());
         }
     } else {
         const toolsPanel = document.getElementById('panel-tools');
@@ -798,12 +907,19 @@ function startLocationPick() {
     };
 }
 
-document.getElementById('create-location-btn')?.addEventListener('click', startLocationPick);
+document.getElementById('panel-tools')?.addEventListener('click', event => {
+    if (event.target.closest('#create-location-btn')) startLocationPick();
+});
 document.getElementById('confirm-create-location')?.addEventListener('click', createLocationFromModal);
 document.getElementById('exit-location-btn')?.addEventListener('click', exitLocation);
 
 // ========== Обработчики сокетов для локации ==========
 if (socket) {
+    socket.on('location_deleted', data => {
+        if (Number(getCurrentLocationId()) !== Number(data.location_id)) return;
+        showNotification('Открытая подлокация была удалена', 'system');
+        window.exitLocation();
+    });
     socket.on('joined_location', (data) => {
         console.log('Joined location', data);
         if (data.character_id) {
@@ -922,6 +1038,11 @@ if (socket) {
         if (Number(data?.location_id) !== Number(getCurrentLocationId())) return;
         import('./locationScene.js').then(module => module.showCombatExplosion(data));
     });
+    socket.on('combat_start_requested', (data) => {
+        showNotification(`${data.actor_name || 'Персонаж'} просит начать бой атакой`, 'system');
+        handleCombatStartRequest(data);
+    });
+    socket.on('combat_start_request_resolved', handleCombatStartRequestResolved);
     socket.on('character_interaction_requested', (data) => {
         import('./locationScene.js').then(module => module.handleCharacterInteractionRequest(data));
     });

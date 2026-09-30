@@ -17,6 +17,9 @@ let tooltipDiv = null;
 let routeLines = new Map();
 let routeDatalistCreate = null;
 let routeDatalistEdit = null;
+let markerRetryTimer = null;
+let locationLoadVersion = 0;
+let locationChangeVersion = 0;
 
 // Для выбора тайла
 let awaitingTilePick = false;
@@ -72,17 +75,17 @@ function createMarkerTexture(type, color, name = '') {
     let ctx, canvasWidth, canvasHeight;
 
     if (type === 'place') {
-        canvas.width = 1024;
-        canvas.height = 1024;
+        canvas.width = 512;
+        canvas.height = 512;
         ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.font = 'bold 96px Arial';
+        ctx.font = 'bold 48px Arial';
         ctx.fillStyle = color || '#ffffff';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.imageSmoothingEnabled = true;
-        const lines = wrapText(ctx, name || '?', canvas.width - 120);
-        const lineHeight = 120;
+        const lines = wrapText(ctx, name || '?', canvas.width - 60);
+        const lineHeight = 60;
         const startY = (canvas.height - lines.length * lineHeight) / 2 + lineHeight/2;
         lines.forEach((line, index) => {
             ctx.fillText(line, canvas.width/2, startY + index * lineHeight);
@@ -155,13 +158,32 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
     socket = socketInstance;
     createTooltip();
 
+    const requestMarkerList = (attempt = 1) => {
+        if (!socket.connected) return;
+        if (markerRetryTimer) clearTimeout(markerRetryTimer);
+        socket.emit('get_markers', { token, lobby_id: currentLobbyId });
+        markerRetryTimer = setTimeout(() => {
+            if (attempt < 3) requestMarkerList(attempt + 1);
+            else showNotification('Не удалось получить маркеры карты. Проверьте соединение.', 'error');
+        }, attempt * 10000);
+    };
+
+    socket.on('authenticated', () => {
+        requestMarkerList();
+        loadLocationsAsMarkers();
+    });
+    socket.on('disconnect', () => {
+        if (markerRetryTimer) clearTimeout(markerRetryTimer);
+        markerRetryTimer = null;
+        locationLoadVersion += 1;
+    });
+
     socket.on('markers_list', (markersData) => {
-        clearMarkers();
-        markersData.forEach(m => {
-            if (canSeeMarkerForCurrentUser(m)) {
-                addMarkerToScene(m);
-            }
-        });
+        if (!Array.isArray(markersData)) return;
+        if (markerRetryTimer) clearTimeout(markerRetryTimer);
+        markerRetryTimer = null;
+        clearSocketMarkers();
+        markersData.forEach(addMarkerToScene);
         updateRouteDatalists();
 
         const uniqueRouteIds = new Set();
@@ -171,9 +193,6 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
             }
         });
         uniqueRouteIds.forEach(id => updateRouteLines(id));
-
-        // Загружаем локации после обычных маркеров
-        loadLocationsAsMarkers();
     });
 
     socket.on('marker_added', (marker) => {
@@ -210,6 +229,7 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
         } else {
             if (updates.color || updates.type || updates.name || markerData?.color || markerData?.type || markerData?.name) {
                 const newTexture = createMarkerTexture(entry.data.type, entry.data.color, entry.data.name);
+                entry.sprite.material.map?.dispose();
                 entry.sprite.material.map = newTexture;
                 entry.sprite.material.needsUpdate = true;
             }
@@ -237,44 +257,47 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
         updateRouteDatalists();
     });
 
-    socket.emit('get_markers', { token, lobby_id: currentLobbyId });
+    socket.on('location_created', data => {
+        if (Number(data.lobby_id) !== Number(currentLobbyId)) return;
+        locationChangeVersion += 1;
+        upsertLocationMarker(data.location);
+    });
+    socket.on('location_updated', data => {
+        if (Number(data.lobby_id) !== Number(currentLobbyId)) return;
+        locationChangeVersion += 1;
+        upsertLocationMarker(data.location);
+    });
+    socket.on('location_deleted', data => {
+        if (Number(data.lobby_id) !== Number(currentLobbyId)) return;
+        locationChangeVersion += 1;
+        removeMarkerFromScene(`loc_${data.location_id}`);
+    });
 
-    // Функция загрузки локаций
-    async function loadLocationsAsMarkers() {
+    async function loadLocationsAsMarkers(attempt = 1) {
+        const version = ++locationLoadVersion;
+        const changeVersion = locationChangeVersion;
         try {
             const locations = await Server.getLocations(currentLobbyId);
-            // Удаляем старые маркеры локаций (на всякий случай)
-            for (let [id, entry] of markers.entries()) {
-                if (id.startsWith('loc_')) {
-                    scene.remove(entry.sprite);
-                    entry.sprite.material.dispose();
-                    markers.delete(id);
-                }
+            if (version !== locationLoadVersion) return;
+            if (changeVersion !== locationChangeVersion) {
+                loadLocationsAsMarkers();
+                return;
             }
-            // Добавляем новые
-            locations.forEach(loc => {
-                const marker = {
-                    id: `loc_${loc.id}`,
-                    type: 'location',
-                    name: loc.name,
-                    description: `Локация: ${loc.name}`,
-                    color: '#44aaff',
-                    position: { x: loc.world_tile_x + 0.5, y: 2.5, z: loc.world_tile_z + 0.5 },
-                    visibleTo: ['all'],
-                    locationId: loc.id
-                };
-                addMarkerToScene(marker);
-            });
-            // Принудительно обновляем линии маршрутов (если нужно)
-            const uniqueRouteIds = new Set();
-            markers.forEach(entry => {
-                if (entry.data.type === 'route_point' && entry.data.routeId) {
-                    uniqueRouteIds.add(entry.data.routeId);
-                }
-            });
-            uniqueRouteIds.forEach(id => updateRouteLines(id));
+            const currentIds = new Set(locations.map(location => `loc_${location.id}`));
+            for (const id of markers.keys()) {
+                if (String(id).startsWith('loc_') && !currentIds.has(id)) removeMarkerFromScene(id);
+            }
+            locations.forEach(upsertLocationMarker);
         } catch (err) {
-            console.warn('Failed to load locations as markers', err);
+            if (version !== locationLoadVersion) return;
+            if (attempt < 3) {
+                setTimeout(() => {
+                    if (version === locationLoadVersion) loadLocationsAsMarkers(attempt + 1);
+                }, attempt * 2000);
+            } else {
+                console.warn('Failed to load locations as markers', err);
+                showNotification('Не удалось загрузить маркеры подлокаций. Проверьте соединение.', 'error');
+            }
         }
     }
 }
@@ -284,12 +307,10 @@ function addMarkerToScene(marker) {
         console.warn('Marker already exists:', marker.id);
         return;
     }
-    console.log('Adding marker:', marker.id, marker.type);
     const sprite = createMarkerSprite(marker);
     sprite.userData = { type: 'marker', markerId: marker.id, markerData: marker };
     scene.add(sprite);
     markers.set(marker.id, { sprite, data: marker });
-    console.log('Total markers now:', markers.size);
 }
 
 function updateMarkerInScene(id, updates) {
@@ -298,6 +319,7 @@ function updateMarkerInScene(id, updates) {
     Object.assign(entry.data, updates);
     if (updates.color || updates.type) {
         const newTexture = createMarkerTexture(entry.data.type, entry.data.color, entry.data.name);
+        entry.sprite.material.map?.dispose();
         entry.sprite.material.map = newTexture;
         entry.sprite.material.needsUpdate = true;
     }
@@ -317,21 +339,24 @@ function removeMarkerFromScene(id) {
     const entry = markers.get(id);
     if (!entry) return;
     scene.remove(entry.sprite);
+    entry.sprite.material.map?.dispose();
     entry.sprite.material.dispose();
-    entry.sprite.geometry.dispose();
     markers.delete(id);
+    if (hoveredMarkerId === id) {
+        hoveredMarkerId = null;
+        hideTooltip();
+    }
 }
 
-function clearMarkers() {
-    markers.forEach(entry => {
-        scene.remove(entry.sprite);
-        entry.sprite.material.dispose();
-        entry.sprite.geometry.dispose();
+function clearSocketMarkers() {
+    for (const id of markers.keys()) {
+        if (!String(id).startsWith('loc_')) removeMarkerFromScene(id);
+    }
+    routeLines.forEach(line => {
+        scene.remove(line);
+        line.geometry.dispose();
+        line.material.dispose();
     });
-    markers.clear();
-
-    // Удаляем все линии маршрутов
-    routeLines.forEach(line => scene.remove(line));
     routeLines.clear();
 }
 
@@ -343,7 +368,11 @@ function updateTooltipPosition(clientX, clientY) {
 
 function showTooltip(markerData, clientX, clientY) {
     if (!tooltipDiv) return;
-    tooltipDiv.innerHTML = `<b>${markerData.name || 'Без названия'}</b><br>${markerData.description || ''}`;
+    const title = document.createElement('b');
+    title.textContent = markerData.name || 'Без названия';
+    const description = document.createElement('span');
+    description.textContent = markerData.description || '';
+    tooltipDiv.replaceChildren(title, document.createElement('br'), description);
     tooltipDiv.style.display = 'block';
     updateTooltipPosition(clientX, clientY);
 }
@@ -363,12 +392,44 @@ function canSeeMarkerForCurrentUser(marker) {
     return visibleTo.includes('all') || visibleTo.map(value => Number(value)).includes(userId);
 }
 
+function upsertLocationMarker(location) {
+    if (!location || !Number.isInteger(Number(location.id))
+        || !Number.isInteger(location.world_tile_x) || !Number.isInteger(location.world_tile_z)) return;
+    const id = `loc_${location.id}`;
+    const marker = {
+        id,
+        type: 'location',
+        name: location.name,
+        description: `Локация: ${location.name}`,
+        color: '#44aaff',
+        position: { x: location.world_tile_x + 0.5, y: 2.5, z: location.world_tile_z + 0.5 },
+        visibleTo: ['all'],
+        locationId: location.id,
+        worldTileX: location.world_tile_x,
+        worldTileZ: location.world_tile_z,
+    };
+    const existing = markers.get(id);
+    if (!existing) {
+        addMarkerToScene(marker);
+        return;
+    }
+    Object.assign(existing.data, marker);
+    existing.sprite.position.set(marker.position.x, marker.position.y + 0.8, marker.position.z);
+    if (hoveredMarkerId === id) {
+        hoveredMarkerId = null;
+        hideTooltip();
+    }
+}
+
 function updateRouteLines(routeId) {
     if (!routeId) return;
 
     // Удаляем старую линию
     if (routeLines.has(routeId)) {
-        scene.remove(routeLines.get(routeId));
+        const previous = routeLines.get(routeId);
+        scene.remove(previous);
+        previous.geometry.dispose();
+        previous.material.dispose();
         routeLines.delete(routeId);
     }
 
@@ -401,6 +462,24 @@ function updateRouteLines(routeId) {
 
 export function setupMarkerInteraction() {
     const canvas = renderer.domElement;
+
+    canvas.addEventListener('contextmenu', event => {
+        if (!AppState.isGM || window.isLocationActive) return;
+        const rect = canvas.getBoundingClientRect();
+        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const hit = raycaster.intersectObjects(Array.from(markers.values()).map(entry => entry.sprite))[0];
+        const marker = hit && markers.get(hit.object.userData.markerId)?.data;
+        if (!marker) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (marker.type === 'location') {
+            openLocationMarkerEditModal(marker);
+        } else {
+            openMarkerEditModal(marker);
+        }
+    });
 
     canvas.addEventListener('mousemove', (event) => {
         if (AppState.editMode) {
@@ -738,6 +817,110 @@ export function resetHoveredMarker() {
     }
 }
 window.resetHoveredMarker = resetHoveredMarker;
+
+function openLocationMarkerEditModal(marker) {
+    if (!AppState.isGM || marker.type !== 'location') return;
+    document.querySelector('.location-marker-edit-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.className = 'modal location-marker-edit-modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 440px;">
+            <h3>Маркер подлокации</h3>
+            <div class="form-group"><label>Название</label><input data-location-name type="text" maxlength="100" class="form-control"></div>
+            <div class="form-group"><label>Клетка X</label><input data-location-x type="number" min="0" step="1" class="form-control"></div>
+            <div class="form-group"><label>Клетка Z</label><input data-location-z type="number" min="0" step="1" class="form-control"></div>
+            <div class="form-actions">
+                <button type="button" data-location-pick class="btn btn-secondary">Выбрать клетку на карте</button>
+                <button type="button" data-location-save class="btn btn-primary">Сохранить</button>
+                <button type="button" data-location-close class="btn btn-secondary">Отмена</button>
+            </div>
+            <div class="form-actions" style="margin-top: 16px;">
+                <button type="button" data-location-delete class="btn btn-danger">Удалить подлокацию</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.style.display = 'flex';
+    const nameField = modal.querySelector('[data-location-name]');
+    const xField = modal.querySelector('[data-location-x]');
+    const zField = modal.querySelector('[data-location-z]');
+    const saveButton = modal.querySelector('[data-location-save]');
+    nameField.value = marker.name || '';
+    xField.value = marker.worldTileX ?? Math.floor(marker.position.x);
+    zField.value = marker.worldTileZ ?? Math.floor(marker.position.z);
+    if (mapWidthTiles) xField.max = String(mapWidthTiles - 1);
+    if (mapHeightTiles) zField.max = String(mapHeightTiles - 1);
+
+    let pickCallback = null;
+    function close() {
+        if (tilePickCallback === pickCallback && pickCallback) {
+            awaitingTilePick = false;
+            tilePickCallback = null;
+        }
+        document.removeEventListener('keydown', onKeyDown);
+        modal.remove();
+    }
+    function onKeyDown(event) {
+        if (event.key === 'Escape') close();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    modal.querySelector('[data-location-close]').addEventListener('click', close);
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.querySelector('[data-location-pick]').addEventListener('click', () => {
+        modal.style.display = 'none';
+        awaitingTilePick = true;
+        pickCallback = (worldX, _height, worldZ) => {
+            xField.value = Math.floor(worldX);
+            zField.value = Math.floor(worldZ);
+            modal.style.display = 'flex';
+        };
+        tilePickCallback = pickCallback;
+        showNotification('Выберите новую клетку для маркера', 'system');
+    });
+    saveButton.addEventListener('click', async () => {
+        const name = nameField.value.trim();
+        const x = xField.valueAsNumber;
+        const z = zField.valueAsNumber;
+        if (!name || name.length > 100) {
+            showNotification('Введите название длиной до 100 символов', 'error');
+            return;
+        }
+        if (!Number.isInteger(x) || !Number.isInteger(z) || x < 0 || z < 0
+            || (mapWidthTiles && x >= mapWidthTiles) || (mapHeightTiles && z >= mapHeightTiles)) {
+            showNotification('Выберите клетку в пределах мировой карты', 'error');
+            return;
+        }
+        saveButton.disabled = true;
+        try {
+            const result = await Server.updateLocation(currentLobbyId, marker.locationId, {
+                name, world_tile_x: x, world_tile_z: z,
+            });
+            upsertLocationMarker(result.location);
+            showNotification('Маркер подлокации обновлён', 'success');
+            close();
+        } catch (error) {
+            showNotification(error.message, 'error');
+            saveButton.disabled = false;
+        }
+    });
+    const deleteButton = modal.querySelector('[data-location-delete]');
+    deleteButton.addEventListener('click', async () => {
+        if (!window.confirm(`Безвозвратно удалить подлокацию «${marker.name}» вместе с картой, объектами и размещениями персонажей?`)) return;
+        deleteButton.disabled = true;
+        saveButton.disabled = true;
+        try {
+            await Server.deleteLocation(currentLobbyId, marker.locationId);
+            removeMarkerFromScene(marker.id);
+            showNotification('Подлокация удалена', 'success');
+            close();
+        } catch (error) {
+            showNotification(error.message, 'error');
+            deleteButton.disabled = false;
+            saveButton.disabled = false;
+        }
+    });
+    nameField.focus();
+}
 
 // ---------- Модальное окно редактирования ----------
 function openMarkerEditModal(marker) {

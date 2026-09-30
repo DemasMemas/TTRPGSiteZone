@@ -29,17 +29,18 @@ if (-not $SkipMigrations) {
 }
 
 $radminIp = $null
-$insideRadminAdapter = $false
-foreach ($line in (ipconfig)) {
-    if ($line -match 'adapter\s+Radmin VPN\s*:') {
-        $insideRadminAdapter = $true
+foreach ($adapter in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+    if ($adapter.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) {
         continue
     }
-    if ($insideRadminAdapter -and $line -match '^\S.*adapter\s+') {
-        break
+    if ($adapter.Name -notmatch 'Radmin' -and $adapter.Description -notmatch 'Radmin') {
+        continue
     }
-    if ($insideRadminAdapter -and $line -match 'IPv4.*?:\s*((?:\d{1,3}\.){3}\d{1,3})') {
-        $radminIp = $Matches[1]
+    $address = $adapter.GetIPProperties().UnicastAddresses | Where-Object {
+        $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+    } | Select-Object -First 1
+    if ($address) {
+        $radminIp = $address.Address.IPAddressToString
         break
     }
 }
@@ -54,7 +55,7 @@ Write-Host "Local address:  http://127.0.0.1:$Port"
 if ($radminIp) {
     Write-Host "Radmin address: http://${radminIp}:$Port" -ForegroundColor Cyan
 } else {
-    Write-Warning 'Radmin VPN adapter was not found. Start Radmin VPN before inviting players.'
+    Write-Warning 'No active Radmin VPN adapter with an IPv4 address was found. Check the Radmin connection before inviting players.'
 }
 Write-Host 'Press Ctrl+C to stop the server.' -ForegroundColor DarkGray
 Write-Host ''

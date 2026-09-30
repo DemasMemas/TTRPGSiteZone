@@ -1,5 +1,9 @@
 // static/js/mapEdit.js
-import AppState from './ui_interactions.js';
+import AppState, {
+    expandMapToolsPanelOnToolChange,
+    setMapEditorAutoExpandEnabled,
+    syncMapEditorAutoExpandCheckbox,
+} from './ui_interactions.js';
 import {
     getHoveredTile,
     updateTileInChunk,
@@ -42,12 +46,18 @@ export function initMapEdit(lobbyId, authToken) {
     token = authToken;
     loadAnomalyFieldCatalog();
 
-    const typeSelect = document.getElementById('tile-type-select');
-    if (typeSelect) {
-        typeSelect.addEventListener('change', (e) => {
-            AppState.setCurrentTileType(e.target.value);
-        });
-    }
+    document.getElementById('panel-tools')?.addEventListener('click', event => {
+        const button = event.target.closest('[data-world-tool]');
+        if (button) selectWorldEditorTool(button.dataset.worldTool);
+    });
+    document.getElementById('panel-tools')?.addEventListener('change', event => {
+        if (event.target.id === 'tile-type-select') AppState.setCurrentTileType(event.target.value);
+        if (event.target.matches('[data-map-editor-auto-expand]')) {
+            setMapEditorAutoExpandEnabled(event.target.checked);
+        }
+    });
+    syncMapEditorAutoExpandCheckbox();
+    selectWorldEditorTool('select');
 
     const previewFields = [
         'object-type-select',
@@ -109,6 +119,28 @@ export function setEditMode(enabled) {
     if (btn) {
         btn.style.background = AppState.editMode ? '#4a6fa5' : '';
     }
+}
+
+export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
+    const root = document.getElementById('gm-only-controls');
+    if (!root || !['select', 'terrain', 'height', 'erase'].includes(tool)) return;
+    const previousTool = window.worldEditorTool;
+    root.dataset.tool = tool;
+    window.worldEditorTool = tool;
+    if (autoExpand) expandMapToolsPanelOnToolChange(previousTool, tool);
+    root.querySelectorAll('[data-world-tool]').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.worldTool === tool));
+    });
+    const eraser = document.getElementById('eraser-checkbox');
+    if (eraser) eraser.checked = tool === 'erase';
+    AppState.setEraserMode(tool === 'erase');
+    const hint = document.getElementById('world-editor-hint');
+    if (hint) hint.textContent = {
+        select: 'Выбор без рисования. Двойной клик открывает настройки тайла.',
+        terrain: 'Проведите кистью по карте, чтобы изменить покрытие.',
+        height: 'Проведите кистью по карте, чтобы изменить высоту.',
+        erase: 'Проведите по карте, чтобы удалить объекты с тайлов.',
+    }[tool];
 }
 
 export function getEditMode() {
@@ -524,7 +556,7 @@ export function setTileHeightFromInput(value) {
 }
 
 export function setEraserModeFromInput(checked) {
-    AppState.setEraserMode(checked);
+    selectWorldEditorTool(checked ? 'erase' : 'select');
 }
 
 export function updateTileEditHeight(value) {

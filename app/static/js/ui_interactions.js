@@ -44,6 +44,33 @@ function loadPanelState(panelId) {
     return allState[panelId] || null;
 }
 
+const MAP_EDITOR_AUTO_EXPAND_KEY = 'mapEditorAutoExpand';
+
+export function isMapEditorAutoExpandEnabled() {
+    return localStorage.getItem(MAP_EDITOR_AUTO_EXPAND_KEY) !== 'false';
+}
+
+export function syncMapEditorAutoExpandCheckbox() {
+    document.querySelectorAll('[data-map-editor-auto-expand]').forEach(checkbox => {
+        checkbox.checked = isMapEditorAutoExpandEnabled();
+    });
+}
+
+export function setMapEditorAutoExpandEnabled(enabled) {
+    localStorage.setItem(MAP_EDITOR_AUTO_EXPAND_KEY, String(enabled));
+    syncMapEditorAutoExpandCheckbox();
+}
+
+export function expandMapToolsPanelOnToolChange(previousTool, nextTool) {
+    if (!previousTool || previousTool === nextTool || !isMapEditorAutoExpandEnabled()) return;
+    const panel = document.getElementById('panel-tools');
+    if (!panel?.classList.contains('collapsed')) return;
+    panel.classList.remove('collapsed');
+    const toggleBtn = panel.querySelector('.panel-header .toggle-btn');
+    if (toggleBtn) toggleBtn.textContent = '▼';
+    savePanelState('panel-tools', { collapsed: false });
+}
+
 function makeDraggable(panel, handle, panelId) {
     let startMouseX, startMouseY, startLeft, startTop, startWidth, startHeight;
     let isDragging = false;
@@ -274,6 +301,10 @@ function handleKeyDown(e) {
         // R – ластик
         if (e.code === 'KeyR' && !modalOpen) {
             e.preventDefault();
+            if (window.selectLocationEditorTool) {
+                window.selectLocationEditorTool(window.locationEditorTool === 'erase' ? 'select' : 'erase');
+                return;
+            }
             const locEraser = document.getElementById('loc-eraser');
             if (locEraser) {
                 const newState = !locEraser.checked;

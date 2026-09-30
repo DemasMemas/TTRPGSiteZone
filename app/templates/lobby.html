@@ -153,48 +153,36 @@
                         <button class="btn btn-sm" id="color-picker-btn" title="Выбрать свой цвет">🎨</button>
                     </div>
                 </div>
-                <div id="gm-only-controls" style="display: none; flex-direction: column; gap: 8px;">
-                    <!-- Остальные GM-контролы (кисть, высота и т.д.) -->
-                    <div style="display: flex; gap: 15px; flex-wrap: nowrap; align-items: center;">
-                        <!-- Радиус кисти -->
-                        <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                            <span>Радиус кисти:</span>
-                            <input type="range" id="brush-radius" min="0" max="3" value="0" oninput="setBrushRadiusFromInput(this.value)">
-                            <span id="brush-radius-value">0</span>
-                        </div>
-
-                        <!-- Тип тайла -->
-                        <div class="tile-palette" style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                            <span>Тип тайла:</span>
-                            <select id="tile-type-select" class="character-select" style="width: auto;">
-                                <option value="grass">🌿 Трава</option>
-                                <option value="sand">🏜️ Песок</option>
-                                <option value="rock">🪨 Камень</option>
-                                <option value="swamp">🟤 Болото</option>
-                                <option value="water">💧 Вода</option>
-                            </select>
-                        </div>
-
-                        <!-- Высота -->
-                        <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                            <span>Высота:</span>
-                            <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.value)">
-                            <span id="tile-height-value">1.0</span>
-                        </div>
-
-                        <!-- Ластик -->
-                        <div style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                            <label>Ластик</label>
-                            <input type="checkbox" id="eraser-checkbox" onchange="setEraserModeFromInput(this.checked)">
-                        </div>
+                <div id="gm-only-controls" class="map-editor" data-tool="select" style="display: none;">
+                    <div class="map-editor-toolbar" role="toolbar" aria-label="Инструмент мировой карты">
+                        <button type="button" data-world-tool="select" aria-pressed="true">Выбор</button>
+                        <button type="button" data-world-tool="terrain" aria-pressed="false">Ландшафт</button>
+                        <button type="button" data-world-tool="height" aria-pressed="false">Высота</button>
+                        <button type="button" data-world-tool="erase" aria-pressed="false">Ластик</button>
                     </div>
-
-                    <!-- Строка подсказок -->
-                    <div style="display: flex; gap: 15px; flex-wrap: wrap; color: #aaa; font-size: 0.8rem;">
-                        <span>Alt+клик: ландшафт</span>
-                        <span>Shift+клик: высота</span>
-                        <span>Двойной клик: настройка тайла</span>
+                    <div class="map-editor-inspector" data-world-settings="select">
+                        <label><input type="checkbox" data-map-editor-auto-expand checked> Раскрывать панель при смене инструмента</label>
                     </div>
+                    <div class="map-editor-inspector" data-world-settings="terrain">
+                        <label>Покрытие <select id="tile-type-select" class="character-select">
+                            <option value="grass">🌿 Трава</option>
+                            <option value="sand">🏜️ Песок</option>
+                            <option value="rock">🪨 Камень</option>
+                            <option value="swamp">🟤 Болото</option>
+                            <option value="water">💧 Вода</option>
+                        </select></label>
+                    </div>
+                    <div class="map-editor-inspector" data-world-settings="height">
+                        <label>Уровень <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.value)"></label>
+                        <output id="tile-height-value" for="tile-height">1.0</output>
+                    </div>
+                    <div class="map-editor-inspector" data-world-settings="brush">
+                        <label>Радиус кисти <input type="range" id="brush-radius" min="0" max="5" value="0" oninput="setBrushRadiusFromInput(this.value)"></label>
+                        <output id="brush-radius-value" for="brush-radius">0</output>
+                    </div>
+                    <input type="checkbox" id="eraser-checkbox" hidden onchange="setEraserModeFromInput(this.checked)">
+                    <p class="map-editor-hint" id="world-editor-hint">Выберите инструмент. Двойной клик открывает настройки тайла.</p>
+                    <p class="map-editor-shortcuts">Удерживайте Q, наведите на сектор и отпустите · 1–4: инструмент · E: редактор · R: ластик</p>
                 </div>
             </div>
         </div>

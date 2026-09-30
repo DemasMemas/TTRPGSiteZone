@@ -203,11 +203,14 @@ test('camera drag defers expensive world picking without blocking brush movement
     const context = vm.createContext({
         window: {
             isLocationActive: false,
+            worldEditorTool: 'terrain', currentTileType: 'grass', brushRadius: 0,
             addEventListener(name, handler) { handlers[name] = handler; },
             applyBrush() { calls.push('brush'); },
         },
         lastMouseX: 0, lastMouseY: 0, lastModifiers: {}, cameraDragActive: false,
-        hoverRaycastPending: false, editMode: true, hoveredTile: {},
+        hoverRaycastPending: false, editMode: true, brushActive: true,
+        lastProcessedTileKey: null,
+        hoveredTile: { chunk: { chunkX: 0, chunkY: 0 }, tileX: 1, tileY: 1 },
         performRaycast() { calls.push('raycast'); },
     });
     vm.runInContext(source.slice(start, end), context);
@@ -221,6 +224,8 @@ test('camera drag defers expensive world picking without blocking brush movement
     assert.equal(context.hoverRaycastPending, true);
     handlers.pointermove({ clientX: 11, clientY: 20, buttons: 1, altKey: true, shiftKey: false });
     assert.deepEqual(calls, ['raycast', 'brush']);
+    handlers.pointermove({ clientX: 11, clientY: 20, buttons: 1, altKey: true, shiftKey: false });
+    assert.deepEqual(calls, ['raycast', 'brush', 'raycast']);
     assert.equal(context.cameraDragActive, false);
 });
 

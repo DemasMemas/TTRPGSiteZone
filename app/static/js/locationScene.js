@@ -155,10 +155,6 @@ let currentLocationId = null;
 let currentLocationData = null;
 let tileCubes = [];
 let locationTileMesh = null;
-let fogMeshes = [];
-let fogGeometry = null;
-let fogMaterial = null;
-let fogTexture = null;
 let fogMemoryKey = null;
 let fogMemory = new Map();
 let fogMemoryGhosts = new Map();
@@ -240,6 +236,9 @@ let facingMenu = null;
 let pendingFacingSelection = null;
 let facingPreviewMesh = null;
 let combatParticipantMenu = null;
+let combatStartRequestMenu = null;
+const pendingCombatStartRequests = new Map();
+let combatStartRequestVersion = 0;
 let teamManagementModal = null;
 let opportunityAttackModal = null;
 let activeOpportunityAttackId = null;
@@ -2616,7 +2615,7 @@ async function openCharacterAttackSelection(characterId) {
         const data = character?.data || {};
         if (!data.is_mutant && !data.basic?.is_mutant) {
             const sheet = await import('./characterSheet.js');
-            await sheet.openCharacterSheet(characterId, 'equipment');
+            await sheet.openCharacterAttackSheet(characterId);
             return;
         }
         const actor = findCombatCharacterByCharacterId(characterId);
@@ -2835,6 +2834,35 @@ async function openCharacterAttackSelection(characterId) {
     } catch (error) {
         showNotification(error.message || 'Не удалось открыть атаки мутанта', 'system');
     }
+}
+
+export async function requestCombatStartForAttack(characterId) {
+    if (!window.isLocationActive || !getCurrentLocationId()) return false;
+    if (combatState?.status === 'active') return false;
+    try {
+        const state = await Server.getLocationCombatState(window.currentLobbyId, getCurrentLocationId());
+        if (state.status === 'active') {
+            setCombatState(state);
+            showNotification('Бой уже начался. Выберите цель атаки ещё раз.', 'system');
+            return true;
+        }
+        const actor = state.characters?.find(item => Number(item.character_id) === Number(characterId));
+        if (!actor?.location_character_id) {
+            showNotification('Этот персонаж не размещён на подлокации', 'error');
+            return true;
+        }
+        if (window.isGM) {
+            await showCombatParticipantSelection(actor.location_character_id);
+            return true;
+        }
+        await Server.requestLocationCombatStart(
+            window.currentLobbyId, getCurrentLocationId(), actor.location_character_id,
+        );
+        showNotification('Запрос на начало боя отправлен ГМу. Патроны и ОД не потрачены.', 'system');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось запросить начало боя', 'error');
+    }
+    return true;
 }
 
 function showMeleeCombatMenu(characterId) {
@@ -4595,18 +4623,7 @@ function toggleGmVision(characterId = null) {
     );
 }
 
-function clearFogMeshes() {
-    fogMeshes.forEach((mesh) => {
-        scene?.remove(mesh);
-        mesh.userData.memoryMaterial?.dispose();
-    });
-    fogMeshes = [];
-    fogGeometry?.dispose();
-    fogMaterial?.dispose();
-    fogTexture?.dispose();
-    fogGeometry = null;
-    fogMaterial = null;
-    fogTexture = null;
+function clearFogMemoryGhosts() {
     fogMemoryGhosts.forEach((ghost) => {
         scene?.remove(ghost);
         disposeObject(ghost);
@@ -4665,10 +4682,6 @@ function rememberFogTile(x, y) {
     return { memory: next, changed: true };
 }
 
-function cloneFogSnapshot(value) {
-    return JSON.parse(JSON.stringify(value));
-}
-
 function setFogGhostAppearance(root) {
     root.traverse((child) => {
         child.raycast = () => {};
@@ -4724,28 +4737,24 @@ function rememberFogContents(x, y) {
     const key = `${x}:${y}`;
     const memory = fogMemory.get(key);
     if (!memory) return false;
-    const structures = locationObjectMeshes
-        .filter((mesh) => {
-            const position = getObjectGridPosition(mesh.userData?.locationObject || {});
-            return Number(position.x) === x && Number(position.y) === y;
-        })
-        .map((mesh) => cloneFogSnapshot(mesh.userData.locationObject));
     const decorations = objectMeshes
-        .filter((mesh) => Number(mesh.userData?.tileX) === x && Number(mesh.userData?.tileZ) === y);
-    const nextSignature = JSON.stringify({ structures, decorations: decorations.map((mesh) => mesh.userData?.objType) });
-    const previousSignature = JSON.stringify({
-        structures: memory.structures || [],
-        decorations: memory.decorations || [],
-    });
+        .filter((mesh) => mesh.userData?.objType === 'anomaly'
+            && Number(mesh.userData.tileX) === x && Number(mesh.userData.tileZ) === y);
+    const previous = (memory.decorations || []).filter(type => type === 'anomaly');
     decorations.forEach((mesh, index) => {
-        const decorationKey = `${key}:${index}:${mesh.userData?.objType || 'object'}`;
+        const decorationKey = `${key}:${index}:anomaly`;
         const current = fogMemoryDecorationTemplates.get(decorationKey);
         if (current) disposeObject(current);
         fogMemoryDecorationTemplates.set(decorationKey, setFogGhostAppearance(mesh.clone(true)));
     });
-    memory.structures = structures;
-    memory.decorations = decorations.map((mesh) => mesh.userData?.objType || 'object');
-    return nextSignature !== previousSignature;
+    for (let index = decorations.length; index < previous.length; index++) {
+        const decorationKey = `${key}:${index}:anomaly`;
+        const template = fogMemoryDecorationTemplates.get(decorationKey);
+        if (template) disposeObject(template);
+        fogMemoryDecorationTemplates.delete(decorationKey);
+    }
+    memory.decorations = decorations.map(() => 'anomaly');
+    return previous.length !== decorations.length;
 }
 
 function rememberVisibleCharacters(sources) {
@@ -4800,12 +4809,6 @@ function createCharacterFogGhost(snapshot) {
     return ghost;
 }
 
-function createStructureFogGhost(snapshot, height) {
-    const ghost = setFogGhostAppearance(createLocationObjectMesh(snapshot));
-    ghost.position.y = Number(height) || 1;
-    return ghost;
-}
-
 function syncFogMemoryGhosts(active, sources) {
     const desired = new Map();
     if (active) {
@@ -4817,14 +4820,8 @@ function syncFogMemoryGhosts(active, sources) {
                     create: () => createCharacterFogGhost({ ...snapshot, height: memory.height }),
                 });
             });
-            (memory.structures || []).forEach((snapshot) => {
-                const position = getObjectGridPosition(snapshot || {});
-                if (isTileVisibleToPlayer(position.x ?? 0, position.y ?? 0, sources)) return;
-                desired.set(`structure:${snapshot.id}`, {
-                    create: () => createStructureFogGhost(snapshot, memory.height),
-                });
-            });
             (memory.decorations || []).forEach((type, index) => {
+                if (type !== 'anomaly') return;
                 const template = fogMemoryDecorationTemplates.get(`${tileKey}:${index}:${type}`);
                 if (!template) return;
                 const [x, y] = tileKey.split(':').map(Number);
@@ -4845,58 +4842,6 @@ function syncFogMemoryGhosts(active, sources) {
         const ghost = getFogGhost(key, definition.create);
         if (ghost) ghost.visible = true;
     });
-}
-
-function getFogMemoryMaterial(mesh, memory) {
-    const terrainColor = terrainColors[memory.terrain] || 0x3a5f0b;
-    const current = mesh.userData.memoryMaterial;
-    if (current?.userData?.terrainColor === terrainColor) return current;
-    current?.dispose();
-    const color = new THREE.Color(terrainColor).multiplyScalar(0.58);
-    const material = new THREE.MeshBasicMaterial({
-        color,
-        side: THREE.DoubleSide,
-    });
-    material.userData.terrainColor = terrainColor;
-    mesh.userData.memoryMaterial = material;
-    return material;
-}
-
-function buildFogMeshes() {
-    clearFogMeshes();
-    if (!scene || !currentLocationData) return;
-    const textureCanvas = document.createElement('canvas');
-    textureCanvas.width = 96;
-    textureCanvas.height = 96;
-    const context = textureCanvas.getContext('2d');
-    const gradient = context.createRadialGradient(48, 48, 8, 48, 48, 68);
-    gradient.addColorStop(0, 'rgba(255,255,255,0.94)');
-    gradient.addColorStop(0.58, 'rgba(255,255,255,0.76)');
-    gradient.addColorStop(1, 'rgba(255,255,255,0)');
-    context.fillStyle = gradient;
-    context.fillRect(0, 0, 96, 96);
-    fogTexture = new THREE.CanvasTexture(textureCanvas);
-    fogGeometry = new THREE.PlaneGeometry(1.01, 1.01);
-    fogMaterial = new THREE.MeshBasicMaterial({
-        color: 0x4b5c62,
-        map: fogTexture,
-        transparent: true,
-        opacity: 0.72,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-    });
-    for (let y = 0; y < currentLocationData.grid_height; y++) {
-        for (let x = 0; x < currentLocationData.grid_width; x++) {
-            const mesh = new THREE.Mesh(fogGeometry, fogMaterial);
-            mesh.rotation.x = -Math.PI / 2;
-            mesh.position.set(x + 0.5, getTileHeight(x, y) + 0.015, y + 0.5);
-            mesh.userData.fogTile = { x, y };
-            // Fog is visual only and must never intercept map clicks or movement targeting.
-            mesh.raycast = () => {};
-            scene.add(mesh);
-            fogMeshes.push(mesh);
-        }
-    }
 }
 
 function getFogVisionSources() {
@@ -5026,38 +4971,37 @@ function isCharacterVisibleToPlayer(entry, sources) {
     );
 }
 
+function isFogHiddenObject(object) {
+    const type = String(object?.type || '').toLowerCase();
+    return type === 'anomaly' || type === 'ground_item' || type === 'corpse'
+        || type === 'body' || object?.properties?.is_ground_item === true
+        || object?.properties?.is_corpse === true;
+}
+
 function applyFogOfWar() {
     if (!scene || !currentLocationData) return;
-    if (!fogMeshes.length) buildFogMeshes();
     const active = fogIsActive();
     loadFogMemory();
     const sources = active ? getFogVisionSources() : [];
     let learnedNewTiles = false;
-    fogMeshes.forEach((mesh) => {
-        const tile = mesh.userData.fogTile;
-        const visibleNow = active && isTileVisibleToPlayer(tile.x, tile.y, sources);
-        const key = `${tile.x}:${tile.y}`;
-        if (visibleNow) {
-            const remembered = rememberFogTile(tile.x, tile.y);
-            learnedNewTiles = rememberFogContents(tile.x, tile.y) || remembered.changed || learnedNewTiles;
-            mesh.visible = false;
-            return;
-        }
-        if (!active) {
-            mesh.visible = false;
-            return;
-        }
-        const memory = fogMemory.get(key);
-        mesh.visible = true;
-        if (memory) {
-            mesh.material = getFogMemoryMaterial(mesh, memory);
-            mesh.position.y = Number(memory.height) + 0.018;
-        } else {
-            mesh.material = fogMaterial;
-            mesh.position.y = getTileHeight(tile.x, tile.y) + 0.015;
-        }
-    });
-    if (active) learnedNewTiles = rememberVisibleCharacters(sources) || learnedNewTiles;
+    if (active) {
+        const anomalyTiles = new Set();
+        objectMeshes.forEach((mesh) => {
+            if (mesh.userData?.objType === 'anomaly') {
+                anomalyTiles.add(`${mesh.userData.tileX}:${mesh.userData.tileZ}`);
+            }
+        });
+        fogMemory.forEach((memory, key) => {
+            if (memory.decorations?.includes('anomaly')) anomalyTiles.add(key);
+        });
+        anomalyTiles.forEach((key) => {
+            const [x, y] = key.split(':').map(Number);
+            if (!isTileVisibleToPlayer(x, y, sources)) return;
+            const remembered = rememberFogTile(x, y);
+            learnedNewTiles = rememberFogContents(x, y) || remembered.changed || learnedNewTiles;
+        });
+        learnedNewTiles = rememberVisibleCharacters(sources) || learnedNewTiles;
+    }
     if (learnedNewTiles) saveFogMemory();
     characterModels.forEach((entry) => {
         const visible = !active || isCharacterVisibleToPlayer(entry, sources);
@@ -5065,6 +5009,10 @@ function applyFogOfWar() {
         entry.label.visible = visible;
     });
     objectMeshes.forEach((mesh) => {
+        if (mesh.userData?.objType !== 'anomaly') {
+            mesh.visible = true;
+            return;
+        }
         const { tileX, tileZ } = mesh.userData || {};
         const sourceObject = mesh.userData?.sourceObject || { type: mesh.userData?.objType };
         mesh.visible = !active || isPointVisibleToPlayer(
@@ -5076,6 +5024,10 @@ function applyFogOfWar() {
     });
     locationObjectMeshes.forEach((mesh) => {
         const object = mesh.userData?.locationObject || {};
+        if (!isFogHiddenObject(object)) {
+            mesh.visible = true;
+            return;
+        }
         const position = getObjectGridPosition(object);
         mesh.visible = !active || isPointVisibleToPlayer(
             position.x ?? 0,
@@ -5518,7 +5470,113 @@ function closeCombatParticipantMenu() {
     }
 }
 
-async function showCombatParticipantSelection(initiatorLocationCharacterId = null) {
+function closeCombatStartRequestMenu() {
+    combatStartRequestMenu?.remove();
+    combatStartRequestMenu = null;
+}
+
+function showCombatStartRequestMenu() {
+    if (!window.isGM || !window.isLocationActive || combatState?.status === 'active') {
+        closeCombatStartRequestMenu();
+        return;
+    }
+    const startRequest = pendingCombatStartRequests.values().next().value;
+    if (!startRequest) {
+        closeCombatStartRequestMenu();
+        return;
+    }
+    if (combatStartRequestMenu?.dataset.requestId === String(startRequest.id)) {
+        combatStartRequestMenu.style.display = 'flex';
+        return;
+    }
+    closeCombatStartRequestMenu();
+    combatStartRequestMenu = document.createElement('div');
+    combatStartRequestMenu.className = 'modal combat-start-request-menu';
+    combatStartRequestMenu.dataset.requestId = String(startRequest.id);
+    combatStartRequestMenu.style.cssText = 'position:fixed;inset:0;z-index:1250;display:flex;align-items:center;justify-content:center;background:rgba(4,7,10,.66);';
+    combatStartRequestMenu.innerHTML = `<div class="modal-content" style="width:min(440px,calc(100vw - 32px));padding:18px;">
+        <h3 style="margin-top:0">Запрос на начало боя</h3>
+        <p class="combat-start-request-text"></p>
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+            <button type="button" class="btn btn-secondary combat-start-request-later">Позже</button>
+            <button type="button" class="btn btn-danger combat-start-request-reject">Отклонить</button>
+            <button type="button" class="btn btn-primary combat-start-request-approve">Выбрать участников</button>
+        </div>
+    </div>`;
+    combatStartRequestMenu.querySelector('.combat-start-request-text').textContent =
+        `${startRequest.actor_name} хочет начать бой атакой. Порядок хода можно выбрать при подтверждении.`;
+    combatStartRequestMenu.querySelector('.combat-start-request-later').onclick = closeCombatStartRequestMenu;
+    combatStartRequestMenu.querySelector('.combat-start-request-approve').onclick = () => {
+        closeCombatStartRequestMenu();
+        showCombatParticipantSelection(startRequest.actor_location_character_id, startRequest.id);
+    };
+    combatStartRequestMenu.querySelector('.combat-start-request-reject').onclick = async (event) => {
+        event.currentTarget.disabled = true;
+        try {
+            await Server.respondLocationCombatStartRequest(
+                window.currentLobbyId, getCurrentLocationId(), startRequest.id, 'reject',
+            );
+            pendingCombatStartRequests.delete(startRequest.id);
+            closeCombatStartRequestMenu();
+            showCombatStartRequestMenu();
+            renderCombatHud();
+        } catch (error) {
+            event.currentTarget.disabled = false;
+            showNotification(error.message || 'Не удалось отклонить запрос', 'error');
+        }
+    };
+    document.body.appendChild(combatStartRequestMenu);
+}
+
+export function handleCombatStartRequest(startRequest) {
+    if (!window.isGM || Number(startRequest?.location_id) !== Number(getCurrentLocationId())) return;
+    combatStartRequestVersion += 1;
+    pendingCombatStartRequests.set(startRequest.id, startRequest);
+    showCombatStartRequestMenu();
+    renderCombatHud();
+}
+
+export function handleCombatStartRequestResolved(startRequest) {
+    combatStartRequestVersion += 1;
+    pendingCombatStartRequests.delete(startRequest.id);
+    if (combatStartRequestMenu?.dataset.requestId === String(startRequest.id)) {
+        closeCombatStartRequestMenu();
+        showCombatStartRequestMenu();
+    }
+    renderCombatHud();
+    if (Number(startRequest.actor_user_id) !== Number(localStorage.getItem('user_id'))) return;
+    const message = startRequest.status === 'approved'
+        ? 'ГМ начал бой. Проверьте порядок хода; когда наступит ваш ход, выберите атаку и цель.'
+        : (startRequest.status === 'rejected'
+            ? 'ГМ отклонил начало боя.'
+            : 'Запрос на начало боя закрыт: бой начался другим действием.');
+    showNotification(message, startRequest.status === 'approved' ? 'success' : 'system');
+}
+
+export async function loadCombatStartRequests() {
+    if (!window.isGM || !window.isLocationActive) return;
+    const locationId = getCurrentLocationId();
+    const version = combatStartRequestVersion;
+    try {
+        const requests = await Server.getLocationCombatStartRequests(
+            window.currentLobbyId, locationId,
+        );
+        if (!window.isLocationActive || Number(getCurrentLocationId()) !== Number(locationId)) return;
+        if (combatState?.status === 'active') return;
+        if (version !== combatStartRequestVersion) {
+            loadCombatStartRequests();
+            return;
+        }
+        pendingCombatStartRequests.clear();
+        requests.forEach(item => pendingCombatStartRequests.set(item.id, item));
+        showCombatStartRequestMenu();
+        renderCombatHud();
+    } catch (error) {
+        showNotification(error.message || 'Не удалось получить запросы на начало боя', 'error');
+    }
+}
+
+async function showCombatParticipantSelection(initiatorLocationCharacterId = null, startRequestId = null) {
     if (!window.isGM || combatState?.status === 'active') return;
     let characters = [];
     try {
@@ -5528,6 +5586,10 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
         );
         combatState = freshState;
         window.locationCombatState = freshState;
+        if (freshState?.status === 'active') {
+            showNotification('Бой уже начался', 'system');
+            return;
+        }
         characters = Array.isArray(freshState?.characters)
             ? freshState.characters
             : [];
@@ -5579,6 +5641,14 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
                 min-height:0;
                 padding-right:4px;
             "></div>
+            ${initiatorLocationCharacterId != null ? `
+                <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;">
+                    <input type="checkbox" class="combat-initiator-first" checked>
+                    <span>Атакующий ходит первым<br>
+                        <small style="opacity:.72;">Если снять галочку, порядок определится обычным броском инициативы.</small>
+                    </span>
+                </label>
+            ` : ''}
             <div style="display:flex; justify-content:flex-end; gap:8px;">
                 <button type="button" class="btn btn-secondary combat-participant-cancel">Отмена</button>
                 <button type="button" class="btn btn-primary combat-participant-start">Начать бой</button>
@@ -5611,7 +5681,10 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
         list.appendChild(row);
     });
 
-    const close = closeCombatParticipantMenu;
+    const close = () => {
+        closeCombatParticipantMenu();
+        if (startRequestId && pendingCombatStartRequests.has(startRequestId)) showCombatStartRequestMenu();
+    };
     combatParticipantMenu.querySelector('.combat-participant-close').onclick = close;
     combatParticipantMenu.querySelector('.combat-participant-cancel').onclick = close;
     combatParticipantMenu.addEventListener('pointerdown', (event) => {
@@ -5619,10 +5692,11 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
     });
     combatParticipantMenu.querySelector('.combat-participant-start').onclick = async (event) => {
         const selectedIds = Array.from(
-            combatParticipantMenu.querySelectorAll('input[type="checkbox"]:checked'),
+            list.querySelectorAll('input[type="checkbox"]:checked'),
         ).map(input => Number(input.value)).filter(Number.isFinite);
         if (
-            Number.isFinite(Number(initiatorLocationCharacterId))
+            initiatorLocationCharacterId != null
+            && Number.isFinite(Number(initiatorLocationCharacterId))
             && !selectedIds.includes(Number(initiatorLocationCharacterId))
         ) {
             selectedIds.unshift(Number(initiatorLocationCharacterId));
@@ -5633,12 +5707,17 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
         }
         event.currentTarget.disabled = true;
         try {
-            const state = await Server.startLocationCombat(
-                window.currentLobbyId,
-                getCurrentLocationId(),
-                selectedIds,
-                initiatorLocationCharacterId,
-            );
+            const initiatorFirst = combatParticipantMenu.querySelector('.combat-initiator-first')?.checked ?? false;
+            const state = startRequestId
+                ? await Server.respondLocationCombatStartRequest(
+                    window.currentLobbyId, getCurrentLocationId(), startRequestId, 'approve', selectedIds,
+                    initiatorFirst,
+                )
+                : await Server.startLocationCombat(
+                    window.currentLobbyId, getCurrentLocationId(), selectedIds,
+                    initiatorFirst ? initiatorLocationCharacterId : null,
+                );
+            if (startRequestId) pendingCombatStartRequests.delete(startRequestId);
             close();
         } catch (error) {
             event.currentTarget.disabled = false;
@@ -5813,10 +5892,12 @@ function renderCombatHud() {
                 <span style="opacity:.72;">Бой не активен</span>
                 ${window.isGM ? '<button class="btn btn-sm btn-primary combat-start-btn">Начать бой</button>' : ''}
             </div>
+            ${window.isGM && pendingCombatStartRequests.size ? `<button class="btn btn-sm btn-warning combat-start-requests-btn" style="margin-top:8px;">Запросы атаки · ${pendingCombatStartRequests.size}</button>` : ''}
             `}
         </div>
     `;
     ensureCombatHudDragging();
+    combatHud.querySelector('.combat-start-requests-btn')?.addEventListener('click', showCombatStartRequestMenu);
     combatHud.querySelector('.combat-deferred-retry')?.addEventListener('click', () => resumeCompletedCombatAction(combatState, true));
     combatHud.querySelectorAll('.combat-deferred-cancel').forEach(button => {
         button.onclick = async () => {
@@ -5912,7 +5993,7 @@ function renderCombatHud() {
     }
     const startBtn = combatHud.querySelector('.combat-start-btn');
     if (startBtn) {
-        startBtn.onclick = showCombatParticipantSelection;
+        startBtn.onclick = () => showCombatParticipantSelection();
     }
     const mustDoBtn = combatHud.querySelector('.combat-must-do-btn');
     if (mustDoBtn) {
@@ -5979,6 +6060,11 @@ function renderCombatHud() {
 export function setCombatState(state) {
     combatState = state || null;
     window.locationCombatState = combatState;
+    if (combatState?.status === 'active') {
+        combatStartRequestVersion += 1;
+        closeCombatStartRequestMenu();
+        pendingCombatStartRequests.clear();
+    }
     syncCombatAreaVisuals(combatState);
     (combatState?.characters || []).forEach((character) => {
         updateCharacterPosition(character.character_id, character.x, character.y, { deferRefresh: true });
@@ -8551,12 +8637,12 @@ function createLocationObjectMesh(obj) {
     return group;
 }
 
-function addLocationObjectMesh(obj) {
+function addLocationObjectMesh(obj, refreshFog = true) {
     if (locationObjectMeshes.some(mesh => mesh.userData.locationObjectId === obj.id)) return;
     const mesh = createLocationObjectMesh(obj);
     scene.add(mesh);
     locationObjectMeshes.push(mesh);
-    applyFogOfWar();
+    if (refreshFog) applyFogOfWar();
 }
 
 function removeLocationObjectMesh(objectId) {
@@ -8713,7 +8799,7 @@ window.updateLocationObject = updateLocationObject;
 
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
-    console.log('loadLocation', data);
+    clearFogMemoryGhosts();
     tileCubes = [];
     objectMeshes = [];
     anomalyEffectMeshes = [];
@@ -8776,15 +8862,14 @@ export function loadLocation(data) {
     // Объекты на тайлах
     for (let y = 0; y < data.tiles_data.length; y++) {
         for (let x = 0; x < data.tiles_data[y].length; x++) {
-            rebuildTileObjects(x, y);
+            if (data.tiles_data[y][x].objects?.length) rebuildTileObjects(x, y);
         }
     }
 
     // Отдельные объекты
     if (data.objects && data.objects.length) {
-        data.objects.forEach(addLocationObjectMesh);
+        data.objects.forEach(object => addLocationObjectMesh(object, false));
     }
-    buildFogMeshes();
     applyFogOfWar();
 
     // Камера
@@ -8926,7 +9011,6 @@ export function applyLocationTilesUpdate(locationId, updates) {
         updateLocationObjectHeight(upd.x, upd.z);
     }
     invalidateMovementMapCache();
-    buildFogMeshes();
     applyFogOfWar();
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
@@ -9139,7 +9223,7 @@ function setupCharacterDragging() {
     // pointerdown - начало перетаскивания
     const onPointerDown = (e) => {
         if (e.button !== 0) return;
-        if (window.locationEditMode) return;
+        if (window.locationEditMode && (window.locationEditorTool !== 'select' || e.altKey || e.shiftKey)) return;
         if (isDraggingCharacter) return;
         if (pendingFacingSelection) {
             e.preventDefault();
@@ -9356,7 +9440,7 @@ function setupCharacterDragging() {
     const onContextMenu = (e) => {
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (window.locationEditMode) return;
+        if (window.locationEditMode && window.locationEditorTool !== 'select') return;
         if (pendingCombatAction) {
             showNotification('Выберите цель левой кнопкой мыши или нажмите Esc для отмены', 'system');
             return;
@@ -9459,6 +9543,23 @@ function setupCharacterDragging() {
 }
 
 // ========== Настройка обработчиков редактирования и Drag&Drop спавна ==========
+function getEditBrushUpdates(e) {
+    const tool = window.locationEditorTool;
+    if (eraserMode || tool === 'erase') return { objects: [] };
+    if (e.altKey) return { terrain: currentBrushTerrain };
+    if (e.shiftKey) return { height: currentBrushHeight };
+    if (tool === 'radiation') return { radiation: brushRadiation };
+    if (tool === 'decor') return { addObject: true };
+    if (tool === 'terrain') return { terrain: currentBrushTerrain };
+    if (tool === 'height') return { height: currentBrushHeight };
+    return {};
+}
+
+function shouldEraseLocationStructures() {
+    return window.locationEditorTool === 'erase'
+        && document.getElementById('loc-erase-structures')?.checked === true;
+}
+
 export function setupLocationEditing() {
     if (!renderer) return;
     const canvas = renderer.domElement;
@@ -9531,33 +9632,21 @@ export function setupLocationEditing() {
             return;
         }
         if (!window.locationEditMode) return;
+        if (window.locationEditorTool === 'select' && !e.altKey && !e.shiftKey) return;
         e.preventDefault();
         e.stopPropagation();
         canvas.setPointerCapture(e.pointerId);
         const { x, z } = hoveredTileCoords;
-        if (buildMode === 'structure') {
+        if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
             if (eraserMode) removeStructuresAtTile(x, z);
             else placeStructureAtTile(x, z);
             return;
         }
-        const radMode = document.getElementById('loc-rad-mode')?.checked;
-        const objMode = document.getElementById('loc-obj-mode')?.checked;
-        const updates = {};
-        if (eraserMode) {
-            updates.objects = [];
-        } else {
-            if (radMode) {
-                updates.radiation = brushRadiation;
-            } else if (objMode) {
-                updates.addObject = true;
-            } else {
-                if (e.altKey) updates.terrain = currentBrushTerrain;
-                if (e.shiftKey) updates.height = currentBrushHeight;
-            }
-        }
+        const updates = getEditBrushUpdates(e);
         if (Object.keys(updates).length) {
             applyLocationBrush(x, z, updates, brushRadius);
         }
+        if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z);
         processedTilesForObjects.clear();
     };
     canvas.addEventListener('pointerdown', onPointerDown);
@@ -9570,35 +9659,22 @@ export function setupLocationEditing() {
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
         const { x, z } = hoveredTileCoords;
-        if (buildMode === 'structure') {
+        if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
             if (eraserMode) removeStructuresAtTile(x, z);
             return;
         }
-        const radMode = document.getElementById('loc-rad-mode')?.checked;
-        const objMode = document.getElementById('loc-obj-mode')?.checked;
-        const updates = {};
-        if (eraserMode) {
-            updates.objects = [];
-        } else {
-            if (radMode) {
-                updates.radiation = brushRadiation;
-            } else if (objMode) {
-                updates.addObject = true;
-            } else {
-                if (e.altKey) updates.terrain = currentBrushTerrain;
-                if (e.shiftKey) updates.height = currentBrushHeight;
-            }
-        }
+        const updates = getEditBrushUpdates(e);
         if (Object.keys(updates).length) {
             applyLocationBrush(x, z, updates, brushRadius);
         }
+        if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z);
     };
     window.addEventListener('pointermove', onPointerMoveWithDrag);
     handlers.window.pointerMoveWithDrag = onPointerMoveWithDrag;
 
     const onPointerUp = (e) => {
         if (!locationActive) return;
-        canvas.releasePointerCapture(e.pointerId);
+        if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     };
     canvas.addEventListener('pointerup', onPointerUp);
     handlers.canvas.editPointerUp = onPointerUp;
@@ -10042,8 +10118,11 @@ export function destroyLocationScene() {
     locationFpsCounter?.destroy();
     locationFpsCounter = null;
     closeNarrativeActionModal();
+    closeCombatStartRequestMenu();
+    pendingCombatStartRequests.clear();
+    combatStartRequestVersion += 1;
     closeFacingMenu();
-    clearFogMeshes();
+    clearFogMemoryGhosts();
     locationActive = false;
     closeAimedZoneMenu();
 

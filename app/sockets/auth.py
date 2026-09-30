@@ -86,7 +86,10 @@ def handle_authenticate(data):
     join_room(f"lobby_{lobby_id}")
     join_room(f"user_{user.id}")  # личная комната для кика
 
-    emit('authenticated', {'username': user.username}, room=request.sid)
+    emit('authenticated', {
+        'username': user.username,
+        'is_gm': participant.lobby.gm_id == user.id,
+    }, room=request.sid)
     logger.info(f"User {user.id} ({user.username}) authenticated in lobby {lobby_id}")
 
     # Оповещаем всех в комнате о новом участнике

@@ -739,23 +739,223 @@ body {
   left: 50%;
   transform: translateX(-50%);
   background: var(--panel-bg);
-  backdrop-filter: blur(5px);
-  border-radius: 40px;
-  border: 1px solid var(--panel-border);
-  padding: 8px 16px;
+  backdrop-filter: blur(12px);
+  border-radius: 16px;
+  border: 1px solid rgba(184, 164, 110, 0.24);
+  box-shadow: var(--panel-shadow);
   display: flex;
-  gap: 15px;
-  align-items: center;
-  overflow-x: auto;
-  max-width: 100%;
-  white-space: nowrap;
-  border: 1px solid rgba(184, 164, 110, 0.12);
+  flex-direction: column;
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(70vh, 620px);
+  overflow: hidden;
 }
-#gm-only-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 15px;
+.map-tools .panel-header {
+  width: 100%;
+  box-sizing: border-box;
+}
+.map-tools .panel-content {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+.map-tools .panel-content > div:first-child {
+  margin-bottom: 8px;
+}
+.map-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  white-space: normal;
+}
+.map-editor-toolbar {
+  display: flex;
   flex-wrap: wrap;
+  gap: 5px;
+  padding: 4px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+}
+.map-editor-toolbar button {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.83rem;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+.map-editor-toolbar button:hover {
+  color: var(--text-color);
+  background: rgba(184, 164, 110, 0.12);
+}
+.map-editor-toolbar button[aria-pressed="true"] {
+  color: var(--text-color);
+  background: var(--btn-primary-bg);
+  border-color: rgba(184, 164, 110, 0.35);
+}
+.map-editor-toolbar button:focus-visible {
+  outline: 2px solid var(--username-color);
+  outline-offset: 2px;
+}
+.map-editor-inspector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.map-editor-inspector label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.map-editor-inspector input[type="range"] {
+  width: 130px;
+}
+.map-editor-inspector select,
+.map-editor-inspector input[type="number"],
+.map-editor-inspector input[type="color"] {
+  color: var(--text-color);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  min-height: 30px;
+}
+.map-editor-inspector output {
+  min-width: 2.5em;
+  font-variant-numeric: tabular-nums;
+  color: var(--username-color);
+}
+.map-editor-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+#gm-only-controls:not([data-tool="select"]) [data-world-settings="select"],
+#gm-only-controls:not([data-tool="terrain"]) [data-world-settings="terrain"],
+#gm-only-controls:not([data-tool="height"]) [data-world-settings="height"],
+#gm-only-controls[data-tool="select"] [data-world-settings="brush"] {
+  display: none;
+}
+.map-editor-inspector-grid {
+  display: grid;
+  gap: 10px;
+}
+.map-editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border: 1px solid var(--panel-border);
+  border-radius: 9px;
+  padding: 11px;
+  background: rgba(0, 0, 0, 0.13);
+}
+.map-editor-section[hidden] {
+  display: none;
+}
+.map-editor-section-heading {
+  color: var(--username-color);
+  font-size: 0.84rem;
+}
+.map-editor-section label,
+.map-editor-section > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.83rem;
+}
+.map-editor-section input[type="range"] {
+  width: min(150px, 100%);
+}
+.map-editor-section .form-control {
+  max-width: 100%;
+}
+.map-tools.is-location-editor {
+  width: min(820px, calc(100vw - 32px));
+}
+.map-tools.is-location-editor .map-editor-toolbar {
+  margin-top: 8px;
+}
+.map-tools.collapsed,
+.map-tools.is-location-editor.collapsed {
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  max-height: none;
+}
+.map-tools.collapsed .panel-header {
+  width: auto;
+  border-radius: 12px;
+}
+.map-editor-shortcuts {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+.map-editor-wheel {
+  position: fixed;
+  z-index: 300;
+  width: 352px;
+  height: 352px;
+  pointer-events: none;
+  animation: editor-wheel-in 130ms ease-out both;
+}
+.map-editor-wheel svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.55));
+}
+.map-editor-sector path {
+  fill: var(--panel-header-bg);
+  stroke: var(--panel-border);
+  stroke-width: 2;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: fill 100ms ease, stroke 100ms ease;
+}
+.map-editor-sector.is-current path {
+  stroke: var(--username-color);
+}
+.map-editor-sector.is-highlighted path,
+.map-editor-sector:focus-visible path {
+  fill: var(--btn-primary-bg);
+  stroke: var(--username-color);
+}
+.map-editor-sector text,
+.map-editor-wheel-label {
+  fill: var(--text-color);
+  text-anchor: middle;
+  dominant-baseline: middle;
+  font-family: inherit;
+  pointer-events: none;
+}
+.map-editor-sector-name {
+  font-size: 12px;
+  font-weight: 700;
+}
+.map-editor-sector-key {
+  font-size: 11px;
+  opacity: 0.72;
+}
+.map-editor-wheel-center {
+  fill: var(--panel-bg);
+  stroke: var(--panel-border);
+  stroke-width: 2;
+  pointer-events: none;
+}
+.map-editor-wheel-label {
+  font-size: 17px;
+  font-weight: 700;
+}
+@keyframes editor-wheel-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to { opacity: 1; transform: scale(1); }
 }
 .tile-palette select {
   background: var(--input-bg);

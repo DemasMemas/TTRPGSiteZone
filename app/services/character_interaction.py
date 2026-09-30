@@ -155,6 +155,8 @@ class CharacterInteractionService:
         request_row = db.session.get(CharacterInteractionRequest, request_id)
         if not request_row or request_row.status != 'pending':
             raise NotFoundError('Interaction request is no longer pending')
+        if request_row.kind not in {'treatment', 'trade'}:
+            raise ValidationError('Use the dedicated endpoint for this request')
         location = CombatService._get_location(request_row.location_id)
         is_gm = location.lobby.gm_id == user_id
         target = db.session.get(LocationCharacter, request_row.target_location_character_id)

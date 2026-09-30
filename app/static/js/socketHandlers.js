@@ -7,6 +7,7 @@ import { updateTileInChunk } from './lobby3d.js';
 import { applyWeather } from './weather.js';
 import { setUserColor } from './colors.js';
 import { refreshUserColor } from './locationScene.js';
+import AppState from './ui_interactions.js';
 
 let socket;
 let currentLobbyId;
@@ -81,11 +82,23 @@ export function initSocket(lobbyId, token) {
 
     socket.on('authenticated', (data) => {
         showNotification(`Вы вошли как ${data.username}`, 'system', 'bottom-left');
+        window.isGM = data.is_gm === true;
+        AppState.setIsGM(window.isGM);
         const myId = parseInt(localStorage.getItem('user_id'));
         onlineUserIds.add(myId);
         loadLobbyInfo();
         loadLobbyCharacters();
         loadAllChunks();
+        if (window.isLocationActive && window.currentLocationId) {
+            socket.emit('join_location', {
+                token,
+                location_id: window.currentLocationId,
+                character_id: window.currentLocationCharacterId || null,
+            });
+            if (window.isGM) {
+                import('./locationScene.js').then(module => module.loadCombatStartRequests());
+            }
+        }
     });
 
     socket.on('new_message', (data) => {

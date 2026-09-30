@@ -112,6 +112,10 @@ export async function loadLobbyInfo() {
                     window.applyBrush(tile, { terrain: window.currentTileType }, window.brushRadius);
                 } else if (event.shiftKey) {
                     window.applyBrush(tile, { height: window.tileHeight }, window.brushRadius);
+                } else if (window.worldEditorTool === 'terrain') {
+                    window.applyBrush(tile, { terrain: window.currentTileType }, window.brushRadius);
+                } else if (window.worldEditorTool === 'height') {
+                    window.applyBrush(tile, { height: window.tileHeight }, window.brushRadius);
                 }
             });
         }
@@ -120,17 +124,28 @@ export async function loadLobbyInfo() {
     }
 }
 
-export async function loadAllChunks() {
-    const promises = [];
-    const maxChunkX = window.MAP_CHUNKS_WIDTH - 1;
-    const maxChunkY = window.MAP_CHUNKS_HEIGHT - 1;
-    for (let cx = 0; cx <= maxChunkX; cx++) {
-        for (let cy = 0; cy <= maxChunkY; cy++) {
-            promises.push(fetchChunk(cx, cy));
+let loadingAllChunks = null;
+
+export function loadAllChunks() {
+    if (loadingAllChunks) return loadingAllChunks;
+    loadingAllChunks = (async () => {
+        const positions = [];
+        for (let cx = 0; cx < window.MAP_CHUNKS_WIDTH; cx++) {
+            for (let cy = 0; cy < window.MAP_CHUNKS_HEIGHT; cy++) {
+                positions.push([cx, cy]);
+            }
         }
-    }
-    await Promise.allSettled(promises);
-    console.log('All chunks loaded');
+        let nextIndex = 0;
+        const worker = async () => {
+            while (nextIndex < positions.length) {
+                const [cx, cy] = positions[nextIndex++];
+                await fetchChunk(cx, cy);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(4, positions.length) }, worker));
+        console.log('All chunks loaded');
+    })().finally(() => { loadingAllChunks = null; });
+    return loadingAllChunks;
 }
 
 async function fetchChunk(cx, cy) {
