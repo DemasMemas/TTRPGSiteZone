@@ -3,13 +3,14 @@ import logging
 import threading
 from flask import request
 from flask_socketio import join_room, leave_room, emit
-from app.extensions import socketio, db
+from app.extensions import socketio
 from app.models import LobbyParticipant, ChatMessage
 from .utils import get_user_from_token
 
 logger = logging.getLogger(__name__)
 
 sid_to_user = {}
+sid_to_username = {}
 sid_to_lobby = {}
 pending_auth = {}
 AUTH_TIMEOUT = 10
@@ -39,6 +40,7 @@ def handle_disconnect():
         del pending_auth[request.sid]
 
     user_id = sid_to_user.pop(request.sid, None)
+    username = sid_to_username.pop(request.sid, None)
     lobby_id = sid_to_lobby.pop(request.sid, None)
     if user_id:
         still_online = any(
@@ -46,7 +48,10 @@ def handle_disconnect():
             for sid, other_user_id in sid_to_user.items()
         )
         if lobby_id and not still_online:
-            emit('user_left', {'user_id': user_id}, room=f"lobby_{lobby_id}")
+            emit('user_left', {
+                'user_id': user_id,
+                'username': username,
+            }, room=f"lobby_{lobby_id}")
             logger.info(f"User {user_id} left lobby {lobby_id}")
     logger.info('Client disconnected')
 
@@ -81,6 +86,7 @@ def handle_authenticate(data):
 
     # Сохраняем информацию о подключении
     sid_to_user[request.sid] = user.id
+    sid_to_username[request.sid] = user.username
     sid_to_lobby[request.sid] = lobby_id
 
     join_room(f"lobby_{lobby_id}")

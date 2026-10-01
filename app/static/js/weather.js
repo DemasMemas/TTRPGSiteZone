@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { scene, directionalLight, ambientLight, waterMat, setSkyMode } from './lobby3d.js';
+import { scene, directionalLight, ambientLight, fillLight, waterMat, setSkyConditions, setCelestialTime } from './lobby3d.js';
 
 let rainParticles = null;
 let rainSound = null;
@@ -8,53 +8,123 @@ let rainSpeeds = [];
 let weatherAudioUnlocked = false;
 let desiredRainAudio = { enabled: false, volume: 0 };
 let desiredEmissionAudio = { enabled: false, volume: 0 };
+let audioUnlockButton = null;
 
 const RAIN_VOLUME_FACTOR = 0.5;
 const EMISSION_VOLUME_FACTOR = 0.05; // ещё тише
 
 const DEFAULT_FOG_INTENSITY = 0.5;
 const DEFAULT_RAIN_INTENSITY = 0.5;
-const DEFAULT_SUN_INTENSITY = 0.5;
+const DEFAULT_CLOUD_CLARITY = 0.5;
 const DEFAULT_EMISSION_INTENSITY = 0.5;
+let worldTimeMinutes = 480;
+let currentClouds = { enabled: false, intensity: DEFAULT_CLOUD_CLARITY };
+let currentEmission = { enabled: false, intensity: DEFAULT_EMISSION_INTENSITY };
+
+export function daylightAtMinutes(minutes) {
+    const normalized = ((Number(minutes) % 1440) + 1440) % 1440;
+    const smoothstep = (start, end) => {
+        const t = Math.max(0, Math.min(1, (normalized - start) / (end - start)));
+        return t * t * (3 - 2 * t);
+    };
+    return smoothstep(5 * 60, 8 * 60) * (1 - smoothstep(18 * 60, 21 * 60));
+}
+
+export function starlightAtMinutes(minutes) {
+    const normalized = ((Number(minutes) % 1440) + 1440) % 1440;
+    const smoothstep = (start, end) => {
+        const t = Math.max(0, Math.min(1, (normalized - start) / (end - start)));
+        return t * t * (3 - 2 * t);
+    };
+    if (normalized >= 21 * 60) return smoothstep(21 * 60, 22.5 * 60);
+    if (normalized < 6 * 60) return 1 - smoothstep(4.5 * 60, 6 * 60);
+    return 0;
+}
+
+function applyWorldLighting() {
+    const daylight = daylightAtMinutes(worldTimeMinutes);
+    const starlight = starlightAtMinutes(worldTimeMinutes);
+    const clarity = currentClouds.enabled
+        ? Math.max(0, Math.min(1, Number(currentClouds.intensity) || 0)) : 1;
+    const directNight = 0.03 + 0.04 * clarity;
+    const ambientNight = 0.04 + 0.025 * clarity;
+    directionalLight.intensity = directNight + (0.27 + 0.98 * clarity - directNight) * daylight;
+    ambientLight.intensity = ambientNight + (0.29 + 0.05 * clarity - ambientNight) * daylight;
+    fillLight.intensity = 0.025 + 0.02 * clarity + (0.12 + 0.13 * clarity - 0.025 - 0.02 * clarity) * daylight;
+    directionalLight.color.lerpColors(
+        new THREE.Color(0xaec6e4),
+        new THREE.Color(0xffe8c2),
+        daylight,
+    );
+    ambientLight.color.setHex(0xffffff);
+    if (currentEmission.enabled) {
+        directionalLight.color.lerp(new THREE.Color(0xff6666), currentEmission.intensity);
+        ambientLight.color.lerp(new THREE.Color(0x882222), currentEmission.intensity);
+    }
+    setSkyConditions(daylight, clarity, starlight);
+    setCelestialTime(worldTimeMinutes);
+}
+
+export function applyWorldTime(minutes) {
+    const numericMinutes = Number(minutes);
+    worldTimeMinutes = Number.isFinite(numericMinutes) ? numericMinutes : 480;
+    applyWorldLighting();
+}
 
 function setLoopingSound(sound, state) {
     if (!sound) return;
-    sound.volume(state.volume);
+    sound.volume = state.volume;
     if (!state.enabled) {
         sound.pause();
         return;
     }
-    if (weatherAudioUnlocked && !sound.playing()) sound.play();
+    if (weatherAudioUnlocked && sound.paused) {
+        const request = sound.play();
+        request?.then?.(() => updateAudioUnlockButton()).catch?.((error) => {
+            weatherAudioUnlocked = false;
+            updateAudioUnlockButton();
+            console.warn('Weather audio could not be played.', error);
+        });
+    }
+}
+
+function updateAudioUnlockButton() {
+    if (!audioUnlockButton) return;
+    const needed = (desiredRainAudio.enabled && rainSound?.paused)
+        || (desiredEmissionAudio.enabled && emissionSound?.paused);
+    audioUnlockButton.hidden = !needed;
 }
 
 function syncWeatherAudio() {
     setLoopingSound(rainSound, desiredRainAudio);
     setLoopingSound(emissionSound, desiredEmissionAudio);
+    updateAudioUnlockButton();
 }
 
-async function unlockWeatherAudio() {
-    try {
-        const context = window.Howler?.ctx;
-        if (context?.state === 'suspended') await context.resume();
-        weatherAudioUnlocked = !context || context.state === 'running';
-    } catch (error) {
-        console.warn('Weather audio could not be unlocked.', error);
-    }
-    if (!weatherAudioUnlocked) return;
+function unlockWeatherAudio() {
+    if (weatherAudioUnlocked) return;
+    weatherAudioUnlocked = true;
     syncWeatherAudio();
-    ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => {
-        window.removeEventListener(eventName, unlockWeatherAudio, true);
-    });
 }
 
 export function initWeather() {
-    if (typeof window.Howl !== 'function') {
-        console.warn('Howler could not be loaded; weather audio is disabled.');
+    if (typeof window.Audio !== 'function') {
+        console.warn('Browser audio is unavailable; weather audio is disabled.');
         return;
     }
-    rainSound = new window.Howl({ src: ['/static/audio/rain.mp3'], loop: true, volume: 0 });
-    emissionSound = new window.Howl({ src: ['/static/audio/emission.mp3'], loop: true, volume: 0 });
-    weatherAudioUnlocked = window.Howler?.ctx?.state === 'running';
+    rainSound = new window.Audio('/static/audio/rain.mp3');
+    emissionSound = new window.Audio('/static/audio/emission.mp3');
+    rainSound.loop = true;
+    emissionSound.loop = true;
+    rainSound.volume = 0;
+    emissionSound.volume = 0;
+    audioUnlockButton = document.createElement('button');
+    audioUnlockButton.type = 'button';
+    audioUnlockButton.className = 'weather-audio-unlock';
+    audioUnlockButton.textContent = 'Включить звуки погоды';
+    audioUnlockButton.hidden = true;
+    audioUnlockButton.addEventListener('click', unlockWeatherAudio);
+    document.body.appendChild(audioUnlockButton);
     ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => {
         window.addEventListener(eventName, unlockWeatherAudio, { capture: true, passive: true });
     });
@@ -62,6 +132,7 @@ export function initWeather() {
 }
 
 export function applyWeather(settings) {
+    settings = settings || {};
     const fog = {
         enabled: settings.fog?.enabled || false,
         intensity: settings.fog?.intensity !== undefined ? settings.fog.intensity : DEFAULT_FOG_INTENSITY
@@ -70,14 +141,17 @@ export function applyWeather(settings) {
         enabled: settings.rain?.enabled || false,
         intensity: settings.rain?.intensity !== undefined ? settings.rain.intensity : DEFAULT_RAIN_INTENSITY
     };
-    const sun = {
+    // The stored `sun` field is retained for existing lobbies; it now controls cloud clarity.
+    const clouds = {
         enabled: settings.sun?.enabled || false,
-        intensity: settings.sun?.intensity !== undefined ? settings.sun.intensity : DEFAULT_SUN_INTENSITY
+        intensity: settings.sun?.intensity !== undefined ? settings.sun.intensity : DEFAULT_CLOUD_CLARITY
     };
     const emission = {
         enabled: settings.emission?.enabled || false,
         intensity: settings.emission?.intensity !== undefined ? settings.emission.intensity : DEFAULT_EMISSION_INTENSITY
     };
+    currentClouds = clouds;
+    currentEmission = emission;
 
     // Туман
     if (fog.enabled) {
@@ -107,41 +181,17 @@ export function applyWeather(settings) {
         desiredRainAudio = { enabled: false, volume: 0 };
     }
 
-    // Солнце + небо
-    if (sun.enabled) {
-        directionalLight.intensity = 2.0 * sun.intensity;
-        ambientLight.intensity = 0.5 * sun.intensity;
-
-        if (sun.intensity >= 0.7) {
-            setSkyMode('day');
-        } else {
-            setSkyMode('night');
-        }
-    } else {
-        directionalLight.intensity = 0.2;
-        ambientLight.intensity = 0.1;
-        setSkyMode('night');
-    }
+    applyWorldLighting();
 
     // Выброс
     if (emission.enabled) {
         const intensity = emission.intensity;
-        const normalDir = new THREE.Color(0xffffff);
-        const redDir = new THREE.Color(0xff6666);
-        directionalLight.color.lerpColors(normalDir, redDir, intensity);
-
-        const normalAmb = new THREE.Color(0xffffff);
-        const redAmb = new THREE.Color(0x882222);
-        ambientLight.color.lerpColors(normalAmb, redAmb, intensity);
-
         if (scene.fog) {
             scene.fog.color.lerpColors(new THREE.Color(0xcccccc), new THREE.Color(0xaa3333), intensity);
         }
 
         desiredEmissionAudio = { enabled: true, volume: intensity * EMISSION_VOLUME_FACTOR };
     } else {
-        directionalLight.color.setHex(0xffffff);
-        ambientLight.color.setHex(0xffffff);
         desiredEmissionAudio = { enabled: false, volume: 0 };
     }
     syncWeatherAudio();

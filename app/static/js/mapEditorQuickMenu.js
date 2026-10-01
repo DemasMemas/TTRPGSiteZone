@@ -2,6 +2,7 @@ const WORLD_TOOLS = [
     ['select', 'Выбор'],
     ['terrain', 'Ландшафт'],
     ['height', 'Высота'],
+    ['radiation', 'Радиация'],
     ['erase', 'Ластик'],
 ];
 
@@ -77,7 +78,7 @@ export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool }) {
         setHighlight(Math.floor(angle / step));
     };
 
-    const openMenu = () => {
+    const openMenu = (held = false) => {
         closeMapEditorQuickMenu();
         const tools = toolsForScene();
         const centerX = Math.max(CENTER, Math.min(window.innerWidth - CENTER, pointerX));
@@ -153,7 +154,7 @@ export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool }) {
         document.body.appendChild(menu);
         quickMenu = menu;
         menuData = { tools, segments, centerX, centerY };
-        qHeld = true;
+        qHeld = held;
     };
 
     document.addEventListener('pointermove', event => {
@@ -192,7 +193,7 @@ export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool }) {
 
         if (event.code === 'KeyQ') {
             if (qHeld) return;
-            openMenu();
+            openMenu(true);
         } else if (/^(Digit|Numpad)[1-7]$/.test(event.code)) {
             const tool = toolsForScene()[Number(event.code.slice(-1)) - 1]?.[0];
             if (!tool) return;

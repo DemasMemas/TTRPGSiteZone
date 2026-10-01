@@ -36,7 +36,7 @@ function harness() {
         [{ terrain: 'grass', height: 1 }, { terrain: 'water', height: 2 }],
         [{ terrain: 'rock', height: 3 }, { terrain: 'grass', height: 4 }],
     ];
-    const entry = { ground, water, tilesData, terrainVisible: true };
+    const entry = { ground, water, tilesData, terrainVisible: true, bounds: { max: { y: 4.5 } } };
     const context = vm.createContext({
         THREE: { Object3D, Color }, terrainColors: { grass: 1, rock: 2 },
         CHUNK_SIZE: 2, chunksMap: new Map([['0,0', entry]]),
@@ -57,7 +57,12 @@ test('world terrain instances contain only real land and water tiles', () => {
     assert.equal(entry.groundIndices[1], -1);
     assert.equal(entry.waterIndices[1], 0);
     assert.deepEqual(ground.matrices[0].scale, [1, 1, 1]);
-    assert.deepEqual(water.matrices[0].scale, [1, 1, 1]);
+    assert.deepEqual(water.matrices[0].position, [1.5, 1, 0.5]);
+    assert.deepEqual(water.matrices[0].scale, [1, 2, 1]);
+    assert.deepEqual(ground.matrices[1].position, [0.5, 1.5, 1.5]);
+    assert.deepEqual(ground.matrices[1].scale, [1, 3, 1]);
+    assert.match(source, /new THREE\.InstancedMesh\(groundGeo, waterMat, totalTiles\)/);
+    assert.match(source, /groundInstances\.frustumCulled = false/);
 });
 
 test('same-kind edit updates one instance; land-water edit rebuilds compact indices', () => {
@@ -67,6 +72,7 @@ test('same-kind edit updates one instance; land-water edit rebuilds compact indi
     assert.equal(entry.groundIndices, originalIndices);
     assert.deepEqual(ground.matrices[0].scale, [1, 5, 1]);
     assert.equal(ground.colors[0], 2);
+    assert.equal(entry.bounds.max.y, 5.5);
 
     context.updateTileInChunk(0, 0, 0, 0, { terrain: 'water' });
     assert.notEqual(entry.groundIndices, originalIndices);
@@ -74,6 +80,21 @@ test('same-kind edit updates one instance; land-water edit rebuilds compact indi
     assert.equal(water.count, 2);
     assert.equal(entry.groundIndices[0], -1);
     assert.equal(entry.waterIndices[0], 0);
+    assert.deepEqual(water.matrices[0].scale, [1, 5, 1]);
+});
+
+test('world landmarks use their actual lowest vertex as the ground offset', () => {
+    const start = source.indexOf('function getBaseHalfHeight(');
+    const end = source.indexOf('\nfunction getDefaultColorForType(', start);
+    assert.ok(start >= 0 && end > start);
+    const landmark = { geometry: { boundingBox: null, computeBoundingBox() { this.boundingBox = { min: { y: -0.31 } }; } } };
+    const context = vm.createContext({
+        WORLD_LANDMARKS: { forest: landmark },
+        getBaseDimensions: type => ({ height: type === 'tree' ? 1 : 1.5 }),
+    });
+    vm.runInContext(source.slice(start, end).replaceAll('export function ', 'function '), context);
+    assert.equal(context.getObjectHeightOffset('forest'), 0.31);
+    assert.equal(context.getObjectHeightOffset('tree'), 0.5);
 });
 
 test('removing a chunk releases instance buffers but keeps shared terrain resources', () => {

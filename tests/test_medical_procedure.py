@@ -121,12 +121,14 @@ def test_wound_treatment_removes_selected_wound_and_applies_pain(client, pair, a
         pair, 'Спирт', 'Спирт. Обрабатывает раны. 10 использований.',
         effects=[selected, untouched], pain=2,
     )
-    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 20)
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 1)
     application = {
         'kind': 'wound', 'effect': deepcopy(selected), 'actionPoints': 1,
     }
     response = apply(client, pair, auth_headers, payload(pair, item, application))
     assert response.status_code == 200, response.json
+    assert response.json['medical_result']['success'] is True
+    assert response.json['medical_result']['roll'] is None
     health = response.json['actor_data']['health']
     assert health['painLevel'] == 5
     assert not any(entry.get('id') == 'wound-1' for entry in health['effects'])

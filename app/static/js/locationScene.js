@@ -159,6 +159,8 @@ let fogMemoryKey = null;
 let fogMemory = new Map();
 let fogMemoryGhosts = new Map();
 let fogMemoryDecorationTemplates = new Map();
+const fogOverlayMeshes = new Map();
+let visionBlockerHeightCache = null;
 let gmVisionCharacterId = null;
 const tileInstanceTransform = new THREE.Object3D();
 let objectMeshes = [];
@@ -221,6 +223,7 @@ let pendingStructureAction = null;
 let containerInteractionMenu = null;
 let containerInteractionState = null;
 let containerExchangeTarget = null;
+let containerInteractionRefresh = null;
 let containerInteractionDragState = null;
 let medicalConsumableMenu = null;
 let medicalConsumableMenuState = null;
@@ -2114,6 +2117,12 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         combatState?.current_character?.character_id === combatCharacter?.character_id
     );
     const hasFullAccess = !combatState || combatState.status !== 'active' ? canControlCharacter(characterId) : (canAct && isCurrentTurn);
+    const characterEntry = getCharacterModelEntry(characterId);
+    const groundItemsHere = (currentLocationData?.objects || []).find(object => {
+        if (object?.type !== 'ground_item' && !object?.properties?.is_ground_item) return false;
+        const position = getObjectGridPosition(object);
+        return position.x === Number(characterEntry?.posX) && position.y === Number(characterEntry?.posY);
+    });
     let menuItems = [
         {
             label: 'Движение',
@@ -2386,6 +2395,17 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             title: 'Действия со структурой или недееспособным персонажем',
             angle: 14,
             action: () => beginStructureInteractionMode(characterId),
+        });
+    }
+    if (groundItemsHere) {
+        menuItems.push({
+            label: 'Вещи',
+            icon: '▣',
+            title: 'Открыть вещи на клетке персонажа',
+            angle: 248,
+            ringRadius: 165,
+            allowAlways: true,
+            action: () => showContainerInteractionMenu(groundItemsHere),
         });
     }
     if (window.isGM) {
@@ -4892,15 +4912,19 @@ function getFogObjectHeight(object) {
 }
 
 function getVisionBlockerHeight(x, y) {
+    const key = `${x}:${y}`;
+    if (visionBlockerHeightCache?.has(key)) return visionBlockerHeightCache.get(key);
     const tile = currentLocationData?.tiles_data?.[y]?.[x];
     const tileObjects = (tile?.objects || []).filter((object) => blocksVision(object));
     const locationObjects = (currentLocationData?.objects || []).filter((object) => (
         blocksVision(object) && tileHasObjectFootprint(object, x, y)
     ));
-    return [...tileObjects, ...locationObjects].reduce(
+    const height = [...tileObjects, ...locationObjects].reduce(
         (height, object) => Math.max(height, getTileHeight(x, y) + getFogObjectHeight(object)),
         -Infinity,
     );
+    visionBlockerHeightCache?.set(key, height);
+    return height;
 }
 
 function visionEyeHeight(entry) {
@@ -4978,8 +5002,73 @@ function isFogHiddenObject(object) {
         || object?.properties?.is_corpse === true;
 }
 
+function clearFogOverlay() {
+    fogOverlayMeshes.forEach((mesh) => {
+        scene?.remove(mesh);
+        mesh.geometry.dispose();
+        mesh.material.dispose();
+    });
+    fogOverlayMeshes.clear();
+}
+
+function updateFogOverlay(active, sources) {
+    if (!active) {
+        fogOverlayMeshes.forEach(mesh => { mesh.visible = false; });
+        return;
+    }
+    const width = Number(currentLocationData?.grid_width) || 0;
+    const height = Number(currentLocationData?.grid_height) || 0;
+    const capacity = width * height;
+    if (!capacity) return;
+    const tiles = { explored: [], unexplored: [] };
+    for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+            if (isTileVisibleToPlayer(x, y, sources)) continue;
+            const key = fogMemory.has(`${x}:${y}`) ? 'explored' : 'unexplored';
+            tiles[key].push({ x, y });
+        }
+    }
+    const transform = new THREE.Object3D();
+    for (const [kind, positions] of Object.entries(tiles)) {
+        let mesh = fogOverlayMeshes.get(kind);
+        if (!mesh || mesh.instanceMatrix.count < capacity) {
+            if (mesh) {
+                scene.remove(mesh);
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+            }
+            mesh = new THREE.InstancedMesh(
+                new THREE.PlaneGeometry(0.98, 0.98),
+                new THREE.MeshBasicMaterial({
+                    color: 0x071019,
+                    transparent: true,
+                    opacity: kind === 'explored' ? 0.24 : 0.48,
+                    depthWrite: false,
+                    side: THREE.DoubleSide,
+                }),
+                capacity,
+            );
+            mesh.raycast = () => {};
+            mesh.frustumCulled = false;
+            mesh.renderOrder = 4;
+            scene.add(mesh);
+            fogOverlayMeshes.set(kind, mesh);
+        }
+        positions.forEach(({ x, y }, index) => {
+            transform.position.set(x + 0.5, getTileHeight(x, y) + 0.045, y + 0.5);
+            transform.rotation.set(-Math.PI / 2, 0, 0);
+            transform.updateMatrix();
+            mesh.setMatrixAt(index, transform.matrix);
+        });
+        mesh.count = positions.length;
+        mesh.visible = positions.length > 0;
+        mesh.instanceMatrix.needsUpdate = true;
+    }
+}
+
 function applyFogOfWar() {
     if (!scene || !currentLocationData) return;
+    visionBlockerHeightCache = new Map();
     const active = fogIsActive();
     loadFogMemory();
     const sources = active ? getFogVisionSources() : [];
@@ -5003,6 +5092,7 @@ function applyFogOfWar() {
         learnedNewTiles = rememberVisibleCharacters(sources) || learnedNewTiles;
     }
     if (learnedNewTiles) saveFogMemory();
+    updateFogOverlay(active, sources);
     characterModels.forEach((entry) => {
         const visible = !active || isCharacterVisibleToPlayer(entry, sources);
         entry.model.visible = visible;
@@ -5037,6 +5127,7 @@ function applyFogOfWar() {
         );
     });
     syncFogMemoryGhosts(active, sources);
+    visionBlockerHeightCache = null;
 }
 
 function closeTeamManagementModal() {
@@ -5749,7 +5840,7 @@ function getBloodStageLabel(value) {
 }
 
 function renderCombatHud() {
-    if (!combatState) {
+    if (!combatState || !window.isLocationActive) {
         if (combatHud && combatHud.parentNode) {
             combatHud.parentNode.removeChild(combatHud);
         }
@@ -5776,6 +5867,9 @@ function renderCombatHud() {
     const visibleOrderLabels = orderLabels.length
         ? orderLabels
         : Array.from(new Set((combatState.characters || []).map((char) => escapeHtml(char.name || 'Unknown'))));
+    const absentCombatCharacters = (combatState.characters || []).filter(character =>
+        !(combatState.turn_order || []).includes(character.location_character_id)
+    );
     const aimedTarget = (combatState.characters || []).find(
         char => char.character_id === combatState.current_character?.aimed_target_character_id
     );
@@ -5865,7 +5959,20 @@ function renderCombatHud() {
             ${combatState.status === 'active' && combatState.current_character && !combatState.current_character.is_mutant && currentMustDoUsage.remaining > 0 ? `<div style="margin-top:6px;padding:7px 8px;border-radius:7px;background:rgba(190,143,72,.16);border:1px solid rgba(190,143,72,.28);"><button type="button" class="btn btn-sm btn-secondary combat-must-do-btn" style="width:100%;">Должен это сделать · ${currentMustDoUsage.remaining}/${currentMustDoUsage.limit}</button><div style="margin-top:5px;font-size:12px;opacity:.8;">${currentMustDoRetry ? `Сохранённый провал: ${escapeHtml(currentMustDoRetry.name || 'повторная проверка')}` : 'Ручной повтор по разрешению ГМа'}</div></div>` : ''}
             ${combatState.current_character?.help_advantage ? `<div style="margin-top:6px;padding:6px 8px;border-radius:7px;background:rgba(92,154,110,.16);">Помощь: преимущество${combatState.current_character.help_advantage.action_label ? `, ${escapeHtml(combatState.current_character.help_advantage.action_label)}` : ''}${combatState.current_character.help_advantage.source_name ? ` (${escapeHtml(combatState.current_character.help_advantage.source_name)})` : ''}</div>` : ''}
             <div>Бонус Воли: ${combatState.current_character?.will_bonus ?? 0} | Модификатор кровопотери: ${combatState.current_character?.bleeding_modifier_total ?? 0}</div>
-            <div style="margin-top:8px; opacity:0.85;">Порядок: ${visibleOrderLabels.join(' -> ') || 'пусто'}</div>
+            <div class="combat-participants-panel">
+                <div class="combat-participants-heading">Порядок хода</div>
+                <div class="combat-participants-order">${visibleOrderLabels.join('<span class="combat-order-arrow" aria-hidden="true">→</span>') || 'Пусто'}</div>
+                ${window.isGM && absentCombatCharacters.length ? `<div class="combat-participants-add">
+                    <label for="combat-add-participant-select">Новый участник</label>
+                    <div class="combat-participants-controls">
+                        <select id="combat-add-participant-select" class="form-control combat-add-participant-select" aria-label="Добавить в инициативу">
+                            ${absentCombatCharacters.map(character => `<option value="${character.location_character_id}">${escapeHtml(character.name || `#${character.location_character_id}`)}</option>`).join('')}
+                        </select>
+                        <button type="button" class="btn btn-sm btn-primary combat-add-participant-btn" title="Добавить в начало списка; первый ход в следующем раунде">Добавить</button>
+                    </div>
+                    <div class="combat-participants-hint">В начале списка со следующего раунда, без прерывания текущего хода</div>
+                </div>` : ''}
+            </div>
             ${reactionReturnCharacter ? `<div style="margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(84,139,196,.16);">Реакция: после завершения ход вернётся к <strong>${escapeHtml(reactionReturnCharacter.name || 'персонажу')}</strong>.</div>` : ''}
             ${pendingReaction && window.isGM ? `<div style="margin-top:8px;padding:8px 9px;border-radius:8px;background:rgba(215,169,75,.16);border:1px solid rgba(215,169,75,.35);"><strong>Запрос реакции: ${escapeHtml(pendingReaction.name || 'персонаж')}</strong>${pendingReaction.reaction_reserve?.trigger ? `<div style="margin-top:3px;font-size:12px;opacity:.86;">${escapeHtml(pendingReaction.reaction_reserve.trigger)}</div>` : ''}<div style="margin-top:7px;"><button class="btn btn-sm btn-primary combat-reaction-approve">Разрешить</button><button class="btn btn-sm btn-secondary combat-reaction-reject" style="margin-left:6px;">Отклонить</button></div></div>` : ''}
             ${pendingCombatAction ? `<div style="margin-top:8px; padding:8px 10px; border-radius:10px; background: rgba(255,255,255,0.06);"><strong>Выбор:</strong> ${
@@ -5930,6 +6037,18 @@ function renderCombatHud() {
                 showNotification(error.message || 'Не удалось убрать персонажа из инициативы');
             }
         };
+    });
+    combatHud.querySelector('.combat-add-participant-btn')?.addEventListener('click', async event => {
+        const button = event.currentTarget;
+        const locationCharacterId = Number(combatHud.querySelector('.combat-add-participant-select')?.value);
+        if (!locationCharacterId) return;
+        button.disabled = true;
+        try {
+            await Server.addLocationCombatParticipant(window.currentLobbyId, getCurrentLocationId(), locationCharacterId);
+        } catch (error) {
+            button.disabled = false;
+            showNotification(error.message || 'Не удалось добавить персонажа в инициативу');
+        }
     });
     combatHud.querySelectorAll('.stress-effect-card button').forEach(button => {
         button.onclick = async () => {
@@ -6067,6 +6186,11 @@ export function setCombatState(state) {
     }
     syncCombatAreaVisuals(combatState);
     (combatState?.characters || []).forEach((character) => {
+        const entry = getCharacterModelEntry(character.character_id);
+        if (entry) {
+            entry.hpZones = character.hp_zones;
+            entry.effects = character.effects;
+        }
         updateCharacterPosition(character.character_id, character.x, character.y, { deferRefresh: true });
         updateCharacterTeamVisual(character.character_id, character.team_name, character.team_color);
         applyCharacterPostureVisual(character.character_id, character.posture);
@@ -8646,7 +8770,7 @@ function addLocationObjectMesh(obj, refreshFog = true) {
 }
 
 function removeLocationObjectMesh(objectId) {
-    const mesh = locationObjectMeshes.find(item => item.userData.locationObjectId === objectId);
+    const mesh = locationObjectMeshes.find(item => Number(item.userData.locationObjectId) === Number(objectId));
     if (!mesh) return;
     scene.remove(mesh);
     disposeLocationObject(mesh);
@@ -8778,9 +8902,11 @@ window.addLocationObject = addLocationObject;
 
 export function removeLocationObject(objectId) {
     if (!currentLocationData) return;
+    if (Number(containerInteractionState?.objectId) === Number(objectId)) closeContainerInteractionMenu();
     removeLocationObjectMesh(objectId);
-    currentLocationData.objects = (currentLocationData.objects || []).filter(object => object.id !== objectId);
+    currentLocationData.objects = (currentLocationData.objects || []).filter(object => Number(object.id) !== Number(objectId));
     invalidateMovementMapCache();
+    applyFogOfWar();
 }
 
 window.removeLocationObject = removeLocationObject;
@@ -8793,12 +8919,17 @@ export function updateLocationObject(object) {
     else currentLocationData.objects[index] = object;
     replaceLocationObjectMesh(object);
     invalidateMovementMapCache();
+    if (Number(containerInteractionState?.objectId) === Number(object.id)) {
+        containerExchangeTarget = object;
+        containerInteractionRefresh?.(object);
+    }
 }
 
 window.updateLocationObject = updateLocationObject;
 
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
+    clearFogOverlay();
     clearFogMemoryGhosts();
     tileCubes = [];
     objectMeshes = [];
@@ -9440,7 +9571,6 @@ function setupCharacterDragging() {
     const onContextMenu = (e) => {
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (window.locationEditMode && window.locationEditorTool !== 'select') return;
         if (pendingCombatAction) {
             showNotification('Выберите цель левой кнопкой мыши или нажмите Esc для отмены', 'system');
             return;
@@ -9565,6 +9695,13 @@ export function setupLocationEditing() {
     const canvas = renderer.domElement;
     const locInfo = document.getElementById('location-tile-info');
     locationActive = true;
+    const onCameraRotatePointerDown = (event) => {
+        if (event.button === 2 && window.locationEditMode && !isDraggingCharacter) {
+            controls.enabled = true;
+        }
+    };
+    canvas.addEventListener('pointerdown', onCameraRotatePointerDown, { capture: true });
+    handlers.canvas.cameraRotatePointerDown = onCameraRotatePointerDown;
 
     const onPointerMove = (e) => {
         if (!locationActive) return;
@@ -9580,7 +9717,7 @@ export function setupLocationEditing() {
             const { x, z } = coords;
             const tile = currentLocationData.tiles_data[z][x];
             locInfo.innerHTML = `
-                <b>Тайл (${x}, ${z})</b><br>
+                <b>(${x}, ${z})</b><br>
                 Ландшафт: ${tile.terrain}<br>
                 Высота: ${tile.height}<br>
                 Радиация: ${tile.radiation !== undefined ? tile.radiation : '0'}<br>
@@ -9621,6 +9758,7 @@ export function setupLocationEditing() {
                 z,
                 placement.ownerId,
                 {
+                    isMutant: placement.isMutant,
                     onSuccess: activateNextCharacterPlacement,
                     onCancel: cancelCharacterPlacement,
                 },
@@ -9769,10 +9907,18 @@ export function setupLocationEditing() {
         if (!dragData) return;
         let parsed;
         try { parsed = JSON.parse(dragData); } catch (err) { return; }
-        const characterId = parsed.characterId;
+        const groupIds = Array.isArray(parsed.characterIds)
+            ? [...new Set(parsed.characterIds.map(Number).filter(Number.isInteger))]
+            : [];
+        const characterId = parsed.characterId || groupIds[0];
         const ownerId = parsed.ownerId;
         if (!characterId) return;
-        openOwnerSelectionModal(characterId, tileX, tileZ, ownerId);
+        openOwnerSelectionModal(characterId, tileX, tileZ, ownerId, {
+            isMutant: Boolean(parsed.isMutant),
+            onConfirm: groupIds.length > 1
+                ? assignToUserId => spawnMutantGroupNearTile(groupIds, tileX, tileZ, assignToUserId)
+                : null,
+        });
         if (previewSprite) previewSprite.visible = false;
         previewValid = false;
     };
@@ -9803,6 +9949,7 @@ export function setupLocationEditing() {
             canvas.removeEventListener(key, handlers.canvas[key]);
             delete handlers.canvas[key];
         });
+        canvas.removeEventListener('pointerdown', onCameraRotatePointerDown, { capture: true });
         // document.click удаляется отдельно в destroyLocationScene
         locationActive = false;
         if (animationFrameId) {
@@ -9820,10 +9967,74 @@ export function setupLocationEditing() {
 }
 
 // ========== Модальное окно выбора владельца ==========
+async function spawnCharacterAtTile(characterId, tileX, tileZ, assignToUserId) {
+    const response = await fetch(`/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/spawn_character`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+        },
+        body: JSON.stringify({
+            character_id: characterId, tile_x: tileX, tile_y: tileZ,
+            assign_to_user_id: assignToUserId,
+        }),
+    });
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Не удалось разместить персонажа');
+    }
+    return response.json();
+}
+
+async function spawnMutantGroupNearTile(characterIds, centerX, centerY, assignToUserId) {
+    const blocked = new Set(getMovementMap().blockedTiles);
+    const positions = [];
+    const width = currentLocationData?.grid_width || 0;
+    const height = currentLocationData?.grid_height || 0;
+    for (let radius = 0; radius < Math.max(width, height) && positions.length < characterIds.length; radius += 1) {
+        for (let y = centerY - radius; y <= centerY + radius; y += 1) {
+            for (let x = centerX - radius; x <= centerX + radius; x += 1) {
+                if (Math.max(Math.abs(x - centerX), Math.abs(y - centerY)) !== radius) continue;
+                if (x < 0 || y < 0 || x >= width || y >= height) continue;
+                if (blocked.has(`${x}:${y}`)) continue;
+                positions.push({ x, y });
+                if (positions.length === characterIds.length) break;
+            }
+            if (positions.length === characterIds.length) break;
+        }
+    }
+    if (positions.length < characterIds.length) {
+        throw new Error('Рядом недостаточно свободных клеток для всей группы');
+    }
+    let placed = 0;
+    try {
+        for (let index = 0; index < characterIds.length; index += 1) {
+            await spawnCharacterAtTile(characterIds[index], positions[index].x, positions[index].y, assignToUserId);
+            placed += 1;
+        }
+    } catch (error) {
+        throw new Error(`Размещено ${placed} из ${characterIds.length}: ${error.message}`);
+    }
+    showNotification(`Размещено мутантов: ${placed}`, 'success');
+}
+
 export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDataOwnerId, callbacks = {}) {
     const lobbyParticipants = window.lobbyParticipants || [];
     const currentUserId = parseInt(localStorage.getItem('user_id'));
     const isGM = window.isGM;
+    const autoAssignMutant = isGM && callbacks.isMutant
+        && document.getElementById('mutants-belong-to-gm')?.checked;
+    if (autoAssignMutant) {
+        try {
+            if (callbacks.onConfirm) await callbacks.onConfirm(currentUserId);
+            else await spawnCharacterAtTile(characterId, tileX, tileZ, currentUserId);
+            callbacks.onSuccess?.();
+        } catch (error) {
+            showNotification(error.message, 'error');
+            callbacks.onCancel?.();
+        }
+        return;
+    }
     let characterOwner = dragDataOwnerId;
     if (!characterOwner) {
         try {
@@ -9877,23 +10088,8 @@ export async function openOwnerSelectionModal(characterId, tileX, tileZ, dragDat
         const assignToUserId = parseInt(document.getElementById('owner-select').value);
         modal.remove();
         try {
-            const response = await fetch(`/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/spawn_character`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-                },
-                body: JSON.stringify({
-                    character_id: characterId,
-                    tile_x: tileX,
-                    tile_y: tileZ,
-                    assign_to_user_id: assignToUserId
-                })
-            });
-            if (!response.ok) {
-                const err = await response.json();
-                throw new Error(err.error || 'Failed to spawn character');
-            }
+            if (callbacks.onConfirm) await callbacks.onConfirm(assignToUserId);
+            else await spawnCharacterAtTile(characterId, tileX, tileZ, assignToUserId);
             showNotification('Персонаж появился в локации', 'success');
             callbacks.onSuccess?.();
         } catch (err) {
@@ -9935,6 +10131,7 @@ export function beginCharacterPlacement(characterOrCharacters) {
             characterId,
             ownerId: Number(character?.owner_id ?? character?.ownerId) || null,
             name: character?.name || `#${characterId}`,
+            isMutant: Boolean(character?.data?.is_mutant || character?.data?.basic?.is_mutant),
         };
     }).filter(Boolean);
     if (!pendingCharacterPlacementQueue.length) return false;
@@ -10043,6 +10240,8 @@ export function setLocationBrushObjectScale(scale) {
 }
 export function setLocationBrushObjectRotation(rot) {
     brushObjectRotation = parseInt(rot) || 0;
+    const input = document.getElementById('loc-obj-rotation');
+    if (input) input.value = String(brushObjectRotation);
     const span = document.getElementById('loc-obj-rotation-value');
     if (span) span.textContent = brushObjectRotation + '°';
 }
@@ -10209,6 +10408,7 @@ export function destroyLocationScene() {
     clearStructureActionMenu();
     clearStructureRotationMenu();
 
+    clearFogOverlay();
     // Очищаем сцену
     if (scene) {
         const objectsToRemove = [];
@@ -10316,6 +10516,7 @@ function closeContainerInteractionMenu() {
     }
     containerInteractionState = null;
     containerExchangeTarget = null;
+    containerInteractionRefresh = null;
 }
 
 async function showContainerInteractionMenu(object) {
@@ -10394,7 +10595,10 @@ async function showContainerInteractionMenu(object) {
 
     const body = containerInteractionMenu.querySelector('.container-exchange-body');
     const dragHandle = containerInteractionMenu.querySelector('.container-drag-handle');
+    let renderVersion = 0;
     const renderExchange = async () => {
+        const version = ++renderVersion;
+        if (Number(containerInteractionState?.objectId) !== Number(object.id)) return;
         const selectedCharacterId = parseInt(select?.value || '0', 10) || null;
         if (selectedCharacterId) {
             containerInteractionState.selectedCharacterId = selectedCharacterId;
@@ -10403,6 +10607,7 @@ async function showContainerInteractionMenu(object) {
         }
 
         const character = selectedCharacterId ? await Server.getCharacter(selectedCharacterId).catch(() => null) : null;
+        if (version !== renderVersion || Number(containerInteractionState?.objectId) !== Number(object.id)) return;
         const characterData = character?.data || null;
         const characterEntries = characterData ? getCharacterTransferEntries(characterData) : [];
         let transferring = false;
@@ -10512,6 +10717,10 @@ async function showContainerInteractionMenu(object) {
                 });
             };
         }
+    };
+    containerInteractionRefresh = updatedObject => {
+        object = updatedObject;
+        renderExchange();
     };
 
     if (select) {

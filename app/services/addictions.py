@@ -112,6 +112,20 @@ def _withdrawal_effect_id(key):
     return f'addiction-withdrawal-{key}'
 
 
+def remove_addiction(health, addiction_key):
+    state = _state(health)
+    key = str(addiction_key)
+    record = state['records'].pop(key, None)
+    if record is None:
+        raise ValueError('Зависимость не найдена')
+    state['exposures'].pop(key, None)
+    health['effects'] = [
+        effect for effect in normalize_effect_list(health.get('effects') or [])
+        if effect.get('id') != _withdrawal_effect_id(key)
+    ]
+    return record
+
+
 def _daily_progress(record, day):
     progress = record.get('daily_progress')
     if not isinstance(progress, dict) or int(progress.get('day', 0)) != day:

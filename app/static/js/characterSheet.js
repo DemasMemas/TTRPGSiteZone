@@ -634,7 +634,7 @@ async function getAllItemTemplates(forceRefresh = false) {
         'consumable', 'crafting_material', 'artifact', 'backpack', 'vest', 'pouch',
         'weapon_module', 'magazine', 'ammo', 'gas_mask_module', 'helmet_module', 'visor', 'belt',
         'exoskeleton_module', 'grenade', 'device', 'armor_plate', 'melee_weapon',
-        'headphones', 'glasses', 'gloves', 'jewelry'
+        'headphones', 'glasses', 'gloves', 'jewelry', 'tool'
     ];
 
     let all = [];
@@ -663,7 +663,7 @@ function clearAllTemplatesCache() {
     allTemplatesCache = null;
     const categories = ['weapon', 'armor', 'helmet', 'gas_mask', 'detector', 'container',
                         'consumable', 'crafting_material', 'artifact', 'modification', 'backpack', 'vest', 'pouch',
-                        'weapon_module', 'ammo', 'exoskeleton_module'];
+                        'weapon_module', 'ammo', 'exoskeleton_module', 'tool'];
     categories.forEach(cat => clearTemplatesCache(cat));
 }
 
@@ -903,8 +903,113 @@ function formatProtectionPercent(value) {
     return `${protectionPercentValue(value)}%`;
 }
 
+const expandedInventoryContainers = new Set();
+
+function inventoryContainerKey(item, path) {
+    return `${currentCharacterId}:${item?.id ? `id:${item.id}` : `path:${path.join(',')}`}`;
+}
+
+function setInventoryContainerOpen(contents, toggle, key, open) {
+    contents.style.display = open ? 'block' : 'none';
+    contents.dataset.containerStateKey = key;
+    if (toggle) toggle.textContent = open ? '▼' : '▶';
+    if (open) expandedInventoryContainers.add(key);
+    else expandedInventoryContainers.delete(key);
+}
+
+function captureSheetViewState() {
+    const root = document.getElementById('character-sheet-modal');
+    if (!root) return null;
+    const active = root.contains(document.activeElement) ? document.activeElement : null;
+    const controls = active?.id
+        ? root.querySelectorAll(`[id="${CSS.escape(active.id)}"]`)
+        : active?.name
+            ? root.querySelectorAll(`[name="${CSS.escape(active.name)}"]`)
+            : [];
+    let selection = null;
+    if (active && ('selectionStart' in active)) {
+        try {
+            selection = [active.selectionStart, active.selectionEnd, active.selectionDirection];
+        } catch (_) {
+            // Numeric inputs do not support text selection.
+        }
+    }
+    return {
+        active,
+        activeId: active?.id || null,
+        activeName: active?.name || null,
+        activeIndex: Array.from(controls).indexOf(active),
+        selection,
+        details: [...root.querySelectorAll('details')].map(detail => {
+            const tab = detail.closest('[id^="sheet-tab-"]');
+            return {
+                panel: detail.dataset.equipmentPanel || null,
+                sheetPanel: detail.dataset.sheetPanel || null,
+                id: detail.id || null,
+                tab: tab?.id || null,
+                index: [...(tab || root).querySelectorAll('details')].indexOf(detail),
+                open: detail.open,
+            };
+        }),
+        openContainers: [...root.querySelectorAll('[data-container-path]')]
+            .filter(container => container.style.display !== 'none')
+            .map(container => container.getAttribute('data-container-path')),
+    };
+}
+
+function restoreSheetViewState(state) {
+    const root = document.getElementById('character-sheet-modal');
+    if (!root || !state) return;
+    for (const entry of state.details) {
+        const scope = entry.tab ? document.getElementById(entry.tab) : root;
+        const detail = entry.panel
+            ? [...(scope?.querySelectorAll('details[data-equipment-panel]') || [])]
+                .find(item => item.dataset.equipmentPanel === entry.panel)
+            : entry.sheetPanel
+                ? [...(scope?.querySelectorAll('details[data-sheet-panel]') || [])]
+                    .find(item => item.dataset.sheetPanel === entry.sheetPanel)
+            : entry.id
+                ? document.getElementById(entry.id)
+                : scope?.querySelectorAll('details')[entry.index];
+        if (detail) detail.open = entry.open;
+    }
+    for (const path of state.openContainers) {
+        const container = [...root.querySelectorAll('[data-container-path]')]
+            .find(item => item.getAttribute('data-container-path') === path);
+        if (!container) continue;
+        container.style.display = 'block';
+        if (container.dataset?.containerStateKey) {
+            expandedInventoryContainers.add(container.dataset.containerStateKey);
+        }
+        const toggle = container.parentElement?._toggleIcon
+            || container.parentElement?.querySelector('.container-toggle');
+        if (toggle) toggle.textContent = '▼';
+    }
+    if (!state.active || (!state.activeId && !state.activeName)) return;
+    if (document.activeElement !== state.active
+        && document.activeElement !== document.body
+        && root.contains(document.activeElement)) return;
+    let control = state.active.isConnected ? state.active : null;
+    if (!control) {
+        const matches = state.activeId
+            ? root.querySelectorAll(`[id="${CSS.escape(state.activeId)}"]`)
+            : root.querySelectorAll(`[name="${CSS.escape(state.activeName)}"]`);
+        control = matches[state.activeIndex >= 0 ? state.activeIndex : 0];
+    }
+    if (!control || control.disabled) return;
+    if (document.activeElement !== control) control.focus({ preventScroll: true });
+    if (state.selection && typeof control.setSelectionRange === 'function') {
+        try {
+            control.setSelectionRange(...state.selection);
+        } catch (_) {
+            // Numeric inputs do not support text selection.
+        }
+    }
+}
+
 async function refreshSavedSheet(characterId) {
     if (Number(currentCharacterId) !== Number(characterId)) return;
+    const viewState = captureSheetViewState();
     await Promise.all([
         renderInventoryTab(currentCharacterData),
         renderEquipmentTab(currentCharacterData),
@@ -912,11 +1017,12 @@ async function refreshSavedSheet(characterId) {
     if (Number(currentCharacterId) !== Number(characterId)) return;
     const activeTab = document.querySelector('#sheet-tabs .tab-btn.active')?.dataset.tab;
     if (activeTab === 'health') refreshHealthPanel();
-    else if (activeTab === 'basic') renderBasicTab(currentCharacterData);
+    else if (activeTab === 'basic') await renderBasicTab(currentCharacterData);
     else if (activeTab === 'skills') renderSkillsTab(currentCharacterData);
     else if (activeTab === 'settings') renderSettingsTab(currentCharacterData);
     else if (activeTab === 'notes') renderNotesTab(currentCharacterData);
     applySheetEditPermissions();
+    restoreSheetViewState(viewState);
 }
 
 function applySheetEditPermissions(root = document.getElementById('character-sheet-modal')) {
@@ -1009,6 +1115,7 @@ async function applyRemoteSheetData(remoteData, characterId = currentCharacterId
 
     const allPaths = [...changes.scalarPaths, ...changes.structuralPaths];
     if (!allPaths.length) return true;
+    const viewState = captureSheetViewState();
     const missingFields = patchRemoteScalarFields(remoteData, changes.scalarPaths);
     const touches = root => allPaths.some(path => pathTouches(path, root));
     const structuralTouches = root => changes.structuralPaths.some(path => pathTouches(path, root));
@@ -1043,6 +1150,7 @@ async function applyRemoteSheetData(remoteData, characterId = currentCharacterId
     await Promise.all(tasks);
     if (Number(currentCharacterId) !== Number(characterId)) return false;
     applySheetEditPermissions();
+    restoreSheetViewState(viewState);
     return true;
 }
 
@@ -2124,10 +2232,12 @@ async function renderBasicTab(data) {
             <div style="flex: 1;">${rightHtml}</div>
         </div>
     `;
+    const viewState = captureSheetViewState();
     container.innerHTML = html;
 
     const healthContainer = document.getElementById('health-right-column');
     renderHealthTab(data, healthContainer);
+    restoreSheetViewState(viewState);
 }
 
 window.fillBackgroundFromTemplate = async function(select) {
@@ -2147,7 +2257,7 @@ window.fillBackgroundFromTemplate = async function(select) {
             delete currentCharacterData.basic.background.skillBonuses;
         }
         ensureHealthMaximums(currentCharacterData);
-        renderHealthTab(currentCharacterData, document.getElementById('health-right-column'));
+        refreshHealthPanel();
         scheduleAutoSave();
         return;
     }
@@ -2192,7 +2302,7 @@ window.fillBackgroundFromTemplate = async function(select) {
     currentCharacterData.basic.background.skillBonuses = skillBonuses;
 
     ensureHealthMaximums(currentCharacterData);
-    renderHealthTab(currentCharacterData, document.getElementById('health-right-column'));
+    refreshHealthPanel();
     scheduleAutoSave();
 };
 
@@ -2951,7 +3061,7 @@ function renderHealthTab(data, container = null) {
         return `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid rgba(255,255,255,.08);border-radius:8px;">
                 <div><strong>${escapeHtml(record.label || record.key)}</strong><div class="text-muted" style="font-size:12px;">${escapeHtml(status)}${withdrawalDays > 0 ? ` · проверки ${checksToday}/5, успехи ${successesToday}` : ''}<br>${escapeHtml(progressText)}</div></div>
-                ${checkButton}
+                <div style="display:flex;gap:6px;align-items:center;">${checkButton}${window.isGM ? `<button type="button" class="btn btn-sm btn-danger" onclick="removeCharacterAddiction('${escapeHtml(record.key)}')">Удалить</button>` : ''}</div>
             </div>`;
     }).join('');
     const stressEffectsHtml = stressEffects.map(({ effect, index }) => {
@@ -2974,6 +3084,7 @@ function renderHealthTab(data, container = null) {
 
     let html = `
         <div class="health-tab">
+            ${window.isGM ? '<div style="display:flex;justify-content:flex-end;margin-bottom:10px;"><button type="button" class="btn btn-sm btn-warning" onclick="healCharacterFully()">Вылечить персонажа</button></div>' : ''}
             <div class="health-vitals-grid">
                 <div class="health-field health-field-pool">
                     <label>Общий пул ОЗ</label>
@@ -2994,9 +3105,9 @@ function renderHealthTab(data, container = null) {
                 <div class="health-field">
                     <label>Стресс</label>
                     <div style="display:flex;align-items:stretch;gap:4px;">
-                        ${window.isGM && window.currentLocationId ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(-1)" title="Снизить стресс на 1" aria-label="Снизить стресс">−</button>' : ''}
+                        ${window.isGM ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(-1)" title="Снизить стресс на 1" aria-label="Снизить стресс">−</button>' : ''}
                         <div class="health-readonly-value" style="min-width:42px;display:flex;align-items:center;justify-content:center;" title="Стресс изменяется игровыми событиями и действиями">${Number(health.stress || 0)}</div>
-                        ${window.isGM && window.currentLocationId ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(1)" title="Повысить стресс на 1" aria-label="Повысить стресс">+</button>' : ''}
+                        ${window.isGM ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(1)" title="Повысить стресс на 1" aria-label="Повысить стресс">+</button>' : ''}
                     </div>
                 </div>
                 <div class="health-field">
@@ -3012,7 +3123,7 @@ function renderHealthTab(data, container = null) {
                     <input type="number" class="form-control" name="health.radiation" value="${health.radiation || 0}">
                 </div>
             </div>
-            <details class="health-compact-panel health-blood-check">
+            <details class="health-compact-panel health-blood-check" data-sheet-panel="blood-check">
                 <summary>
                     <span>Проверка кровопотери</span>
                     <strong>Сложность ${finalBleedingDc}</strong>
@@ -3026,7 +3137,7 @@ function renderHealthTab(data, container = null) {
                     <span class="health-compact-note">${bleedingEffects.length ? bleedingEffects.map(item => `${escapeHtml(item.name || item.type)} (${item.kind === 'internal' ? 'внутр.' : 'внешн.'} ${item.stage || 'light'})`).join(', ') : 'Активных кровотечений нет'}</span>
                 </div>
             </details>
-            <details class="health-compact-panel health-infection-panel" ${Number(health.infection || 0) > 0 || Number(health.infectionGrowthPerDay || 0) > 0 ? 'open' : ''}>
+            <details class="health-compact-panel health-infection-panel" data-sheet-panel="infection" ${Number(health.infection || 0) > 0 || Number(health.infectionGrowthPerDay || 0) > 0 ? 'open' : ''}>
                 <summary>
                     <span>Заражение крови</span>
                     <strong>${Number(health.infection || 0)}%</strong>
@@ -3048,14 +3159,14 @@ function renderHealthTab(data, container = null) {
                     ${visibleEffectChips.length ? visibleEffectChips.map((text) => `<span style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.08); font-size:12px;">${escapeHtml(text)}</span>`).join('') : '<span style="opacity:0.7; font-size:12px;">Сейчас нет активных эффектов</span>'}
                 </div>
             </div>
-            <details class="health-compact-panel" ${addictionRecords.length ? 'open' : ''}>
+            <details class="health-compact-panel" data-sheet-panel="addictions" ${addictionRecords.length ? 'open' : ''}>
                 <summary><span>Зависимости</span><strong>${addictionRecords.length}</strong></summary>
                 <div style="display:grid;gap:7px;padding-top:8px;">
                     ${addictionHtml || '<span class="text-muted" style="font-size:12px;">Активных зависимостей нет</span>'}
                 </div>
             </details>
             ${stressEffects.length ? `
-                <details class="health-compact-panel" open>
+                <details class="health-compact-panel" data-sheet-panel="stress-effects" open>
                     <summary><span>\u042d\u0444\u0444\u0435\u043a\u0442\u044b \u0441\u0442\u0440\u0435\u0441\u0441\u0430</span><strong>${stressEffects.length}</strong></summary>
                     <div style="display:grid;gap:7px;padding-top:8px;">${stressEffectsHtml}</div>
                 </details>` : ''}
@@ -3127,7 +3238,7 @@ function renderHealthTab(data, container = null) {
                     </div>
                 </div>
             </div>
-            <details class="health-compact-panel">
+            <details class="health-compact-panel" data-sheet-panel="organs">
                 <summary><span>Органы</span></summary>
                 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;padding-top:8px;">
                     ${[
@@ -3300,7 +3411,10 @@ function renderHealthTab(data, container = null) {
 function refreshHealthPanel(data = currentCharacterData) {
     const healthContainer = document.getElementById('health-right-column')
         || document.getElementById('sheet-tab-health');
-    if (healthContainer) renderHealthTab(data, healthContainer);
+    if (!healthContainer) return;
+    const viewState = captureSheetViewState();
+    renderHealthTab(data, healthContainer);
+    restoreSheetViewState(viewState);
 }
 
 window.adjustCharacterStress = async function(amount) {
@@ -3308,18 +3422,12 @@ window.adjustCharacterStress = async function(amount) {
         stressAdjustmentPending
         || !window.isGM
         || !currentLobbyId
-        || !window.currentLocationId
         || !currentCharacterId
         || ![-1, 1].includes(Number(amount))
     ) return;
     stressAdjustmentPending = true;
     try {
-        const result = await Server.adjustLocationCharacterStress(
-            currentLobbyId,
-            window.currentLocationId,
-            currentCharacterId,
-            Number(amount),
-        );
+        const result = await Server.adjustCharacterStress(currentLobbyId, currentCharacterId, Number(amount));
         if (result?.data) {
             currentCharacterData = result.data;
             normalizeCharacterEffects(currentCharacterData);
@@ -3329,6 +3437,23 @@ window.adjustCharacterStress = async function(amount) {
         showNotification(error.message || 'Не удалось изменить стресс', 'system');
     } finally {
         stressAdjustmentPending = false;
+    }
+};
+
+window.healCharacterFully = async function() {
+    if (!window.isGM || !currentLobbyId || !currentCharacterId) return;
+    if (!window.confirm('Восстановить базовые ОЗ тела, конечностей и органов и удалить все эффекты и кровотечения?')) return;
+    try {
+        await Server.waitForCharacterSave(currentCharacterId);
+        const result = await Server.healCharacterFully(currentLobbyId, currentCharacterId);
+        if (result?.data) {
+            currentCharacterData = result.data;
+            normalizeCharacterEffects(currentCharacterData);
+            refreshHealthPanel();
+        }
+        showNotification('Персонаж вылечен', 'success');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось вылечить персонажа', 'system');
     }
 };
 
@@ -3352,6 +3477,21 @@ window.checkAddictionWithdrawal = async function(addictionKey) {
         }
     } catch (error) {
         showNotification(error.message || 'Не удалось выполнить проверку ломки');
+    }
+};
+
+window.removeCharacterAddiction = async function(addictionKey) {
+    if (!window.isGM || !currentCharacterId) return;
+    if (!window.confirm('Удалить зависимость и связанную с ней ломку?')) return;
+    try {
+        updateDataFromFields();
+        await Server.updateCharacter(currentCharacterId, { data: currentCharacterData });
+        const response = await Server.removeCharacterAddiction(currentLobbyId, currentCharacterId, addictionKey);
+        currentCharacterData = response.data;
+        normalizeCharacterEffects(currentCharacterData);
+        refreshHealthPanel();
+    } catch (error) {
+        showNotification(error.message || 'Не удалось удалить зависимость');
     }
 };
 
@@ -4192,9 +4332,11 @@ async function renderEquipmentTab(data) {
         </div>
     `;
 
+    const viewState = captureSheetViewState();
     container.innerHTML = html;
     await renderWeapons(weapons, weaponTemplates, weaponModuleTemplates, weaponModTemplates);
     renderEquipmentLoadout(container, data, weaponTemplates, helmetTemplates, gasMaskTemplates, armorTemplates);
+    restoreSheetViewState(viewState);
 }
 
 function equipmentModule(item, slotType) {
@@ -4327,7 +4469,11 @@ function renderEquipmentFigure(equipment, armorTemplates, helmetTemplates) {
         'data-headphones': occupied(equipment.headphones),
         'data-glasses': occupied(equipment.glasses),
         'data-gloves': occupied(equipment.gloves),
-        'data-jewelry': ['ring', 'necklace', 'earrings', 'bracelet1', 'bracelet2'].some(key => occupied(equipment[key])),
+        'data-ring': occupied(equipment.ring),
+        'data-necklace': occupied(equipment.necklace),
+        'data-earrings': occupied(equipment.earrings),
+        'data-bracelet1': occupied(equipment.bracelet1),
+        'data-bracelet2': occupied(equipment.bracelet2),
     };
     const attributes = Object.entries(flags).map(([key, value]) => `${key}="${value}"`).join(' ');
     return `<div class="loadout-figure" ${attributes}>
@@ -4341,6 +4487,7 @@ function renderEquipmentFigure(equipment, armorTemplates, helmetTemplates) {
                 <path d="M58 164 L88 170 L86 222 L78 284 L57 284 L55 226Z M122 164 L92 170 L94 222 L102 284 L123 284 L125 226Z"/>
                 <path d="M55 283 L80 283 L79 292 L52 292Z M100 283 L125 283 L128 292 L101 292Z" class="loadout-art-boots"/>
             </g>
+            <g class="loadout-art-hands"><path d="M40 174 L52 177 L51 187 L47 194 L43 193 L38 184Z M128 177 L140 174 L142 184 L137 193 L133 194 L129 187Z"/></g>
             <g class="loadout-art-face"><path d="M77 36 L84 36 M96 36 L103 36 M90 39 L88 47 L92 47 M84 54 Q90 57 96 54"/></g>
             <g class="loadout-art-armor loadout-art-armor-light"><path d="M63 82 L77 77 L90 94 L103 77 L117 82 L125 157 Q90 173 55 157Z"/><path d="M75 81 L89 108 L105 81 M89 108 L90 159" class="loadout-art-detail"/></g>
             <g class="loadout-art-armor loadout-art-armor-medium"><path d="M62 84 L76 78 L104 78 L118 84 L120 149 L109 163 L71 163 L60 149Z"/><path d="M74 91 L106 91 L110 135 L70 135Z M75 141 L105 141 L105 154 L75 154Z" class="loadout-art-plate"/><path d="M58 87 L70 82 L74 99 L59 105Z M122 87 L110 82 L106 99 L121 105Z" class="loadout-art-plate"/></g>
@@ -4349,16 +4496,20 @@ function renderEquipmentFigure(equipment, armorTemplates, helmetTemplates) {
             <g class="loadout-art-armor loadout-art-armor-exo"><path d="M54 80 L70 73 L110 73 L126 80 L133 115 L117 127 L117 163 L105 179 L75 179 L63 163 L63 127 L47 115Z"/><path d="M69 87 L111 87 L113 139 L90 151 L67 139Z M72 151 L108 151 L106 168 L74 168Z" class="loadout-art-plate"/><path d="M47 119 L36 176 L44 182 L57 133 M133 119 L144 176 L136 182 L123 133 M61 177 L49 223 L52 279 L63 279 L68 222 M119 177 L131 223 L128 279 L117 279 L112 222" class="loadout-art-exo-rail"/><circle cx="58" cy="179" r="7"/><circle cx="122" cy="179" r="7"/><circle cx="59" cy="222" r="7"/><circle cx="121" cy="222" r="7"/></g>
             <g class="loadout-art-vest"><path d="M66 84 L77 79 L103 79 L114 84 L117 145 L105 154 L75 154 L63 145Z"/><path d="M76 82 L76 153 M104 82 L104 153 M77 119 L103 119" class="loadout-art-detail"/></g>
             <g class="loadout-art-belt"><path d="M58 158 Q90 168 122 158 L122 171 Q90 180 58 171Z"/><path d="M84 158 L96 158 L96 175 L84 175Z" class="loadout-art-plate"/></g>
-            <g class="loadout-art-headphones"><path d="M64 37 Q65 4 90 4 Q115 4 116 37"/><path d="M60 35 L69 35 L69 51 L60 51Z M111 35 L120 35 L120 51 L111 51Z"/></g>
+            <g class="loadout-art-headphones"><path class="loadout-art-headband" d="M67 36 Q68 7 90 7 Q112 7 113 36"/><path d="M62 33 L69 33 L69 45 L62 45Z M111 33 L118 33 L118 45 L111 45Z"/></g>
             <g class="loadout-art-mask"><path d="M67 30 Q67 10 90 9 Q113 10 113 30 L111 50 Q108 64 90 70 Q72 64 69 50Z"/><circle cx="79" cy="37" r="8" class="loadout-art-lens"/><circle cx="101" cy="37" r="8" class="loadout-art-lens"/><path d="M90 45 L90 52" class="loadout-art-detail"/><circle cx="90" cy="57" r="9" class="loadout-art-filter"/><circle cx="90" cy="57" r="4" class="loadout-art-filter-center"/></g>
             <g class="loadout-art-helmet loadout-art-helmet-open"><path d="M64 37 Q63 7 90 7 Q117 7 116 37 L111 42 L110 32 L70 32 L69 42Z"/><path d="M66 38 L76 44 M114 38 L104 44" class="loadout-art-detail"/></g>
             <g class="loadout-art-helmet loadout-art-helmet-visor"><path d="M62 35 Q62 6 90 6 Q118 6 118 35 L113 55 L105 63 L75 63 L67 55Z"/><path d="M70 29 L110 29 L107 47 L73 47Z" class="loadout-art-lens"/><path d="M78 53 L102 53" class="loadout-art-detail"/></g>
             <g class="loadout-art-helmet loadout-art-helmet-sealed"><path d="M61 36 Q61 5 90 5 Q119 5 119 36 L113 58 L102 68 L78 68 L67 58Z"/><path d="M69 28 L111 28 L106 44 L74 44Z" class="loadout-art-lens"/><circle cx="90" cy="53" r="7"/><path d="M77 51 L83 58 M103 51 L97 58" class="loadout-art-detail"/></g>
             <g class="loadout-art-helmet loadout-art-helmet-anomalous"><path d="M90 5 C108 5 118 18 118 36 C118 56 108 70 90 70 C72 70 62 56 62 36 C62 18 72 5 90 5Z"/><ellipse cx="90" cy="37" rx="24" ry="28" class="loadout-art-visor-frame"/><ellipse cx="90" cy="37" rx="21" ry="25" class="loadout-art-visor-glass"/><path d="M74 28 Q76 19 83 16" class="loadout-art-glass-highlight"/></g>
             <g class="loadout-art-glasses"><path d="M73 32 L87 32 L85 42 L75 42Z M93 32 L107 32 L105 42 L95 42Z M87 35 L93 35"/></g>
-            <g class="loadout-art-gloves"><path d="M39 167 L52 168 L52 183 L47 190 L38 184Z M128 168 L141 167 L142 184 L133 190 L128 183Z"/></g>
+            <g class="loadout-art-gloves"><path d="M39 174 L52 177 L51 186 L47 192 L43 191 L38 183Z M128 177 L141 174 L142 183 L137 191 L133 192 L129 186Z"/><path d="M39 176 L52 180 M128 180 L141 176" class="loadout-art-detail"/></g>
             <g class="loadout-art-detector"><path d="M45 115 L57 117 L55 140 L43 138Z"/><circle cx="49" cy="124" r="3" class="loadout-art-core"/></g>
-            <g class="loadout-art-jewelry"><circle cx="90" cy="80" r="4"/><circle cx="69" cy="52" r="3"/><circle cx="111" cy="52" r="3"/></g>
+            <g class="loadout-art-necklace"><path d="M75 69 Q90 89 105 69"/><path d="M90 87 L85 94 L90 101 L95 94Z"/></g>
+            <g class="loadout-art-earrings"><circle cx="68" cy="51" r="3"/><circle cx="112" cy="51" r="3"/></g>
+            <g class="loadout-art-bracelet1"><path d="M39 169 L53 172 L52 177 L39 174Z"/></g>
+            <g class="loadout-art-bracelet2"><path d="M127 172 L141 169 L141 174 L128 177Z"/></g>
+            <g class="loadout-art-ring"><path d="M43 186 L50 188 L49 191 L42 189Z"/></g>
         </svg>
     </div>`;
 }
@@ -4861,11 +5012,16 @@ window.drawWeaponFromEquipment = async function(weaponIndex) {
         return;
     }
     try {
-        await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
+        const result = await Server.performLocationCombatAction(window.currentLobbyId, window.currentLocationId, {
             location_character_id: actor.location_character_id,
             action_key: 'draw_weapon',
             weapon_index: weaponIndex,
+            pending_action_id: `draw-weapon-${actor.location_character_id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         });
+        if (result?.pending_action) {
+            showNotification('Доставание оружия начато. Оно окажется в руках после полной оплаты ОД.', 'system');
+            return;
+        }
         currentCharacterData.activeWeaponIndex = weaponIndex;
         renderEquipmentTab(currentCharacterData);
         showNotification('Оружие подготовлено', 'success');
@@ -10722,9 +10878,11 @@ async function useConsumable(item, itemPath, options = {}) {
             return false;
         }
     }
-    const needsMedicineCheck = direct.medical_difficulty !== undefined
-        || ['bleeding', 'wound', 'injury'].includes(application.kind)
-        || direct.requires_infusion_tool;
+    const needsMedicineCheck = application.kind !== 'wound' && (
+        direct.medical_difficulty !== undefined
+        || ['bleeding', 'injury'].includes(application.kind)
+        || direct.requires_infusion_tool
+    );
     if (needsMedicineCheck && !options.skipMedicineCheck) {
         const medicine = currentCharacterData.skills?.other?.medicine || {};
         const medicineBase = Number.isFinite(Number(medicine.base)) ? Number(medicine.base) : 10;
@@ -13132,6 +13290,7 @@ async function renderInventoryTab(data) {
         ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>` : ''}` : ''}
     `;
 
+    const viewState = captureSheetViewState();
     container.innerHTML = html;
     if (eq.belt?.templateId) {
         renderBeltPouchesNew(eq.belt.pouches || [], pouchTemplates, allTemplates);
@@ -13162,14 +13321,15 @@ async function renderInventoryTab(data) {
 
     recalculateInventoryTotals();
 
-    container.addEventListener('input', (e) => {
+    container.oninput = (e) => {
         const target = e.target;
         if (target.matches('input[name*="weight"], input[name*="volume"], input[name*="quantity"]')) {
             updateDataFromFields();
             recalculateInventoryTotals();
             scheduleAutoSave();
         }
-    });
+    };
+    restoreSheetViewState(viewState);
 }
 
 function getItemByPath(pathArray) {
@@ -13524,6 +13684,8 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
     contentsDiv.style.borderLeft = '2px dashed #666';
     contentsDiv.style.display = 'none';
     contentsDiv.setAttribute('data-container-path', path.concat('contents').join(','));
+    const containerKey = inventoryContainerKey(pouch, path);
+    setInventoryContainerOpen(contentsDiv, toggleIcon, containerKey, expandedInventoryContainers.has(containerKey));
 
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
@@ -13547,15 +13709,9 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
 
     itemDiv.appendChild(contentsDiv);
 
-    toggleIcon.onclick = () => {
-        if (contentsDiv.style.display === 'none') {
-            contentsDiv.style.display = 'block';
-            toggleIcon.textContent = '▼';
-        } else {
-            contentsDiv.style.display = 'none';
-            toggleIcon.textContent = '▶';
-        }
-    };
+    toggleIcon.onclick = () => setInventoryContainerOpen(
+        contentsDiv, toggleIcon, containerKey, contentsDiv.style.display === 'none',
+    );
 
     // Универсальное отображение слотов предмета
     if (getItemSlots(pouch).length > 0) {
@@ -13664,6 +13820,9 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     contentsDiv.style.display = 'none';
     contentsDiv.setAttribute('data-container-path', path.concat('contents').join(','));
 
+    const containerKey = inventoryContainerKey(pouch, path);
+    setInventoryContainerOpen(contentsDiv, toggleIcon, containerKey, expandedInventoryContainers.has(containerKey));
+
     if (pouch.contents && pouch.contents.length > 0) {
         pouch.contents.forEach((subItem, subIndex) => {
             renderBackpackItem(subItem, subIndex, path.concat('contents'), contentsDiv, allTemplates);
@@ -13686,15 +13845,9 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
 
     itemDiv.appendChild(contentsDiv);
 
-    toggleIcon.onclick = () => {
-        if (contentsDiv.style.display === 'none') {
-            contentsDiv.style.display = 'block';
-            toggleIcon.textContent = '▼';
-        } else {
-            contentsDiv.style.display = 'none';
-            toggleIcon.textContent = '▶';
-        }
-    };
+    toggleIcon.onclick = () => setInventoryContainerOpen(
+        contentsDiv, toggleIcon, containerKey, contentsDiv.style.display === 'none',
+    );
 
     if (getItemSlots(pouch).length > 0) {
         const slotsHtml = renderSlotsUniversal(pouch, path, 1);
@@ -13962,7 +14115,7 @@ function getInventoryTargetItems(targetPath) {
     return null;
 }
 
-async function addTemplateItemToInventory(templateId, target, quantity = 1, ammoVariant = null) {
+async function addTemplateItemToInventory(templateId, target, quantity = 1, ammoVariant = null, itemAttributes = null) {
     if (!templateId) return false;
 
     const allTemplates = await getAllItemTemplates();
@@ -13983,6 +14136,7 @@ async function addTemplateItemToInventory(templateId, target, quantity = 1, ammo
     const newItem = createItemFromTemplateSelection(template, quantity, ammoVariant, {
         createdByPlayer: !window.isGM,
     });
+    if (itemAttributes) newItem.attributes = { ...(newItem.attributes || {}), ...itemAttributes };
     targetItems.push(...splitAmmoItemIntoSlotStacks(newItem));
 
     await rerenderContainer(targetPath, null, { keepExpanded: true });
@@ -14059,6 +14213,62 @@ window.selectInventoryTemplate = async function(templateId) {
     if (template.category === 'ammo') {
         closeInventoryTemplatePicker();
         openAmmoSelectionModal(templateId, target, selectionHandler);
+        return;
+    }
+
+    if (template.category === 'consumable' && template.name.trim().toLowerCase() === 'пакет крови') {
+        closeInventoryTemplatePicker();
+        const savePacket = async (bloodType, bloodTypeKnown) => {
+            const attributes = { bloodType, bloodTypeKnown };
+            if (selectionHandler) {
+                const item = createItemFromTemplateSelection(template, 1, null, {
+                    createdByPlayer: !window.isGM,
+                });
+                item.attributes = { ...(item.attributes || {}), ...attributes };
+                await selectionHandler(item, template);
+            } else {
+                await addTemplateItemToInventory(templateId, target, 1, null, attributes);
+            }
+        };
+        if (!window.isGM) {
+            await savePacket(1 + Math.floor(Math.random() * 4), false);
+            return;
+        }
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.style.display = 'flex';
+        modal.innerHTML = `<div class="modal-content" style="max-width:390px;">
+            <h3>Пакет крови</h3>
+            <label>Фактическая группа крови
+                <select class="form-control blood-packet-type">
+                    <option value="1">I</option><option value="2">II</option>
+                    <option value="3">III</option><option value="4">IV</option>
+                </select>
+            </label>
+            <label style="display:flex;gap:8px;align-items:center;margin:12px 0;">
+                <input type="checkbox" class="blood-packet-known"> Группа известна персонажам
+            </label>
+            <div class="form-actions">
+                <button type="button" class="btn btn-primary blood-packet-save">Добавить</button>
+                <button type="button" class="btn btn-secondary blood-packet-cancel">Отмена</button>
+            </div>
+        </div>`;
+        document.body.appendChild(modal);
+        modal.querySelector('.blood-packet-cancel').onclick = () => modal.remove();
+        modal.querySelector('.blood-packet-save').onclick = async () => {
+            const button = modal.querySelector('.blood-packet-save');
+            button.disabled = true;
+            try {
+                await savePacket(
+                    Number(modal.querySelector('.blood-packet-type').value),
+                    modal.querySelector('.blood-packet-known').checked,
+                );
+                modal.remove();
+            } catch (error) {
+                button.disabled = false;
+                showNotification(error.message || 'Не удалось добавить пакет крови');
+            }
+        };
         return;
     }
 
@@ -14634,6 +14844,15 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         itemDiv._toggleIcon = toggleIcon;
     }
     nameWrapper.appendChild(nameCell);
+    const isBloodPacket = String(item.name || '').trim().toLowerCase() === 'пакет крови';
+    if (isBloodPacket) {
+        const bloodBadge = document.createElement('span');
+        bloodBadge.className = 'inventory-blood-type';
+        const knownType = item.attributes?.bloodTypeKnown
+            ? Number(item.attributes?.bloodType || item.attributes?.blood_type || 0) : 0;
+        bloodBadge.textContent = knownType ? formatBloodType(knownType) : 'Группа неизвестна';
+        nameWrapper.appendChild(bloodBadge);
+    }
     if (item.createdByPlayer) {
         const createdBadge = document.createElement('span');
         createdBadge.className = 'created-by-player-badge';
@@ -14684,7 +14903,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     const hasMods = item.modifications && item.modifications.length > 0;
     const hasEffects = item.attributes?.effects && item.attributes.effects.length > 0;
     const hasMagazineDetails = item.category === 'magazine' && item.ammo?.length;
-    if (hasProt || hasMods || hasEffects || hasMagazineDetails) {
+    if (hasProt || hasMods || hasEffects || hasMagazineDetails || isBloodPacket) {
         const infoBtn = document.createElement('button');
         infoBtn.type = 'button';
         infoBtn.className = 'btn btn-sm btn-secondary';
@@ -14997,16 +15216,12 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
             itemDiv._contentsDiv = contentsDiv;
 
             const toggleIcon = itemDiv._toggleIcon;
+            const containerKey = inventoryContainerKey(item, itemPath);
+            setInventoryContainerOpen(contentsDiv, toggleIcon, containerKey, expandedInventoryContainers.has(containerKey));
             if (toggleIcon) {
-                toggleIcon.onclick = () => {
-                    if (contentsDiv.style.display === 'none') {
-                        contentsDiv.style.display = 'block';
-                        toggleIcon.textContent = '▼';
-                    } else {
-                        contentsDiv.style.display = 'none';
-                        toggleIcon.textContent = '▶';
-                    }
-                };
+                toggleIcon.onclick = () => setInventoryContainerOpen(
+                    contentsDiv, toggleIcon, containerKey, contentsDiv.style.display === 'none',
+                );
             }
         }
     }
@@ -15023,6 +15238,11 @@ function showItemDetailsModal(item) {
 
     let html = `<h3>${escapeHtml(item.name)}</h3>`;
     html += '<hr>';
+    if (String(item.name || '').trim().toLowerCase() === 'пакет крови') {
+        const knownType = item.attributes?.bloodTypeKnown
+            ? Number(item.attributes?.bloodType || item.attributes?.blood_type || 0) : 0;
+        html += `<p><strong>Группа крови:</strong> ${knownType ? escapeHtml(formatBloodType(knownType)) : 'Неизвестна'}</p>`;
+    }
 
     // Прочность
     if (item.durability != null && item.maxDurability != null) {
@@ -15340,6 +15560,7 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
         showNotification('Дождитесь завершения применения предмета', 'system');
         return;
     }
+    if (Number(currentCharacterId) !== Number(characterId)) expandedInventoryContainers.clear();
     currentCharacterId = characterId;
     window.currentCharacterId = characterId;
     localStorage.setItem('currentCharacterId', String(characterId));

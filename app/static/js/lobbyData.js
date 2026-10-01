@@ -3,7 +3,7 @@ import { Server } from './api.js';
 import { setMapDimensions, setTileClickCallback } from './lobby3d.js';
 import { setLobbyData, updateParticipantsList } from './ui.js';
 import AppState from './ui_interactions.js';
-import { applyWeather } from './weather.js';
+import { applyWeather, applyWorldTime } from './weather.js';
 import { updateMapTileSize } from './markers.js';
 
 let currentLobbyId;
@@ -14,6 +14,7 @@ function applyLobbyTime(data) {
     const minutes = Math.max(0, Math.min(1439, Number(data?.game_time_minutes ?? 480)));
     window.lobbyGameDay = Math.max(1, Number(data?.game_day || 1));
     window.lobbyGameTimeMinutes = minutes;
+    applyWorldTime(minutes);
     if (dayInput) dayInput.value = Math.max(1, Number(data?.game_day || 1));
     if (timeInput) {
         const hours = Math.floor(minutes / 60);
@@ -116,6 +117,8 @@ export async function loadLobbyInfo() {
                     window.applyBrush(tile, { terrain: window.currentTileType }, window.brushRadius);
                 } else if (window.worldEditorTool === 'height') {
                     window.applyBrush(tile, { height: window.tileHeight }, window.brushRadius);
+                } else if (window.worldEditorTool === 'radiation') {
+                    window.applyBrush(tile, { radiation: window.worldBrushRadiation ?? 0 }, window.brushRadius);
                 }
             });
         }

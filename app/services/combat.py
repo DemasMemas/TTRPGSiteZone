@@ -11182,6 +11182,43 @@ class CombatService:
         return payload
 
     @staticmethod
+    def add_combat_participant(location_id, user_id, location_character_id):
+        location = CombatService._get_location(location_id)
+        CombatService._ensure_access(location, user_id)
+        if location.lobby.gm_id != user_id:
+            raise PermissionDenied('Only GM can add combat participants')
+        state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        if not state or state.status != 'active':
+            raise ValidationError('Combat is not active')
+        participant_id = CombatService._coerce_int(location_character_id, 0)
+        participant = LocationCharacter.query.filter_by(
+            id=participant_id, location_id=location_id,
+        ).first()
+        if not participant:
+            raise NotFoundError('Character not found')
+        if not CombatService._can_take_combat_turn(participant):
+            raise ValidationError('Incapacitated character cannot join combat')
+        turn_order = list(dict.fromkeys(state.turn_order or []))
+        if participant_id in turn_order:
+            raise ValidationError('Character is already in the turn order')
+        if state.current_location_character_id not in turn_order:
+            raise ValidationError('Current combat turn is unavailable')
+
+        profile = CombatService._combat_profile(participant)
+        participant.initiative_bonus = profile['initiative_bonus']
+        participant.initiative_roll = random.randint(1, 20)
+        participant.initiative_total = participant.initiative_roll + participant.initiative_bonus
+        participant.strenuous_movement_blocked_until_round = 0
+        participant.drawn_weapon_index = CombatService._persistent_weapon_index(participant)
+        CombatService._clear_aim(participant)
+        # Place the newcomer at the start; their first turn begins next round.
+        turn_order.insert(0, participant_id)
+        state.turn_order = turn_order
+        state.turn_index = turn_order.index(state.current_location_character_id)
+        db.session.commit()
+        return CombatService._serialize_state(location, state)
+
+    @staticmethod
     def remove_combat_participant(location_id, user_id, location_character_id):
         location = CombatService._get_location(location_id)
         CombatService._ensure_access(location, user_id)
@@ -13214,11 +13251,7 @@ class CombatService:
                 weapon_index,
             )
             draw_cost = ergonomics_profile['draw_action_points']
-            if character.action_points_current < draw_cost:
-                raise ValidationError("Not enough action points")
-            character.action_points_current -= draw_cost
-            CombatService._set_active_weapon(character, weapon_index)
-            CombatService._clear_aim(character)
+            special_action_cost = draw_cost
             draw_details = {
                 'weapon_index': weapon_index,
                 'action_points': draw_cost,
@@ -13986,8 +14019,6 @@ class CombatService:
             CombatService._clear_aim(character)
         elif action_key in {'change_posture', 'change_facing'}:
             CombatService._clear_aim(character)
-        elif action_key == 'draw_weapon':
-            pass
         elif action_key == 'stow_weapon':
             CombatService._set_active_weapon(character, None)
             CombatService._clear_aim(character)
@@ -14052,6 +14083,10 @@ class CombatService:
                 }
             if not resumed_paid_action:
                 character.action_points_current -= action_point_cost
+            if action_key == 'draw_weapon':
+                CombatService._set_active_weapon(character, weapon_index)
+                data = character.character.data
+                CombatService._clear_aim(character)
             if action_key != 'attack' and combat_meta.pop('mutantRageAccuracy', None) is not None:
                 character.character.data = data
                 flag_modified(character.character, 'data')

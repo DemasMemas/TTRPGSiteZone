@@ -5,6 +5,7 @@ import io
 import random
 import re
 from copy import deepcopy
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from sqlalchemy import or_
 from sqlalchemy.orm.attributes import flag_modified
@@ -25,10 +26,10 @@ from app.services.character_events import emit_character_update, publish_charact
 from app.services.combat import CombatService
 from app.services.artifact_effects import apply_artifact_world_movement
 from app.services.character_interaction import CharacterInteractionService
-from app.services.health import apply_health_maximums, health_zones_to_location
+from app.services.health import apply_health_maximums, heal_character_fully, health_zones_to_location
 from app.services.equipment_repair import repair_equipment, resolve_item_path
 from app.services.gas_mask_filters import consume_equipped_filter_charges
-from app.services.addictions import advance_addictions, record_exposure, withdrawal_check
+from app.services.addictions import advance_addictions, record_exposure, withdrawal_check, remove_addiction
 from app.services.anomaly_profiles import anomaly_catalog
 from app.services.world_rules import (
     anomaly_field_catalog,
@@ -1955,6 +1956,29 @@ def check_character_addiction_withdrawal(character_id, addiction_key):
     )
     return jsonify({'result': result, 'data': character.data_snapshot()}), 200
 
+
+@lobbies_bp.route('/<int:lobby_id>/characters/<int:character_id>/addictions/<addiction_key>', methods=['DELETE'])
+@jwt_required()
+@requires_gm
+def remove_character_addiction(lobby_id, character_id, addiction_key, lobby):
+    character = LobbyCharacter.query.filter_by(id=character_id, lobby_id=lobby_id).first()
+    if not character:
+        raise NotFoundError('Персонаж не найден')
+    character_data = deepcopy(character.data or {})
+    try:
+        remove_addiction(character_data.setdefault('health', {}), addiction_key)
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 404
+    character.data = character_data
+    flag_modified(character, 'data')
+    db.session.commit()
+    emit_character_update({
+        'character_id': character.id,
+        'updates': {'data': character.data_snapshot()},
+        'source': 'gm_remove_addiction',
+    })
+    return jsonify({'data': character.data_snapshot()}), 200
+
 @lobbies_bp.route('/characters/<int:character_id>', methods=['DELETE'])
 @jwt_required()
 def delete_character(character_id):
@@ -3454,6 +3478,22 @@ def end_location_combat_turn(lobby_id, location_id, lobby, participant):
 
 @lobbies_bp.route(
     '/<int:lobby_id>/locations/<int:location_id>/combat/participants/<int:location_character_id>',
+    methods=['POST'],
+)
+@jwt_required()
+@requires_gm
+def add_location_combat_participant(
+    lobby_id, location_id, location_character_id, lobby,
+):
+    state = CombatService.add_combat_participant(
+        location_id, lobby.gm_id, location_character_id,
+    )
+    socketio.emit('combat_state_updated', state, room=f'location_{location_id}')
+    return jsonify(state), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/combat/participants/<int:location_character_id>',
     methods=['DELETE'],
 )
 @jwt_required()
@@ -3671,6 +3711,66 @@ def adjust_location_character_stress(lobby_id, location_id, character_id, lobby)
         'data': loc_char.character.data_snapshot(),
         'combat_state': state,
     }), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/characters/<int:character_id>/stress', methods=['POST'])
+@jwt_required()
+@requires_gm
+def adjust_character_stress(lobby_id, character_id, lobby):
+    data = request.get_json(silent=True) or {}
+    amount = data.get('amount')
+    if type(amount) is not int or amount not in {-1, 1}:
+        raise ValidationError('Изменение стресса должно быть -1 или 1')
+    character = LobbyCharacter.query.filter_by(id=character_id, lobby_id=lobby_id).first()
+    if not character:
+        raise NotFoundError('Персонаж не найден')
+    result = CombatService.apply_stress_trigger(
+        SimpleNamespace(character=character), amount, trigger='gm_quick_adjustment',
+    )
+    db.session.commit()
+    emit_character_update({
+        'character_id': character.id,
+        'updates': {'data': character.data_snapshot()},
+        'source': 'stress_adjustment',
+    })
+    for location_id in {
+        row.location_id for row in LocationCharacter.query.filter_by(character_id=character.id).all()
+    }:
+        socketio.emit(
+            'combat_state_updated', CombatService.get_state(location_id, lobby.gm_id),
+            room=f'location_{location_id}',
+        )
+    return jsonify({'stress': result, 'data': character.data_snapshot()}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/characters/<int:character_id>/heal', methods=['POST'])
+@jwt_required()
+@requires_gm
+def heal_character_by_gm(lobby_id, character_id, lobby):
+    character = LobbyCharacter.query.filter_by(id=character_id, lobby_id=lobby_id).first()
+    if not character:
+        raise NotFoundError('Персонаж не найден')
+    character_data = deepcopy(character.data or {})
+    health = heal_character_fully(character_data)
+    character.data = character_data
+    flag_modified(character, 'data')
+    posture_updates = CharacterService.sync_location_health(character, health)
+    db.session.commit()
+    emit_character_update({
+        'character_id': character.id,
+        'updates': {'data': character.data_snapshot()},
+        'source': 'gm_full_heal',
+    })
+    for update in posture_updates:
+        socketio.emit('location_character_posture_updated', update, room=f"location_{update['location_id']}")
+    for location_id in {
+        row.location_id for row in LocationCharacter.query.filter_by(character_id=character.id).all()
+    }:
+        socketio.emit(
+            'combat_state_updated', CombatService.get_state(location_id, lobby.gm_id),
+            room=f'location_{location_id}',
+        )
+    return jsonify({'data': character.data_snapshot()}), 200
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/combat/reaction/reserve', methods=['POST'])

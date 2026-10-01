@@ -47,9 +47,14 @@ test('figure draws generic slot layers but never weapons', () => {
         backpack: { templateId: 2 }, detector: { templateId: 3 },
         gloves: { templateId: 4 }, ring: { templateId: 5 },
     });
-    for (const flag of ['mask', 'backpack', 'detector', 'gloves', 'jewelry']) {
+    for (const flag of ['mask', 'backpack', 'detector', 'gloves', 'ring']) {
         assert.match(equipped, new RegExp(`data-${flag}="true"`));
     }
+    for (const flag of ['necklace', 'earrings', 'bracelet1', 'bracelet2']) {
+        assert.match(equipped, new RegExp(`data-${flag}="false"`));
+    }
+    assert.match(equipped, /loadout-art-hands/);
+    assert.match(equipped, /loadout-art-gloves/);
     assert.doesNotMatch(equipped, /data-ranged|data-melee|loadout-art-ranged|loadout-art-melee/);
     assert.doesNotMatch(equipped, /Любой противогаз/);
     assert.match(equipped, /loadout-art-mask[^>]*>.*loadout-art-filter/s);

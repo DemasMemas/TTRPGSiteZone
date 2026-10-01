@@ -1,10 +1,10 @@
 # app/services/map.py
 import logging
 import copy
-import random
 from app.extensions import db
 from app.models import MapChunk, Lobby, LobbyParticipant
-from app.constants import CHUNK_SIZE, ANOMALY_TYPES
+from app.constants import CHUNK_SIZE
+from app.services.world_generation import generated_world_tile
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -195,7 +195,6 @@ class MapService:
     def _generate_chunk_data(lobby_id, chunk_x, chunk_y, map_type):
         """Генерирует данные для нового чанка в зависимости от типа карты."""
         lobby = Lobby.query.get(lobby_id)
-        max_x, max_y = MapService._get_world_bounds(lobby) if lobby else (0, 0)
         data = []
         for y in range(CHUNK_SIZE):
             row = []
@@ -203,76 +202,14 @@ class MapService:
                 global_x = chunk_x * CHUNK_SIZE + x
                 global_y = chunk_y * CHUNK_SIZE + y
 
-                if map_type == 'empty':
-                    terrain = 'grass'
-                elif map_type == 'random':
-                    r = random.random()
-                    if r < 0.4: terrain = 'grass'
-                    elif r < 0.6: terrain = 'sand'
-                    elif r < 0.8: terrain = 'rock'
-                    else: terrain = 'swamp'
-                elif map_type == 'predefined':
-                    if global_x < 2 or global_x > max_x - 2 or global_y < 2 or global_y > max_y - 2:
-                        terrain = 'water'
-                    else:
-                        r = random.random()
-                        if r < 0.4: terrain = 'grass'
-                        elif r < 0.6: terrain = 'sand'
-                        elif r < 0.8: terrain = 'rock'
-                        else: terrain = 'swamp'
+                if map_type in {'random', 'predefined'}:
+                    tile = generated_world_tile(
+                        lobby_id, global_x, global_y,
+                        lobby.chunks_width, lobby.chunks_height, map_type,
+                    )
+                    row.append(tile)
+                    continue
                 else:
-                    terrain = 'grass'
-
-                height = 1.0 + random.uniform(-0.1, 0.1)
-
-                objects = []
-                if terrain != 'water' and random.random() < 0.2:
-                    color = random.choice(['#2d5a27', '#3c6e47', '#1e4d2b'])
-                    objects.append({
-                        'type': 'tree',
-                        'x': round(random.uniform(-0.4, 0.4), 2),
-                        'z': round(random.uniform(-0.4, 0.4), 2),
-                        'scale': round(random.uniform(0.8, 1.2), 2),
-                        'rotation': random.randint(0, 360),
-                        'color': color
-                    })
-                if terrain != 'water' and random.random() < 0.05:
-                    color = random.choice(['#8B4513', '#A0522D', '#CD853F', '#D2691E'])
-                    objects.append({
-                        'type': 'house',
-                        'x': round(random.uniform(-0.4, 0.4), 2),
-                        'z': round(random.uniform(-0.4, 0.4), 2),
-                        'scale': 1.0,
-                        'rotation': random.choice([0, 90, 180, 270]),
-                        'color': color
-                    })
-                if terrain != 'water' and random.random() < 0.02:
-                    color = random.choice(['#8B5A2B', '#A67B5B', '#6B4F3C'])
-                    objects.append({
-                        'type': 'fence',
-                        'x': round(random.uniform(-0.4, 0.4), 2),
-                        'z': round(random.uniform(-0.4, 0.4), 2),
-                        'scale': 1.0,
-                        'rotation': random.choice([0, 90]),
-                        'color': color
-                    })
-                if terrain != 'water' and random.random() < 0.01:
-                    chosen_type = random.choice(ANOMALY_TYPES)
-                    color = random.choice(['#00FFFF', '#FF69B4', '#FFD700'])
-                    objects.append({
-                        'type': 'anomaly',
-                        'anomalyType': chosen_type,
-                        'x': round(random.uniform(-0.4, 0.4), 2),
-                        'z': round(random.uniform(-0.4, 0.4), 2),
-                        'scale': round(random.uniform(0.5, 1.0), 2),
-                        'rotation': 0,
-                        'color': color
-                    })
-
-                row.append({
-                    'terrain': terrain,
-                    'height': round(height, 3),
-                    'objects': objects
-                })
+                    row.append({'terrain': 'grass', 'height': 1.0, 'objects': []})
             data.append(row)
         return data

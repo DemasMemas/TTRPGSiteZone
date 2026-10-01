@@ -19,7 +19,7 @@ from app.models import (
 )
 from app.models.templates import ItemTemplate
 from app.services.map import MapService
-from app.services.world_rules import mutant_character_data, mutant_profile
+from app.services.world_rules import mutant_catalog, mutant_character_data, mutant_profile
 
 
 def create_lobby(client, user, auth_headers, name="Rookie camp"):
@@ -53,6 +53,44 @@ def create_character(client, lobby, user, auth_headers, data=None):
     )
     assert response.status_code == 201
     return response.get_json()
+
+
+def test_gm_full_heal_restores_body_and_rejects_player(client, create_user, auth_headers):
+    gm = create_user('full-heal-gm')
+    player = create_user('full-heal-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers)
+    stored = db.session.get(LobbyCharacter, character['id'])
+    stored.data = {
+        **stored.data,
+        'health': {
+            'current': 0, 'max': 700, 'stress': 3, 'painLevel': 7,
+            'blood': 'severe',
+            'zones': {
+                'head': {'current': 0, 'max': 50, 'destructionDamage': 300},
+                'leftArm': {'current': 0, 'max': 90, 'destructionDamage': 500},
+            },
+            'organs': {'skull': {'current': 0, 'max': 50}},
+            'effects': [{'type': 'death'}, {'type': 'fracture', 'area': 'leftArm'}],
+        },
+    }
+    db.session.commit()
+    endpoint = f"/lobbies/{lobby['id']}/characters/{character['id']}/heal"
+    assert client.post(endpoint, headers=auth_headers(player)).status_code == 403
+    result = client.post(endpoint, headers=auth_headers(gm))
+    assert result.status_code == 200, result.json
+    health = result.json['data']['health']
+    assert health['current'] == health['max'] == 700
+    assert health['zones']['head']['current'] == health['zones']['head']['max'] == 50
+    assert health['zones']['leftArm']['current'] == health['zones']['leftArm']['max'] == 90
+    assert health['zones']['leftArm']['destructionDamage'] == 0
+    assert health['organs']['skull']['current'] == health['organs']['skull']['max'] == 50
+    assert health['effects'] == []
+    assert health['bleeding']['effects'] == []
+    assert health['blood'] == 'normal'
+    assert health['painLevel'] == 0
+    assert health['stress'] == 3
 
 
 def test_addiction_exposure_and_global_time_start_withdrawal(
@@ -2413,6 +2451,38 @@ def test_attack_start_request_can_use_normal_initiative_when_gm_unchecks_first(
     assert initiatives[target.id] > initiatives[actor.id]
 
 
+def test_gm_can_adjust_stress_without_placing_character_on_location(
+    client, create_user, auth_headers,
+):
+    gm = create_user('stress-outside-gm')
+    player = create_user('stress-outside-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, player, auth_headers)
+    url = f"/lobbies/{lobby['id']}/characters/{character['id']}/stress"
+
+    assert client.post(url, headers=auth_headers(player), json={'amount': 1}).status_code == 403
+    increased = client.post(url, headers=auth_headers(gm), json={'amount': 1})
+    assert increased.status_code == 200
+    assert increased.get_json()['data']['health']['stress'] == 1
+    reduced = client.post(url, headers=auth_headers(gm), json={'amount': -1})
+    assert reduced.status_code == 200
+    assert reduced.get_json()['data']['health']['stress'] == 0
+
+
+def test_new_world_chunks_have_no_standalone_anomaly_objects(
+    client, create_user, auth_headers,
+):
+    gm = create_user('world-no-anomalies-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    chunk = MapService.get_chunks(lobby['id'], gm['id'], (0, 0, 0, 0))[0]
+
+    assert all(
+        obj.get('type') != 'anomaly'
+        for row in chunk['data'] for tile in row for obj in tile.get('objects', [])
+    )
+
+
 def test_only_gm_can_change_character_visibility(
     client,
     create_user,
@@ -2593,6 +2663,107 @@ def test_only_gm_can_remove_current_character_from_initiative(
     assert state["removed_location_character_id"] == first.id
     assert db.session.get(LocationCharacter, first.id) is not None
     assert db.session.get(LocationCharacter, first.id).initiative_roll is None
+
+
+def test_gm_adds_combat_participant_for_next_round_only(client, create_user, auth_headers):
+    gm = create_user('initiative-add-gm')
+    player = create_user('initiative-add-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    characters = [create_character(client, lobby, gm, auth_headers) for _ in range(3)]
+    location = Location(lobby_id=lobby['id'], name='Reinforcements', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    placed = [LocationCharacter(location_id=location.id, character_id=character['id']) for character in characters]
+    db.session.add_all(placed)
+    db.session.flush()
+    db.session.add(LocationCombatState(
+        location_id=location.id, status='active', round_number=1, turn_index=0,
+        turn_order=[placed[0].id, placed[1].id],
+        current_location_character_id=placed[0].id,
+    ))
+    db.session.commit()
+    endpoint = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/participants/{placed[2].id}"
+
+    assert client.post(endpoint, headers=auth_headers(player)).status_code == 403
+    response = client.post(endpoint, headers=auth_headers(gm))
+    assert response.status_code == 200
+    state = response.get_json()
+    assert state['turn_order'] == [placed[2].id, placed[0].id, placed[1].id]
+    assert state['current_location_character_id'] == placed[0].id
+    assert state['round_number'] == 1
+    assert client.post(endpoint, headers=auth_headers(gm)).status_code == 400
+
+    next_turn = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(gm), json={},
+    )
+    assert next_turn.status_code == 200
+    assert next_turn.get_json()['current_location_character_id'] == placed[1].id
+    following_turn = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/end_turn",
+        headers=auth_headers(gm), json={},
+    )
+    assert following_turn.status_code == 200
+    assert following_turn.get_json()['current_location_character_id'] == placed[2].id
+    assert following_turn.get_json()['round_number'] == 2
+
+
+def test_only_gm_removes_character_addiction(client, create_user, auth_headers):
+    gm = create_user('remove-addiction-gm')
+    player = create_user('remove-addiction-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers)
+    stored = db.session.get(LobbyCharacter, character['id'])
+    data = dict(stored.data)
+    data['health'] = {
+        'addictions': {
+            'records': {'caffeine': {'key': 'caffeine', 'label': 'Кофеин', 'active': True}},
+            'exposures': {'caffeine': {'dose': 3}},
+        },
+        'effects': [{'id': 'addiction-withdrawal-caffeine', 'type': 'addiction_withdrawal'}],
+    }
+    stored.data = data
+    db.session.commit()
+    endpoint = f"/lobbies/{lobby['id']}/characters/{character['id']}/addictions/caffeine"
+
+    assert client.delete(endpoint, headers=auth_headers(player)).status_code == 403
+    response = client.delete(endpoint, headers=auth_headers(gm))
+    assert response.status_code == 200
+    health = response.get_json()['data']['health']
+    assert not health['addictions']['records']
+    assert not health['addictions']['exposures']
+    assert not any(effect.get('type') == 'addiction_withdrawal' for effect in health['effects'])
+
+
+def test_gm_heal_restores_mutant_specific_maximums(client, create_user, auth_headers):
+    gm = create_user('mutant-heal-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    profile = mutant_profile(mutant_catalog()[0]['name'])
+    mutant = create_character(client, lobby, gm, auth_headers, mutant_character_data(profile))
+    stored = db.session.get(LobbyCharacter, mutant['id'])
+    data = dict(stored.data)
+    health = dict(data['health'])
+    health['current'] = 1
+    health['painLevel'] = 7
+    health['bloodStage'] = 'severe'
+    health['zones'] = {key: dict(zone) for key, zone in health['zones'].items()}
+    health['zones']['head']['current'] = 0
+    data['health'] = health
+    stored.data = data
+    db.session.commit()
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/characters/{mutant['id']}/heal",
+        headers=auth_headers(gm),
+    )
+    assert response.status_code == 200
+    healed = response.get_json()['data']['health']
+    assert healed['current'] == healed['max'] == profile['health']
+    assert healed['zones']['head']['current'] == healed['zones']['head']['max']
+    assert healed['painLevel'] == 0
+    assert healed['bloodStage'] == 'normal'
 
 
 def test_end_turn_automatically_skips_dead_character(

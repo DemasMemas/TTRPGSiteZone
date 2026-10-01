@@ -171,9 +171,12 @@ export function toggleSettings() {
 }
 
 export function openSettings() {
-    document.getElementById('settings-panel').style.display = 'block';
+    const panel = document.getElementById('settings-panel');
+    panel.style.display = 'block';
     settingsVisible = true;
-    showSettingsTab('banned', document.querySelector('.tab-btn.active'));
+    const selected = panel.querySelector('.settings-tabs .tab-btn.active')
+        || panel.querySelector('.settings-tabs .tab-btn');
+    if (selected) showSettingsTab(selected.dataset.settingsTab || 'banned', selected);
 }
 
 export function closeSettings() {
@@ -182,10 +185,12 @@ export function closeSettings() {
 }
 
 export function showSettingsTab(tab, btn) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    const panel = document.getElementById('settings-panel');
+    if (!panel || !btn) return;
+    panel.querySelectorAll('.settings-tabs .tab-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
 
-    document.querySelectorAll('.settings-tab-content').forEach(el => el.style.display = 'none');
+    panel.querySelectorAll('.settings-tab-content').forEach(el => el.style.display = 'none');
 
     if (tab === 'banned') {
         document.getElementById('settings-content').style.display = 'block';

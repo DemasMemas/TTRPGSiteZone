@@ -37,7 +37,7 @@ let MAX_CHUNK_X = 15;
 let MAX_CHUNK_Y = 15;
 
 const chunkBounds = [];
-const ANOMALY_TYPES = ['electric', 'fire', 'acid', 'void'];
+const worldBrushPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -1);
 
 const terrainColors = {
     grass: 0x3a5f0b,
@@ -50,6 +50,72 @@ const terrainColors = {
 const treeGeo = new THREE.ConeGeometry(0.3, 1, 8);
 const houseGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
 const fenceGeo = new THREE.BoxGeometry(0.2, 0.5, 0.8);
+function landmarkGeometry(parts) {
+    const vertices = [];
+    const normals = [];
+    const vertex = new THREE.Vector3();
+    const normal = new THREE.Vector3();
+    for (const [geometry, x, y, z, sx = 1, sy = 1, sz = 1, rotation = 0] of parts) {
+        const flat = geometry.index ? geometry.toNonIndexed() : geometry;
+        const transform = new THREE.Matrix4().compose(
+            new THREE.Vector3(x, y, z),
+            new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotation),
+            new THREE.Vector3(sx, sy, sz),
+        );
+        const normalTransform = new THREE.Matrix3().getNormalMatrix(transform);
+        const positions = flat.getAttribute('position');
+        const sourceNormals = flat.getAttribute('normal');
+        for (let index = 0; index < positions.count; index++) {
+            vertex.fromBufferAttribute(positions, index).applyMatrix4(transform);
+            normal.fromBufferAttribute(sourceNormals, index).applyMatrix3(normalTransform).normalize();
+            vertices.push(vertex.x, vertex.y, vertex.z);
+            normals.push(normal.x, normal.y, normal.z);
+        }
+        if (flat !== geometry) flat.dispose();
+        geometry.dispose();
+    }
+    const merged = new THREE.BufferGeometry();
+    merged.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    merged.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    return merged;
+}
+
+const WORLD_LANDMARKS = {
+    forest: { geometry: landmarkGeometry([
+        [new THREE.ConeGeometry(0.26, 1.0, 6), -0.23, 0.19, 0.02],
+        [new THREE.ConeGeometry(0.29, 1.18, 7), 0.16, 0.28, -0.16],
+        [new THREE.ConeGeometry(0.23, 0.86, 6), 0.22, 0.12, 0.24],
+    ]), width: 1.05, height: 1.5, depth: 1.05, color: '#244832' },
+    hamlet: { geometry: landmarkGeometry([
+        [new THREE.BoxGeometry(0.55, 0.28, 0.45), 0, -0.12, 0],
+        [new THREE.ConeGeometry(0.42, 0.25, 4), 0, 0.13, 0, 1, 1, 1, Math.PI / 4],
+    ]), width: 0.75, height: 0.52, depth: 0.75, color: '#aa8665' },
+    village: { geometry: landmarkGeometry([
+        [new THREE.BoxGeometry(0.35, 0.24, 0.3), -0.23, -0.13, -0.22],
+        [new THREE.ConeGeometry(0.27, 0.2, 4), -0.23, 0.08, -0.22, 1, 1, 1, Math.PI / 4],
+        [new THREE.BoxGeometry(0.38, 0.28, 0.32), 0.23, -0.11, -0.1],
+        [new THREE.ConeGeometry(0.3, 0.22, 4), 0.23, 0.13, -0.1, 1, 1, 1, Math.PI / 4],
+        [new THREE.BoxGeometry(0.32, 0.23, 0.28), 0, -0.15, 0.27],
+        [new THREE.ConeGeometry(0.25, 0.2, 4), 0, 0.05, 0.27, 1, 1, 1, Math.PI / 4],
+    ]), width: 1.05, height: 0.53, depth: 1.05, color: '#b39474' },
+    road: { geometry: new THREE.BoxGeometry(0.92, 0.035, 0.25), width: 0.92, height: 0.035, depth: 0.25, color: '#756f61' },
+    factory: { geometry: landmarkGeometry([
+        [new THREE.BoxGeometry(0.75, 0.42, 0.58), 0, -0.17, 0],
+        [new THREE.CylinderGeometry(0.075, 0.085, 0.48, 6), -0.22, 0.27, -0.12],
+        [new THREE.CylinderGeometry(0.06, 0.07, 0.34, 6), 0.21, 0.2, -0.12],
+    ]), width: 0.8, height: 0.85, depth: 0.58, color: '#66747b' },
+    base: { geometry: landmarkGeometry([
+        [new THREE.CylinderGeometry(0.45, 0.5, 0.23, 8), 0, -0.13, 0],
+        [new THREE.CylinderGeometry(0.16, 0.2, 0.39, 6), 0, 0.13, 0],
+        [new THREE.ConeGeometry(0.24, 0.16, 6), 0, 0.4, 0],
+    ]), width: 1, height: 0.75, depth: 1, color: '#6c765d' },
+    camp: { geometry: landmarkGeometry([
+        [new THREE.ConeGeometry(0.33, 0.43, 4), -0.17, 0, -0.1, 1, 1, 1, Math.PI / 4],
+        [new THREE.ConeGeometry(0.25, 0.33, 4), 0.22, -0.05, 0.18, 1, 1, 1, Math.PI / 4],
+    ]), width: 1, height: 0.5, depth: 0.85, color: '#9c8362' },
+};
+const WORLD_LANDMARK_TYPES = Object.keys(WORLD_LANDMARKS);
+const landmarkMat = new THREE.MeshStandardMaterial();
 
 const treeMat = new THREE.MeshStandardMaterial();
 const houseMat = new THREE.MeshStandardMaterial();
@@ -63,34 +129,41 @@ window.isLocationActive = false;
 
 function createCloudTexture() {
     const canvas = document.createElement('canvas');
-    canvas.width = 2048;
-    canvas.height = 1024;
+    canvas.width = 1024;
+    canvas.height = 512;
     const ctx = canvas.getContext('2d');
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    for (let layer = 0; layer < 3; layer++) {
-        const count = 60 + layer * 30;
-        const baseAlpha = 0.1 + layer * 0.03;
-        const baseSize = 100 + layer * 50;
-
-        for (let i = 0; i < count; i++) {
-            // Облака от 5% до 95% ширины
-            const x = canvas.width * (0.05 + Math.random() * 0.9);
-            const y = Math.random() * canvas.height;
-            const radiusX = (baseSize + Math.random() * 100) * 0.85; // ширина уменьшена на 15%
-            const radiusY = baseSize * 0.3 + Math.random() * 30;
-            const alpha = baseAlpha + Math.random() * 0.1;
-
-            const gradient = ctx.createRadialGradient(x, y, 0, x, y, radiusX);
-            gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
-            gradient.addColorStop(0.3, `rgba(255,255,255,${alpha*0.5})`);
-            gradient.addColorStop(0.7, `rgba(255,255,255,0)`);
-
+    let seed = 34171;
+    const random = () => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return seed / 4294967296;
+    };
+    const puff = (x, y, radiusX, radiusY, opacity) => {
+        for (const offset of [-canvas.width, 0, canvas.width]) {
+            const wrappedX = x + offset;
+            if (wrappedX + radiusX < 0 || wrappedX - radiusX > canvas.width) continue;
+            ctx.save();
+            ctx.translate(wrappedX, y);
+            ctx.scale(1, radiusY / radiusX);
+            const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, radiusX);
+            gradient.addColorStop(0, `rgba(255,255,255,${opacity})`);
+            gradient.addColorStop(0.45, `rgba(255,255,255,${opacity * 0.7})`);
+            gradient.addColorStop(1, 'rgba(255,255,255,0)');
             ctx.fillStyle = gradient;
             ctx.beginPath();
-            ctx.ellipse(x, y, radiusX, radiusY, 0, 0, Math.PI * 2);
+            ctx.arc(0, 0, radiusX, 0, Math.PI * 2);
             ctx.fill();
+            ctx.restore();
+        }
+    };
+    for (let i = 0; i < 65; i++) {
+        const x = random() * canvas.width;
+        const y = 20 + random() * (canvas.height - 40);
+        const width = 75 + random() * 90;
+        puff(x, y, width, 12 + random() * 19, 0.18);
+        for (let j = 0; j < 5; j++) {
+            const offset = (j - 2) * width * 0.28;
+            puff(x + offset, y - random() * 12, width * (0.32 + random() * 0.22),
+                15 + random() * 19, 0.23 + random() * 0.12);
         }
     }
 
@@ -104,15 +177,20 @@ function createCloudTexture() {
 // Создаём текстуру один раз
 const cloudTexture = createCloudTexture();
 
-// Дневная сфера (светлое небо + облака)
-const daySkySphere = (() => {
+// Единое небо: время плавно смешивает день и ночь, облачность меняет покрытие.
+const worldSkySphere = (() => {
     const geometry = new THREE.SphereGeometry(980, 64, 40);
-    // Используем шейдер для градиента + текстура облаков
     const material = new THREE.ShaderMaterial({
         uniforms: {
             cloudTexture: { value: cloudTexture },
-            topColor: { value: new THREE.Color(0x1a2b3c) },
-            bottomColor: { value: new THREE.Color(0x7ec8ff) }
+            dayTopColor: { value: new THREE.Color(0x5c9db8) },
+            dayBottomColor: { value: new THREE.Color(0xd5d5bd) },
+            nightTopColor: { value: new THREE.Color(0x08111d) },
+            nightBottomColor: { value: new THREE.Color(0x263646) },
+            daylight: { value: 1 },
+            clarity: { value: 1 },
+            starlight: { value: 0 },
+            starRotation: { value: 0 }
         },
         vertexShader: `
             varying vec2 vUv;
@@ -125,64 +203,43 @@ const daySkySphere = (() => {
         `,
         fragmentShader: `
             uniform sampler2D cloudTexture;
-            uniform vec3 topColor;
-            uniform vec3 bottomColor;
+            uniform vec3 dayTopColor;
+            uniform vec3 dayBottomColor;
+            uniform vec3 nightTopColor;
+            uniform vec3 nightBottomColor;
+            uniform float daylight;
+            uniform float clarity;
+            uniform float starlight;
+            uniform float starRotation;
             varying vec2 vUv;
             varying vec3 vPosition;
 
             void main() {
-                // Вертикальный градиент (по Y)
-                float h = normalize(vPosition).y * 0.5 + 0.5;
-                vec3 skyGradient = mix(bottomColor, topColor, h);
-
-                // Облака
-                vec4 clouds = texture2D(cloudTexture, vUv);
-                clouds.rgb *= 1.0; // можно регулировать яркость
-
-                // Смешиваем: облака поверх градиента
-                vec3 finalColor = mix(skyGradient, clouds.rgb, clouds.a);
-                gl_FragColor = vec4(finalColor, 1.0);
-            }
-        `,
-        side: THREE.BackSide
-    });
-    return new THREE.Mesh(geometry, material);
-})();
-
-// Ночная сфера (тёмное небо + тёмные облака)
-const nightSkySphere = (() => {
-    const geometry = new THREE.SphereGeometry(980, 64, 40);
-    const material = new THREE.ShaderMaterial({
-        uniforms: {
-            cloudTexture: { value: cloudTexture },
-            topColor: { value: new THREE.Color(0x050510) },
-            bottomColor: { value: new THREE.Color(0x1a1a2e) }
-        },
-        vertexShader: `
-            varying vec2 vUv;
-            varying vec3 vPosition;
-            void main() {
-                vUv = uv;
-                vPosition = position;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            }
-        `,
-        fragmentShader: `
-            uniform sampler2D cloudTexture;
-            uniform vec3 topColor;
-            uniform vec3 bottomColor;
-            varying vec2 vUv;
-            varying vec3 vPosition;
-
-            void main() {
-                float h = normalize(vPosition).y * 0.5 + 0.5;
-                vec3 skyGradient = mix(bottomColor, topColor, h);
-
-                vec4 clouds = texture2D(cloudTexture, vUv);
-                clouds.rgb *= 0.3; // затемняем облака
-                clouds.a *= 0.5;    // делаем полупрозрачнее
-
-                vec3 finalColor = mix(skyGradient, clouds.rgb, clouds.a);
+                vec3 direction = normalize(vPosition);
+                float h = smoothstep(-0.08, 0.8, direction.y);
+                vec3 dayColor = mix(dayBottomColor, dayTopColor, h);
+                vec3 nightColor = mix(nightBottomColor, nightTopColor, h);
+                vec3 skyColor = mix(nightColor, dayColor, daylight);
+                float cloudPattern = smoothstep(0.04, 0.38, texture2D(cloudTexture, vUv).a);
+                float cloudCover = mix(0.82 + cloudPattern * 0.18, cloudPattern * 0.5, clarity);
+                vec3 cloudColor = mix(vec3(0.09, 0.11, 0.14), vec3(0.52, 0.56, 0.59), daylight);
+                cloudColor += vec3(0.1, 0.1, 0.09) * daylight * cloudPattern;
+                vec3 finalColor = mix(skyColor, cloudColor, cloudCover);
+                vec3 rotatedStars = vec3(
+                    direction.x * cos(starRotation) + direction.y * sin(starRotation),
+                    direction.y * cos(starRotation) - direction.x * sin(starRotation),
+                    direction.z
+                );
+                vec2 skyUv = vec2(
+                    atan(rotatedStars.z, rotatedStars.x) / 6.2831853 + 0.5,
+                    asin(rotatedStars.y) / 3.14159265 + 0.5
+                );
+                vec2 starGrid = skyUv * vec2(180.0, 90.0);
+                vec2 starCell = floor(starGrid);
+                float starSeed = fract(sin(dot(starCell, vec2(12.9898, 78.233))) * 43758.5453);
+                float starShape = 1.0 - smoothstep(0.04, 0.16, length(fract(starGrid) - 0.5));
+                float star = step(0.975, starSeed) * starShape * starlight * clarity * (1.0 - cloudCover);
+                finalColor += vec3(0.9, 0.95, 1.0) * star;
                 gl_FragColor = vec4(finalColor, 1.0);
             }
         `,
@@ -196,43 +253,95 @@ let stars = null;
 function createStars() {
     const geometry = new THREE.BufferGeometry();
     const vertices = [];
-    for (let i = 0; i < 3000; i++) {
-        const x = (Math.random() - 0.5) * 3000;
-        const y = (Math.random() - 0.5) * 3000;
-        const z = (Math.random() - 0.5) * 3000;
-        vertices.push(x, y, z);
+    for (let i = 0; i < 1900; i++) {
+        const azimuth = Math.random() * Math.PI * 2;
+        // The world camera looks down, so its visible horizon is below the camera.
+        const elevation = -0.75 + Math.random() * 1.35;
+        const horizontal = Math.sqrt(1 - elevation * elevation) * 900;
+        vertices.push(
+            Math.cos(azimuth) * horizontal,
+            elevation * 900,
+            Math.sin(azimuth) * horizontal,
+        );
     }
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-    const material = new THREE.PointsMaterial({ color: 0xffffff, size: 0.5 });
+    const material = new THREE.PointsMaterial({
+        color: 0xe5eef5, size: 2.6, sizeAttenuation: false, depthWrite: false,
+        fog: false, transparent: true, opacity: 0,
+    });
     stars = new THREE.Points(geometry, material);
+    stars.renderOrder = 1;
     scene.add(stars);
 }
 
-// Добавляем сферы в сцену
-scene.add(daySkySphere);
-scene.add(nightSkySphere);
+scene.add(worldSkySphere);
 createStars();
 
-// По умолчанию показываем ночную сферу
-daySkySphere.visible = false;
-nightSkySphere.visible = true;
-stars.visible = true;
+const sunDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(10, 20, 12),
+    new THREE.MeshBasicMaterial({ color: 0xffe6a0, fog: false, depthWrite: false, transparent: true }),
+);
+const moonDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(8, 20, 12),
+    new THREE.MeshBasicMaterial({ color: 0xd9e5f2, fog: false, depthWrite: false, transparent: true }),
+);
+sunDisc.renderOrder = 2;
+moonDisc.renderOrder = 2;
+worldSkySphere.add(sunDisc);
+worldSkySphere.add(moonDisc);
 
-export function setSkyMode(mode) {
-    if (mode === 'day') {
-        daySkySphere.visible = true;
-        nightSkySphere.visible = false;
-        if (stars) stars.visible = false;
-    } else {
-        daySkySphere.visible = false;
-        nightSkySphere.visible = true;
-        if (stars) stars.visible = true;
-    }
+let celestialMinutes = 480;
+const MIN_WORLD_SHADOW_LIGHT_Y = 0.8;
+
+function updateCelestialPositions() {
+    const angle = celestialMinutes >= 360 && celestialMinutes < 1200
+        ? (celestialMinutes - 360) * Math.PI / 840
+        : Math.PI + ((celestialMinutes + (celestialMinutes < 360 ? 1440 : 0)) - 1200) * Math.PI / 600;
+    const sunDirection = new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0.22).normalize();
+    const moonDirection = sunDirection.clone().negate();
+    sunDisc.position.copy(sunDirection).multiplyScalar(920);
+    moonDisc.position.copy(moonDirection).multiplyScalar(920);
+    sunDisc.visible = sunDirection.y > 0.02;
+    moonDisc.visible = moonDirection.y > 0.02;
+    worldSkySphere.material.uniforms.starRotation.value = angle;
+    stars.rotation.z = angle;
+
+    const celestialLightDirection = sunDirection.y > 0 ? sunDirection : moonDirection;
+    // Keep the visible sun low at dawn/dusk without stretching terrain shadows across several tiles.
+    const lightDirection = new THREE.Vector3(
+        celestialLightDirection.x,
+        Math.max(celestialLightDirection.y, MIN_WORLD_SHADOW_LIGHT_Y),
+        celestialLightDirection.z,
+    ).normalize();
+    const centerX = (MAX_CHUNK_X + 1) * CHUNK_SIZE / 2;
+    const centerZ = (MAX_CHUNK_Y + 1) * CHUNK_SIZE / 2;
+    directionalLight.target.position.set(centerX, 0, centerZ);
+    directionalLight.position.set(
+        centerX + lightDirection.x * 500,
+        lightDirection.y * 500,
+        centerZ + lightDirection.z * 500,
+    );
+    directionalLight.target.updateMatrixWorld();
+    markWorldShadowsDirty();
 }
 
-export function setDaySkyIntensity(intensity) {
-    // Можно регулировать цвета градиента в зависимости от интенсивности, но пока оставим
-    // Если нужно, добавим позже
+export function setCelestialTime(minutes) {
+    celestialMinutes = ((Math.trunc(Number(minutes) || 0) % 1440) + 1440) % 1440;
+    updateCelestialPositions();
+}
+
+export function setSkyConditions(daylight, clarity, starlight) {
+    const day = THREE.MathUtils.clamp(Number(daylight) || 0, 0, 1);
+    const clear = THREE.MathUtils.clamp(Number(clarity) || 0, 0, 1);
+    const visibleStars = THREE.MathUtils.clamp(Number(starlight) || 0, 0, 1);
+    worldSkySphere.material.uniforms.daylight.value = day;
+    worldSkySphere.material.uniforms.clarity.value = clear;
+    worldSkySphere.material.uniforms.starlight.value = visibleStars;
+    stars.material.opacity = visibleStars * clear;
+    stars.visible = stars.material.opacity > 0.01;
+    sunDisc.material.opacity = (0.06 + 0.94 * clear) * (0.35 + 0.65 * day);
+    moonDisc.material.opacity = (0.04 + 0.88 * clear) * (1 - day * 0.7);
+    scene.background.copy(new THREE.Color(0x101b29).lerp(new THREE.Color(0x8199a0), day * (0.65 + 0.35 * clear)));
 }
 
 // ===== Конец неба =====
@@ -311,6 +420,7 @@ directionalLight.shadow.camera.bottom = -400;
 directionalLight.shadow.bias = 0;
 directionalLight.shadow.normalBias = 0;
 scene.add(directionalLight);
+scene.add(directionalLight.target);
 
 const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
 fillLight.position.set(-50, 50, -50);
@@ -336,6 +446,7 @@ const tileInfoContent = document.getElementById('tile-info-content');
 let previewObject = null;
 
 function getGeometryForType(type) {
+    if (WORLD_LANDMARKS[type]) return WORLD_LANDMARKS[type].geometry;
     switch(type) {
         case 'tree': return treeGeo;
         case 'house': return houseGeo;
@@ -360,7 +471,7 @@ export function createPreviewObject(tile, params) {
     const worldX = tile.chunkX * CHUNK_SIZE + tile.tileX + 0.5 + offsetX;
     const worldZ = tile.chunkY * CHUNK_SIZE + tile.tileY + 0.5 + offsetZ;
     const height = tile.tileData.height || 1.0;
-    const baseHalf = getBaseHalfHeight(type, anomalyType);
+    const baseHalf = getBaseGroundOffset(type, anomalyType);
     const yPos = height + baseHalf * scale;
 
     let obj;
@@ -397,11 +508,16 @@ export function removePreviewObject() {
 export function setMapDimensions(widthChunks, heightChunks) {
     MAX_CHUNK_X = widthChunks - 1;
     MAX_CHUNK_Y = heightChunks - 1;
+    updateCelestialPositions();
     console.log(`Map dimensions set: ${widthChunks} x ${heightChunks} chunks`);
 }
 
 function getBaseDimensions(type, anomalyType) {
     const base = { width: 0.6, height: 0.6, depth: 0.6 };
+    if (WORLD_LANDMARKS[type]) {
+        const { width, height, depth } = WORLD_LANDMARKS[type];
+        return { width, height, depth };
+    }
     if (type === 'tree') {
         base.width = 0.6;
         base.height = 1.0;
@@ -436,15 +552,23 @@ function getBaseHalfHeight(type, anomalyType) {
     return dims.height / 2;
 }
 
+function getBaseGroundOffset(type, anomalyType) {
+    const landmark = WORLD_LANDMARKS[type];
+    if (!landmark) return getBaseHalfHeight(type, anomalyType);
+    if (!landmark.geometry.boundingBox) landmark.geometry.computeBoundingBox();
+    return -landmark.geometry.boundingBox.min.y;
+}
+
 export function getObjectHalfHeight(type, anomalyType) {
     return getBaseHalfHeight(type, anomalyType);
 }
 
 export function getObjectHeightOffset(type, anomalyType) {
-    return getBaseHalfHeight(type, anomalyType);
+    return getBaseGroundOffset(type, anomalyType);
 }
 
 function getDefaultColorForType(type) {
+    if (WORLD_LANDMARKS[type]) return WORLD_LANDMARKS[type].color;
     switch(type) {
         case 'tree': return '#2d5a27';
         case 'house': return '#8B4513';
@@ -652,6 +776,24 @@ function createAnomalyLOD(x, y, z, type = 'electric', baseColor = '#00ffff', sca
     return lod;
 }
 
+function createAnomalyFieldLOD(tile, x, z) {
+    const field = tile.anomaly_field;
+    if (!field?.name) return null;
+    const type = String(field.field_type || '').toLowerCase();
+    const visual = type.includes('электр') ? ['electric', '#7fd6f3']
+        : type.includes('термич') ? ['fire', '#e69967']
+            : type.includes('химич') ? ['acid', '#9ecb80']
+                : type.includes('радио') ? ['radiation', '#bbd565']
+                    : type.includes('пси') ? ['psi', '#8eace4']
+                        : ['void', '#c3a4d5'];
+    const rank = Math.max(1, Math.min(4, Number(field.rank) || 1));
+    const lod = createAnomalyLOD(
+        x, (tile.height || 1) + 0.12, z, visual[0], visual[1], 0.55 + rank * 0.12,
+    );
+    lod.userData.anomalyField = field.name;
+    return lod;
+}
+
 const FAR_ANOMALY_DISTANCE_SQ = 200 * 200;
 const farAnomalyGeo = new THREE.SphereGeometry(0.2, 4);
 const farAnomalyMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
@@ -729,16 +871,46 @@ function animateChunkAnomalies(time) {
     animateAnomalyEffects(visibleNearAnomalies, time);
 }
 
-// --- Вода: простой цветной материал (без текстуры) ---
+function createWaterTexture() {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const context = canvas.getContext('2d');
+    const image = context.createImageData(size, size);
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            const u = x / size * Math.PI * 2;
+            const v = y / size * Math.PI * 2;
+            const waves = Math.sin(u * 4 + Math.sin(v * 2) * 0.7)
+                + 0.55 * Math.sin(v * 7 - u * 2)
+                + 0.25 * Math.sin((u + v) * 11);
+            const shade = Math.round(waves * 8);
+            const index = (y * size + x) * 4;
+            image.data[index] = 36 + shade;
+            image.data[index + 1] = 92 + shade;
+            image.data[index + 2] = 110 + shade;
+            image.data[index + 3] = 255;
+        }
+    }
+    context.putImageData(image, 0, 0);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.encoding = THREE.sRGBEncoding;
+    return texture;
+}
+
+const waterTexture = createWaterTexture();
 const waterMat = new THREE.MeshStandardMaterial({
-    color: 0x1E90FF,
-    emissive: 0x0,
+    map: waterTexture,
+    color: 0xc9e1e3,
+    roughness: 0.38,
+    metalness: 0.08,
+    emissive: 0x07121a,
     transparent: false,
     opacity: 1.0
 });
 const groundGeo = new THREE.BoxGeometry(1, 1, 1);
-const planeGeo = new THREE.PlaneGeometry(0.99, 0.99);
-planeGeo.rotateX(-Math.PI / 2);
 const groundMat = new THREE.MeshStandardMaterial();
 
 function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, visible = true) {
@@ -757,7 +929,7 @@ function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, vis
             const height = tile.height || 1.0;
             dummy.position.set(chunkX * size + x + 0.5, height / 2, chunkY * size + y + 0.5);
             if (tile.terrain === 'water') {
-                dummy.scale.set(1, 1, 1);
+                dummy.scale.set(1, height, 1);
                 dummy.updateMatrix();
                 waterIndices[tileIndex] = waterCount;
                 water.setMatrixAt(waterCount++, dummy.matrix);
@@ -783,6 +955,64 @@ function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, vis
 }
 
 // --- Функции для чанков ---
+function createLandmarkMeshes(tilesData) {
+    const counts = Object.fromEntries(WORLD_LANDMARK_TYPES.map(type => [type, 0]));
+    for (const row of tilesData) {
+        for (const tile of row) {
+            for (const object of tile.objects || []) {
+                if (counts[object.type] !== undefined) counts[object.type]++;
+            }
+        }
+    }
+    return Object.fromEntries(WORLD_LANDMARK_TYPES.map(type => {
+        const count = counts[type];
+        if (!count) return [type, null];
+        const mesh = new THREE.InstancedMesh(WORLD_LANDMARKS[type].geometry, landmarkMat, count);
+        mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+        mesh.castShadow = type !== 'road';
+        mesh.receiveShadow = false;
+        return [type, mesh];
+    }));
+}
+
+function fillLandmarkMeshes(meshes, tilesData, cx, cy) {
+    const size = tilesData.length;
+    const indices = Object.fromEntries(WORLD_LANDMARK_TYPES.map(type => [
+        type, Array.from({ length: size * size }, () => []),
+    ]));
+    const nextIndex = Object.fromEntries(WORLD_LANDMARK_TYPES.map(type => [type, 0]));
+    const dummy = new THREE.Object3D();
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            const tile = tilesData[y][x];
+            for (const object of tile.objects || []) {
+                const mesh = meshes[object.type];
+                if (!mesh) continue;
+                const scale = object.scale || 1;
+                dummy.position.set(
+                    cx * size + x + 0.5 + (object.x || 0),
+                    (tile.height || 1) + getBaseGroundOffset(object.type) * scale,
+                    cy * size + y + 0.5 + (object.z || 0),
+                );
+                dummy.rotation.set(0, THREE.MathUtils.degToRad(object.rotation || 0), 0);
+                dummy.scale.setScalar(scale);
+                dummy.updateMatrix();
+                const index = nextIndex[object.type]++;
+                mesh.setMatrixAt(index, dummy.matrix);
+                mesh.setColorAt(index, new THREE.Color(object.color || getDefaultColorForType(object.type)));
+                indices[object.type][y * size + x].push(index);
+            }
+        }
+    }
+    for (const mesh of Object.values(meshes)) {
+        if (!mesh) continue;
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        scene.add(mesh);
+    }
+    return indices;
+}
+
 export function addChunk(cx, cy, tilesData) {
     if (cx < MIN_CHUNK || cx > MAX_CHUNK_X || cy < MIN_CHUNK || cy > MAX_CHUNK_Y) return;
 
@@ -795,12 +1025,14 @@ export function addChunk(cx, cy, tilesData) {
     const groundInstances = new THREE.InstancedMesh(groundGeo, groundMat, totalTiles);
     groundInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalTiles * 3), 3);
 
-    const waterInstances = new THREE.InstancedMesh(planeGeo, waterMat, totalTiles);
+    const waterInstances = new THREE.InstancedMesh(groundGeo, waterMat, totalTiles);
 
     groundInstances.castShadow = false;
     groundInstances.receiveShadow = true;
+    groundInstances.frustumCulled = false;
     waterInstances.castShadow = false;
     waterInstances.receiveShadow = false;
+    waterInstances.frustumCulled = false;
 
     let treeCount = 0, houseCount = 0, fenceCount = 0;
     for (let y = 0; y < size; y++) {
@@ -863,34 +1095,16 @@ export function addChunk(cx, cy, tilesData) {
             minZ = Math.min(minZ, worldZ - 0.5);
             maxZ = Math.max(maxZ, worldZ + 0.5);
 
+            const fieldLOD = createAnomalyFieldLOD(tile, worldX, worldZ);
+            if (fieldLOD) {
+                scene.add(fieldLOD);
+                anomalyLODs.push(fieldLOD);
+            }
+
             if (tile.objects) {
                 tile.objects.forEach(obj => {
-                    if (obj.type === 'anomaly') {
-                        let anomalyType = obj.anomalyType;
-                        if (!anomalyType) {
-                            anomalyType = ANOMALY_TYPES[Math.floor(Math.random() * ANOMALY_TYPES.length)];
-                            obj.anomalyType = anomalyType;
-                        }
-                        const baseHalf = getBaseHalfHeight('anomaly', anomalyType);
-                        const yPos = height + baseHalf * (obj.scale || 1.0);
-                        const lod = createAnomalyLOD(
-                            worldX + (obj.x || 0),
-                            yPos,
-                            worldZ + (obj.z || 0),
-                            anomalyType,
-                            obj.color || getDefaultColorForType('anomaly'),
-                            obj.scale || 1.0
-                        );
-                        lod.traverse(child => {
-                            if (child.isMesh) {
-                                child.castShadow = false;
-                                child.receiveShadow = false;
-                            }
-                        });
-                        scene.add(lod);
-                        anomalyLODs.push(lod);
-                    } else {
-                        const baseHalf = getBaseHalfHeight(obj.type);
+                    if (obj.type !== 'anomaly') {
+                        const baseHalf = getBaseGroundOffset(obj.type);
                         const yPos = height + baseHalf * (obj.scale || 1.0);
                         dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
                         dummy.position.set(
@@ -945,15 +1159,14 @@ export function addChunk(cx, cy, tilesData) {
     if (treeInstances) scene.add(treeInstances);
     if (houseInstances) scene.add(houseInstances);
     if (fenceInstances) scene.add(fenceInstances);
+    const landmarkMeshes = createLandmarkMeshes(tilesData);
+    const landmarkIndices = fillLandmarkMeshes(landmarkMeshes, tilesData, cx, cy);
 
     const farAnomalies = createFarAnomalyInstances(anomalyLODs);
 
     const box = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ));
     chunkBounds.push({ box, mesh: groundInstances, key });
     if (waterInstances) chunkBounds.push({ box, mesh: waterInstances, key });
-    if (treeInstances) chunkBounds.push({ box, mesh: treeInstances, key });
-    if (houseInstances) chunkBounds.push({ box, mesh: houseInstances, key });
-    if (fenceInstances) chunkBounds.push({ box, mesh: fenceInstances, key });
 
     chunksMap.set(key, {
         ground: groundInstances,
@@ -961,6 +1174,8 @@ export function addChunk(cx, cy, tilesData) {
         trees: treeInstances,
         houses: houseInstances,
         fences: fenceInstances,
+        landmarks: landmarkMeshes,
+        landmarkIndices,
         anomalyLODs: anomalyLODs,
         farAnomalies,
         farAnomalyActive: [],
@@ -969,7 +1184,7 @@ export function addChunk(cx, cy, tilesData) {
         chunkY: cy,
         terrainVisible: true,
         ...terrainIndices,
-        bounds: box.clone(),
+        bounds: box,
         objectIndices: objectIndices,
         pendingRebuild: null
     });
@@ -1001,6 +1216,12 @@ export function removeChunk(cx, cy) {
     entry.trees?.dispose();
     entry.houses?.dispose();
     entry.fences?.dispose();
+    for (const mesh of Object.values(entry.landmarks || {})) {
+        if (mesh) {
+            scene.remove(mesh);
+            mesh.dispose();
+        }
+    }
     disposeChunkAnomalyLODs(entry.anomalyLODs);
     if (entry.farAnomalies) {
         scene.remove(entry.farAnomalies);
@@ -1026,9 +1247,10 @@ function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
     if (!tile.objects) return;
 
     let treeIdxPos = 0, houseIdxPos = 0, fenceIdxPos = 0;
+    const landmarkPositions = Object.fromEntries(WORLD_LANDMARK_TYPES.map(type => [type, 0]));
 
     tile.objects.forEach(obj => {
-        const baseHalf = getBaseHalfHeight(obj.type, obj.anomalyType);
+        const baseHalf = getBaseGroundOffset(obj.type, obj.anomalyType);
         const yPos = newHeight + baseHalf * (obj.scale || 1.0);
 
         dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
@@ -1049,12 +1271,18 @@ function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
         } else if (obj.type === 'fence' && entry.fences) {
             const idx = entry.objectIndices.fences[tileIndex][fenceIdxPos++];
             entry.fences.setMatrixAt(idx, dummy.matrix);
+        } else if (entry.landmarks?.[obj.type]) {
+            const idx = entry.landmarkIndices[obj.type][tileIndex][landmarkPositions[obj.type]++];
+            entry.landmarks[obj.type].setMatrixAt(idx, dummy.matrix);
         }
     });
 
     if (entry.trees) entry.trees.instanceMatrix.needsUpdate = true;
     if (entry.houses) entry.houses.instanceMatrix.needsUpdate = true;
     if (entry.fences) entry.fences.instanceMatrix.needsUpdate = true;
+    for (const mesh of Object.values(entry.landmarks || {})) {
+        if (mesh) mesh.instanceMatrix.needsUpdate = true;
+    }
 }
 
 // --- Функция для полного перестроения объектов чанка (при изменении объектов) ---
@@ -1070,6 +1298,12 @@ function rebuildChunkObjects(entry) {
     if (entry.fences) {
         scene.remove(entry.fences);
         entry.fences.dispose();
+    }
+    for (const mesh of Object.values(entry.landmarks || {})) {
+        if (mesh) {
+            scene.remove(mesh);
+            mesh.dispose();
+        }
     }
     disposeChunkAnomalyLODs(entry.anomalyLODs);
     if (entry.farAnomalies) {
@@ -1133,34 +1367,16 @@ function rebuildChunkObjects(entry) {
             const height = tile.height || 1.0;
             const tileIndex = y * size + x;
 
+            const fieldLOD = createAnomalyFieldLOD(tile, worldX, worldZ);
+            if (fieldLOD) {
+                scene.add(fieldLOD);
+                anomalyLODs.push(fieldLOD);
+            }
+
             if (tile.objects) {
                 tile.objects.forEach(obj => {
-                    if (obj.type === 'anomaly') {
-                        let anomalyType = obj.anomalyType;
-                        if (!anomalyType) {
-                            anomalyType = ANOMALY_TYPES[Math.floor(Math.random() * ANOMALY_TYPES.length)];
-                            obj.anomalyType = anomalyType;
-                        }
-                        const baseHalf = getBaseHalfHeight('anomaly', anomalyType);
-                        const yPos = height + baseHalf * (obj.scale || 1.0);
-                        const lod = createAnomalyLOD(
-                            worldX + (obj.x || 0),
-                            yPos,
-                            worldZ + (obj.z || 0),
-                            anomalyType,
-                            obj.color || getDefaultColorForType('anomaly'),
-                            obj.scale || 1.0
-                        );
-                        lod.traverse(child => {
-                            if (child.isMesh) {
-                                child.castShadow = false;
-                                child.receiveShadow = false;
-                            }
-                        });
-                        scene.add(lod);
-                        anomalyLODs.push(lod);
-                    } else {
-                        const baseHalf = getBaseHalfHeight(obj.type);
+                    if (obj.type !== 'anomaly') {
+                        const baseHalf = getBaseGroundOffset(obj.type);
                         const yPos = height + baseHalf * (obj.scale || 1.0);
                         dummy.rotation.set(0, THREE.MathUtils.degToRad(obj.rotation || 0), 0);
                         dummy.position.set(
@@ -1210,10 +1426,16 @@ function rebuildChunkObjects(entry) {
         fenceInstances.instanceColor.needsUpdate = true;
         scene.add(fenceInstances);
     }
+    const landmarkMeshes = createLandmarkMeshes(tilesData);
+    const landmarkIndices = fillLandmarkMeshes(
+        landmarkMeshes, tilesData, entry.chunkX, entry.chunkY,
+    );
 
     entry.trees = treeInstances;
     entry.houses = houseInstances;
     entry.fences = fenceInstances;
+    entry.landmarks = landmarkMeshes;
+    entry.landmarkIndices = landmarkIndices;
     entry.anomalyLODs = anomalyLODs;
     entry.farAnomalies = createFarAnomalyInstances(anomalyLODs);
     entry.farAnomalyActive = [];
@@ -1233,6 +1455,9 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     lastHoverRaycastAt = -Infinity;
 
     if (updates.terrain !== undefined || updates.height !== undefined) {
+        if (entry.bounds) {
+            entry.bounds.max.y = Math.max(entry.bounds.max.y, (tile.height || 1) + 0.5);
+        }
         const tileIndex = tileY * CHUNK_SIZE + tileX;
         const groundIndex = entry.groundIndices[tileIndex];
         const waterIndex = entry.waterIndices[tileIndex];
@@ -1246,7 +1471,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
             const height = tile.height || 1.0;
             dummy.position.set(chunkX * CHUNK_SIZE + tileX + 0.5, height / 2, chunkY * CHUNK_SIZE + tileY + 0.5);
             if (isWater) {
-                dummy.scale.set(1, 1, 1);
+                dummy.scale.set(1, height, 1);
                 dummy.updateMatrix();
                 entry.water.setMatrixAt(waterIndex, dummy.matrix);
                 entry.water.instanceMatrix.needsUpdate = true;
@@ -1263,10 +1488,12 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
 
     if (updates.height !== undefined) {
         updateTileObjectsPositions(entry, tileX, tileY, tile.height);
+        lastChunkVisibilityAt = -Infinity;
         markWorldShadowsDirty();
     }
 
-    if (updates.objects !== undefined) {
+    if (updates.objects !== undefined || updates.anomaly_field !== undefined
+        || (updates.height !== undefined && tile.anomaly_field)) {
         if (entry.pendingRebuild) {
             cancelAnimationFrame(entry.pendingRebuild);
         }
@@ -1328,13 +1555,19 @@ function setVisible(chunk, visible, naturalVisible = false, structureVisible = f
     const visibilityChanged = (chunk.ground && chunk.ground.visible !== groundVisible)
         || (chunk.trees && chunk.trees.visible !== naturalVisible)
         || (chunk.houses && chunk.houses.visible !== structureVisible)
-        || (chunk.fences && chunk.fences.visible !== naturalVisible);
+        || (chunk.fences && chunk.fences.visible !== naturalVisible)
+        || Object.entries(chunk.landmarks || {}).some(([type, mesh]) => (
+            mesh && mesh.visible !== (type === 'forest' ? naturalVisible : structureVisible)
+        ));
     chunk.terrainVisible = visible;
     if (chunk.ground) chunk.ground.visible = groundVisible;
     if (chunk.water) chunk.water.visible = waterVisible;
     if (chunk.trees) chunk.trees.visible = naturalVisible;
     if (chunk.houses) chunk.houses.visible = structureVisible;
     if (chunk.fences) chunk.fences.visible = naturalVisible;
+    for (const [type, mesh] of Object.entries(chunk.landmarks || {})) {
+        if (mesh) mesh.visible = type === 'forest' ? naturalVisible : structureVisible;
+    }
     updateFarAnomalyInstances(chunk, anomalyVisible);
     if (visibilityChanged) markWorldShadowsDirty();
 }
@@ -1354,8 +1587,9 @@ export function setWorldTravelTileClickCallback(callback) {
 function performRaycast(clientX, clientY) {
     if (window.isLocationActive) return;
     lastHoverRaycastAt = performance.now();
-    mouse.x = (clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
 
     const candidates = chunkBounds.filter(entry => entry.mesh.visible && raycaster.ray.intersectsBox(entry.box)).map(e => e.mesh);
@@ -1367,9 +1601,9 @@ function performRaycast(clientX, clientY) {
     }
     if (tileInfoDiv) tileInfoDiv.style.display = 'none';
 
-    if (intersects.length > 0) {
-        const intersect = intersects[0];
-        const point = intersect.point;
+    const point = intersects[0]?.point
+        || (editMode ? raycaster.ray.intersectPlane(worldBrushPlane, new THREE.Vector3()) : null);
+    if (point) {
 
         const globalX = point.x;
         const globalZ = point.z;
@@ -1399,12 +1633,9 @@ function performRaycast(clientX, clientY) {
 
                 if (tileInfoDiv && tileInfoContent) {
                     tileInfoContent.innerHTML = `
-                        <b>Тайл (${chunkX * CHUNK_SIZE + tileX}, ${chunkY * CHUNK_SIZE + tileY})</b><br>
-                        Ландшафт: ${tileData.terrain}<br>
+                        <b>(${chunkX * CHUNK_SIZE + tileX}, ${chunkY * CHUNK_SIZE + tileY})</b><br>
                         Высота: ${tileData.height}<br>
-                        Название: ${tileData.name || '—'}<br>
-                        Радиация: ${tileData.radiation !== undefined ? tileData.radiation : '—'}<br>
-                        Объектов: ${tileData.objects ? tileData.objects.length : 0}
+                        Радиация: ${tileData.radiation ?? 0}
                     `;
                     tileInfoDiv.style.display = 'block';
                 }
@@ -1415,8 +1646,14 @@ function performRaycast(clientX, clientY) {
 
 function canvasMouseDownHandler(event) {
     if (window.isLocationActive) return;
-    event.preventDefault();
+    if (event.button === 2 && editMode) {
+        controls.enabled = true;
+        controlsDisabled = false;
+        brushActive = false;
+        return;
+    }
     if (event.button !== 0) return;
+    event.preventDefault();
     if (event.target.closest('.ui-overlay')) return;
 
     performRaycast(event.clientX, event.clientY);
@@ -1425,7 +1662,7 @@ function canvasMouseDownHandler(event) {
     lastProcessedTileKey = null;
 
     const isEditing = editMode && !window.isWorldTravelSelectionActive?.()
-        && (event.altKey || event.shiftKey || ['terrain', 'height', 'erase'].includes(window.worldEditorTool));
+        && (event.altKey || event.shiftKey || ['terrain', 'height', 'radiation', 'erase'].includes(window.worldEditorTool));
 
     if (isEditing) {
         event.preventDefault();
@@ -1469,7 +1706,9 @@ function canvasMouseDownHandler(event) {
     }
 }
 
-renderer.domElement.addEventListener('mousedown', canvasMouseDownHandler, { capture: true });
+renderer.domElement.addEventListener('pointerdown', canvasMouseDownHandler, { capture: true });
+renderer.domElement.addEventListener('contextmenu', event => event.preventDefault());
+renderer.domElement.addEventListener('dragstart', event => event.preventDefault());
 
 window.addEventListener('click', (event) => {
     if (window.isLocationActive) return;
@@ -1560,6 +1799,9 @@ function animate() {
         }
         updateRain(delta);
         animateChunkAnomalies(now);
+        waterTexture.offset.set((now * 0.000002) % 1, (now * 0.000001) % 1);
+        worldSkySphere.position.copy(camera.position);
+        stars.position.copy(camera.position);
 
         if ((lastMouseX !== 0 || lastMouseY !== 0)
             && !cameraDragActive
@@ -1659,6 +1901,8 @@ window.addEventListener('pointermove', (event) => {
             updates.terrain = window.currentTileType;
         } else if (window.worldEditorTool === 'height') {
             updates.height = window.tileHeight;
+        } else if (window.worldEditorTool === 'radiation') {
+            updates.radiation = window.worldBrushRadiation ?? 0;
         }
         if (Object.keys(updates).length > 0) {
             lastProcessedTileKey = tileKey;
@@ -1710,7 +1954,7 @@ export function getTileHeightAt(globalX, globalZ) {
     return chunk.tilesData[tileY][tileX].height || 1.0;
 }
 
-export { scene, camera, renderer, controls, directionalLight, ambientLight, waterMat };
+export { scene, camera, renderer, controls, directionalLight, ambientLight, fillLight, waterMat };
 
 // ========== ВРЕМЕННОЕ СКРЫТИЕ ГЛОБАЛЬНОЙ КАРТЫ (ДЛЯ ЛОКАЦИЙ) ==========
 let globalCanvasParent = null;

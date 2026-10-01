@@ -28,6 +28,10 @@ let pendingTileUpdates = [];
 let batchUpdateTimeout = null;
 let anomalyFieldCatalog = [];
 let anomalyCatalog = [];
+const WORLD_OBJECT_COLORS = {
+    forest: '#315f3b', hamlet: '#aa8665', village: '#b39474',
+    road: '#756f61', factory: '#66747b', base: '#6c765d', camp: '#9c8362',
+};
 
 const ANOMALY_TYPE_LABELS = {
     void: 'гравитационная',
@@ -52,6 +56,7 @@ export function initMapEdit(lobbyId, authToken) {
     });
     document.getElementById('panel-tools')?.addEventListener('change', event => {
         if (event.target.id === 'tile-type-select') AppState.setCurrentTileType(event.target.value);
+        if (event.target.id === 'world-brush-radiation') setWorldBrushRadiation(event.target.value);
         if (event.target.matches('[data-map-editor-auto-expand]')) {
             setMapEditorAutoExpandEnabled(event.target.checked);
         }
@@ -123,13 +128,20 @@ export function setEditMode(enabled) {
 
 export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     const root = document.getElementById('gm-only-controls');
-    if (!root || !['select', 'terrain', 'height', 'erase'].includes(tool)) return;
+    if (!root || !['select', 'terrain', 'height', 'radiation', 'erase'].includes(tool)) return;
     const previousTool = window.worldEditorTool;
     root.dataset.tool = tool;
     window.worldEditorTool = tool;
     if (autoExpand) expandMapToolsPanelOnToolChange(previousTool, tool);
     root.querySelectorAll('[data-world-tool]').forEach(button => {
         button.setAttribute('aria-pressed', String(button.dataset.worldTool === tool));
+    });
+    document.getElementById('object-type-select')?.addEventListener('change', event => {
+        const color = document.getElementById('object-color');
+        if (color && WORLD_OBJECT_COLORS[event.target.value]) {
+            color.value = WORLD_OBJECT_COLORS[event.target.value];
+            updatePreviewFromModal();
+        }
     });
     const eraser = document.getElementById('eraser-checkbox');
     if (eraser) eraser.checked = tool === 'erase';
@@ -139,6 +151,7 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
         select: 'Выбор без рисования. Двойной клик открывает настройки тайла.',
         terrain: 'Проведите кистью по карте, чтобы изменить покрытие.',
         height: 'Проведите кистью по карте, чтобы изменить высоту.',
+        radiation: 'Проведите кистью по карте, чтобы изменить радиацию.',
         erase: 'Проведите по карте, чтобы удалить объекты с тайлов.',
     }[tool];
 }
@@ -190,7 +203,7 @@ export function applyBrush(centerTile, updates, radius) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-    const allowedFields = ['terrain', 'height', 'objects'];
+    const allowedFields = ['terrain', 'height', 'radiation', 'objects'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
         if (updates[key] !== undefined) {
@@ -292,9 +305,8 @@ function updateTileEditModal() {
 
     let infoHtml = `
         <p>Координаты: (${currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX}, ${currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY})</p>
-        <p>Ландшафт: ${tileData.terrain}</p>
         <p>Высота: ${tileData.height}</p>
-        <p>Объектов: ${tileData.objects ? tileData.objects.length : 0}</p>
+        <p>Радиация: ${tileData.radiation ?? 0}</p>
     `;
     document.getElementById('tile-edit-info').innerHTML = infoHtml;
 
@@ -334,7 +346,6 @@ function updateTileEditModal() {
     document.getElementById('tile-edit-terrain').value = tileData.terrain;
     document.getElementById('tile-edit-height').value = tileData.height;
     document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
-    document.getElementById('tile-edit-name').value = tileData.name || '';
     document.getElementById('tile-edit-radiation').value = tileData.radiation !== undefined ? tileData.radiation : 0;
     document.getElementById('tile-edit-radiation-value').textContent = (tileData.radiation !== undefined ? tileData.radiation : 0).toFixed(1);
     const fieldSelect = document.getElementById('tile-edit-anomaly-field');
@@ -559,6 +570,13 @@ export function setEraserModeFromInput(checked) {
     selectWorldEditorTool(checked ? 'erase' : 'select');
 }
 
+export function setWorldBrushRadiation(value) {
+    const radiation = Math.max(0, Math.min(10, Number(value) || 0));
+    window.worldBrushRadiation = radiation;
+    const output = document.getElementById('world-brush-radiation-value');
+    if (output) output.textContent = radiation.toFixed(1);
+}
+
 export function updateTileEditHeight(value) {
     document.getElementById('tile-edit-height-value').textContent = parseFloat(value).toFixed(1);
 }
@@ -585,24 +603,6 @@ export function updateObjectRotation(value) {
 
 export function updateTileEditRadiation(value) {
     document.getElementById('tile-edit-radiation-value').textContent = parseFloat(value).toFixed(1);
-}
-
-export async function applyNameChange() {
-    if (!currentEditTile) return;
-    const newName = document.getElementById('tile-edit-name').value;
-    await handleTileUpdate(
-        currentEditTile.chunkX,
-        currentEditTile.chunkY,
-        currentEditTile.tileX,
-        currentEditTile.tileY,
-        { name: newName }
-    );
-    const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
-    const chunkEntry = chunksMap.get(chunkKey);
-    if (chunkEntry) {
-        currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
-        updateTileEditModal();
-    }
 }
 
 export async function applyRadiationChange() {

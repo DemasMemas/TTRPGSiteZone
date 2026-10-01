@@ -124,7 +124,7 @@ function makeDraggable(panel, handle, panelId) {
         }
     };
 
-    panel.addEventListener('mousedown', onMouseDown);
+    handle.addEventListener('mousedown', onMouseDown);
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
 }

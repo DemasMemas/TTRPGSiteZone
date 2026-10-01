@@ -107,6 +107,43 @@ def apply_health_maximums(character_data: Dict[str, Any], force: bool = False) -
     return health
 
 
+def heal_character_fully(character_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Reset physical injuries without erasing unrelated character progression."""
+    health = apply_health_maximums(character_data)
+    profile = get_health_maximums(character_data)
+    health["max"] = profile["current"]
+    health["current"] = profile["current"]
+    for key, maximum in profile["zones"].items():
+        zone = health["zones"].setdefault(key, {})
+        zone["max"] = maximum
+        zone["current"] = maximum
+        zone["destructionDamage"] = 0
+    for key, maximum in BASE_ORGAN_MAXIMUMS.items():
+        health["organs"][key] = {"current": maximum, "max": maximum}
+    health["effects"] = []
+    health["wounds"] = []
+    health["bleeding"] = {"effects": []}
+    health["blood"] = "normal"
+    health["bloodStage"] = "normal"
+    health["painLevel"] = 0
+    health["infection"] = 0
+    health["intoxication"] = 0
+    health["radiation"] = 0
+    health["psyState"] = 0
+    health["exhaustion"] = 0
+    health["temperature"] = NORMAL_BODY_TEMPERATURE
+    if isinstance(character_data.get("effects"), list):
+        character_data["effects"] = []
+    combat_meta = health.get("combatMeta")
+    if isinstance(combat_meta, dict):
+        for key in ("damageTakenThisRound", "damagePainAppliedThisRound", "damagePainRound",
+                    "pendingDamageStressTrigger"):
+            combat_meta.pop(key, None)
+    from app.services.effects import sync_health_derived_statuses
+    sync_health_derived_statuses(health)
+    return health
+
+
 def health_zones_to_location(health: Dict[str, Any]) -> Dict[str, Any]:
     zones = (health or {}).get("zones") or {}
     mapping = {

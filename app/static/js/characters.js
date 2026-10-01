@@ -4,6 +4,7 @@ import { showNotification } from './utils.js';
 
 let currentLobbyId;
 let mutantCatalog = [];
+let mutantsBelongToGm = true;
 
 export function initCharacters(lobbyId) {
     currentLobbyId = lobbyId;
@@ -69,7 +70,16 @@ function displayLobbyCharacters(characters) {
     if (mutants.length) {
         const heading = document.createElement('div');
         heading.className = 'character-list-heading mutant-list-heading';
-        heading.textContent = 'Мутанты';
+        heading.innerHTML = '<span>Мутанты</span>';
+        if (window.isGM) {
+            const ownerOption = document.createElement('label');
+            ownerOption.className = 'mutant-owner-option';
+            ownerOption.innerHTML = `<input type="checkbox" id="mutants-belong-to-gm" ${mutantsBelongToGm ? 'checked' : ''}> Принадлежат ГМу`;
+            ownerOption.querySelector('input').addEventListener('change', event => {
+                mutantsBelongToGm = event.target.checked;
+            });
+            heading.appendChild(ownerOption);
+        }
         container.appendChild(heading);
         const groups = new Map();
         mutants.forEach(char => {
@@ -84,6 +94,17 @@ function displayLobbyCharacters(characters) {
             details.className = 'mutant-group';
             const summary = document.createElement('summary');
             summary.textContent = `${group.type}${group.variant ? ` · ${group.variant}` : ''} ×${group.members.length}`;
+            summary.draggable = window.isGM;
+            if (window.isGM) summary.title = 'Перетащить всю группу на карту';
+            summary.addEventListener('dragstart', event => {
+                if (!window.isGM) return;
+                event.dataTransfer.setData('text/plain', JSON.stringify({
+                    characterIds: group.members.map(member => member.id),
+                    ownerId: group.members[0]?.owner_id,
+                    isMutant: true,
+                }));
+                event.dataTransfer.effectAllowed = 'copy';
+            });
             details.appendChild(summary);
             const members = document.createElement('div');
             members.className = 'mutant-group-members';
@@ -104,6 +125,7 @@ function displayLobbyCharacters(characters) {
                         characterId: char.id,
                         characterName: char.name,
                         ownerId: char.owner_id,
+                        isMutant: true,
                     }));
                     event.dataTransfer.effectAllowed = 'copy';
                     row.classList.add('dragging');
@@ -112,6 +134,29 @@ function displayLobbyCharacters(characters) {
                 members.appendChild(row);
             });
             details.appendChild(members);
+            if (window.isGM) {
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'btn btn-sm btn-secondary mutant-group-add';
+                add.textContent = '+ Добавить экземпляр';
+                add.addEventListener('click', async () => {
+                    add.disabled = true;
+                    try {
+                        const created = await Server.createMutant(currentLobbyId, {
+                            mutant_type: group.type,
+                            variant: group.variant || null,
+                            name: group.variant || group.type,
+                        });
+                        await loadLobbyCharacters();
+                        const scene = await import('./locationScene.js');
+                        scene.beginCharacterPlacement(created);
+                    } catch (error) {
+                        add.disabled = false;
+                        showNotification(error.message, 'error');
+                    }
+                });
+                details.appendChild(add);
+            }
             container.appendChild(details);
         });
     }
@@ -214,6 +259,11 @@ export async function openMutantCard(characterId, loadedCharacter = null) {
                 const value = effect.type === 'pain' && effect.value ? ` +${Number(effect.value)}` : '';
                 return `<li><strong>${escapeHtml(label)}${escapeHtml(value)}</strong>${area ? `<span>${escapeHtml(area)}</span>` : ''}</li>`;
             }).join('');
+        const bloodStageLabels = {
+            normal: 'Нет', light: 'Слабая', medium: 'Средняя', severe: 'Сильная',
+            extreme: 'Экстремальная', critical: 'Критическая', fatal: 'Смертельная',
+        };
+        const bloodStage = String(health.bloodStage || health.blood || 'normal').toLowerCase();
         modal.innerHTML = `
             <div class="modal-content mutant-card-content">
                 <button type="button" class="close mutant-card-close">&times;</button>
@@ -225,6 +275,7 @@ export async function openMutantCard(characterId, loadedCharacter = null) {
                     <span><strong>Физ. защита</strong>${Number(mutant.physical_protection) || 0}%</span>
                     <span><strong>Аном. защита</strong>${Number(mutant.anomaly_protection) || 0}%</span>
                 </div>
+                <div class="mutant-card-vitals">Боль: ${Number(health.painLevel) || 0} · Кровопотеря: ${escapeHtml(bloodStageLabels[bloodStage] || bloodStage)}</div>
                 <h4>Части тела</h4>
                 <div class="mutant-health-zones">${zones || '<span>Нет данных</span>'}</div>
                 <h4>Травмы и состояния</h4>
@@ -232,7 +283,7 @@ export async function openMutantCard(characterId, loadedCharacter = null) {
                 <h4>Атаки</h4>
                 <div class="mutant-card-attacks">${attacks || '<span>Нет</span>'}</div>
                 ${(traits || variantTraits) ? `<h4>Особенности</h4><ul class="mutant-card-traits">${traits}${variantTraits}</ul>` : ''}
-                ${window.isGM ? '<button type="button" class="btn btn-sm btn-danger mutant-card-delete">Удалить экземпляр</button>' : ''}
+                ${window.isGM ? '<button type="button" class="btn btn-sm btn-warning mutant-card-heal">Вылечить полностью</button><button type="button" class="btn btn-sm btn-danger mutant-card-delete">Удалить экземпляр</button>' : ''}
             </div>
         `;
         document.body.appendChild(modal);
@@ -240,6 +291,17 @@ export async function openMutantCard(characterId, loadedCharacter = null) {
         modal.querySelector('.mutant-card-close').addEventListener('click', close);
         modal.addEventListener('pointerdown', event => {
             if (event.target === modal) close();
+        });
+        modal.querySelector('.mutant-card-heal')?.addEventListener('click', async () => {
+            if (!window.confirm(`Вылечить ${character.name} полностью?`)) return;
+            try {
+                await Server.healCharacterFully(currentLobbyId, characterId);
+                close();
+                await loadLobbyCharacters();
+                await openMutantCard(characterId);
+            } catch (error) {
+                showNotification(error.message, 'error');
+            }
         });
         modal.querySelector('.mutant-card-delete')?.addEventListener('click', async () => {
             if (!window.confirm(`Удалить мутанта «${character.name}»?`)) return;

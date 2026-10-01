@@ -671,6 +671,32 @@ export const Server = {
         });
     },
 
+    async adjustCharacterStress(lobbyId, characterId, amount) {
+        return apiFetch(`/lobbies/${lobbyId}/characters/${characterId}/stress`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount }),
+        });
+    },
+
+    async healCharacterFully(lobbyId, characterId) {
+        return apiFetch(`/lobbies/${lobbyId}/characters/${characterId}/heal`, {
+            method: 'POST',
+        });
+    },
+
+    async removeCharacterAddiction(lobbyId, characterId, addictionKey) {
+        return apiFetch(`/lobbies/${lobbyId}/characters/${characterId}/addictions/${encodeURIComponent(addictionKey)}`, {
+            method: 'DELETE',
+        });
+    },
+
+    async addLocationCombatParticipant(lobbyId, locationId, locationCharacterId) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/participants/${locationCharacterId}`, {
+            method: 'POST',
+        });
+    },
+
     async reserveLocationCombatReaction(lobbyId, locationId, payload) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/reaction/reserve`, {
             method: 'POST',

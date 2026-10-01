@@ -154,7 +154,9 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('user_left', (data) => {
-        showNotification(`${data.username} покинул комнату`, 'system', 'bottom-left');
+        const participant = lobbyParticipants.find(item => Number(item.user_id) === Number(data.user_id));
+        const username = data.username || participant?.username;
+        if (username) showNotification(`${username} покинул комнату`, 'system', 'bottom-left');
         onlineUserIds.delete(Number(data.user_id));
         updateParticipantsList();
         loadLobbyCharacters();

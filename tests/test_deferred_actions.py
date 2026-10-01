@@ -79,6 +79,36 @@ def test_reconnect_resumes_saved_arguments_once_without_repaying(client, case, a
     assert ChatMessage.query.filter_by(username='Действие').count() == 1
 
 
+def test_drawing_weapon_waits_for_full_payment(client, case, auth_headers):
+    character = db.session.get(LobbyCharacter, case['actor_sheet'])
+    character.data = {**character.data, 'weapons': [{'id': 'test-gun', 'name': 'Test gun', 'ergonomics': 0}]}
+    actor = db.session.get(LocationCharacter, case['actor'])
+    actor.action_points_current = 0
+    actor.drawn_weapon_index = None
+    db.session.commit()
+
+    started = action(client, case, auth_headers, {
+        'location_character_id': case['actor'], 'action_key': 'draw_weapon',
+        'weapon_index': 0, 'pending_action_id': 'draw-test',
+    })
+    assert started.status_code == 200, started.json
+    assert started.json['pending_action'] is True
+    assert db.session.get(LocationCharacter, case['actor']).drawn_weapon_index is None
+    assert character.data.get('activeWeaponIndex') is None
+
+    state = pay(client, case, auth_headers)
+    assert state['current_character']['deferred_action']['status'] == 'ready'
+    completed = action(client, case, auth_headers, {
+        'location_character_id': case['actor'], 'action_key': 'draw_weapon',
+        'resume_pending_action_id': 'draw-test',
+    })
+    assert completed.status_code == 200, completed.json
+    assert completed.json['draw_weapon']['weapon_index'] == 0
+    assert db.session.get(LocationCharacter, case['actor']).drawn_weapon_index == 0
+    assert character.data['activeWeaponIndex'] == 0
+    assert db.session.get(DeferredCombatAction, 'draw-test').status == 'completed'
+
+
 def test_large_cost_spans_several_turns_before_becoming_ready(client, case, auth_headers):
     start(client, case, auth_headers, cost=13)
     for remaining in (6, 1):

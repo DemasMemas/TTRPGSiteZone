@@ -212,6 +212,7 @@ def _procedure_requirements(health, direct, application):
         if effect.get('type') != 'untreated_wound':
             raise ConflictError('Выбранная рана уже изменилась')
         base_difficulty = 4
+        requires_roll = False
     elif application.get('kind') == 'injury' and direct.get('special_limb_treatment'):
         treatment = str(direct['special_limb_treatment'])
         area = str(selected_effect.get('area') or '')

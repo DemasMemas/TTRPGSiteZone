@@ -55,8 +55,8 @@
             </div>
             <div class="menu-item lobby-name">Комната: <span id="lobby-name">Загрузка...</span></div>
             <div class="menu-item lobby-time" title="Глобальное время комнаты">
-                <label>Сутки <input id="lobby-game-day" type="number" min="1" value="1" style="width:52px;"></label>
-                <input id="lobby-game-time" type="time" value="08:00" step="60">
+                <label class="lobby-time-field"><span>Сутки</span><input id="lobby-game-day" type="number" min="1" value="1" aria-label="Сутки"></label>
+                <label class="lobby-time-field"><span>Время</span><input id="lobby-game-time" type="time" value="08:00" step="60" aria-label="Время суток"></label>
             </div>
             <div class="menu-item invite-code" id="gm-invite-code" style="display:none;">Код: <span id="invite-code-value"></span></div>
             <button class="menu-item theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Переключить тему">🌓</button>
@@ -73,9 +73,9 @@
                 <button onclick="closeSettings()" style="background:none; border:none; color:white; font-size:1.2rem; cursor:pointer;">✕</button>
             </div>
             <div class="settings-tabs">
-                <button class="tab-btn active" onclick="showSettingsTab('banned', this)">Забаненные</button>
-                <button class="tab-btn" onclick="showSettingsTab('export', this)">Экспорт</button>
-                <button class="tab-btn" id="weather-tab-btn" onclick="showSettingsTab('weather', this)">Погода</button>
+                <button class="tab-btn active" data-settings-tab="banned" onclick="showSettingsTab('banned', this)">Забаненные</button>
+                <button class="tab-btn" data-settings-tab="export" onclick="showSettingsTab('export', this)">Экспорт</button>
+                <button class="tab-btn" id="weather-tab-btn" data-settings-tab="weather" onclick="showSettingsTab('weather', this)">Погода</button>
             </div>
             <div id="export-settings" class="settings-tab-content" style="display:none;">
                 <h4>Экспорт карты</h4>
@@ -95,9 +95,10 @@
                         <span id="weather-rain-value">0.5</span>
                     </div>
                     <div class="weather-control">
-                        <label><input type="checkbox" id="weather-sun"> Солнце</label>
-                        <input type="range" id="weather-sun-intensity" min="0" max="1" step="0.1" value="0.5" oninput="updateWeatherValue('weather-sun', this.value)">
+                        <label title="Включить настройку облаков; без галочки небо ясное"><input type="checkbox" id="weather-sun"> Облачность</label>
+                        <input type="range" id="weather-sun-intensity" min="0" max="1" step="0.1" value="0.5" title="0 — плотные облака и темно; 1 — редкие облака и ярче" oninput="updateWeatherValue('weather-sun', this.value)">
                         <span id="weather-sun-value">0.5</span>
+                        <small class="weather-control-hint">0 — плотная · 1 — редкая</small>
                     </div>
                     <div class="weather-control">
                         <label><input type="checkbox" id="weather-emission"> Выброс</label>
@@ -158,6 +159,7 @@
                         <button type="button" data-world-tool="select" aria-pressed="true">Выбор</button>
                         <button type="button" data-world-tool="terrain" aria-pressed="false">Ландшафт</button>
                         <button type="button" data-world-tool="height" aria-pressed="false">Высота</button>
+                        <button type="button" data-world-tool="radiation" aria-pressed="false">Радиация</button>
                         <button type="button" data-world-tool="erase" aria-pressed="false">Ластик</button>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="select">
@@ -176,13 +178,17 @@
                         <label>Уровень <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.value)"></label>
                         <output id="tile-height-value" for="tile-height">1.0</output>
                     </div>
+                    <div class="map-editor-inspector" data-world-settings="radiation">
+                        <label>Уровень радиации <input type="range" id="world-brush-radiation" min="0" max="10" step="0.1" value="0" oninput="setWorldBrushRadiation(this.value)"></label>
+                        <output id="world-brush-radiation-value" for="world-brush-radiation">0.0</output>
+                    </div>
                     <div class="map-editor-inspector" data-world-settings="brush">
                         <label>Радиус кисти <input type="range" id="brush-radius" min="0" max="5" value="0" oninput="setBrushRadiusFromInput(this.value)"></label>
                         <output id="brush-radius-value" for="brush-radius">0</output>
                     </div>
                     <input type="checkbox" id="eraser-checkbox" hidden onchange="setEraserModeFromInput(this.checked)">
                     <p class="map-editor-hint" id="world-editor-hint">Выберите инструмент. Двойной клик открывает настройки тайла.</p>
-                    <p class="map-editor-shortcuts">Удерживайте Q, наведите на сектор и отпустите · 1–4: инструмент · E: редактор · R: ластик</p>
+                    <p class="map-editor-shortcuts">Удерживайте Q, наведите на сектор и отпустите · 1–5: инструмент · E: редактор · R: ластик</p>
                 </div>
             </div>
         </div>
@@ -220,11 +226,6 @@
                     <button class="btn btn-primary" onclick="applyHeightChange()">Применить</button>
                     <br><br>
 
-                    <label>Название места:</label>
-                    <input type="text" id="tile-edit-name" placeholder="Введите название" style="width:100%; margin-bottom:10px;">
-                    <button class="btn btn-primary" onclick="applyNameChange()">Сохранить название</button>
-                    <br><br>
-
                     <label>Радиация:</label>
                     <input type="range" id="tile-edit-radiation" min="0" max="10" step="0.1" value="0" oninput="updateTileEditRadiation(this.value)">
                     <span id="tile-edit-radiation-value">0.0</span>
@@ -242,48 +243,16 @@
 
                     <label>Тип объекта:</label>
                     <select id="object-type-select">
-                        <option value="tree">🌲 Дерево</option>
-                        <option value="house">🏠 Дом</option>
-                        <option value="fence">🚧 Забор</option>
-                        <optgroup label="Аномалии: гравитационные">
-                            <option value="anomaly_batut">Батут</option><option value="anomaly_otboynik">Отбойник</option>
-                            <option value="anomaly_kacheli">Качели</option><option value="anomaly_zybuchka">Зыбучка</option>
-                            <option value="anomaly_vozduhovorot">Воздуховорот</option><option value="anomaly_glukhar">Глухарь</option>
-                            <option value="anomaly_britva">Бритва</option><option value="anomaly_viselitsa">Виселица</option>
-                        </optgroup>
-                        <optgroup label="Аномалии: электрические">
-                            <option value="anomaly_vspishka">Вспышка</option><option value="anomaly_pautina">Паутина</option>
-                            <option value="anomaly_tesla">Тесла</option><option value="anomaly_katushka">Катушка</option>
-                            <option value="anomaly_kapkan">Капкан</option><option value="anomaly_paralizator">Парализатор</option>
-                            <option value="anomaly_akkumulyator">Аккумулятор</option><option value="anomaly_ionny_tuman">Ионный туман</option>
-                        </optgroup>
-                        <optgroup label="Аномалии: термические">
-                            <option value="anomaly_banya">Баня</option><option value="anomaly_parilka">Парилка</option>
-                            <option value="anomaly_mochalka">Мочалка</option><option value="anomaly_kipyatilnik">Кипятильник</option>
-                            <option value="anomaly_morozilnik">Морозильник</option><option value="anomaly_uley">Улей</option>
-                            <option value="anomaly_metelitsa">Метелица</option><option value="anomaly_gril">Гриль</option>
-                        </optgroup>
-                        <optgroup label="Аномалии: радиационные">
-                            <option value="anomaly_zarosli">Заросли</option><option value="anomaly_svetlyachki">Светлячки</option>
-                            <option value="anomaly_mor">Мор</option><option value="anomaly_zapovednik">Заповедник</option>
-                            <option value="anomaly_mertvy_koster">Мертвый костер</option><option value="anomaly_solyariy">Солярий</option>
-                            <option value="anomaly_radioaktivny_roy">Радиоактивный рой</option><option value="anomaly_bagrovaya_luna">Багровая луна</option>
-                        </optgroup>
-                        <optgroup label="Аномалии: химические">
-                            <option value="anomaly_varevo">Варево</option><option value="anomaly_soda">Сода</option>
-                            <option value="anomaly_ezhinoe_oblako">Ежиное облако</option><option value="anomaly_rzhavchina">Ржавчина</option>
-                            <option value="anomaly_mogilshchik">Могильщик</option><option value="anomaly_chuma">Чума</option>
-                            <option value="anomaly_myshelovka">Мышеловка</option><option value="anomaly_gniloy_razlom">Гнилой разлом</option>
-                        </optgroup>
-                        <optgroup label="Аномалии: псионические">
-                            <option value="anomaly_ekho">Эхо</option><option value="anomaly_mirazh">Мираж</option>
-                            <option value="anomaly_starshina">Старшина</option><option value="anomaly_tuman_poteryannykh">Туман потерянных</option>
-                            <option value="anomaly_tma">Тьма</option><option value="anomaly_piyavka">Пиявка</option>
-                            <option value="anomaly_kolodets">Колодец</option><option value="anomaly_mozgotrobilka">Мозгодробилка</option>
-                        </optgroup>
+                        <option value="forest">🌲 Лес</option>
+                        <option value="hamlet">🏚️ Хутор</option>
+                        <option value="village">🏘️ Деревня</option>
+                        <option value="road">🛣️ Дорога</option>
+                        <option value="factory">🏭 Завод</option>
+                        <option value="base">🏢 База</option>
+                        <option value="camp">⛺ Лагерь</option>
                     </select>
                     <label>Цвет:</label>
-                    <input type="color" id="object-color" value="#2d5a27">
+                    <input type="color" id="object-color" value="#315f3b">
 
                     <div style="display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 8px; margin-top: 10px; align-items: center;">
                         <label>X:</label>
@@ -598,7 +567,6 @@
     </div>
 
     <!-- Основной скрипт комнат (модуль) -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.3/howler.min.js"></script>
     <script type="module" src="/static/js/main.js"></script>
 
 </body>

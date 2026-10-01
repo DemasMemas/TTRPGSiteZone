@@ -9,7 +9,7 @@ import { initMapEdit, setEditMode, setBrushRadius, toggleEraserMode, applyBrush,
  getEditMode, setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, updateTileEditHeight,
  selectWorldEditorTool,
  updateObjectOffsetX, updateObjectOffsetZ, updateObjectScale, updateObjectRotation,
- applyNameChange, applyRadiationChange, updateTileEditRadiation, applyAnomalyFieldChange,
+ setWorldBrushRadiation, applyRadiationChange, updateTileEditRadiation, applyAnomalyFieldChange,
  updateAnomalyFieldRankOptions} from './mapEdit.js';
 import { hideObjectHighlight, camera, getHoveredTile } from './lobby3d.js';
 import { hideGlobalCanvas, showGlobalCanvas, controls as globalControls } from './lobby3d.js';
@@ -967,17 +967,17 @@ if (socket) {
         }
     });
     socket.on('location_object_created', (data) => {
-        if (data.location_id === getCurrentLocationId()) {
+        if (Number(data.location_id) === Number(getCurrentLocationId())) {
             import('./locationScene.js').then(module => module.addLocationObject(data.object));
         }
     });
     socket.on('location_object_deleted', (data) => {
-        if (data.location_id === getCurrentLocationId()) {
+        if (Number(data.location_id) === Number(getCurrentLocationId())) {
             import('./locationScene.js').then(module => module.removeLocationObject(data.object_id));
         }
     });
     socket.on('location_object_updated', (data) => {
-        if (data.location_id === getCurrentLocationId()) {
+        if (Number(data.location_id) === Number(getCurrentLocationId())) {
             import('./locationScene.js').then(module => module.updateLocationObject(data.object));
         }
     });
@@ -1080,7 +1080,7 @@ window.openTileEditModal = openTileEditModal;
 window.closeTileEditModal = closeTileEditModal;
 window.applyTerrainChange = applyTerrainChange;
 window.applyHeightChange = applyHeightChange;
-window.applyNameChange = applyNameChange;
+window.setWorldBrushRadiation = setWorldBrushRadiation;
 window.applyRadiationChange = applyRadiationChange;
 window.applyAnomalyFieldChange = applyAnomalyFieldChange;
 window.updateAnomalyFieldRankOptions = updateAnomalyFieldRankOptions;
@@ -1189,10 +1189,10 @@ window.loadWeatherSettings = (settings) => {
         }
         if (valueSpan) valueSpan.textContent = intensity.toFixed(1);
     };
-    updateControl('weather-fog', settings.fog?.enabled || false, settings.fog?.intensity || 0.5);
-    updateControl('weather-rain', settings.rain?.enabled || false, settings.rain?.intensity || 0.5);
-    updateControl('weather-sun', settings.sun?.enabled || false, settings.sun?.intensity || 0.5);
-    updateControl('weather-emission', settings.emission?.enabled || false, settings.emission?.intensity || 0.5);
+    updateControl('weather-fog', settings.fog?.enabled || false, settings.fog?.intensity ?? 0.5);
+    updateControl('weather-rain', settings.rain?.enabled || false, settings.rain?.intensity ?? 0.5);
+    updateControl('weather-sun', settings.sun?.enabled || false, settings.sun?.intensity ?? 0.5);
+    updateControl('weather-emission', settings.emission?.enabled || false, settings.emission?.intensity ?? 0.5);
 };
 
 window.updateWeatherValue = (id, value) => {
@@ -1204,9 +1204,13 @@ function bindWeatherSliders() {
     const sliderIds = ['weather-fog-intensity', 'weather-rain-intensity', 'weather-sun-intensity', 'weather-emission-intensity'];
     sliderIds.forEach(id => {
         const slider = document.getElementById(id);
+        const checkbox = document.getElementById(id.replace('-intensity', ''));
         if (slider) {
             slider.addEventListener('input', (e) => {
                 window.updateWeatherValue(id.replace('-intensity', ''), e.target.value);
+            });
+            checkbox?.addEventListener('change', () => {
+                slider.disabled = !checkbox.checked;
             });
         }
     });

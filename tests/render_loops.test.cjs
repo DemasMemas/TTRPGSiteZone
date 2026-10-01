@@ -18,6 +18,9 @@ function frameHarness(local) {
         requestAnimationFrame: mark('schedule'), lastTime: 0, previousFrameTime: 0,
         renderer: { render: mark('render') }, labelRenderer: { render: mark('labels') },
         controls: { update: mark('controls') }, scene: {}, camera: {},
+        waterTexture: { offset: { set: mark('water') } },
+        worldSkySphere: { position: { copy: mark('sky') } },
+        stars: { position: { copy: mark('stars') } },
         updateLocationCameraMovement: mark('camera'), updateGlobalCameraMovement: mark('camera'),
         updateChunkVisibility: mark('chunks'), updateRain: mark('rain'),
         refreshWorldShadows: mark('shadows'),
@@ -57,6 +60,7 @@ test('hidden world does no rendering, picking, weather or camera work; resumes o
     assert.ok(calls.some(call => call[0] === 'render'));
     assert.ok(calls.some(call => call[0] === 'fps'));
     assert.ok(calls.some(call => call[0] === 'rain'));
+    assert.ok(calls.some(call => call[0] === 'water'));
     assert.ok(calls.some(call => call[0] === 'raycast'));
 });
 

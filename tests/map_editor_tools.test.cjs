@@ -123,8 +123,10 @@ test('location brush uses one active tool, while Alt and Shift still override it
 test('world brush paints on pointer press without waiting for the window click', () => {
     const source = read('lobby3d.js');
     const start = source.indexOf('function canvasMouseDownHandler(');
-    const end = source.indexOf("\nrenderer.domElement.addEventListener('mousedown'", start);
+    const end = source.indexOf("\nrenderer.domElement.addEventListener('pointerdown'", start);
     assert.ok(start >= 0 && end > start);
+    assert.match(source, /renderer\.domElement\.addEventListener\('pointerdown', canvasMouseDownHandler/);
+    assert.match(source, /raycaster\.ray\.intersectPlane\(worldBrushPlane/);
     const painted = [];
     const tile = { chunk: { chunkX: 1, chunkY: 2 }, tileX: 3, tileY: 4, tileData: { terrain: 'grass' } };
     const context = vm.createContext({
@@ -159,6 +161,71 @@ test('world brush paints on pointer press without waiting for the window click',
     const clickStart = source.indexOf("window.addEventListener('click', (event) => {", end);
     const clickEnd = source.indexOf("\nwindow.addEventListener('dblclick'", clickStart);
     assert.doesNotMatch(source.slice(clickStart, clickEnd), /tileClickCallback/);
+});
+
+test('world radiation brush updates every tile in its radius', () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('export function applyBrush(');
+    const end = source.indexOf('\nexport async function handleTileUpdate(', start);
+    assert.ok(start >= 0 && end > start);
+    const painted = [];
+    const context = vm.createContext({
+        document: { getElementById() { return null; } },
+        AppState: { isGM: true },
+        window: { MAP_CHUNKS_WIDTH: 1, MAP_CHUNKS_HEIGHT: 1 },
+        updateTileInChunk(...args) { painted.push(args); },
+        scheduleBatchUpdate() {},
+        showNotification(message) { throw new Error(message); },
+    });
+    vm.runInContext(
+        'const CHUNK_SIZE = 32; let pendingTileUpdates = [];\n'
+            + source.slice(start, end).replace('export function', 'function'),
+        context,
+    );
+    context.applyBrush({ chunkX: 0, chunkY: 0, tileX: 8, tileY: 8 }, { radiation: 4.5 }, 1);
+    assert.equal(painted.length, 9);
+    assert.equal(painted.every(call => call[4].radiation === 4.5), true);
+});
+
+test('world anomaly fields use a visual matching their field type', () => {
+    const source = read('lobby3d.js');
+    const start = source.indexOf('function createAnomalyFieldLOD(');
+    const end = source.indexOf('\nconst FAR_ANOMALY_DISTANCE_SQ', start);
+    assert.ok(start >= 0 && end > start);
+    const context = vm.createContext({
+        createAnomalyLOD(...args) { return { args, userData: {} }; },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    const field = type => context.createAnomalyFieldLOD({
+        height: 1,
+        anomaly_field: { name: 'Тестовое поле', field_type: type, rank: 2 },
+    }, 4, 5);
+    assert.equal(field('Электрическое').args[3], 'electric');
+    assert.equal(field('Термический').args[3], 'fire');
+    assert.equal(field('Химическое').args[3], 'acid');
+    assert.equal(field('Радиоактивное').args[3], 'radiation');
+    assert.equal(field('Псионическое').args[3], 'psi');
+    assert.equal(field('Гравитационное').args[3], 'void');
+    assert.equal(field('Гравитационное').userData.anomalyField, 'Тестовое поле');
+    assert.equal(context.createAnomalyFieldLOD({ height: 1 }, 4, 5), null);
+});
+
+test('new world landmarks are available without deleting legacy map objects', () => {
+    const scene = read('lobby3d.js');
+    const html = fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8');
+    const mapService = fs.readFileSync(path.join(__dirname, '../app/services/map.py'), 'utf8');
+    const options = html.slice(html.indexOf('<select id="object-type-select">'), html.indexOf('</select>', html.indexOf('<select id="object-type-select">')));
+    for (const type of ['forest', 'hamlet', 'village', 'road', 'factory', 'base', 'camp']) {
+        assert.match(options, new RegExp(`value="${type}"`));
+        assert.match(scene, new RegExp(`\\b${type}: \\{ geometry:`));
+    }
+    for (const legacy of ['tree', 'house', 'fence']) {
+        assert.doesNotMatch(options, new RegExp(`value="${legacy}"`));
+        assert.match(scene, new RegExp(`case '${legacy}'`));
+    }
+    assert.match(scene, /fillLandmarkMeshes\(landmarkMeshes, tilesData, cx, cy\)/);
+    assert.match(scene, /fillLandmarkMeshes\(\s*landmarkMeshes, tilesData, entry\.chunkX, entry\.chunkY/);
+    assert.doesNotMatch(mapService, /'type': '(?:tree|house|fence)'/);
 });
 
 test('location eraser removes structures only when its option is enabled', () => {
@@ -278,4 +345,34 @@ test('held Q selects the highlighted full-ring sector on release', () => {
     press('Digit7');
     assert.deepEqual(selected, ['terrain', 'terrain', 'erase']);
     assert.equal(appended.at(-1).removed, true);
+});
+
+test('right drag while painting remains available to world and location cameras', () => {
+    const worldSource = read('lobby3d.js');
+    const start = worldSource.indexOf('function canvasMouseDownHandler(event)');
+    const end = worldSource.indexOf("renderer.domElement.addEventListener('pointerdown'", start);
+    assert.ok(start >= 0 && end > start);
+    const context = vm.createContext({
+        window: { isLocationActive: false },
+        editMode: true,
+        controls: { enabled: false },
+        controlsDisabled: true,
+        brushActive: true,
+    });
+    vm.runInContext(worldSource.slice(start, end), context);
+    let prevented = false;
+    context.canvasMouseDownHandler({
+        button: 2,
+        preventDefault() { prevented = true; },
+    });
+    assert.equal(prevented, false);
+    assert.equal(context.controls.enabled, true);
+    assert.equal(context.brushActive, false);
+
+    const localSource = read('locationScene.js');
+    const contextStart = localSource.indexOf('const onContextMenu = (e) => {');
+    const contextEnd = localSource.indexOf("canvas.addEventListener('contextmenu'", contextStart);
+    assert.ok(contextStart >= 0 && contextEnd > contextStart);
+    assert.doesNotMatch(localSource.slice(contextStart, contextEnd), /setLocationBrushObjectRotation/);
+    assert.match(localSource, /canvas\.addEventListener\('pointerdown', onCameraRotatePointerDown, \{ capture: true \}\)/);
 });

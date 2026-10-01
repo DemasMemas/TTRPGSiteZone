@@ -1,6 +1,28 @@
 import pytest
 
 from app.services import addictions
+
+
+def test_gm_removal_clears_only_selected_addiction_and_withdrawal():
+    health = {
+        'addictions': {
+            'records': {
+                'caffeine': {'key': 'caffeine', 'label': 'Кофеин'},
+                'nicotine': {'key': 'nicotine', 'label': 'Никотин'},
+            },
+            'exposures': {'caffeine': {'dose': 2}, 'nicotine': {'dose': 1}},
+        },
+        'effects': [
+            {'id': 'addiction-withdrawal-caffeine', 'type': 'addiction_withdrawal'},
+            {'id': 'other-effect', 'type': 'custom'},
+        ],
+    }
+
+    addictions.remove_addiction(health, 'caffeine')
+
+    assert set(health['addictions']['records']) == {'nicotine'}
+    assert set(health['addictions']['exposures']) == {'nicotine'}
+    assert [effect['id'] for effect in health['effects']] == ['other-effect']
 from app.services.combat import CombatService
 from app.services.effects import advance_timed_effects
 
