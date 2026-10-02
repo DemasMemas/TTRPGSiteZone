@@ -15,6 +15,20 @@ sid_to_lobby = {}
 pending_auth = {}
 AUTH_TIMEOUT = 10
 
+
+def lobby_has_online_users(lobby_id):
+    return any(
+        str(connected_lobby_id) == str(lobby_id) and sid in sid_to_user
+        for sid, connected_lobby_id in sid_to_lobby.items()
+    )
+
+
+def user_is_online_in_lobby(user_id, lobby_id):
+    return any(
+        connected_user_id == user_id and str(sid_to_lobby.get(sid)) == str(lobby_id)
+        for sid, connected_user_id in sid_to_user.items()
+    )
+
 @socketio.on('connect')
 def handle_connect():
     logger.info('Client connected')

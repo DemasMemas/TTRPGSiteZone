@@ -70,7 +70,17 @@ test('GM can choose whether the attacker acts first when starting combat', () =>
     const apiSource = fs.readFileSync(path.join(__dirname, '../app/static/js/api.js'), 'utf8');
     assert.match(sceneSource, /class="combat-initiator-first" checked/);
     assert.match(sceneSource, /list\.querySelectorAll\('input\[type="checkbox"\]:checked'\)/);
-    assert.match(sceneSource, /initiatorFirst \? initiatorLocationCharacterId : null/);
+    assert.match(sceneSource, /initiatorLocationCharacterId, initiatorFirst,/);
+    assert.match(sceneSource, /condition\.state === 'active'\) \{\s*menuItems\.push\(\{\s*label: 'Начать бой'/);
+    assert.match(sceneSource, /actor\.condition\?\.state !== 'active'/);
     assert.match(sceneSource, /'approve', selectedIds,\s+initiatorFirst/);
     assert.match(apiSource, /initiator_first: initiatorFirst/);
+    assert.match(apiSource, /initiator_location_character_id: initiatorLocationCharacterId/);
+});
+
+test('dead characters are not offered for combat initiative', () => {
+    const sceneSource = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
+    assert.match(sceneSource, /const selectableCharacters = characters\.filter\(character => character\.condition\?\.state !== 'dead'\)/);
+    assert.match(sceneSource, /selectableCharacters\.forEach\(\(character\) => \{/);
+    assert.match(sceneSource, /const absentCombatCharacters = [\s\S]*?character\.condition\?\.state !== 'dead'/);
 });

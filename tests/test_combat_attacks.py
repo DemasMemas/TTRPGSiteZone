@@ -696,6 +696,32 @@ def test_forced_stress_manifestation_uses_current_level_table(monkeypatch):
     assert result["effect"] == "Адреналин"
 
 
+def test_repeated_stress_manifestations_keep_only_latest_strongest_pending(monkeypatch):
+    monkeypatch.setattr(combat_module.random, "randint", lambda *_: 1)
+    monkeypatch.setattr(combat_module, "flag_modified", lambda *args, **kwargs: None)
+    target = SimpleNamespace(
+        character=SimpleNamespace(data={
+            "skills": {"physical": {"will": {"base": 5, "bonus": 0}}},
+            "health": {"stress": 5, "effects": []},
+        }),
+        posture="standing",
+    )
+
+    first = CombatService.apply_stress_trigger(target, 1, trigger="damage")
+    second = CombatService.apply_stress_trigger(target, 1, trigger="damage")
+    third = CombatService.apply_stress_trigger(target, 1, trigger="damage")
+
+    assert first["table"] == "stress"
+    assert second["table"] == third["table"] == "tension"
+    pending = [
+        effect for effect in target.character.data["health"]["effects"]
+        if effect.get("source") == "stress_manifestation" and effect.get("gmPending")
+    ]
+    assert len(pending) == 1
+    assert pending[0]["stress_level"] == 8
+    assert pending[0]["stress_table"] == "tension"
+
+
 def test_ranged_targets_must_stay_inside_the_facing_arc():
     shooter = SimpleNamespace(pos_x=5, pos_y=5, facing_x=0, facing_y=1)
 

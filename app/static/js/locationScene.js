@@ -1467,9 +1467,82 @@ async function requestTreatmentConsent(actorLocationCharacterId, targetCharacter
     if (requestData.status !== 'pending') {
         return { allowed: false, requestId: requestData.id, status: requestData.status };
     }
-    showNotification('Ожидаем согласия персонажа на лечение', 'system');
+    const gmDecision = Boolean(requestData.payload?.gm_decision_for_offline_target);
+    showNotification(gmDecision
+        ? 'Игрок пациента не в сети. Ожидаем решения ГМа'
+        : 'Ожидаем согласия персонажа на лечение', 'system');
     return new Promise((resolve) => {
-        pendingCharacterInteractionResolvers.set(requestData.id, resolve);
+        const notice = document.createElement('div');
+        notice.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:1310;max-width:340px;padding:12px 14px;border:1px solid rgba(255,255,255,.2);border-radius:12px;background:#19231d;color:#f0f5ef;box-shadow:0 12px 32px rgba(0,0,0,.35);display:grid;gap:10px;';
+        const label = document.createElement('span');
+        label.textContent = gmDecision ? 'Ожидаем решения ГМа по лечению' : 'Ожидаем согласия на лечение';
+        const cancelButton = document.createElement('button');
+        cancelButton.type = 'button';
+        cancelButton.className = 'btn btn-secondary';
+        cancelButton.textContent = 'Отменить ожидание';
+        notice.append(label, cancelButton);
+        document.body.appendChild(notice);
+        let settled = false;
+        let timer;
+        const settle = (result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            pendingCharacterInteractionResolvers.delete(requestData.id);
+            notice.remove();
+            resolve(result);
+        };
+        const cancel = (timedOut = false) => {
+            if (settled) return;
+            cancelButton.disabled = true;
+            if (characterTradeModal?.dataset.interactionRequestId === String(requestData.id)) {
+                characterTradeModal.style.display = 'none';
+            }
+            settle({ allowed: false, requestId: requestData.id, status: 'cancelled' });
+            if (timedOut) showNotification('Время ожидания согласия истекло', 'system');
+            Server.cancelCharacterInteraction(window.currentLobbyId, requestData.id).catch(error => {
+                showNotification(error.message || 'Не удалось отменить запрос на сервере', 'system');
+            });
+        };
+        cancelButton.onclick = () => cancel();
+        pendingCharacterInteractionResolvers.set(requestData.id, settle);
+        timer = setTimeout(() => cancel(true), 90_000);
+        if (gmDecision && Number(requestData.target_user_id) === getCurrentUserId()) {
+            showIncomingCharacterInteraction(requestData).catch(error => {
+                showNotification(error.message || 'Не удалось открыть запрос ГМу', 'system');
+            });
+        }
+    });
+}
+
+async function applyQuickMedicalConsumable(characterId, entry, targetCharacterId, actorLocationCharacterIdHint = null) {
+    if (!canControlCharacter(characterId) || getLocationCharacterCondition(characterId).state !== 'active') {
+        throw new Error('Этот персонаж сейчас не может применить предмет');
+    }
+    const module = await import('./characterSheet.js');
+    const isOtherTarget = targetCharacterId && Number(targetCharacterId) !== Number(characterId);
+    const actorLocationCharacterId = actorLocationCharacterIdHint
+        || findCombatCharacterByCharacterId(characterId)?.location_character_id;
+    if (isOtherTarget && !actorLocationCharacterId) {
+        throw new Error('Не удалось найти врача на локации');
+    }
+    const interactionTarget = isOtherTarget
+        ? await Server.inspectLocationCharacter(
+            window.currentLobbyId, getCurrentLocationId(), targetCharacterId, actorLocationCharacterId
+        )
+        : null;
+    return module.useCharacterInventoryItem(characterId, entry.path, {
+        itemId: entry.item?.id,
+        targetCharacterId: targetCharacterId || undefined,
+        targetData: interactionTarget?.target_data,
+        requestTreatmentConsent: isOtherTarget && getLocationCharacterCondition(targetCharacterId).state === 'active'
+            ? procedure => requestTreatmentConsent(actorLocationCharacterId, targetCharacterId, procedure)
+            : undefined,
+        interactionContext: isOtherTarget ? {
+            lobbyId: window.currentLobbyId,
+            locationId: getCurrentLocationId(),
+            actorLocationCharacterId,
+        } : undefined,
     });
 }
 
@@ -1481,14 +1554,6 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
     const actorLocationCharacterId = actorLocationCharacterIdHint
         || findCombatCharacterByCharacterId(characterId)?.location_character_id
         || pendingStructureAction?.actorLocationCharacterId;
-    const interactionTarget = forcedTargetCharacterId && actorLocationCharacterId
-        ? await Server.inspectLocationCharacter(
-            window.currentLobbyId,
-            getCurrentLocationId(),
-            forcedTargetCharacterId,
-            actorLocationCharacterId
-        ).catch(() => null)
-        : null;
     const characterData = character?.data || null;
     const consumables = characterData ? getMedicalConsumableEntries(characterData) : [];
 
@@ -1498,7 +1563,7 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
             <button type="button" class="medical-close-btn" style="width:32px; height:32px; border-radius:999px; border:0; background:rgba(255,255,255,0.08); color:#fff; cursor:pointer; font-size:18px; line-height:1;">×</button>
         </div>
         <div style="padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.06); opacity:0.8; font-size:13px;">
-            Быстрый список предметов, которые можно использовать прямо из боя.
+            Быстрый список предметов для применения в бою и вне боя.
         </div>
         <div class="medical-menu-body" style="flex:1 1 auto; min-height:0; padding:12px 14px; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable;"></div>
     `;
@@ -1538,7 +1603,6 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
             row.onclick = async (event) => {
                 event.stopPropagation();
                 try {
-                    const module = await import('./characterSheet.js');
                     const direct = item.attributes?.consumable?.direct || {};
                     const needsTarget = direct.target_required
                         || direct.application_form === 'injectable'
@@ -1546,41 +1610,50 @@ async function showMedicalConsumableMenu(characterId, forcedTargetCharacterId = 
                         || direct.wound_treatment
                         || direct.requires_infusion_tool;
                     if (needsTarget && !forcedTargetCharacterId) {
-                        const actor = findCombatCharacterByCharacterId(characterId);
-                        if (!actor) throw new Error('Не удалось найти действующего персонажа');
-                        closeMedicalConsumableMenu();
-                        beginPendingCombatAction({
-                            actorCharacterId: characterId,
-                            actorLocationCharacterId: actor.location_character_id,
-                            actionKey: 'use_item',
-                            itemPath: entry.path,
-                            itemId: item.id,
-                            onResolve: ({ targetCharacterId }) => module.useCharacterInventoryItem(
-                                characterId,
-                                entry.path,
-                                { itemId: item.id, targetCharacterId }
-                            ),
-                        });
+                        const choice = document.createElement('div');
+                        choice.style.cssText = 'display:flex;gap:8px;margin:-2px 0 10px;';
+                        choice.innerHTML = `
+                            <button type="button" class="medical-target-self btn btn-sm btn-secondary">Себе</button>
+                            <button type="button" class="medical-target-map btn btn-sm btn-secondary">Выбрать модель на карте</button>
+                        `;
+                        row.after(choice);
+                        row.disabled = true;
+                        choice.querySelector('.medical-target-self').onclick = async () => {
+                            try {
+                                closeMedicalConsumableMenu();
+                                await applyQuickMedicalConsumable(
+                                    characterId, entry, characterId, actorLocationCharacterId
+                                );
+                            } catch (error) {
+                                showNotification(error.message || 'Не удалось использовать расходник', 'system');
+                            } finally {
+                                row.disabled = false;
+                                choice.remove();
+                            }
+                        };
+                        choice.querySelector('.medical-target-map').onclick = () => {
+                            const started = beginPendingCombatAction({
+                                actorCharacterId: characterId,
+                                actorLocationCharacterId,
+                                actionKey: 'use_item',
+                                itemPath: entry.path,
+                                itemId: item.id,
+                                onResolve: ({ targetCharacterId }) => applyQuickMedicalConsumable(
+                                    characterId, entry, targetCharacterId, actorLocationCharacterId
+                                ),
+                            });
+                            if (started) closeMedicalConsumableMenu();
+                            else {
+                                row.disabled = false;
+                                choice.remove();
+                            }
+                        };
+                        return;
                     } else {
                         closeMedicalConsumableMenu();
-                        await module.useCharacterInventoryItem(characterId, entry.path, {
-                            itemId: item.id,
-                            targetCharacterId: forcedTargetCharacterId || undefined,
-                            targetData: interactionTarget?.target_data,
-                            requestTreatmentConsent: forcedTargetCharacterId
-                                && getLocationCharacterCondition(forcedTargetCharacterId).state === 'active'
-                                ? (procedure) => requestTreatmentConsent(
-                                    actorLocationCharacterId,
-                                    forcedTargetCharacterId,
-                                    procedure,
-                                )
-                                : undefined,
-                            interactionContext: forcedTargetCharacterId ? {
-                                lobbyId: window.currentLobbyId,
-                                locationId: getCurrentLocationId(),
-                                actorLocationCharacterId,
-                            } : undefined,
-                        });
+                        await applyQuickMedicalConsumable(
+                            characterId, entry, forcedTargetCharacterId, actorLocationCharacterId
+                        );
                     }
                     closeMedicalConsumableMenu();
                 } catch (error) {
@@ -2409,7 +2482,8 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         });
     }
     if (window.isGM) {
-        if (combatState?.status !== 'active' && combatCharacter?.location_character_id) {
+        if (combatState?.status !== 'active' && combatCharacter?.location_character_id
+            && condition.state === 'active') {
             menuItems.push({
                 label: 'Начать бой',
                 icon: '⚔',
@@ -2869,6 +2943,10 @@ export async function requestCombatStartForAttack(characterId) {
         const actor = state.characters?.find(item => Number(item.character_id) === Number(characterId));
         if (!actor?.location_character_id) {
             showNotification('Этот персонаж не размещён на подлокации', 'error');
+            return true;
+        }
+        if (actor.condition?.state !== 'active') {
+            showNotification('Только персонаж в сознании может начать бой действием', 'system');
             return true;
         }
         if (window.isGM) {
@@ -3924,8 +4002,16 @@ function beginCharacterMoveMode(characterId, movementType = 'walk', evasion = fa
 
 export function beginPendingCombatAction(action) {
     if (!combatState || combatState.status !== 'active') {
-        showNotification('Бой сейчас не активен', 'system');
-        return false;
+        if (action?.actionKey !== 'use_item' || !canControlCharacter(action.actorCharacterId)
+            || getLocationCharacterCondition(action.actorCharacterId).state !== 'active') {
+            showNotification('Этот персонаж сейчас не может применить предмет', 'system');
+            return false;
+        }
+        pendingCombatAction = { ...action, outOfCombat: true, createdAt: Date.now() };
+        closeCombatMenus();
+        hideStructureInteraction();
+        showNotification('Применение предмета: выберите персонажа на карте (Esc — отмена)', 'system');
+        return true;
     }
     const actor = action?.actorCharacterId ? findCombatCharacterByCharacterId(action.actorCharacterId) : null;
     const { current, canAct } = getCombatMenuState();
@@ -4028,6 +4114,24 @@ function isAttackerBehindTarget(attacker, target) {
 async function resolveCombatTargetSelection(targetCharacterId) {
     if (!pendingCombatAction) return false;
     const action = pendingCombatAction;
+    if (action.outOfCombat) {
+        if (combatState?.status === 'active') {
+            clearPendingCombatAction();
+            showNotification('Начался бой. Выберите расходник заново', 'system');
+            return false;
+        }
+        const target = getLocationCharacterById(targetCharacterId);
+        if (!target) return false;
+        try {
+            const applied = await action.onResolve({ targetCharacterId, target });
+            if (applied === false) return false;
+            clearPendingCombatAction();
+            return true;
+        } catch (error) {
+            showNotification(error.message || 'Не удалось применить предмет', 'system');
+            return false;
+        }
+    }
     const actor = findCombatCharacterByCharacterId(action.actorCharacterId);
     const target = findCombatCharacterByCharacterId(targetCharacterId);
     if (!actor) {
@@ -5684,12 +5788,22 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
         characters = Array.isArray(freshState?.characters)
             ? freshState.characters
             : [];
+        if (initiatorLocationCharacterId != null) {
+            const initiator = characters.find(character =>
+                Number(character.location_character_id) === Number(initiatorLocationCharacterId)
+            );
+            if (initiator?.condition?.state !== 'active') {
+                showNotification('Инициатор больше не может начать бой действием', 'system');
+                return;
+            }
+        }
     } catch (error) {
         showNotification(error.message || 'Не удалось получить участников боя', 'error');
         return;
     }
-    if (!characters.length) {
-        showNotification('На подлокации нет персонажей', 'system');
+    const selectableCharacters = characters.filter(character => character.condition?.state !== 'dead');
+    if (!selectableCharacters.length) {
+        showNotification('На подлокации нет живых участников боя', 'system');
         return;
     }
 
@@ -5747,7 +5861,7 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
         </div>
     `;
     const list = combatParticipantMenu.querySelector('.combat-participant-list');
-    characters.forEach((character) => {
+    selectableCharacters.forEach((character) => {
         const bonus = Number(character.initiative_bonus) || 0;
         const row = document.createElement('label');
         row.style.cssText = `
@@ -5806,7 +5920,7 @@ async function showCombatParticipantSelection(initiatorLocationCharacterId = nul
                 )
                 : await Server.startLocationCombat(
                     window.currentLobbyId, getCurrentLocationId(), selectedIds,
-                    initiatorFirst ? initiatorLocationCharacterId : null,
+                    initiatorLocationCharacterId, initiatorFirst,
                 );
             if (startRequestId) pendingCombatStartRequests.delete(startRequestId);
             close();
@@ -5869,6 +5983,7 @@ function renderCombatHud() {
         : Array.from(new Set((combatState.characters || []).map((char) => escapeHtml(char.name || 'Unknown'))));
     const absentCombatCharacters = (combatState.characters || []).filter(character =>
         !(combatState.turn_order || []).includes(character.location_character_id)
+        && character.condition?.state !== 'dead'
     );
     const aimedTarget = (combatState.characters || []).find(
         char => char.character_id === combatState.current_character?.aimed_target_character_id
@@ -6983,8 +7098,8 @@ function ensureStructureActionMenu() {
     `;
     document.body.appendChild(structureActionMenu);
     const onClick = (event) => {
-        if (structureActionMenu && !structureActionMenu.contains(event.target)) {
-            clearStructureActionMenu();
+        if (structureActionMenu?.style.display === 'block' && !structureActionMenu.contains(event.target)) {
+            hideStructureInteraction();
         }
     };
     document.addEventListener('click', onClick);
@@ -7063,7 +7178,7 @@ function showStructureRotationMenu(object) {
         `;
         button.onclick = async (event) => {
             event.stopPropagation();
-            clearStructureRotationMenu();
+            hideStructureInteraction();
             await updateInteractiveObject(object.id, {
                 properties: { rotation: item.rotation }
             });
@@ -7545,6 +7660,8 @@ async function showCharacterTradeMenu(actorLocationCharacterId, actorCharacterId
 
 async function showIncomingCharacterInteraction(requestData) {
     const modal = ensureCharacterTradeModal();
+    if (modal.dataset.interactionRequestId === String(requestData.id) && modal.style.display === 'flex') return;
+    modal.dataset.interactionRequestId = String(requestData.id);
     const procedure = requestData.payload?.procedure || {};
     if (requestData.kind === 'treatment') {
         modal.innerHTML = `
@@ -7627,16 +7744,20 @@ async function showIncomingCharacterInteraction(requestData) {
 }
 
 export function handleCharacterInteractionRequest(requestData) {
-    if (Number(requestData.location_id) !== Number(getCurrentLocationId())) return;
+    if (Number(requestData.location_id) !== Number(getCurrentLocationId())
+        && !requestData.payload?.gm_decision_for_offline_target) return;
     showIncomingCharacterInteraction(requestData).catch(error => {
         showNotification(error.message || 'Не удалось открыть запрос взаимодействия', 'system');
     });
 }
 
 export function handleCharacterInteractionResolved(requestData) {
+    if (requestData.status === 'cancelled'
+        && characterTradeModal?.dataset.interactionRequestId === String(requestData.id)) {
+        characterTradeModal.style.display = 'none';
+    }
     const resolve = pendingCharacterInteractionResolvers.get(requestData.id);
     if (resolve) {
-        pendingCharacterInteractionResolvers.delete(requestData.id);
         resolve({
             allowed: ['accepted', 'forced', 'in_progress', 'completed'].includes(requestData.status),
             requestId: requestData.id,
@@ -7724,7 +7845,7 @@ async function showMutantButcheringMenu(actorLocationCharacterId, targetCharacte
     modal.style.display = 'flex';
     modal.innerHTML = `
         <div class="modal-content" style="width:min(660px,calc(100vw - 28px));max-height:calc(100vh - 28px);overflow:auto;">
-            <button type="button" class="close">&times;</button>
+            <button type="button" class="close mutant-card-close" aria-label="Закрыть">&times;</button>
             <h3 style="margin-bottom:5px;">Разделка: ${escapeHtml(profile.target_name || profile.species)}</h3>
             <div style="font-size:13px;opacity:.78;margin-bottom:12px;">
                 d20 ${profile.roll.roll} ${Number(profile.roll.mutant_modifier) >= 0 ? '+' : ''}${profile.roll.mutant_modifier} вид
@@ -7891,14 +8012,28 @@ function showCharacterInteractionMenu(clientX, clientY, targetCharacterId) {
         };
         structureActionMenu.appendChild(button);
     });
-    const rect = structureActionMenu.getBoundingClientRect();
-    structureActionMenu.style.left = `${Math.max(8, Math.min(clientX + 18, window.innerWidth - rect.width - 8))}px`;
-    structureActionMenu.style.top = `${Math.max(8, Math.min(clientY + 18, window.innerHeight - rect.height - 8))}px`;
     structureActionMenu.style.display = 'block';
+    const rect = structureActionMenu.getBoundingClientRect();
+    let anchorX = clientX;
+    let anchorY = clientY;
+    const model = getCharacterModelEntry(targetCharacterId)?.model;
+    if (model && camera) {
+        const anchor = new THREE.Vector3();
+        model.getWorldPosition(anchor);
+        anchor.y += 0.9;
+        anchor.project(camera);
+        if (anchor.z > -1 && anchor.z < 1) {
+            anchorX = ((anchor.x + 1) / 2) * window.innerWidth;
+            anchorY = ((1 - anchor.y) / 2) * window.innerHeight;
+        }
+    }
+    let left = anchorX + 10;
+    if (left + rect.width > window.innerWidth - 8) left = anchorX - rect.width - 10;
+    structureActionMenu.style.left = `${Math.max(8, Math.min(left, window.innerWidth - rect.width - 8))}px`;
+    structureActionMenu.style.top = `${Math.max(8, Math.min(anchorY - rect.height / 2, window.innerHeight - rect.height - 8))}px`;
 }
 
-async function executeStructureAction(object, actionKey) {
-    const actorCharacterId = pendingStructureAction?.actorCharacterId || null;
+async function executeStructureAction(object, actionKey, actorCharacterId = pendingStructureAction?.actorCharacterId || null) {
     if (!actorCharacterId) {
         showNotification('Не удалось определить персонажа');
         return false;
@@ -8054,12 +8189,14 @@ function showStructureActionMenu(clientX, clientY, object) {
         };
         button.onclick = async (event) => {
             event.stopPropagation();
-            clearStructureActionMenu();
-            await executeStructureAction(object, item.actionKey);
+            const actorCharacterId = pendingStructureAction?.actorCharacterId || null;
+            hideStructureInteraction();
+            await executeStructureAction(object, item.actionKey, actorCharacterId);
         };
         structureActionMenu.appendChild(button);
     });
 
+    structureActionMenu.style.display = 'block';
     const rect = structureActionMenu.getBoundingClientRect();
     let anchorX = clientX;
     let anchorY = clientY;
@@ -8076,15 +8213,10 @@ function showStructureActionMenu(clientX, clientY, object) {
             }
         }
     }
-    let left = anchorX + 18;
-    let top = anchorY + 18;
-    if (left + rect.width > window.innerWidth) left = anchorX - rect.width - 18;
-    if (top + rect.height > window.innerHeight) top = anchorY - rect.height - 18;
-    if (left < 8) left = 8;
-    if (top < 8) top = 8;
-    structureActionMenu.style.left = `${left}px`;
-    structureActionMenu.style.top = `${top}px`;
-    structureActionMenu.style.display = 'block';
+    let left = anchorX + 10;
+    if (left + rect.width > window.innerWidth - 8) left = anchorX - rect.width - 10;
+    structureActionMenu.style.left = `${Math.max(8, Math.min(left, window.innerWidth - rect.width - 8))}px`;
+    structureActionMenu.style.top = `${Math.max(8, Math.min(anchorY - rect.height / 2, window.innerHeight - rect.height - 8))}px`;
 }
 
 function updateStructureMovePreview(clientX, clientY) {
@@ -9306,6 +9438,7 @@ function setupCharacterDragging() {
             updateStructureMovePreview(e.clientX, e.clientY);
         }
         if (pendingStructureAction && !pendingObjectMoveId) {
+            const menuOpen = structureActionMenu?.style.display === 'block';
             const targetCharacterObject = getCharacterAtScreen(e.clientX, e.clientY);
             const targetCharacterId = targetCharacterObject?.userData?.characterId;
             if (
@@ -9339,12 +9472,12 @@ function setupCharacterDragging() {
                     }
                 } else {
                     hoveredStructureObjectId = null;
-                    clearStructureActionMenu();
+                    if (!menuOpen) clearStructureActionMenu();
                 }
             } else {
                 hoveredStructureObjectId = null;
                 structureHoverLastObjectId = null;
-                clearStructureActionMenu();
+                if (!menuOpen) clearStructureActionMenu();
             }
         }
     };
@@ -9354,6 +9487,12 @@ function setupCharacterDragging() {
     // pointerdown - начало перетаскивания
     const onPointerDown = (e) => {
         if (e.button !== 0) return;
+        if (structureActionMenu?.style.display === 'block') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            hideStructureInteraction();
+            return;
+        }
         if (window.locationEditMode && (window.locationEditorTool !== 'select' || e.altKey || e.shiftKey)) return;
         if (isDraggingCharacter) return;
         if (pendingFacingSelection) {
@@ -9644,7 +9783,7 @@ function setupCharacterDragging() {
             clearPendingCombatAction();
             showNotification('Выбор цели отменён', 'system');
         }
-        if (pendingStructureAction || pendingObjectMoveId) {
+        if (pendingStructureAction || pendingObjectMoveId || structureRotationMenu?.style.display === 'block') {
             e.preventDefault();
             hideStructureInteraction();
             showNotification('Взаимодействие отменено', 'system');

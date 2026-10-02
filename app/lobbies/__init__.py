@@ -2606,8 +2606,15 @@ def spawn_character_in_location(lobby_id, location_id):
     ).first()
     if existing:
         # Перемещаем на новые координаты
+        previous_position = (existing.pos_x, existing.pos_y)
         existing.pos_x = tile_x
         existing.pos_y = tile_y
+        combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
+        anomaly_changed = False
+        if not combat_state or combat_state.status != 'active':
+            anomaly_changed = CombatService._sync_anomaly_after_relocation(
+                location, existing, previous_position,
+            )
         existing.status = 'idle'
         if assign_to_user_id is not None:
             existing.controlled_by = target_user_id  # обновляем управление
@@ -2666,6 +2673,11 @@ def spawn_character_in_location(lobby_id, location_id):
             'pos_y': loc_char.pos_y
         }
     }, room=f"location_{location_id}")
+    if existing and anomaly_changed:
+        socketio.emit(
+            'combat_state_updated', CombatService.get_state(location_id, user_id),
+            room=f"location_{location_id}",
+        )
 
     return jsonify({'message': f'Character {action} successfully', 'location_character_id': loc_char.id}), 200
 
@@ -2884,6 +2896,12 @@ def apply_medical_procedure(character_id):
         emit_character_update({
             'character_id': operation.target.id,
             'updates': {'data': operation.target.data},
+            'source': 'medical_procedure',
+        })
+    for related in operation.related_characters:
+        emit_character_update({
+            'character_id': related.id,
+            'updates': {'data': related.data},
             'source': 'medical_procedure',
         })
     for posture_update in operation.posture_updates:
@@ -3235,6 +3253,22 @@ def respond_character_interaction(lobby_id, request_id, lobby, participant):
 
 
 @lobbies_bp.route(
+    '/<int:lobby_id>/character-interactions/<int:request_id>',
+    methods=['DELETE'],
+)
+@jwt_required()
+@requires_participant
+def cancel_character_interaction(lobby_id, request_id, lobby, participant):
+    request_row = db.session.get(CharacterInteractionRequest, request_id)
+    if not request_row or not Location.query.filter_by(id=request_row.location_id, lobby_id=lobby_id).first():
+        return jsonify({'error': 'Запрос взаимодействия не найден'}), 404
+    result = CharacterInteractionService.cancel_request(request_id, participant.user_id)
+    for recipient_id in {result['actor_user_id'], result['target_user_id']}:
+        socketio.emit('character_interaction_resolved', result, room=f'user_{recipient_id}')
+    return jsonify(result), 200
+
+
+@lobbies_bp.route(
     '/<int:lobby_id>/character-interactions/<int:request_id>/progress',
     methods=['PATCH'],
 )
@@ -3338,8 +3372,8 @@ def request_location_combat_start(lobby_id, location_id, lobby, participant):
     actor = LocationCharacter.query.filter_by(id=actor_id, location_id=location_id).first()
     if not actor or not CombatService._can_end_turn_for_character(actor, participant.user_id):
         raise PermissionDenied('Вы не управляете этим персонажем')
-    if not CombatService._can_take_combat_turn(actor):
-        raise ValidationError('Этот персонаж не может начать бой')
+    if CombatService._location_character_condition(actor)['state'] != 'active':
+        raise ValidationError('Только персонаж в сознании может начать бой действием')
     state = LocationCombatState.query.filter_by(location_id=location_id).first()
     if state and state.status == 'active':
         raise ConflictError('Бой уже начался')
@@ -3403,6 +3437,11 @@ def respond_location_combat_start_request(lobby_id, location_id, request_id, lob
         for user_id in {start_request.actor_user_id, lobby.gm_id}:
             socketio.emit('combat_start_request_resolved', payload, room=f'user_{user_id}')
         return jsonify(payload), 200
+    actor = LocationCharacter.query.filter_by(
+        id=start_request.actor_location_character_id, location_id=location_id,
+    ).first()
+    if not actor or CombatService._location_character_condition(actor)['state'] != 'active':
+        raise ValidationError('Инициатор больше не может начать бой действием')
     selected_ids = data.get('location_character_ids')
     if selected_ids is not None and (
         not isinstance(selected_ids, list)
@@ -3416,9 +3455,8 @@ def respond_location_combat_start_request(lobby_id, location_id, request_id, lob
         location_id,
         lobby.gm_id,
         location_character_ids=selected_ids,
-        initiator_location_character_id=(
-            start_request.actor_location_character_id if initiator_first else None
-        ),
+        initiator_location_character_id=start_request.actor_location_character_id,
+        initiator_first=initiator_first,
     )
     _resolve_combat_start_requests(location_id, approved_id=start_request.id)
     _publish_combat_start(lobby_id, location_id, lobby.gm_id, state)
@@ -3435,6 +3473,7 @@ def start_location_combat(lobby_id, location_id, lobby):
         lobby.gm_id,
         location_character_ids=data.get('location_character_ids'),
         initiator_location_character_id=data.get('initiator_location_character_id'),
+        initiator_first=data.get('initiator_first', True),
     )
     _resolve_combat_start_requests(location_id)
     _publish_combat_start(lobby_id, location_id, lobby.gm_id, state)

@@ -1964,7 +1964,24 @@ class CombatService:
             'requirement': requirements[table][effect_roll - 1],
             'gmPending': True,
         }
-        health.setdefault('effects', []).append(effect)
+        effects = normalize_effect_list(health.get('effects') or [])
+        pending = [
+            item for item in effects
+            if item.get('source') == 'stress_manifestation'
+            and item.get('gmPending') and item.get('active', True)
+        ]
+        strength = {'concern': 0, 'stress': 1, 'tension': 2, 'psychosis': 3}
+        strongest = max(pending, key=lambda item: strength.get(item.get('stress_table'), -1), default=None)
+        if strongest and strength.get(strongest.get('stress_table'), -1) > strength[table]:
+            result.update({
+                'table': strongest.get('stress_table'),
+                'effect_roll': strongest.get('stress_roll'),
+                'effect': strongest.get('name'),
+            })
+            return result
+        # Only the strongest unresolved manifestation from a damage sequence awaits the GM.
+        health['effects'] = [item for item in effects if item not in pending]
+        health['effects'].append(effect)
         sync_health_derived_statuses(health)
         loc_char.character.data = data
         flag_modified(loc_char.character, 'data')
@@ -9173,6 +9190,40 @@ class CombatService:
         return active
 
     @staticmethod
+    def _leave_anomaly(loc_char):
+        data, health, meta, active = CombatService._active_anomaly(loc_char)
+        if not active:
+            return False
+        meta.pop('activeAnomaly', None)
+        health['effects'] = [
+            effect for effect in normalize_effect_list(health.get('effects') or [])
+            if not (
+                effect.get('type') == 'blindness'
+                and str(effect.get('source') or '') == str(active.get('name') or '')
+            )
+        ]
+        sync_health_derived_statuses(health)
+        loc_char.character.data = data
+        flag_modified(loc_char.character, 'data')
+        CombatService._sync_location_effects_from_character(loc_char)
+        return True
+
+    @staticmethod
+    def _sync_anomaly_after_relocation(location, loc_char, previous_position):
+        if (loc_char.pos_x, loc_char.pos_y) == previous_position:
+            return False
+        _, _, _, active = CombatService._active_anomaly(loc_char)
+        if not active:
+            return False
+        CombatService._leave_anomaly(loc_char)
+        anomalies = CombatService._anomalies_at_tile(location, loc_char.pos_x, loc_char.pos_y)
+        if anomalies:
+            CombatService._enter_anomaly(
+                loc_char, anomalies[0], 1, previous_position=previous_position,
+            )
+        return True
+
+    @staticmethod
     def _apply_anomaly_exposure(
         loc_char, active, fraction=1.0, *, apply_category_effect=True,
         round_number=0, exiting=False, escape_margin=None, condition=None,
@@ -10236,10 +10287,13 @@ class CombatService:
             raise ValidationError('На выбранные части не хватает очков разделки')
 
         actor_data = actor.character.data if isinstance(actor.character.data, dict) else {}
-        backpack = actor_data.setdefault('inventory', {}).setdefault('backpack', [])
-        if not isinstance(backpack, list):
-            backpack = []
-            actor_data['inventory']['backpack'] = backpack
+        equipment = actor_data.get('equipment') or {}
+        destination = 'backpack' if isinstance(equipment, dict) and equipment.get('backpack') else 'pockets'
+        inventory = actor_data.setdefault('inventory', {})
+        loot_container = inventory.setdefault(destination, [])
+        if not isinstance(loot_container, list):
+            loot_container = []
+            inventory[destination] = loot_container
         loot = []
         for key, amount in normalized.items():
             if amount <= 0:
@@ -10259,7 +10313,7 @@ class CombatService:
                     'radiation': profile['radiation'],
                 },
             }
-            backpack.append(item)
+            loot_container.append(item)
             loot.append(deepcopy(item))
         target_meta['butchered'] = True
         target_meta['butcheringResult'] = {'allocation': normalized, 'spent': spent}
@@ -10799,6 +10853,7 @@ class CombatService:
         user_id,
         location_character_ids=None,
         initiator_location_character_id=None,
+        initiator_first=True,
     ):
         location = CombatService._get_location(location_id)
         CombatService._ensure_access(location, user_id)
@@ -10812,7 +10867,12 @@ class CombatService:
             raise ValidationError("No characters are present in this location")
         available_by_id = {item.id: item for item in available_characters}
         if location_character_ids is None:
-            loc_chars = available_characters
+            loc_chars = [
+                item for item in available_characters
+                if CombatService._location_character_condition(item)['state'] != 'dead'
+            ]
+            if not loc_chars:
+                raise ValidationError('На подлокации нет живых участников боя')
         else:
             if not isinstance(location_character_ids, (list, tuple, set)):
                 raise ValidationError("Combat participants must be a list")
@@ -10828,16 +10888,23 @@ class CombatService:
             if missing_ids:
                 raise ValidationError("Selected character is not in this location")
             loc_chars = [available_by_id[value] for value in selected_ids]
+            if any(
+                CombatService._location_character_condition(item)['state'] == 'dead'
+                for item in loc_chars
+            ):
+                raise ValidationError('Мёртвого персонажа нельзя добавить в инициативу')
 
         initiator_id = CombatService._coerce_int(
             initiator_location_character_id, 0,
         )
         if initiator_id and initiator_id not in {item.id for item in loc_chars}:
             raise ValidationError("The combat initiator must be a selected participant")
-        if initiator_id and not CombatService._can_take_combat_turn(
+        if initiator_id and CombatService._location_character_condition(
             available_by_id[initiator_id]
-        ):
-            raise ValidationError("An incapacitated character cannot initiate combat")
+        )['state'] != 'active':
+            raise ValidationError('Только персонаж в сознании может начать бой действием')
+        if not isinstance(initiator_first, bool):
+            raise ValidationError('Укажите, должен ли инициатор ходить первым')
 
         state = CombatService._get_or_create_state(location_id)
         if state.status == 'active':
@@ -10880,7 +10947,7 @@ class CombatService:
         ordered_chars = sorted(
             loc_chars,
             key=lambda item: (
-                0 if initiator_id and item.id == initiator_id else 1,
+                0 if initiator_first and initiator_id and item.id == initiator_id else 1,
                 -(item.initiative_total or 0),
                 -(item.initiative_bonus or 0),
                 item.id,
@@ -14597,16 +14664,7 @@ class CombatService:
                 if anomaly_details['exits']:
                     character.pos_x = anomaly_details['target_x']
                     character.pos_y = anomaly_details['target_y']
-                    combat_meta.pop('activeAnomaly', None)
-                    health = data.setdefault('health', {})
-                    health['effects'] = [
-                        effect for effect in normalize_effect_list(health.get('effects') or [])
-                        if not (
-                            effect.get('type') == 'blindness'
-                            and str(effect.get('source') or '') == str(active_anomaly.get('name') or '')
-                        )
-                    ]
-                    sync_health_derived_statuses(health)
+                    CombatService._leave_anomaly(character)
                     CombatService._clear_aim(character)
                 else:
                     active_anomaly['rounds'] = max(
@@ -15442,14 +15500,23 @@ class CombatService:
                 else:
                     raise ValidationError("Not enough movement points")
 
+            previous_position = (character.pos_x, character.pos_y)
             character.pos_x, character.pos_y = landing
+            anomaly_changed = False
+            if not state or state.status != 'active':
+                anomaly_changed = CombatService._sync_anomaly_after_relocation(
+                    location, character, previous_position,
+                )
             CombatService._clear_aim(character)
             character.last_action = db.func.now()
             CombatService._apply_periodic_health_effects(character, phase='movement_end')
             CombatService._sync_location_effects_from_character(character)
             CombatService._release_invalid_gunpoints(location_id)
             db.session.commit()
-            state_payload = CombatService._serialize_state(location, state) if state else None
+            state_payload = (
+                CombatService._serialize_state(location, state) if state else
+                CombatService.get_state(location_id, user_id) if anomaly_changed else None
+            )
             return character, climb_cost, state_payload
 
         try:
@@ -15642,6 +15709,11 @@ class CombatService:
         previous_x, previous_y = character.pos_x, character.pos_y
         character.pos_x = new_x
         character.pos_y = new_y
+        anomaly_changed = False
+        if not state or state.status != 'active':
+            anomaly_changed = CombatService._sync_anomaly_after_relocation(
+                location, character, (previous_x, previous_y),
+            )
         if entered_anomaly:
             CombatService._enter_anomaly(
                 character,
@@ -15705,7 +15777,10 @@ class CombatService:
         CombatService._release_invalid_gunpoints(location_id)
         db.session.commit()
 
-        state_payload = CombatService._serialize_state(location, state) if state else None
+        state_payload = (
+            CombatService._serialize_state(location, state) if state else
+            CombatService.get_state(location_id, user_id) if anomaly_changed else None
+        )
         return character, cost, state_payload
 
     @staticmethod

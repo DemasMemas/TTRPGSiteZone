@@ -40,6 +40,32 @@ def emit_character_update(payload, *, skip_sid=None):
             socketio.server.leave_room(sid, room, namespace='/')
             forget_subscription(sid, character_id)
     socketio.emit('character_data_updated', payload, room=room, skip_sid=skip_sid)
+    data = character.data if isinstance(character.data, dict) else {}
+    basic = data.get('basic') if isinstance(data.get('basic'), dict) else {}
+    if 'data' not in payload.get('updates', {}) or not (
+        data.get('is_mutant') or basic.get('is_mutant')
+    ):
+        return
+    health = data.get('health') if isinstance(data.get('health'), dict) else {}
+    lobby = db.session.get(Lobby, character.lobby_id)
+    recipients = {character.owner_id, lobby.gm_id}
+    recipients.update(character.visible_to or [])
+    recipients.update(character.editable_to or [])
+    recipients.update(
+        model.controlled_by for model in LocationCharacter.query.filter_by(character_id=character.id).all()
+        if model.controlled_by
+    )
+    health_update = {
+        'lobby_id': character.lobby_id,
+        'character_id': character.id,
+        'health': {'current': health.get('current'), 'max': health.get('max')},
+    }
+    for user_id in recipients:
+        try:
+            CharacterService.check_access(character, user_id)
+        except ServiceError:
+            continue
+        socketio.emit('mutant_health_updated', health_update, room=f'user_{user_id}')
 
 
 def publish_character_save(result, updates, user_id, *, skip_sid=None):

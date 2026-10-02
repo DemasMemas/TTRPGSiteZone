@@ -1,3 +1,5 @@
+import pytest
+
 from app.extensions import db
 from app.models import Lobby, LobbyCharacter, Location, LocationCharacter, LocationCombatState, User
 from app.services.anomaly_profiles import ANOMALY_PROFILES, anomaly_profile
@@ -73,6 +75,38 @@ def test_anomaly_is_passable_and_stops_route_on_first_anomaly(app):
     assert (moved.pos_x, moved.pos_y) == (2, 2)
     active = actor.data["health"]["combatMeta"]["activeAnomaly"]
     assert active["key"] == "otboynik"
+
+
+@pytest.mark.parametrize('has_idle_state', [True, False])
+def test_gm_relocation_outside_combat_exits_anomaly_without_exposure(app, has_idle_state):
+    user, location, actor, placed, _ = _combat_with_anomaly()
+    state = LocationCombatState.query.filter_by(location_id=location.id).one()
+    if has_idle_state:
+        state.status = 'idle'
+        state.turn_order = []
+        state.current_location_character_id = None
+    else:
+        db.session.delete(state)
+    placed.pos_x = placed.pos_y = 2
+    active = CombatService._enter_anomaly(
+        placed, CombatService._anomalies_at_tile(location, 2, 2)[0], 1,
+    )
+    actor.data['health']['effects'] = [
+        {'type': 'blindness', 'source': active['name'], 'value': 90},
+        {'type': 'blindness', 'source': 'other', 'value': 10},
+    ]
+    db.session.commit()
+
+    moved, _, snapshot = CombatService.move_character(
+        location.id, user.id, actor.id, 3, 2,
+    )
+
+    assert (moved.pos_x, moved.pos_y) == (3, 2)
+    assert 'activeAnomaly' not in actor.data['health']['combatMeta']
+    assert actor.data['health']['current'] == 700
+    assert all(effect.get('source') != active['name'] for effect in actor.data['health']['effects'])
+    assert any(effect.get('source') == 'other' for effect in actor.data['health']['effects'])
+    assert snapshot['characters'][0]['active_anomaly'] is None
 
 
 def test_successful_escape_costs_three_ap_and_moves_without_damage(app, monkeypatch):

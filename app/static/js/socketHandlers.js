@@ -1,6 +1,6 @@
 // static/js/socketHandlers.js
 import { showNotification } from './utils.js';
-import { loadLobbyCharacters } from './characters.js';
+import { loadLobbyCharacters, updateMutantHealthInList } from './characters.js';
 import { loadLobbyInfo, loadAllChunks, updateDisplayedLobbyTime } from './lobbyData.js';
 import { addMessage, updateParticipantsList, onlineUserIds, lobbyParticipants } from './ui.js';
 import { updateTileInChunk } from './lobby3d.js';
@@ -191,6 +191,10 @@ export function initSocket(lobbyId, token) {
     socket.on('character_created', () => loadLobbyCharacters());
     socket.on('character_deleted', () => loadLobbyCharacters());
     socket.on('character_updated', () => loadLobbyCharacters());
+    socket.on('mutant_health_updated', data => {
+        if (Number(data?.lobby_id) !== Number(currentLobbyId)) return;
+        updateMutantHealthInList(data.character_id, data.health);
+    });
 
     socket.on('tile_updated', (data) => {
         updateTileInChunk(data.chunk_x, data.chunk_y, data.tile_x, data.tile_y, data.updates);

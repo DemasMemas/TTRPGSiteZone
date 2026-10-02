@@ -3,6 +3,7 @@ import pytest
 from app.extensions import db
 from app.lobbies import _world_group_speed
 from app.services import addictions
+from app.services.character_events import emit_character_update
 from app.services.combat import CombatService
 from app.models import (
     ChatMessage,
@@ -91,6 +92,93 @@ def test_gm_full_heal_restores_body_and_rejects_player(client, create_user, auth
     assert health['blood'] == 'normal'
     assert health['painLevel'] == 0
     assert health['stress'] == 3
+
+
+def test_mutant_health_update_reaches_only_allowed_list_viewers(
+    client, create_user, auth_headers, monkeypatch,
+):
+    gm = create_user('mutant-health-event-gm')
+    viewer = create_user('mutant-health-event-viewer')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, viewer, auth_headers)
+    mutant = create_character(
+        client, lobby, gm, auth_headers,
+        mutant_character_data(mutant_profile('Собака')),
+    )
+    human = create_character(client, lobby, gm, auth_headers)
+    stored = db.session.get(LobbyCharacter, mutant['id'])
+    stored.data = {
+        **stored.data,
+        'health': {**stored.data['health'], 'current': 70},
+    }
+    db.session.commit()
+    events = []
+    monkeypatch.setattr(
+        'app.services.character_events.socketio.emit',
+        lambda event, payload, **kwargs: events.append((event, payload, kwargs)),
+    )
+
+    emit_character_update({
+        'character_id': stored.id,
+        'updates': {'data': stored.data_snapshot()},
+        'source': 'combat',
+    })
+    health_events = [event for event in events if event[0] == 'mutant_health_updated']
+    assert len(health_events) == 1
+    assert health_events[0][1]['health'] == {'current': 70, 'max': stored.data['health']['max']}
+    assert health_events[0][2]['room'] == f"user_{gm['id']}"
+
+    stored.visible_to = [viewer['id']]
+    db.session.commit()
+    events.clear()
+    emit_character_update({
+        'character_id': stored.id,
+        'updates': {'data': stored.data_snapshot()},
+        'source': 'combat',
+    })
+    assert {
+        event[2]['room'] for event in events if event[0] == 'mutant_health_updated'
+    } == {f"user_{gm['id']}", f"user_{viewer['id']}"}
+
+    events.clear()
+    person = db.session.get(LobbyCharacter, human['id'])
+    emit_character_update({'character_id': person.id, 'updates': {'data': person.data_snapshot()}})
+    assert not any(event[0] == 'mutant_health_updated' for event in events)
+
+
+def test_replacing_character_outside_combat_clears_old_anomaly(
+    client, create_user, auth_headers,
+):
+    gm = create_user('reposition-anomaly-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    character = create_character(client, lobby, gm, auth_headers)
+    tiles = [[{'terrain': 'grass', 'height': 1, 'objects': []} for _ in range(5)] for _ in range(5)]
+    tiles[2][2]['objects'] = [{'type': 'anomaly', 'anomalyKey': 'otboynik'}]
+    location = Location(
+        lobby_id=lobby['id'], name='Reposition anomaly', world_tile_x=0, world_tile_z=0,
+        grid_width=5, grid_height=5, tiles_data=tiles,
+    )
+    db.session.add(location)
+    db.session.flush()
+    placed = LocationCharacter(
+        location_id=location.id, character_id=character['id'], pos_x=2, pos_y=2,
+    )
+    db.session.add(placed)
+    db.session.flush()
+    CombatService._enter_anomaly(
+        placed, CombatService._anomalies_at_tile(location, 2, 2)[0], 1,
+    )
+    db.session.commit()
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/spawn_character",
+        headers=auth_headers(gm),
+        json={'character_id': character['id'], 'tile_x': 3, 'tile_y': 2},
+    )
+
+    assert response.status_code == 200
+    assert (placed.pos_x, placed.pos_y) == (3, 2)
+    assert 'activeAnomaly' not in db.session.get(LobbyCharacter, character['id']).data['health']['combatMeta']
 
 
 def test_addiction_exposure_and_global_time_start_withdrawal(
@@ -269,8 +357,9 @@ def test_exact_facing_vector_is_saved_outside_combat(client, create_user, auth_h
     assert (placed.facing_x, placed.facing_y) == (2, 7)
 
 
+@pytest.mark.parametrize('has_backpack', [False, True])
 def test_dead_mutant_can_be_butchered_only_once(
-    client, create_user, auth_headers, monkeypatch,
+    client, create_user, auth_headers, monkeypatch, has_backpack,
 ):
     gm = create_user("butchering-gm")
     lobby = create_lobby(client, gm, auth_headers)
@@ -287,6 +376,7 @@ def test_dead_mutant_can_be_butchered_only_once(
             },
         }],
         "inventory": {"pockets": [], "backpack": []},
+        "equipment": {"backpack": {"name": "Рюкзак"}} if has_backpack else {},
     }
     actor = create_character(client, lobby, gm, auth_headers, actor_data)
     dog_data = mutant_character_data(mutant_profile("Собака"))
@@ -327,7 +417,10 @@ def test_dead_mutant_can_be_butchered_only_once(
     assert completed.status_code == 200
     assert completed.get_json()["spent"] == 12
     stored_actor = db.session.get(LobbyCharacter, actor["id"])
-    assert len(stored_actor.data["inventory"]["backpack"]) == 3
+    destination = "backpack" if has_backpack else "pockets"
+    other = "pockets" if has_backpack else "backpack"
+    assert len(stored_actor.data["inventory"][destination]) == 3
+    assert stored_actor.data["inventory"][other] == []
 
     repeated = client.post(
         url,
@@ -335,6 +428,30 @@ def test_dead_mutant_can_be_butchered_only_once(
         json={"actor_location_character_id": actor_placed.id},
     )
     assert repeated.status_code == 400
+
+    healed = client.post(
+        f"/lobbies/{lobby['id']}/characters/{mutant['id']}/heal",
+        headers=auth_headers(gm),
+    )
+    assert healed.status_code == 200
+    healed_meta = healed.get_json()['data']['health'].get('combatMeta', {})
+    assert not any(key in healed_meta for key in ('butchered', 'butcheringResult', 'butcheringRoll'))
+    revived = db.session.get(LobbyCharacter, mutant['id'])
+    revived.data = {
+        **revived.data,
+        'health': {
+            **revived.data['health'],
+            'effects': [{'type': 'death', 'name': 'Смерть', 'active': True}],
+        },
+    }
+    db.session.commit()
+    new_body = client.post(
+        url,
+        headers=auth_headers(gm),
+        json={"actor_location_character_id": actor_placed.id},
+    )
+    assert new_body.status_code == 200
+    assert new_body.get_json()['roll']['total'] == 17
 
 
 def test_reaction_reserve_interrupts_and_returns_to_the_original_turn(
@@ -2331,6 +2448,70 @@ def test_combat_start_rolls_tactics_initiative_only_for_selected_characters(
     assert excluded_state["initiative_total"] is None
 
 
+@pytest.mark.parametrize('kind,health_change', [
+    ('mutant', {'effects': [{'type': 'death', 'active': True}]}),
+    ('human', {'effects': [{'type': 'death', 'active': True}]}),
+    ('human', {'bloodStage': 'fatal'}),
+    ('human', {'organs': {'brain': {'current': 0}}}),
+    ('human', {'organs': {'skull': {'current': 0}}}),
+])
+@pytest.mark.parametrize('explicit_selection', [True, False])
+def test_dead_character_cannot_join_initiative_at_combat_start(
+    client, create_user, auth_headers, kind, health_change, explicit_selection,
+):
+    gm = create_user(f'dead-initiative-{kind}')
+    lobby = create_lobby(client, gm, auth_headers)
+    alive = create_character(client, lobby, gm, auth_headers)
+    dead_data = mutant_character_data(mutant_profile('Собака')) if kind == 'mutant' else {}
+    dead_data['health'] = {**dead_data.get('health', {}), **health_change}
+    dead = create_character(client, lobby, gm, auth_headers, dead_data)
+    location = Location(lobby_id=lobby['id'], name='Dead initiative', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    living_model = LocationCharacter(location_id=location.id, character_id=alive['id'])
+    dead_model = LocationCharacter(location_id=location.id, character_id=dead['id'])
+    db.session.add_all([living_model, dead_model])
+    db.session.commit()
+
+    payload = {'location_character_ids': [living_model.id, dead_model.id]} if explicit_selection else {}
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start",
+        headers=auth_headers(gm), json=payload,
+    )
+
+    if explicit_selection:
+        assert response.status_code == 400
+        assert not LocationCombatState.query.filter_by(location_id=location.id, status='active').first()
+        assert db.session.get(LocationCharacter, dead_model.id).initiative_roll is None
+    else:
+        assert response.status_code == 200
+        state = response.get_json()
+        assert state['turn_order'] == [living_model.id]
+        assert db.session.get(LocationCharacter, dead_model.id).initiative_roll is None
+
+
+def test_combat_cannot_start_with_only_dead_characters(client, create_user, auth_headers):
+    gm = create_user('only-dead-initiative-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    dead = create_character(
+        client, lobby, gm, auth_headers,
+        {'health': {'effects': [{'type': 'death', 'active': True}]}},
+    )
+    location = Location(lobby_id=lobby['id'], name='Only dead', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    db.session.add(LocationCharacter(location_id=location.id, character_id=dead['id']))
+    db.session.commit()
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start",
+        headers=auth_headers(gm), json={},
+    )
+
+    assert response.status_code == 400
+    assert not LocationCombatState.query.filter_by(location_id=location.id, status='active').first()
+
+
 def test_attack_start_request_requires_gm_approval_and_preserves_ammo(
     client, create_user, auth_headers,
 ):
@@ -2449,6 +2630,156 @@ def test_attack_start_request_can_use_normal_initiative_when_gm_unchecks_first(
         for item in state['characters']
     }
     assert initiatives[target.id] > initiatives[actor.id]
+
+
+@pytest.mark.parametrize('initiator_first', [True, False])
+@pytest.mark.parametrize('actor_kind,health_change', [
+    ('mutant', {'effects': [{'type': 'death', 'active': True}]}),
+    ('mutant', {'current': 0}),
+    ('human', {'effects': [{'type': 'death', 'active': True}]}),
+    ('human', {'effects': [{'type': 'critical_condition', 'active': True}]}),
+    ('human', {'effects': [{'type': 'unconsciousness', 'active': True}]}),
+    ('human', {'effects': [{'type': 'shock', 'active': True}]}),
+])
+def test_incapacitated_character_cannot_start_combat_by_action(
+    client, create_user, auth_headers, actor_kind, health_change, initiator_first,
+):
+    gm = create_user(f'invalid-combat-initiator-{actor_kind}')
+    lobby = create_lobby(client, gm, auth_headers)
+    actor_data = mutant_character_data(mutant_profile('Собака')) if actor_kind == 'mutant' else {}
+    actor_data['health'] = {**actor_data.get('health', {}), **health_change}
+    initiator = create_character(client, lobby, gm, auth_headers, actor_data)
+    location = Location(lobby_id=lobby['id'], name='Invalid initiator', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    placed = LocationCharacter(location_id=location.id, character_id=initiator['id'])
+    db.session.add(placed)
+    db.session.commit()
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start"
+    response = client.post(
+        url, headers=auth_headers(gm),
+        json={
+            'location_character_ids': [placed.id],
+            'initiator_location_character_id': placed.id,
+            'initiator_first': initiator_first,
+        },
+    )
+
+    assert response.status_code == 400
+    assert not LocationCombatState.query.filter_by(location_id=location.id, status='active').first()
+
+
+@pytest.mark.parametrize('health_change', [
+    {'effects': [{'type': 'death', 'active': True}]},
+    {'effects': [{'type': 'critical_condition', 'active': True}]},
+    {'effects': [{'type': 'shock', 'active': True}]},
+])
+def test_incapacitated_character_cannot_request_combat_start(
+    client, create_user, auth_headers, health_change,
+):
+    gm = create_user('invalid-combat-request-gm')
+    player = create_user('invalid-combat-request-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    attacker = create_character(client, lobby, player, auth_headers, {'health': health_change})
+    location = Location(lobby_id=lobby['id'], name='Invalid request', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    actor = LocationCharacter(location_id=location.id, character_id=attacker['id'])
+    db.session.add(actor)
+    db.session.commit()
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start-requests"
+    response = client.post(
+        url, headers=auth_headers(player),
+        json={'actor_location_character_id': actor.id},
+    )
+
+    assert response.status_code == 400
+    assert client.get(url, headers=auth_headers(gm)).get_json() == []
+
+
+def test_gm_action_start_with_normal_initiative_keeps_living_initiator(
+    client, create_user, auth_headers, monkeypatch,
+):
+    gm = create_user('direct-combat-normal-initiative-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    attacker = create_character(client, lobby, gm, auth_headers)
+    defender = create_character(
+        client, lobby, gm, auth_headers,
+        {'skills': {'other': {'tactics': {'base': 16, 'bonus': 2}}}},
+    )
+    location = Location(lobby_id=lobby['id'], name='Normal initiative', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    actor = LocationCharacter(location_id=location.id, character_id=attacker['id'])
+    target = LocationCharacter(location_id=location.id, character_id=defender['id'])
+    db.session.add_all([actor, target])
+    db.session.commit()
+    monkeypatch.setattr('app.services.combat.random.randint', lambda _low, _high: 10)
+
+    response = client.post(
+        f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start",
+        headers=auth_headers(gm),
+        json={
+            'location_character_ids': [actor.id, target.id],
+            'initiator_location_character_id': actor.id,
+            'initiator_first': False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()['turn_order'] == [target.id, actor.id]
+
+
+@pytest.mark.parametrize('initiator_first', [True, False])
+def test_combat_start_request_cannot_be_approved_after_mutant_dies(
+    client, create_user, auth_headers, initiator_first,
+):
+    gm = create_user('late-mutant-combat-gm')
+    player = create_user('late-mutant-combat-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    mutant = create_character(
+        client, lobby, player, auth_headers,
+        mutant_character_data(mutant_profile('Собака')),
+    )
+    location = Location(lobby_id=lobby['id'], name='Late mutant death', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    actor = LocationCharacter(location_id=location.id, character_id=mutant['id'])
+    db.session.add(actor)
+    db.session.commit()
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/combat/start-requests"
+    created = client.post(
+        url, headers=auth_headers(player),
+        json={'actor_location_character_id': actor.id},
+    )
+    assert created.status_code == 201
+    stored = db.session.get(LobbyCharacter, mutant['id'])
+    stored.data = {
+        **stored.data,
+        'health': {
+            **stored.data['health'],
+            'effects': [{'type': 'death', 'active': True}],
+        },
+    }
+    db.session.commit()
+
+    approved = client.post(
+        f"{url}/{created.get_json()['id']}/response",
+        headers=auth_headers(gm),
+        json={
+            'decision': 'approve',
+            'location_character_ids': [actor.id],
+            'initiator_first': initiator_first,
+        },
+    )
+
+    assert approved.status_code == 400
+    assert not LocationCombatState.query.filter_by(location_id=location.id, status='active').first()
 
 
 def test_gm_can_adjust_stress_without_placing_character_on_location(

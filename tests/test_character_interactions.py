@@ -231,3 +231,72 @@ def test_interaction_distance_is_ignored_outside_combat(
 
     assert response.status_code == 201
     assert response.get_json()['status'] == 'pending'
+
+
+def test_offline_patient_requires_gm_decision_and_waiting_request_can_be_cancelled(
+    client, create_user, auth_headers, monkeypatch,
+):
+    from app.sockets.auth import sid_to_lobby, sid_to_user
+
+    pair = _setup_pair(client, create_user, auth_headers)
+    monkeypatch.setitem(sid_to_user, 'test-doctor-online', pair['actor_user']['id'])
+    monkeypatch.setitem(sid_to_lobby, 'test-doctor-online', pair['lobby'].id)
+    endpoint = f"/lobbies/{pair['lobby'].id}/locations/{pair['location'].id}/character-interactions"
+    request_data = {
+        'actor_location_character_id': pair['actor_location'].id,
+        'target_character_id': pair['target_character'].id,
+        'kind': 'treatment',
+        'payload': {'procedure': {'item_name': 'Бинт'}},
+    }
+    response = client.post(endpoint, headers=auth_headers(pair['actor_user']), json=request_data)
+    assert response.status_code == 201, response.json
+    pending = response.get_json()
+    assert pending['status'] == 'pending'
+    assert pending['target_user_id'] == pair['actor_user']['id']
+    assert pending['payload']['gm_decision_for_offline_target'] is True
+    assert pair['actor_location'].action_points_current == 5
+
+    cancel_url = f"/lobbies/{pair['lobby'].id}/character-interactions/{pending['id']}"
+    unauthorized = client.delete(cancel_url, headers=auth_headers(pair['target_user']))
+    assert unauthorized.status_code == 403
+    cancelled = client.delete(cancel_url, headers=auth_headers(pair['actor_user']))
+    assert cancelled.status_code == 200, cancelled.json
+    assert cancelled.get_json()['status'] == 'cancelled'
+    assert pair['actor_location'].action_points_current == 5
+    assert pair['actor_character'].data['inventory']['backpack'][0]['quantity'] == 2
+
+    second = client.post(endpoint, headers=auth_headers(pair['actor_user']), json=request_data)
+    assert second.status_code == 201, second.json
+    approved = client.post(
+        f"/lobbies/{pair['lobby'].id}/character-interactions/{second.get_json()['id']}/response",
+        headers=auth_headers(pair['actor_user']), json={'decision': 'accept'},
+    )
+    assert approved.status_code == 200, approved.json
+    assert approved.get_json()['status'] == 'accepted'
+
+
+def test_offline_patient_request_fails_immediately_if_gm_is_offline(
+    client, create_user, auth_headers, monkeypatch,
+):
+    from app.sockets.auth import sid_to_lobby, sid_to_user
+
+    pair = _setup_pair(client, create_user, auth_headers)
+    pair['lobby'].gm_id = pair['target_user']['id']
+    db.session.commit()
+    monkeypatch.setitem(sid_to_user, 'test-doctor-online-no-gm', pair['actor_user']['id'])
+    monkeypatch.setitem(sid_to_lobby, 'test-doctor-online-no-gm', pair['lobby'].id)
+
+    response = client.post(
+        f"/lobbies/{pair['lobby'].id}/locations/{pair['location'].id}/character-interactions",
+        headers=auth_headers(pair['actor_user']),
+        json={
+            'actor_location_character_id': pair['actor_location'].id,
+            'target_character_id': pair['target_character'].id,
+            'kind': 'treatment',
+            'payload': {'procedure': {'item_name': 'Бинт'}},
+        },
+    )
+
+    assert response.status_code == 409, response.json
+    assert 'ГМ недоступен' in response.json['error']['message']
+    assert CharacterInteractionRequest.query.count() == 0

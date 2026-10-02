@@ -4,10 +4,11 @@ import pytest
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.extensions import db
-from app.models import ConsumableUse, DeferredCombatAction
+from app.models import ConsumableUse, DeferredCombatAction, LocationCombatState
 from app.models.templates import ItemTemplate
 from app.services.consumable_effects import parse_consumable_effects
 from app.services.effects import advance_timed_effects
+from app.services.medical_procedure import _blood_packet_proof, _verified_blood_donor
 from test_consumable_use import pair
 from test_atomic_inventory import treatment_payload
 
@@ -371,6 +372,7 @@ def test_blood_collection_creates_packet_and_worsens_donor_state(
     data['health']['bloodStage'] = 'normal'
     data['health']['exhaustion'] = 1
     data['health'].setdefault('combatMeta', {})['bloodType'] = 4
+    data['health']['combatMeta']['bloodTypeKnown'] = True
     pair['actor_character'].data = data
     flag_modified(pair['actor_character'], 'data')
     db.session.commit()
@@ -390,6 +392,236 @@ def test_blood_collection_creates_packet_and_worsens_donor_state(
     packet = data['inventory']['pockets'][-1]
     assert packet['name'] == 'Пакет крови'
     assert packet['attributes']['bloodType'] == 4
+    assert packet['attributes']['bloodTypeKnown'] is True
+    assert packet['attributes']['donorCharacterId'] == pair['actor_character'].id
+    assert packet['isStackable'] is False
+
+
+def test_unknown_donor_and_collected_packet_keep_one_blood_type(
+        client, pair, auth_headers, monkeypatch):
+    packet_profile = parse_consumable_effects('Пакет крови. Восстанавливает стадию кровопотери.')
+    db.session.add(ItemTemplate(
+        name='Пакет крови', category='consumable',
+        attributes={'consumable': packet_profile},
+    ))
+    _, _, collection_kit = install_item(
+        pair, 'Набор для забора крови',
+        'При использовании выкачивает кровь и преобразует набор в пакет крови.',
+        quantity=1,
+    )
+    data = deepcopy(pair['actor_character'].data)
+    data['health'].setdefault('combatMeta', {}).pop('bloodType', None)
+    data['health']['combatMeta']['bloodTypeKnown'] = False
+    pair['actor_character'].data = data
+    flag_modified(pair['actor_character'], 'data')
+    db.session.commit()
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 17)
+
+    collected = apply(client, pair, auth_headers, payload(
+        pair, collection_kit, {'kind': 'self', 'actionPoints': 0},
+        operation='collect-unknown-blood',
+    ))
+    assert collected.status_code == 200, collected.json
+    donor_meta = collected.json['actor_data']['health']['combatMeta']
+    packet = collected.json['actor_data']['inventory']['pockets'][-1]
+    assert donor_meta['bloodType'] == 3
+    assert donor_meta['bloodTypeKnown'] is False
+    assert packet['attributes']['bloodType'] == 3
+    assert packet['attributes']['bloodTypeKnown'] is False
+    assert packet['attributes']['donorCharacterId'] == pair['actor_character'].id
+
+    _, _, test_kit = install_item(
+        pair, 'Набор для определения группы крови',
+        'Позволяет определить группу крови.', quantity=1,
+    )
+    packet_application = {
+        'kind': 'blood_type_test', 'target': 'packet', 'actionPoints': 0,
+        'entry': {'path': ['inventory', 'pockets', 0], 'item': deepcopy(packet)},
+    }
+    tested_packet = apply(client, pair, auth_headers, payload(
+        pair, test_kit, packet_application, operation='test-collected-packet',
+    ))
+    assert tested_packet.status_code == 200, tested_packet.json
+    assert tested_packet.json['medical_result']['outcome']['blood_type'] == 3
+    assert tested_packet.json['actor_data']['inventory']['pockets'][0]['attributes']['bloodTypeKnown'] is True
+    assert tested_packet.json['actor_data']['health']['combatMeta']['bloodTypeKnown'] is True
+
+    _, _, test_kit = install_item(
+        pair, 'Набор для определения группы крови',
+        'Позволяет определить группу крови.', quantity=1,
+    )
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 1)
+    tested_donor = apply(client, pair, auth_headers, payload(
+        pair, test_kit, {'kind': 'blood_type_test', 'target': 'character', 'actionPoints': 0},
+        operation='test-collected-donor',
+    ))
+    assert tested_donor.status_code == 200, tested_donor.json
+    assert tested_donor.json['medical_result']['outcome']['blood_type'] == 3
+    assert tested_donor.json['actor_data']['health']['combatMeta']['bloodTypeKnown'] is True
+
+
+def test_legacy_packet_without_group_can_be_tested(client, pair, auth_headers, monkeypatch):
+    _, _, item = install_item(
+        pair, 'Набор для определения группы крови',
+        'Позволяет определить группу крови.', quantity=1,
+    )
+    data = deepcopy(pair['actor_character'].data)
+    packet = {
+        'id': 'legacy-packet', 'name': 'Пакет крови', 'category': 'consumable',
+        'quantity': 1, 'attributes': {'bloodType': None},
+    }
+    data['inventory']['pockets'].append(packet)
+    pair['actor_character'].data = data
+    flag_modified(pair['actor_character'], 'data')
+    db.session.commit()
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 20)
+
+    response = apply(client, pair, auth_headers, payload(
+        pair, item, {
+            'kind': 'blood_type_test', 'target': 'packet', 'actionPoints': 0,
+            'entry': {'path': ['inventory', 'pockets', 0], 'item': deepcopy(packet)},
+        }, operation='test-legacy-packet',
+    ))
+    assert response.status_code == 200, response.json
+    assert response.json['medical_result']['outcome']['blood_type'] == 4
+    attributes = response.json['actor_data']['inventory']['pockets'][0]['attributes']
+    assert attributes['bloodType'] == 4
+    assert attributes['bloodTypeKnown'] is True
+
+
+def test_packet_donor_link_rejects_tampered_identity(client):
+    packet = {
+        'id': 'collected-packet',
+        'attributes': {'bloodType': 3, 'donorCharacterId': 42},
+    }
+    packet['attributes']['bloodDonorProof'] = _blood_packet_proof(packet['id'], 42, 3)
+    assert _verified_blood_donor(packet) == 42
+    packet['attributes']['donorCharacterId'] = 43
+    assert _verified_blood_donor(packet) is None
+    packet['attributes']['donorCharacterId'] = 42
+    packet['attributes']['bloodType'] = 4
+    assert _verified_blood_donor(packet) is None
+
+
+@pytest.mark.parametrize('donor_type, expected_type', [(2, 2), (None, 3)])
+def test_out_of_combat_blood_collection_from_other_character_completes_consent(
+        client, pair, auth_headers, monkeypatch, donor_type, expected_type):
+    packet_profile = parse_consumable_effects('Пакет крови. Восстанавливает стадию кровопотери.')
+    db.session.add(ItemTemplate(
+        name='Пакет крови', category='consumable',
+        attributes={'consumable': packet_profile},
+    ))
+    _, _, item = install_item(
+        pair, 'Набор для забора крови',
+        'При использовании выкачивает кровь и преобразует набор в пакет крови.',
+        quantity=1,
+    )
+    combat = LocationCombatState.query.filter_by(location_id=pair['location'].id).one()
+    combat.status = 'idle'
+    donor_data = deepcopy(pair['target_character'].data)
+    donor_data['health']['blood'] = 'normal'
+    donor_data['health']['bloodStage'] = 'normal'
+    donor_data['health']['exhaustion'] = 0
+    donor_data['health'].setdefault('combatMeta', {})['bloodType'] = donor_type
+    donor_data['health']['combatMeta']['bloodTypeKnown'] = donor_type is not None
+    pair['target_character'].data = donor_data
+    flag_modified(pair['target_character'], 'data')
+    db.session.commit()
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 17)
+    consent, _ = treatment_payload(pair)
+
+    response = apply(client, pair, auth_headers, payload(
+        pair, item, {'kind': 'self', 'actionPoints': 0}, operation='collect-other-blood',
+        target=pair['target_character'], consent=consent,
+    ))
+
+    assert response.status_code == 200, response.json
+    assert consent.status == 'completed'
+    assert response.json['target_data']['health']['bloodStage'] == 'medium'
+    assert response.json['target_data']['health']['exhaustion'] == 2
+    assert response.json['target_data']['health']['combatMeta']['bloodType'] == expected_type
+    packet = response.json['actor_data']['inventory']['pockets'][-1]
+    assert packet['attributes']['bloodType'] == expected_type
+    assert packet['attributes']['bloodTypeKnown'] is (donor_type is not None)
+    assert packet['attributes']['donorCharacterId'] == pair['target_character'].id
+    assert response.json['actor_data']['inventory']['backpack'] == []
+
+    if donor_type is None:
+        _, _, test_kit = install_item(
+            pair, 'Набор для определения группы крови',
+            'Позволяет определить группу крови.', quantity=1,
+        )
+        tested = apply(client, pair, auth_headers, payload(
+            pair, test_kit, {
+                'kind': 'blood_type_test', 'target': 'packet', 'actionPoints': 0,
+                'entry': {'path': ['inventory', 'pockets', 0], 'item': deepcopy(packet)},
+            }, operation='test-other-donor-packet',
+        ))
+        assert tested.status_code == 200, tested.json
+        assert tested.json['medical_result']['outcome']['blood_type'] == expected_type
+        assert pair['target_character'].data['health']['combatMeta']['bloodTypeKnown'] is True
+
+
+def test_testing_donor_reveals_related_packet_held_by_doctor(
+        client, pair, auth_headers, monkeypatch):
+    packet_profile = parse_consumable_effects('Пакет крови. Восстанавливает стадию кровопотери.')
+    db.session.add(ItemTemplate(
+        name='Пакет крови', category='consumable',
+        attributes={'consumable': packet_profile},
+    ))
+    _, _, collection_kit = install_item(
+        pair, 'Набор для забора крови',
+        'При использовании выкачивает кровь и преобразует набор в пакет крови.',
+        quantity=1,
+    )
+    combat = LocationCombatState.query.filter_by(location_id=pair['location'].id).one()
+    combat.status = 'idle'
+    donor_data = deepcopy(pair['target_character'].data)
+    donor_data['health'].setdefault('combatMeta', {}).pop('bloodType', None)
+    pair['target_character'].data = donor_data
+    flag_modified(pair['target_character'], 'data')
+    db.session.commit()
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 17)
+    consent, _ = treatment_payload(pair)
+    collected = apply(client, pair, auth_headers, payload(
+        pair, collection_kit, {'kind': 'self', 'actionPoints': 0},
+        operation='collect-before-donor-test', target=pair['target_character'], consent=consent,
+    ))
+    assert collected.status_code == 200, collected.json
+    assert collected.json['actor_data']['inventory']['pockets'][-1]['attributes']['bloodTypeKnown'] is False
+
+    _, _, test_kit = install_item(
+        pair, 'Набор для определения группы крови',
+        'Позволяет определить группу крови.', quantity=1,
+    )
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 1)
+    consent, _ = treatment_payload(pair)
+    tested = apply(client, pair, auth_headers, payload(
+        pair, test_kit, {'kind': 'blood_type_test', 'target': 'character', 'actionPoints': 0},
+        operation='test-donor-after-collection', target=pair['target_character'], consent=consent,
+    ))
+    assert tested.status_code == 200, tested.json
+    assert tested.json['medical_result']['outcome']['blood_type'] == 3
+    packet = tested.json['actor_data']['inventory']['pockets'][-1]
+    assert packet['attributes']['bloodType'] == 3
+    assert packet['attributes']['bloodTypeKnown'] is True
+
+
+def test_consent_cannot_skip_combat_payment_by_omitting_location(
+        client, pair, auth_headers):
+    _, _, item = install_item(
+        pair, 'Набор для забора крови',
+        'При использовании выкачивает кровь и преобразует набор в пакет крови.',
+        quantity=1,
+    )
+    consent, _ = treatment_payload(pair)
+    response = apply(client, pair, auth_headers, payload(
+        pair, item, {'kind': 'self', 'actionPoints': 0}, operation='unpaid-blood-collection',
+        target=pair['target_character'], consent=consent,
+    ))
+    assert response.status_code == 400, response.json
+    assert consent.status == 'accepted'
+    assert pair['actor_character'].data['inventory']['backpack'][0]['quantity'] == 1
 
 
 def test_ammonia_requires_shock_and_is_not_consumed(client, pair, auth_headers):

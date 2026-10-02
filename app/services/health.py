@@ -137,7 +137,8 @@ def heal_character_fully(character_data: Dict[str, Any]) -> Dict[str, Any]:
     combat_meta = health.get("combatMeta")
     if isinstance(combat_meta, dict):
         for key in ("damageTakenThisRound", "damagePainAppliedThisRound", "damagePainRound",
-                    "pendingDamageStressTrigger"):
+                    "pendingDamageStressTrigger", "butchered", "butcheringResult",
+                    "butcheringRoll"):
             combat_meta.pop(key, None)
     from app.services.effects import sync_health_derived_statuses
     sync_health_derived_statuses(health)

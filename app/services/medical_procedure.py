@@ -1,13 +1,16 @@
 """Authoritative targeted treatment for bleeding and splints."""
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import hmac
 import random
 import uuid
 
+from flask import current_app
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.extensions import db
-from app.models import DeferredCombatAction, LobbyCharacter, LocationCharacter, LocationCombatState
+from app.models import CharacterInteractionRequest, DeferredCombatAction, LobbyCharacter, LocationCharacter, LocationCombatState
 from app.models.templates import ItemTemplate
 from app.services.character import CharacterService
 from app.services.character_interaction import CharacterInteractionService
@@ -41,6 +44,7 @@ class MedicalProcedureResult:
     target: LobbyCharacter
     result: dict
     posture_updates: list
+    related_characters: list = field(default_factory=list)
 
 
 def _profile(item):
@@ -329,6 +333,11 @@ def _numeric(value, default=0):
         return default
 
 
+def _roll_blood_type():
+    roll = random.randint(1, 20)
+    return (1 if roll <= 10 else 2 if roll <= 15 else 3 if roll <= 19 else 4), roll
+
+
 def _validate_infusion(actor_data, target_health, direct, item):
     from app.services.general_consumable import _inventory_entries
 
@@ -365,18 +374,16 @@ def _blood_test_context(actor_data, application):
     packet = parent[index]
     if packet != selected['item'] or str(packet.get('name') or '').strip().casefold() != 'пакет крови':
         raise ConflictError('Выбранный пакет крови изменился')
-    attributes = packet.get('attributes') or {}
-    if int(_numeric(attributes.get('bloodType') or attributes.get('blood_type'))) not in {1, 2, 3, 4}:
-        raise ConflictError('Группа этого пакета не задана ГМом')
     return packet
 
 
-def _blood_packet_from_template(blood_type):
+def _blood_packet_from_template(blood_type, known=False):
     template = ItemTemplate.query.filter_by(category='consumable', name='Пакет крови').first()
     if not template:
         raise ConflictError('Шаблон пакета крови не найден')
     attributes = deepcopy(template.attributes or {})
     attributes['bloodType'] = blood_type if blood_type in {1, 2, 3, 4} else None
+    attributes['bloodTypeKnown'] = bool(known)
     return {
         'id': f'item_{uuid.uuid4().hex}', 'templateId': template.id,
         'name': template.name, 'category': template.category,
@@ -385,8 +392,84 @@ def _blood_packet_from_template(blood_type):
         'weight': template.weight or 0, 'volume': template.volume or 0,
         'price': template.price or 0, 'attributes': attributes,
         'installedModules': [], 'contents': [], 'isContainer': False,
-        'isEquippable': False, 'isStackable': True,
+        'isEquippable': False, 'isStackable': False,
     }
+
+
+def _blood_packet_proof(packet_id, donor_id, blood_type):
+    message = f'{packet_id}:{donor_id}:{blood_type}'.encode('utf-8')
+    if not current_app.secret_key:
+        raise ConflictError('Сервер не настроен для безопасного забора крови')
+    secret = str(current_app.secret_key).encode('utf-8')
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def _verified_blood_donor(packet):
+    attributes = packet.get('attributes') or {}
+    donor_id = attributes.get('donorCharacterId')
+    blood_type = int(_numeric(attributes.get('bloodType') or attributes.get('blood_type')))
+    proof = attributes.get('bloodDonorProof')
+    if type(donor_id) is not int or blood_type not in {1, 2, 3, 4} or not isinstance(proof, str):
+        return None
+    expected = _blood_packet_proof(packet.get('id'), donor_id, blood_type)
+    return donor_id if hmac.compare_digest(proof, expected) else None
+
+
+def _synchronize_blood_knowledge(actor, target, actor_data, target_data, application, context, outcome):
+    if not outcome or outcome.get('kind') != 'blood_type_test':
+        return []
+    packet = (context or {}).get('blood_packet')
+    donor_id = target.id if application.get('target') == 'character' else (
+        _verified_blood_donor(packet) if isinstance(packet, dict) else None
+    )
+    if type(donor_id) is not int:
+        return []
+    donor = db.session.get(LobbyCharacter, donor_id)
+    if not donor or donor.lobby_id != actor.lobby_id:
+        return []
+    blood_type = outcome['blood_type']
+    related = []
+    from app.services.general_consumable import _inventory_entries
+
+    for character in LobbyCharacter.query.filter_by(lobby_id=actor.lobby_id).all():
+        current_data = (actor_data if character.id == actor.id else
+                        target_data if character.id == target.id else character.data or {})
+        has_linked_packet = any(
+            str(entry.get('name') or '').strip().casefold() == 'пакет крови'
+            and _verified_blood_donor(entry) == donor.id
+            for _, _, entry in _inventory_entries(current_data)
+        )
+        if character.id != donor.id and not has_linked_packet:
+            continue
+        data = (current_data if character.id in {actor.id, target.id} else deepcopy(current_data))
+        changed = False
+        if character.id == donor.id:
+            meta = data.setdefault('health', {}).setdefault('combatMeta', {})
+            stored_type = int(_numeric(meta.get('bloodType')))
+            if stored_type in {1, 2, 3, 4} and stored_type != blood_type:
+                raise ConflictError('Группа донора не совпадает с группой пакета')
+            meta['bloodType'] = blood_type
+            meta['bloodTypeKnown'] = True
+            meta['bloodTypeTested'] = True
+            changed = True
+        for _, _, entry in _inventory_entries(data):
+            if str(entry.get('name') or '').strip().casefold() != 'пакет крови':
+                continue
+            attributes = entry.get('attributes') or {}
+            if _verified_blood_donor(entry) != donor.id:
+                continue
+            stored_type = int(_numeric(attributes.get('bloodType') or attributes.get('blood_type')))
+            if stored_type in {1, 2, 3, 4} and stored_type != blood_type:
+                raise ConflictError('Группа связанного пакета не совпадает с группой донора')
+            attributes['bloodType'] = blood_type
+            attributes['bloodTypeKnown'] = True
+            entry['attributes'] = attributes
+            changed = True
+        if changed and character.id not in {actor.id, target.id}:
+            character.data = data
+            flag_modified(character, 'data')
+            related.append(character)
+    return related
 
 
 def _minimum_treatment_cost(character_data, direct, canonical_application=None):
@@ -499,11 +582,33 @@ def _consume_uses(parent, index, amount, template):
         item.setdefault('attributes', {})['uses_remaining'] = uses
 
 
+def _validate_treatment_consent(request_id, actor, target, user_id):
+    if type(request_id) is not int or request_id <= 0:
+        raise ValidationError('Некорректное согласие на лечение')
+    request_row = db.session.get(CharacterInteractionRequest, request_id)
+    if not request_row or request_row.kind != 'treatment':
+        raise NotFoundError('Согласие на лечение не найдено')
+    _, actor_model, target_model = CharacterInteractionService._pair(
+        request_row.location_id, user_id, request_row.actor_location_character_id, target.id,
+    )
+    if actor_model.character_id != actor.id:
+        raise PermissionDenied('Согласие выдано другому врачу')
+    return CharacterInteractionService.validate_treatment(request_id, actor_model, target_model)
+
+
 def _combat_context(actor, target, user_id, payload):
     location_id = payload.get('combat_location_id')
     if location_id is None:
+        request_id = payload.get('interaction_request_id')
         if actor.id != target.id:
-            CharacterService.check_access(target, user_id, edit=True)
+            if request_id:
+                consent = _validate_treatment_consent(request_id, actor, target, user_id)
+                if LocationCombatState.query.filter_by(location_id=consent.location_id, status='active').first():
+                    raise ValidationError('В бою медицинскую процедуру нужно сначала оплатить')
+            else:
+                CharacterService.check_access(target, user_id, edit=True)
+        elif request_id:
+            raise ValidationError('Для лечения себя не требуется согласие')
         return None, None, None
     if type(location_id) is not int or location_id <= 0:
         raise ValidationError('Некорректная локация лечения')
@@ -599,11 +704,16 @@ def _apply_success(
                 raise ConflictError('Выбранный пакет крови больше недоступен')
             attributes = packet.setdefault('attributes', {})
             blood_type = int(_numeric(attributes.get('bloodType') or attributes.get('blood_type')))
+            if blood_type not in {1, 2, 3, 4}:
+                blood_type, _ = _roll_blood_type()
+                attributes['bloodType'] = blood_type
             attributes['bloodTypeKnown'] = True
             return {'kind': 'blood_type_test', 'target': 'packet', 'blood_type': blood_type}
-        roll = random.randint(1, 20)
-        blood_type = 1 if roll <= 10 else 2 if roll <= 15 else 3 if roll <= 19 else 4
         meta = health.setdefault('combatMeta', {})
+        blood_type = int(_numeric(meta.get('bloodType')))
+        roll = meta.get('bloodTypeRoll')
+        if blood_type not in {1, 2, 3, 4}:
+            blood_type, roll = _roll_blood_type()
         meta.update({
             'bloodTypeTested': True, 'bloodTypeKnown': True,
             'bloodType': blood_type, 'bloodTypeRoll': roll,
@@ -616,8 +726,16 @@ def _apply_success(
     if application.get('kind') == 'self' and direct.get('blood_collection'):
         if not isinstance(actor_data, dict):
             raise ValidationError('Инвентарь врача недоступен')
-        blood_type = int(_numeric((health.get('combatMeta') or {}).get('bloodType')))
-        packet = _blood_packet_from_template(blood_type)
+        meta = health.setdefault('combatMeta', {})
+        blood_type = int(_numeric(meta.get('bloodType')))
+        if blood_type not in {1, 2, 3, 4}:
+            blood_type, roll = _roll_blood_type()
+            meta['bloodType'] = blood_type
+            meta['bloodTypeRoll'] = roll
+        packet = _blood_packet_from_template(blood_type, meta.get('bloodTypeKnown'))
+        donor_id = (procedure_context or {}).get('blood_donor_id')
+        packet['attributes']['donorCharacterId'] = donor_id
+        packet['attributes']['bloodDonorProof'] = _blood_packet_proof(packet['id'], donor_id, blood_type)
         inventory = actor_data.setdefault('inventory', {})
         inventory.setdefault('pockets', []).append(packet)
         stages = ['normal', 'light', 'medium', 'severe', 'critical']
@@ -917,6 +1035,7 @@ class MedicalProcedureService:
         generic_self = application.get('kind') == 'self'
         procedure_context = {
             'blood_packet': _blood_test_context(actor_data, application),
+            'blood_donor_id': target.id,
         }
         infusion_bonus = (
             _validate_infusion(actor_data, health, direct, item)
@@ -969,6 +1088,9 @@ class MedicalProcedureService:
                 infusion_bonus=infusion_bonus,
                 actor_data=actor_data, procedure_context=procedure_context,
             )
+            related_characters = _synchronize_blood_knowledge(
+                actor, target, actor_data, target_data, application, procedure_context, outcome,
+            )
             if generic_self and direct.get('use_limit'):
                 usage = health.setdefault('combatMeta', {}).setdefault('consumableUsage', {})
                 usage[usage_key] = _numeric(usage.get(usage_key)) + 1
@@ -985,6 +1107,7 @@ class MedicalProcedureService:
                         direct.get('action_points_delta')
                     )
         else:
+            related_characters = []
             meta = actor_data.setdefault('health', {}).setdefault('combatMeta', {})
             meta['mustDoRetry'] = {
                 'kind': 'medical', 'name': f"Применить {item.get('name') or template.name}",
@@ -1017,11 +1140,7 @@ class MedicalProcedureService:
         interaction = None
         request_id = payload.get('interaction_request_id')
         if request_id:
-            consent_user = CharacterInteractionService.validate_treatment(
-                request_id, actor_model,
-                LocationCharacter.query.filter_by(location_id=actor_model.location_id, character_id=target.id).first(),
-            ).actor_user_id
-            interaction = CharacterInteractionService.complete_treatment(request_id, consent_user, commit=False)
+            interaction = CharacterInteractionService.complete_treatment(request_id, user_id, commit=False)
 
         result = {
             'roll': roll, 'difficulty': difficulty, 'base_difficulty': base_difficulty,
@@ -1032,7 +1151,7 @@ class MedicalProcedureService:
             'consumable': use_result,
             'interaction': interaction,
         }
-        return MedicalProcedureResult(actor, target, result, posture_updates)
+        return MedicalProcedureResult(actor, target, result, posture_updates, related_characters)
 
     @staticmethod
     def apply_retry_success(actor_model, retry):

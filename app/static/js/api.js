@@ -541,6 +541,12 @@ export const Server = {
         });
     },
 
+    async cancelCharacterInteraction(lobbyId, requestId) {
+        return apiFetch(`/lobbies/${lobbyId}/character-interactions/${requestId}`, {
+            method: 'DELETE',
+        });
+    },
+
     async startCharacterTreatment(lobbyId, requestId, pendingActionId = null) {
         return apiFetch(`/lobbies/${lobbyId}/character-interactions/${requestId}/progress`, {
             method: 'PATCH',
@@ -592,6 +598,7 @@ export const Server = {
         locationId,
         locationCharacterIds = null,
         initiatorLocationCharacterId = null,
+        initiatorFirst = true,
     ) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/start`, {
             method: 'POST',
@@ -599,6 +606,7 @@ export const Server = {
             body: JSON.stringify({
                 location_character_ids: locationCharacterIds,
                 initiator_location_character_id: initiatorLocationCharacterId,
+                initiator_first: initiatorFirst,
             }),
         });
     },

@@ -10427,7 +10427,7 @@ async function useConsumable(item, itemPath, options = {}) {
             }
         }
     }
-    if (direct.target_required && !options.targetCharacterId) {
+    if (direct.target_required && !options.targetCharacterId && !direct.blood_collection) {
         showNotification('Для этого предмета нужно выбрать цель через медицинское действие');
         return false;
     }
@@ -10707,6 +10707,10 @@ async function useConsumable(item, itemPath, options = {}) {
             return false;
         }
         if (!consent?.allowed) {
+            if (consent?.status === 'cancelled') {
+                showNotification('Ожидание согласия на лечение отменено', 'system');
+                return false;
+            }
             const contest = consent?.result;
             showNotification(
                 contest?.actor_strength
@@ -11251,9 +11255,18 @@ async function useConsumable(item, itemPath, options = {}) {
             return false;
         }
         const packet = createItemFromTemplate(packetTemplate);
-        const donorBloodType = Number(health.combatMeta?.bloodType || 0);
+        health.combatMeta = health.combatMeta || {};
+        let donorBloodType = Number(health.combatMeta.bloodType || 0);
+        if (![1, 2, 3, 4].includes(donorBloodType)) {
+            const result = rollBloodType();
+            donorBloodType = result.bloodType;
+            health.combatMeta.bloodType = donorBloodType;
+            health.combatMeta.bloodTypeRoll = result.roll;
+        }
         packet.attributes = packet.attributes || {};
-        packet.attributes.bloodType = donorBloodType || null;
+        packet.attributes.bloodType = donorBloodType;
+        packet.attributes.bloodTypeKnown = Boolean(health.combatMeta.bloodTypeKnown);
+        packet.isStackable = false;
         currentCharacterData.inventory = currentCharacterData.inventory || {};
         currentCharacterData.inventory.pockets = currentCharacterData.inventory.pockets || [];
         currentCharacterData.inventory.pockets.push(packet);
@@ -11442,20 +11455,23 @@ async function useConsumable(item, itemPath, options = {}) {
         if (!health.combatMeta) health.combatMeta = {};
         if (application.kind === 'blood_type_test' && application.target === 'packet') {
             const packet = application.entry?.item;
-            const bloodType = Number(packet?.attributes?.bloodType || packet?.attributes?.blood_type || 0);
-            if (!bloodType) {
-                showNotification('Группа этого пакета не задана ГМом');
-                return false;
+            let bloodType = Number(packet?.attributes?.bloodType || packet?.attributes?.blood_type || 0);
+            if (![1, 2, 3, 4].includes(bloodType)) {
+                bloodType = rollBloodType().bloodType;
+                packet.attributes.bloodType = bloodType;
             }
             packet.attributes.bloodTypeKnown = true;
             showNotification(`Группа крови в пакете: ${formatBloodType(bloodType)}`, 'success');
         } else {
-            const result = rollBloodType();
+            const storedType = Number(health.combatMeta.bloodType || 0);
+            const result = [1, 2, 3, 4].includes(storedType)
+                ? { bloodType: storedType, roll: health.combatMeta.bloodTypeRoll ?? null }
+                : rollBloodType();
             health.combatMeta.bloodTypeTested = true;
             health.combatMeta.bloodTypeKnown = true;
             health.combatMeta.bloodType = result.bloodType;
             health.combatMeta.bloodTypeRoll = result.roll;
-            showNotification(`Группа крови определена: ${formatBloodType(result.bloodType)} (d20: ${result.roll})`, 'success');
+            showNotification(`Группа крови определена: ${formatBloodType(result.bloodType)}${result.roll == null ? '' : ` (d20: ${result.roll})`}`, 'success');
         }
         hasChanges = true;
     }

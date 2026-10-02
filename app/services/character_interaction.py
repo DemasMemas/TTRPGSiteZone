@@ -8,7 +8,7 @@ from app.extensions import db
 from app.models import CharacterInteractionRequest, LocationCombatState
 from app.models.location_character import LocationCharacter
 from app.services.combat import CombatService
-from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+from app.services.exceptions import ConflictError, NotFoundError, PermissionDenied, ValidationError
 
 
 class CharacterInteractionService:
@@ -121,6 +121,22 @@ class CharacterInteractionService:
             raise ValidationError('Consent is only required from a conscious character')
         target_user_id = CharacterInteractionService._target_user_id(location, target)
         clean_payload = deepcopy(payload) if isinstance(payload, dict) else {}
+        clean_payload.pop('gm_decision_for_offline_target', None)
+        delegated_to_gm = False
+        if target_user_id != user_id:
+            from app.sockets.auth import lobby_has_online_users, user_is_online_in_lobby
+
+            if lobby_has_online_users(location.lobby_id) and not user_is_online_in_lobby(
+                target_user_id, location.lobby_id,
+            ):
+                if kind != 'treatment':
+                    raise ConflictError('Игрок цели не в сети: обмен пока невозможен')
+                gm_id = location.lobby.gm_id
+                if not user_is_online_in_lobby(gm_id, location.lobby_id):
+                    raise ConflictError('Игрок пациента не в сети, а ГМ недоступен для решения')
+                target_user_id = gm_id
+                delegated_to_gm = True
+                clean_payload['gm_decision_for_offline_target'] = True
         request_row = CharacterInteractionRequest(
             location_id=location_id,
             actor_location_character_id=actor.id,
@@ -128,7 +144,7 @@ class CharacterInteractionService:
             actor_user_id=user_id,
             target_user_id=target_user_id,
             kind=kind,
-            status='accepted' if target_user_id == user_id else 'pending',
+            status='accepted' if target_user_id == user_id and not delegated_to_gm else 'pending',
             payload=clean_payload,
         )
         db.session.add(request_row)
@@ -137,6 +153,20 @@ class CharacterInteractionService:
             CharacterInteractionService._complete_trade(request_row)
         else:
             db.session.commit()
+        return CharacterInteractionService._serialize(request_row)
+
+    @staticmethod
+    def cancel_request(request_id, user_id):
+        request_row = db.session.get(CharacterInteractionRequest, request_id)
+        if not request_row:
+            raise NotFoundError('Запрос взаимодействия не найден')
+        if request_row.actor_user_id != user_id:
+            raise PermissionDenied('Отменить запрос может только его автор')
+        if request_row.status != 'pending':
+            raise ConflictError('Запрос уже получил ответ или начал выполняться')
+        request_row.status = 'cancelled'
+        request_row.resolved_at = datetime.now(timezone.utc)
+        db.session.commit()
         return CharacterInteractionService._serialize(request_row)
 
     @staticmethod

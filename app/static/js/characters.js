@@ -22,6 +22,11 @@ export async function loadLobbyCharacters() {
 function displayLobbyCharacters(characters) {
     const container = document.getElementById('lobby-characters-list');
     if (!container) return;
+    const expandedMutantGroups = new Set(
+        [...container.querySelectorAll('details.mutant-group[open]')]
+            .map(group => group.dataset.groupKey)
+            .filter(Boolean)
+    );
     container.innerHTML = '';
     if (characters.length === 0) {
         container.innerHTML = '<p>В комнате пока нет персонажей</p>';
@@ -92,6 +97,8 @@ function displayLobbyCharacters(characters) {
         groups.forEach(group => {
             const details = document.createElement('details');
             details.className = 'mutant-group';
+            details.dataset.groupKey = JSON.stringify([group.type, group.variant]);
+            details.open = expandedMutantGroups.has(details.dataset.groupKey);
             const summary = document.createElement('summary');
             summary.textContent = `${group.type}${group.variant ? ` · ${group.variant}` : ''} ×${group.members.length}`;
             summary.draggable = window.isGM;
@@ -116,7 +123,7 @@ function displayLobbyCharacters(characters) {
                 const health = char.data?.health || {};
                 row.innerHTML = `
                     <button type="button" class="mutant-instance-open">${escapeHtml(char.name)}</button>
-                    <span>${Number(health.current) || 0}/${Number(health.max) || 0} ОЗ</span>
+                    <span class="mutant-instance-health">${Number(health.current) || 0}/${Number(health.max) || 0} ОЗ</span>
                     <span class="mutant-drag-hint">перетащить</span>
                 `;
                 row.querySelector('.mutant-instance-open').addEventListener('click', () => openMutantCard(char.id));
@@ -159,6 +166,16 @@ function displayLobbyCharacters(characters) {
             }
             container.appendChild(details);
         });
+    }
+}
+
+export function updateMutantHealthInList(characterId, health) {
+    const container = document.getElementById('lobby-characters-list');
+    const row = [...(container?.querySelectorAll('.mutant-instance-row') || [])]
+        .find(item => item.dataset.characterId === String(characterId));
+    const label = row?.querySelector('.mutant-instance-health');
+    if (label && health) {
+        label.textContent = `${Number(health.current) || 0}/${Number(health.max) || 0} ОЗ`;
     }
 }
 
@@ -295,10 +312,10 @@ export async function openMutantCard(characterId, loadedCharacter = null) {
         modal.querySelector('.mutant-card-heal')?.addEventListener('click', async () => {
             if (!window.confirm(`Вылечить ${character.name} полностью?`)) return;
             try {
-                await Server.healCharacterFully(currentLobbyId, characterId);
+                const result = await Server.healCharacterFully(currentLobbyId, characterId);
+                updateMutantHealthInList(characterId, result.data?.health);
                 close();
-                await loadLobbyCharacters();
-                await openMutantCard(characterId);
+                await openMutantCard(characterId, { ...character, data: result.data });
             } catch (error) {
                 showNotification(error.message, 'error');
             }
