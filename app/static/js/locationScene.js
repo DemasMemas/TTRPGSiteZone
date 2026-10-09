@@ -13,6 +13,20 @@ import { Server } from './api.js';
 import { createDeferredActionResumer } from './deferredCombatActions.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createFpsCounter } from './fpsCounter.js';
+import { createWaterMaterial } from './waterSurface.js';
+import { buildSmoothTerrainData } from './locationTerrain.js';
+import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting } from './locationLighting.js';
+import { findLocationAsset } from './locationAssetCatalog.js';
+import {
+    bearingFromDelta, bearingToObjectRotation, clampAssetElevation, objectRotationToBearing,
+} from './locationAssetTransforms.js';
+import { createSecondaryDragGuard } from './locationEditorPointer.js';
+import { doorOnWall, doorFrameStyle, wallVisualPlan } from './locationArchitecture.js';
+import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
+import { isWorldDarkTime } from './darknessRules.js';
+import {
+    assetDimensions, baseAssetDimensions, resizedAxis, resizedUniformDimensions, validAssetDimensions,
+} from './locationAssetDimensions.js';
 
 function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, (character) => ({
@@ -153,8 +167,29 @@ function bindAwarenessMode(form, getCharacterId) {
 let scene, camera, renderer, labelRenderer, controls;
 let currentLocationId = null;
 let currentLocationData = null;
+let locationAmbientLight = null;
+let locationDirectionalLight = null;
+let locationLightGroup = null;
+let locationDarknessFactors = null;
+let activeLightingProfile = null;
+let selectedLocationAsset = null;
+let editorSelection = null;
+let editorMoveMode = false;
+let editorMovePreviewPoint = null;
+let editorRotateMode = false;
+let editorRotateAngle = 0;
+let editorResizeMode = false;
+let editorResizeAxis = 'all';
+let editorResizeDimensions = null;
+let editorResizeBaseDimensions = null;
+let editorResizeAnchor = null;
+const cameraDragMenuGuard = createSecondaryDragGuard();
+let editorSelectionRing = null;
+let lampEditPending = false;
 let tileCubes = [];
 let locationTileMesh = null;
+let waterTileMesh = null;
+let smoothTerrainMesh = null;
 let fogMemoryKey = null;
 let fogMemory = new Map();
 let fogMemoryGhosts = new Map();
@@ -348,12 +383,14 @@ let structureHeight = 2.4;
 let structureColor = '#8b6b4f';
 let structureRotation = 0;
 let buildPreviewMesh = null;
+let buildPreviewKey = null;
 const structureDeletionInFlight = new Set();
 let pendingObjectMoveId = null;
 let hoveredStructureObjectId = null;
 
 const objectInteractions = {
     door: ['toggle_door'],
+    window: ['toggle_door'],
     shelf: ['open_container'],
     chest: ['open_container', 'climb'],
     corpse: ['open_container'],
@@ -374,7 +411,7 @@ const interactionRequirements = {
 const LOW_CLIMB_OBJECT_TYPES = new Set(['table', 'chair', 'chest', 'box', 'barrier']);
 const HIGH_CLIMB_OBJECT_TYPES = new Set(['fence']);
 const TOO_HIGH_OBJECT_TYPES = new Set(['tree', 'rock', 'house', 'tent', 'wall', 'shelf']);
-const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'ground_item', 'anomaly']);
+const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'ground_item', 'anomaly', 'poster', 'floor']);
 const THROWABLE_OBJECT_WEIGHTS = {
     chair: 5,
     box: 10,
@@ -458,6 +495,7 @@ function getTileHeight(tileX, tileZ) {
 
 function disposeObject(obj) {
     if (!obj) return;
+    if (obj.isLight && obj.shadow?.map) obj.shadow.map.dispose();
     if (obj.geometry) obj.geometry.dispose();
     if (obj.material) {
         if (Array.isArray(obj.material)) {
@@ -3649,8 +3687,13 @@ function getLocationTileAtScreen(clientX, clientY) {
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
     const hit = raycaster.intersectObjects(tileCubes)[0];
-    const coords = hit?.object?.userData?.tileByInstance?.[hit.instanceId];
+    const coords = hitTileCoords(hit);
     return coords ? { x: coords.x, y: coords.z } : null;
+}
+
+function hitTileCoords(hit) {
+    return hit?.object?.userData?.tileByInstance?.[hit.instanceId]
+        || hit?.object?.userData?.tileByFace?.[hit.faceIndex] || null;
 }
 
 function showFacingPaymentSelection(characterId, targetX, targetY, isCombatActive) {
@@ -4586,6 +4629,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     const model = createCharacterModel(colorUserId);
     const tileHeight = getTileHeight(posX, posY);
     model.position.set(posX + 0.5, tileHeight, posY + 0.5);
+    tintLocationMesh(model, darknessFactorAt(posX, posY));
     model.userData.characterId = characterId;
     model.userData.ownerId = colorUserId;
     scene.add(model);
@@ -5015,14 +5059,23 @@ function getFogObjectHeight(object) {
     }[type] || 1.5;
 }
 
-function getVisionBlockerHeight(x, y) {
-    const key = `${x}:${y}`;
+function getVisionBlockerHeight(x, y, rayHeight) {
+    const key = `${x}:${y}:${Math.round(rayHeight * 10)}`;
     if (visionBlockerHeightCache?.has(key)) return visionBlockerHeightCache.get(key);
     const tile = currentLocationData?.tiles_data?.[y]?.[x];
     const tileObjects = (tile?.objects || []).filter((object) => blocksVision(object));
-    const locationObjects = (currentLocationData?.objects || []).filter((object) => (
-        blocksVision(object) && tileHasObjectFootprint(object, x, y)
-    ));
+    const locationObjects = (currentLocationData?.objects || []).filter((object) => {
+        if (!blocksVision(object) || !tileHasObjectFootprint(object, x, y)) return false;
+        if (object.type !== 'wall') return true;
+        return !(currentLocationData.objects || []).some(portal => {
+            if (!['door', 'window'].includes(portal.type) || !portal.properties?.is_open
+                || !tileHasObjectFootprint(portal, x, y)) return false;
+            const opening = doorOnWall(portal, object);
+            if (!opening) return false;
+            const bottom = getTileHeight(x, y) + Number(object.properties?.elevation || 0) + opening.bottom;
+            return rayHeight >= bottom && rayHeight <= bottom + opening.height;
+        });
+    });
     const height = [...tileObjects, ...locationObjects].reduce(
         (height, object) => Math.max(height, getTileHeight(x, y) + getFogObjectHeight(object)),
         -Infinity,
@@ -5061,13 +5114,17 @@ function hasLineOfSight(sourceX, sourceY, targetX, targetY, sourceHeight = null,
         }
         steps += 1;
         const rayHeight = fromHeight + (toHeight - fromHeight) * (steps / totalSteps);
-        const blockerHeight = getVisionBlockerHeight(x, y);
+        const blockerHeight = getVisionBlockerHeight(x, y, rayHeight);
         // A low obstacle only hides what is physically below its top edge.
         if (Number.isFinite(blockerHeight) && blockerHeight >= rayHeight) {
             return x === targetX && y === targetY;
         }
     }
-    return true;
+    return lightPathOpen(
+        { x: sourceX + 0.5, z: sourceY + 0.5 },
+        { x: targetX + 0.5, z: targetY + 0.5 },
+        currentLocationData?.objects || [],
+    );
 }
 
 function isPointVisibleToPlayer(x, y, targetHeight, sources) {
@@ -5078,6 +5135,7 @@ function isPointVisibleToPlayer(x, y, targetHeight, sources) {
         const dy = y - sourceY;
         const distance = Math.hypot(dx, dy);
         if (!distance) return true;
+        if (darknessFactorAt(x, y) < 0.12) return false;
         if (distance > FOG_VIEW_RADIUS) return false;
         const facingX = Number(source.facingX) || 0;
         const facingY = Number(source.facingY ?? 1);
@@ -5508,6 +5566,7 @@ export function updateCharacterPosition(characterId, posX, posY, options = {}) {
     if (!entry) return;
     const tileHeight = getTileHeight(posX, posY);
     entry.model.position.set(posX + 0.5, tileHeight, posY + 0.5);
+    tintLocationMesh(entry.model, darknessFactorAt(posX, posY));
     const labelOffset = entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55;
     entry.label.position.set(posX + 0.5, tileHeight + labelOffset, posY + 0.5);
     entry.posX = posX;
@@ -6518,15 +6577,12 @@ export function initLocationScene(containerId) {
     window.locationControls = controls;
 
     // Освещение
-    const ambientLight = new THREE.AmbientLight(0x404060);
-    scene.add(ambientLight);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
-    dirLight.position.set(5, 10, 7);
-    dirLight.castShadow = true;
-    scene.add(dirLight);
-    const fillLight = new THREE.PointLight(0x4466cc, 0.3);
-    fillLight.position.set(0, 5, 0);
-    scene.add(fillLight);
+    locationAmbientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(locationAmbientLight);
+    locationDirectionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    locationDirectionalLight.castShadow = true;
+    scene.add(locationDirectionalLight);
+    scene.add(locationDirectionalLight.target);
 
     // Highlight
     createHighlight();
@@ -6544,6 +6600,7 @@ export function initLocationScene(containerId) {
         updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
         animateAnomalyEffects(anomalyEffectMeshes, performance.now());
+        waterTileMesh?.material.map?.offset.set((frameTime * 0.000002) % 1, (frameTime * 0.000001) % 1);
         if (renderer && scene && camera) {
             renderer.render(scene, camera);
             if (!renderer.isUnavailableRenderer) locationFpsCounter.frame(frameTime);
@@ -6630,7 +6687,7 @@ function getObjectActions(object) {
 
 function getStructureActions(object) {
     const actions = [...getObjectActions(object)];
-    if (['door', 'table', 'chair', 'shelf', 'chest'].includes(object.type) && !actions.includes('rotate')) {
+    if (['door', 'window', 'table', 'chair', 'shelf', 'chest'].includes(object.type) && !actions.includes('rotate')) {
         actions.push('rotate');
     }
     if ((LOW_CLIMB_OBJECT_TYPES.has(object.type) || HIGH_CLIMB_OBJECT_TYPES.has(object.type) || object.properties?.climbable) && !actions.includes('climb')) {
@@ -6657,8 +6714,8 @@ function isStructureCoverObject(object) {
     const properties = object?.properties || {};
     const type = String(object?.type || '').toLowerCase();
     if (properties.cover_enabled === false) return false;
-    if (['floor', 'ground_item', 'campfire', 'anomaly'].includes(type)) return false;
-    if (type === 'door' && properties.is_open) return false;
+    if (['floor', 'ground_item', 'campfire', 'anomaly', 'poster'].includes(type)) return false;
+    if (['door', 'window'].includes(type) && properties.is_open) return false;
     return getObjectTraversalHeight(object) >= 0.3;
 }
 
@@ -6761,18 +6818,16 @@ function getObjectTraversalDimensions(object) {
     if (!Number.isFinite(width) || width <= 0) width = fallback.width;
     if (!Number.isFinite(depth) || depth <= 0) depth = fallback.depth;
     const rotation = Number(properties.rotation || 0);
-    const quarterTurns = ((Math.round(rotation / (Math.PI / 2)) % 4) + 4) % 4;
-    if (quarterTurns % 2 === 1) {
-        [width, depth] = [depth, width];
-    }
-    return { width, depth };
+    const cosine = Math.abs(Math.cos(rotation));
+    const sine = Math.abs(Math.sin(rotation));
+    return { width: width * cosine + depth * sine, depth: width * sine + depth * cosine };
 }
 
 function getObjectFootprintBounds(object, fallbackX = null, fallbackY = null) {
     const { width, depth } = getObjectTraversalDimensions(object);
     const { x, y } = getObjectGridPosition(object, fallbackX, fallbackY);
-    const centerX = (x ?? 0) + 0.5;
-    const centerY = (y ?? 0) + 0.5;
+    const centerX = (x ?? 0) + 0.5 + Number(object?.properties?.offset_x || 0);
+    const centerY = (y ?? 0) + 0.5 + Number(object?.properties?.offset_z || 0);
     return {
         minX: centerX - (width / 2),
         maxX: centerX + (width / 2),
@@ -6824,8 +6879,12 @@ function getMovementMap(movingCharacterId = null) {
     for (const object of locationObjects) {
         if (!object) continue;
         const profile = getMovementObjectProfile(object);
+        const doorwayTiles = object.type === 'wall' ? new Set(locationObjects
+            .filter(door => door.type === 'door' && door.properties?.is_open && doorOnWall(door, object))
+            .flatMap(door => getObjectFootprintTiles(door).map(tile => `${tile.x}:${tile.y}`))) : null;
         for (const footprintTile of getObjectFootprintTiles(object)) {
             const key = `${footprintTile.x}:${footprintTile.y}`;
+            if (doorwayTiles?.has(key)) continue;
             if (profile.blocked) {
                 blockedTiles.add(key);
                 climbCostTiles.delete(key);
@@ -7246,6 +7305,8 @@ function getMovementObjectProfile(object) {
         }
         return { blocked: true, climbCost: 0 };
     }
+
+    if (type === 'window') return { blocked: true, climbCost: 0 };
 
     if (properties.blocks_movement === false) {
         return { blocked: false, climbCost: 0 };
@@ -8811,8 +8872,13 @@ function disposeLocationObject(mesh) {
 }
 
 function getStructureDimensions(preset = structurePreset) {
+    if (window.locationEditorTool === 'assets' && selectedLocationAsset?.kind === 'structure'
+        && selectedLocationAsset.id === preset) {
+        return { width: structureWidth, depth: structureDepth, height: structureHeight };
+    }
     if (preset === 'floor') return { width: structureWidth, depth: structureWidth, height: 0.12 };
     if (preset === 'door') return { width: 0.9, depth: 0.18, height: Math.max(1.8, structureHeight) };
+    if (preset === 'window') return { width: 1.2, depth: 0.14, height: 1 };
     if (preset === 'table') return { width: structureWidth, depth: structureDepth, height: Math.max(0.6, structureHeight) };
     if (preset === 'chair') return { width: structureWidth, depth: structureDepth, height: structureHeight };
     if (preset === 'shelf') return { width: structureWidth, depth: Math.max(0.3, structureDepth), height: structureHeight };
@@ -8829,7 +8895,64 @@ function createLocationObjectMesh(obj) {
     const group = new THREE.Group();
     let main;
 
-    if (obj.type === 'ground_item' || properties.is_ground_item) {
+    if (obj.type === 'wall') {
+        const plan = wallVisualPlan(obj, currentLocationData?.objects || []);
+        for (const span of plan.spans) {
+            const piece = new THREE.Mesh(
+                new THREE.BoxGeometry(span.end - span.start, span.top - span.bottom, depth),
+                material,
+            );
+            piece.position.set((span.start + span.end) / 2, (span.bottom + span.top) / 2, 0);
+            group.add(piece);
+        }
+    } else if (obj.type === 'window') {
+        const frameMaterial = new THREE.MeshStandardMaterial({ color: '#6f756b' });
+        const glassMaterial = new THREE.MeshStandardMaterial({
+            color: properties.color || '#9bb7bc', transparent: true, opacity: 0.42,
+            metalness: 0.08, roughness: 0.12, side: THREE.DoubleSide,
+        });
+        for (const sign of [-1, 1]) {
+            const post = new THREE.Mesh(new THREE.BoxGeometry(0.07, height, depth + 0.04), frameMaterial);
+            post.position.set(sign * (width / 2 - 0.035), height / 2, 0);
+            group.add(post);
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(width, 0.07, depth + 0.04), frameMaterial);
+            rail.position.set(0, sign > 0 ? height - 0.035 : 0.035, 0);
+            group.add(rail);
+        }
+        if (!properties.is_open) {
+            const pane = new THREE.Mesh(new THREE.BoxGeometry(width - 0.14, height - 0.14, 0.025), glassMaterial);
+            pane.position.y = height / 2;
+            group.add(pane);
+        }
+    } else if (obj.type === 'door') {
+        const jamb = 0.09;
+        const frame = doorFrameStyle(obj, currentLocationData?.objects || []);
+        const frameMaterial = new THREE.MeshStandardMaterial({ color: frame.color });
+        for (const sign of [-1, 1]) {
+            const post = new THREE.Mesh(new THREE.BoxGeometry(jamb, frame.height, frame.depth), frameMaterial);
+            post.position.set(sign * (width / 2 + jamb / 2), frame.bottom + frame.height / 2, 0);
+            group.add(post);
+        }
+        const lintel = new THREE.Mesh(new THREE.BoxGeometry(width + 2 * jamb, 0.12, frame.depth), frameMaterial);
+        lintel.position.y = frame.bottom + frame.height - 0.06;
+        group.add(lintel);
+        const pivot = new THREE.Group();
+        pivot.position.x = -width / 2;
+        const panelHeight = frame.inWall
+            ? Math.max(0.05, Math.min(height, frame.bottom + frame.height - 0.12)) : height;
+        const panel = new THREE.Mesh(new THREE.BoxGeometry(width, panelHeight, depth), material);
+        panel.position.set(width / 2, panelHeight / 2, 0);
+        pivot.add(panel);
+        pivot.rotation.y = properties.is_open ? -Math.PI / 2 : 0;
+        group.add(pivot);
+        if (!frame.inWall) {
+            for (const sign of [-1, 1]) {
+                const wing = new THREE.Mesh(new THREE.BoxGeometry(0.42, height + 0.12, depth + 0.08), material);
+                wing.position.set(sign * (width / 2 + jamb + 0.21), (height + 0.12) / 2, 0);
+                group.add(wing);
+            }
+        }
+    } else if (obj.type === 'ground_item' || properties.is_ground_item) {
         const itemColor = properties.color || '#c9b27a';
         const itemMaterial = new THREE.MeshStandardMaterial({
             color: itemColor,
@@ -8884,18 +9007,106 @@ function createLocationObjectMesh(obj) {
     const objectPosition = getObjectGridPosition(obj);
     const tileX = objectPosition.x ?? 0;
     const tileY = objectPosition.y ?? 0;
-    group.position.set(tileX + 0.5, getTileHeight(tileX, tileY), tileY + 0.5);
+    group.position.set(tileX + 0.5 + Number(properties.offset_x || 0),
+        getTileHeight(tileX, tileY) + clampAssetElevation(properties.elevation)
+            - (obj.type === 'floor' ? height - 0.005 : 0),
+        tileY + 0.5 + Number(properties.offset_z || 0));
     if (obj.type === 'ground_item' || properties.is_ground_item) {
         group.position.y += 0.04;
     }
-    group.rotation.y = (properties.rotation || 0) + (properties.is_open ? Math.PI / 2 : 0);
+    group.rotation.y = properties.rotation || 0;
+    group.traverse(child => {
+        if (!child.isMesh) return;
+        child.castShadow = true;
+        child.receiveShadow = true;
+    });
     group.userData = { locationObjectId: obj.id, locationObject: obj };
     return group;
+}
+
+function darknessFactorAt(x, z) {
+    if (!locationDarknessFactors || !currentLocationData) return 1;
+    const tileX = Math.floor(x);
+    const tileZ = Math.floor(z);
+    if (tileX < 0 || tileZ < 0 || tileX >= currentLocationData.grid_width
+        || tileZ >= currentLocationData.grid_height) return 1;
+    return locationDarknessFactors[tileZ * currentLocationData.grid_width + tileX] ?? 1;
+}
+
+export function isLocationCharacterInDarkness(characterId) {
+    if (!currentLocationData) return null;
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry) return null;
+    const x = Math.floor(Number(entry.posX));
+    const z = Math.floor(Number(entry.posY));
+    const profile = activeLightingProfile || resolveLocationLighting(
+        currentLocationData.lighting, window.lobbyGameTimeMinutes ?? 480,
+    );
+    const marked = (profile.dark_tiles || []).some(tile => tile.x === x && tile.z === z);
+    const night = isWorldDarkTime(window.lobbyGameTimeMinutes ?? 480);
+    const ambient = Number(profile.ambient_intensity) + Number(profile.directional_intensity);
+    if (!marked && !(profile.mode === 'world' ? night : ambient < 0.12)) return false;
+    const daylight = profile.mode === 'world' && night ? 0 : Math.min(1, ambient);
+    const factor = computeDarknessFactors(
+        currentLocationData.grid_width, currentLocationData.grid_height,
+        [{ x, z }], currentLocationData.objects || [], profile.local_lights || [], daylight,
+    )[z * currentLocationData.grid_width + x];
+    return factor < 0.12;
+}
+
+function tintLocationMesh(mesh, factor) {
+    mesh.traverse(child => {
+        if (!child.isMesh) return;
+        for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
+            if (!material?.color) continue;
+            if (!material.userData.darkBaseColor) material.userData.darkBaseColor = material.color.clone();
+            material.color.copy(material.userData.darkBaseColor).multiplyScalar(factor);
+        }
+    });
+}
+
+function refreshLocationDarkness(profile = activeLightingProfile) {
+    if (!currentLocationData || !profile) return;
+    activeLightingProfile = profile;
+    const daylight = profile.mode === 'world' && isWorldDarkTime(window.lobbyGameTimeMinutes ?? 480)
+        ? 0 : Math.min(1, Number(profile.ambient_intensity) + Number(profile.directional_intensity));
+    locationDarknessFactors = computeDarknessFactors(
+        currentLocationData.grid_width, currentLocationData.grid_height,
+        profile.dark_tiles || [], currentLocationData.objects || [], profile.local_lights || [], daylight,
+    );
+    if (locationTileMesh) {
+        for (let z = 0; z < currentLocationData.grid_height; z++) {
+            for (let x = 0; x < currentLocationData.grid_width; x++) {
+                const tile = currentLocationData.tiles_data[z][x];
+                const index = z * currentLocationData.grid_width + x;
+                if (tile.terrain === 'water') {
+                    waterTileMesh?.setColorAt(index, new THREE.Color(0xffffff).multiplyScalar(darknessFactorAt(x, z)));
+                } else {
+                    locationTileMesh.setColorAt(index,
+                        new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b).multiplyScalar(darknessFactorAt(x, z)));
+                }
+            }
+        }
+        locationTileMesh.instanceColor.needsUpdate = true;
+        if (waterTileMesh?.instanceColor) waterTileMesh.instanceColor.needsUpdate = true;
+    }
+    updateSmoothTerrainColors();
+    for (const mesh of locationObjectMeshes) {
+        tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
+    }
+    for (const mesh of objectMeshes) {
+        if (!anomalyEffectMeshes.includes(mesh)) tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
+    }
+    for (const entry of characterModels.values()) {
+        tintLocationMesh(entry.model, darknessFactorAt(entry.model.position.x, entry.model.position.z));
+    }
+    applyFogOfWar();
 }
 
 function addLocationObjectMesh(obj, refreshFog = true) {
     if (locationObjectMeshes.some(mesh => mesh.userData.locationObjectId === obj.id)) return;
     const mesh = createLocationObjectMesh(obj);
+    tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
     scene.add(mesh);
     locationObjectMeshes.push(mesh);
     if (refreshFog) applyFogOfWar();
@@ -8915,27 +9126,251 @@ function replaceLocationObjectMesh(object) {
     addLocationObjectMesh(object);
 }
 
+function refreshArchitecturalMeshes() {
+    if (!scene || !currentLocationData) return;
+    for (let index = 0; index < locationObjectMeshes.length; index++) {
+        const oldMesh = locationObjectMeshes[index];
+        const source = (currentLocationData.objects || []).find(item => item.id === oldMesh.userData.locationObjectId);
+        if (!source || !['wall', 'door', 'window'].includes(source.type)) continue;
+        scene.remove(oldMesh);
+        disposeLocationObject(oldMesh);
+        const newMesh = createLocationObjectMesh(source);
+        tintLocationMesh(newMesh, darknessFactorAt(newMesh.position.x, newMesh.position.z));
+        scene.add(newMesh);
+        locationObjectMeshes[index] = newMesh;
+    }
+    applyFogOfWar();
+    refreshLocationDarkness();
+}
+
 function updateLocationObjectHeight(tileX, tileZ) {
     const height = getTileHeight(tileX, tileZ);
     locationObjectMeshes.forEach(mesh => {
         const object = mesh.userData.locationObject;
         if (!object) return;
         const position = getObjectGridPosition(object);
-        if (position.x === tileX && position.y === tileZ) mesh.position.y = height;
+        if (position.x === tileX && position.y === tileZ) {
+            mesh.position.y = height + clampAssetElevation(object.properties?.elevation)
+                - (object.type === 'floor' ? Number(object.properties?.dimensions?.height || 0.12) - 0.005 : 0);
+        }
     });
 }
 
 function clearBuildPreview() {
+    buildPreviewKey = null;
     if (!buildPreviewMesh) return;
     scene?.remove(buildPreviewMesh);
     disposeLocationObject(buildPreviewMesh);
     buildPreviewMesh = null;
 }
 
+function createPosterMesh(color) {
+    const group = new THREE.Group();
+    const frame = new THREE.Mesh(
+        new THREE.BoxGeometry(0.86, 1.16, 0.035),
+        new THREE.MeshStandardMaterial({ color: '#302d27', roughness: 0.9 }),
+    );
+    frame.position.x = -0.02;
+    frame.rotation.y = Math.PI / 2;
+    const paper = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.8, 1.1),
+        new THREE.MeshStandardMaterial({ color: color || '#c9a96a', side: THREE.DoubleSide, roughness: 0.95 }),
+    );
+    paper.position.x = 0.005;
+    paper.rotation.y = Math.PI / 2;
+    group.add(frame, paper);
+    return group;
+}
+
+function createEditorDecorPreview(type, color) {
+    if (type.startsWith('anomaly_')) {
+        const key = type.slice('anomaly_'.length);
+        const profile = (window.locationAnomalyCatalog || []).find(anomaly => anomaly.key === key);
+        return createAnomalyEffect(profile?.visual || 'void', color || '#79d7dd', 1, key, '');
+    }
+    if (type === 'poster') return createPosterMesh(color);
+    const group = new THREE.Group();
+    const material = new THREE.MeshStandardMaterial({ color: color || '#7f9674' });
+    if (type === 'tree') {
+        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.15, 0.7, 8),
+            new THREE.MeshStandardMaterial({ color: '#5b3a20' }));
+        trunk.position.y = 0.35;
+        group.add(trunk);
+        const crown = new THREE.Mesh(new THREE.ConeGeometry(0.43, 1.2, 8), material);
+        crown.position.y = 1.15;
+        group.add(crown);
+    } else {
+        const geometry = type === 'rock' ? new THREE.DodecahedronGeometry(0.35)
+            : type === 'tent' ? new THREE.CylinderGeometry(0.5, 0.7, 0.6, 4)
+                : new THREE.CylinderGeometry(0.23, 0.3, 0.16, 8);
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.y = type === 'rock' ? 0.2 : type === 'tent' ? 0.3 : 0.08;
+        group.add(mesh);
+    }
+    return group;
+}
+
+function applyDecorSize(mesh, source, type) {
+    const base = baseAssetDimensions(type, 'decor');
+    const dimensions = assetDimensions(source, 'decor', type);
+    mesh.scale.set(
+        (type === 'poster' ? dimensions.depth / base.depth : dimensions.width / base.width),
+        dimensions.height / base.height,
+        (type === 'poster' ? dimensions.width / base.width : dimensions.depth / base.depth),
+    );
+}
+
+function createEditorLampPreview(source) {
+    const group = new THREE.Group();
+    const isSpot = source.kind === 'spot' || source.lightKind === 'spot';
+    const fixture = new THREE.Mesh(
+        isSpot ? new THREE.ConeGeometry(0.22, 0.35, 12) : new THREE.SphereGeometry(0.2, 12, 8),
+        new THREE.MeshStandardMaterial({ color: source.color, emissive: source.color, emissiveIntensity: 0.65 }),
+    );
+    if (isSpot) {
+        fixture.rotation.z = -Math.PI / 2;
+        fixture.rotation.y = -Number(source.azimuth || 0) * Math.PI / 180;
+    }
+    const base = baseAssetDimensions(isSpot ? 'spot' : 'point', 'lamp');
+    const dimensions = assetDimensions(source, 'lamp', isSpot ? 'spot' : 'point');
+    fixture.scale.set(dimensions.width / base.width, dimensions.height / base.height, dimensions.depth / base.depth);
+    group.add(fixture);
+    const previewIntensity = Math.min(Number(source.intensity || 2), 2);
+    const distance = Number(source.distance || 7);
+    if (isSpot) {
+        const light = new THREE.SpotLight(source.color, previewIntensity, distance, Math.PI / 5, 0.55, 2);
+        const azimuth = Number(source.azimuth || 0) * Math.PI / 180;
+        light.target.position.set(Math.cos(azimuth) * 5, -Math.min(3, Number(source.height)), Math.sin(azimuth) * 5);
+        group.add(light, light.target);
+        group.add(new THREE.ArrowHelper(
+            new THREE.Vector3(Math.cos(azimuth), 0, Math.sin(azimuth)),
+            new THREE.Vector3(), 0.9, source.color, 0.22, 0.13,
+        ));
+    } else {
+        group.add(new THREE.PointLight(source.color, previewIntensity, distance, 2));
+    }
+    return group;
+}
+
+function fadeEditorPreview(mesh) {
+    mesh.traverse(child => {
+        if (!child.isMesh) return;
+        for (const material of (Array.isArray(child.material) ? child.material : [child.material])) {
+            material.transparent = true;
+            material.opacity = 0.55;
+            material.depthWrite = false;
+        }
+        child.raycast = () => {};
+    });
+    return mesh;
+}
+
 function updateBuildPreview() {
+    if (editorRotateMode && editorSelection?.kind === 'lamp') {
+        clearBuildPreview();
+        return;
+    }
+    if (!window.locationEditMode || !hoveredTileCoords || !scene) {
+        clearBuildPreview();
+        return;
+    }
+    const selectedPosition = editorRotateMode || editorResizeMode ? getSelectedLocationEditorAsset() : null;
+    const x = editorMoveMode && editorMovePreviewPoint ? Math.floor(editorMovePreviewPoint.x)
+        : selectedPosition ? Math.floor(selectedPosition.x) : hoveredTileCoords.x;
+    const z = editorMoveMode && editorMovePreviewPoint ? Math.floor(editorMovePreviewPoint.z)
+        : selectedPosition ? Math.floor(selectedPosition.z) : hoveredTileCoords.z;
+    const editingSelection = editorMoveMode || editorRotateMode || editorResizeMode;
+    const source = editingSelection ? getSelectedEditorSource() : selectedLocationAsset;
+    const placingAsset = window.locationEditorTool === 'assets' && selectedLocationAsset;
+    const previewKey = [window.locationEditorTool, x, z, editorMoveMode, editorRotateMode, editorRotateAngle,
+        editorResizeMode, editorResizeAxis, JSON.stringify(editorResizeDimensions),
+        editorMovePreviewPoint?.x?.toFixed(2), editorMovePreviewPoint?.z?.toFixed(2),
+        source?.id || source?.type || source?.kind,
+        source?.properties?.rotation ?? source?.rotation ?? source?.azimuth,
+        source?.properties?.elevation ?? source?.elevation ?? source?.height,
+        source?.x ?? source?.offsetX, source?.z ?? source?.offsetZ,
+        JSON.stringify(source?.dimensions || source?.properties?.dimensions || null),
+        structureWidth, structureDepth, structureHeight, structureColor].join(':');
+    if (buildPreviewMesh && buildPreviewKey === previewKey) return;
     clearBuildPreview();
-    if (!window.locationEditMode || buildMode !== 'structure' || !hoveredTileCoords || !scene) return;
-    const { x, z } = hoveredTileCoords;
+    buildPreviewKey = previewKey;
+    if (editingSelection || placingAsset) {
+        if (!source) return;
+        const kind = editingSelection ? editorSelection.kind : source.kind;
+        if (kind === 'structure') {
+            const object = editingSelection ? (editorResizeMode
+                ? { ...source, properties: { ...source.properties, dimensions: editorResizeDimensions } }
+                : editorMoveMode && editorMovePreviewPoint ? {
+                    ...source, tile_x: x, tile_y: z,
+                    properties: { ...source.properties,
+                        offset_x: editorMovePreviewPoint.x - x - 0.5,
+                        offset_z: editorMovePreviewPoint.z - z - 0.5 },
+                } : source) : {
+                type: source.id, tile_x: x, tile_y: z,
+                properties: {
+                    dimensions: { width: structureWidth, depth: structureDepth, height: structureHeight },
+                    color: structureColor,
+                    elevation: clampAssetElevation(source.elevation),
+                },
+            };
+            buildPreviewMesh = createLocationObjectMesh(object);
+        } else if (kind === 'lamp') {
+            const lampPreview = editorResizeMode
+                ? { ...source, dimensions: editorResizeDimensions, intensity: 0 } : source;
+            buildPreviewMesh = createEditorLampPreview(lampPreview);
+            buildPreviewMesh.position.set(
+                editorResizeMode ? Number(source.x) : editorMovePreviewPoint?.x ?? x + 0.5,
+                getTileHeight(x, z) + Number(source.height),
+                editorResizeMode ? Number(source.z) : editorMovePreviewPoint?.z ?? z + 0.5,
+            );
+        } else {
+            const decorType = source.type === 'anomaly'
+                ? `anomaly_${source.anomalyKey}` : source.type || source.id;
+            buildPreviewMesh = createEditorDecorPreview(decorType, source.color);
+            const decorPreview = editorResizeMode
+                ? { ...source, dimensions: editorResizeDimensions, scale: 1 } : source;
+            if (source.type !== 'anomaly') applyDecorSize(buildPreviewMesh, decorPreview, decorType);
+            buildPreviewMesh.rotation.y = THREE.MathUtils.degToRad(
+                editingSelection ? Number(source.rotation || 0) : -Number(source.rotation || 0),
+            );
+            buildPreviewMesh.position.set(
+                editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.x ?? source.offsetX ?? 0),
+                getTileHeight(x, z) + clampAssetElevation(source.elevation),
+                editorMovePreviewPoint?.z ?? z + 0.5 + Number(source.z ?? source.offsetZ ?? 0),
+            );
+        }
+        if (kind === 'structure') buildPreviewMesh.position.set(
+            editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.properties?.offset_x || 0),
+            getTileHeight(x, z),
+            editorMovePreviewPoint?.z ?? z + 0.5 + Number(source.properties?.offset_z || 0),
+        );
+        if (kind === 'structure') buildPreviewMesh.position.y += clampAssetElevation(source.properties?.elevation ?? source.elevation);
+        if (editorRotateMode) {
+            buildPreviewMesh.rotation.y = bearingToObjectRotation(editorRotateAngle);
+            const arrow = new THREE.ArrowHelper(
+                new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0.16, 0),
+                0.8, 0x8be2cb, 0.2, 0.13,
+            );
+            arrow.traverse(item => { item.raycast = () => {}; });
+            buildPreviewMesh.add(arrow);
+        }
+        if (editorResizeMode) {
+            const posterAxes = kind === 'decor' && source.type === 'poster';
+            const axes = editorResizeAxis === 'all' ? ['width', 'depth', 'height'] : [editorResizeAxis];
+            for (const axis of axes) {
+                const direction = axis === 'height' ? new THREE.Vector3(0, 1, 0)
+                    : axis === 'depth' ? new THREE.Vector3(posterAxes ? 1 : 0, 0, posterAxes ? 0 : 1)
+                        : new THREE.Vector3(posterAxes ? 0 : 1, 0, posterAxes ? 1 : 0);
+                const arrow = new THREE.ArrowHelper(direction, new THREE.Vector3(0, 0.16, 0),
+                    0.8, 0xe5bb6a, 0.2, 0.13);
+                arrow.traverse(item => { item.raycast = () => {}; });
+                buildPreviewMesh.add(arrow);
+            }
+        }
+        scene.add(fadeEditorPreview(buildPreviewMesh));
+        return;
+    }
+    if (buildMode !== 'structure') return;
     const dimensions = getStructureDimensions();
     const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(dimensions.width, dimensions.height, dimensions.depth),
@@ -8962,6 +9397,8 @@ async function placeStructureAtTile(x, z) {
                 dimensions,
                 color: structureColor,
                 rotation: structureRotation,
+                elevation: window.locationEditorTool === 'assets'
+                    ? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
                 cover_class: selectedCoverClass,
                 cover_max_hp: coverProfile.maxHp,
                 cover_hp: coverProfile.maxHp,
@@ -8980,6 +9417,8 @@ async function placeStructureAtTile(x, z) {
         currentLocationData.objects = currentLocationData.objects || [];
         if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
         addLocationObjectMesh(object);
+        if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
+        return object;
     } catch (error) {
         showNotification(error.message || 'Не удалось построить объект');
     }
@@ -9008,6 +9447,7 @@ async function removeStructuresAtTile(x, z) {
         if (result.status === 'fulfilled') {
             removeLocationObjectMesh(objectId);
             currentLocationData.objects = currentLocationData.objects.filter(object => object.id !== objectId);
+            refreshArchitecturalMeshes();
         } else {
             showNotification(result.reason?.message || 'Не удалось удалить объект');
         }
@@ -9027,6 +9467,7 @@ export function addLocationObject(object) {
     currentLocationData.objects = currentLocationData.objects || [];
     if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
     addLocationObjectMesh(object);
+    if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
     invalidateMovementMapCache();
 }
 
@@ -9034,9 +9475,11 @@ window.addLocationObject = addLocationObject;
 
 export function removeLocationObject(objectId) {
     if (!currentLocationData) return;
+    const removed = (currentLocationData.objects || []).find(object => Number(object.id) === Number(objectId));
     if (Number(containerInteractionState?.objectId) === Number(objectId)) closeContainerInteractionMenu();
     removeLocationObjectMesh(objectId);
     currentLocationData.objects = (currentLocationData.objects || []).filter(object => Number(object.id) !== Number(objectId));
+    if (['wall', 'door', 'window'].includes(removed?.type)) refreshArchitecturalMeshes();
     invalidateMovementMapCache();
     applyFogOfWar();
 }
@@ -9050,7 +9493,12 @@ export function updateLocationObject(object) {
     if (index === -1) currentLocationData.objects.push(object);
     else currentLocationData.objects[index] = object;
     replaceLocationObjectMesh(object);
+    if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
     invalidateMovementMapCache();
+    if (typeof editorSelection !== 'undefined' && editorSelection?.kind === 'structure' && editorSelection.id === object.id) {
+        updateEditorSelectionVisual();
+        notifyEditorSelection();
+    }
     if (Number(containerInteractionState?.objectId) === Number(object.id)) {
         containerExchangeTarget = object;
         containerInteractionRefresh?.(object);
@@ -9058,6 +9506,664 @@ export function updateLocationObject(object) {
 }
 
 window.updateLocationObject = updateLocationObject;
+
+export function applyLocationLighting(settings, persist = true) {
+    if (settings && persist && currentLocationData) currentLocationData.lighting = settings;
+    if (!scene || !currentLocationData || !locationAmbientLight || !locationDirectionalLight) return;
+    const cloudSetting = window.weatherSettings?.sun;
+    const clarity = cloudSetting?.enabled ? Number(cloudSetting.intensity) : 1;
+    const profile = resolveLocationLighting(
+        settings || currentLocationData.lighting,
+        window.lobbyGameTimeMinutes ?? 480,
+        clarity,
+    );
+    locationAmbientLight.color.set(profile.ambient_color);
+    locationAmbientLight.intensity = Number(profile.ambient_intensity);
+    locationDirectionalLight.color.set(profile.directional_color);
+    locationDirectionalLight.intensity = Number(profile.directional_intensity);
+    locationDirectionalLight.castShadow = locationDirectionalLight.intensity > 0.05;
+    const azimuth = Number(profile.directional_azimuth) * Math.PI / 180;
+    const elevation = Number(profile.directional_elevation) * Math.PI / 180;
+    const distance = Math.max(currentLocationData.grid_width, currentLocationData.grid_height);
+    const shadowReach = distance / 2 + 2;
+    Object.assign(locationDirectionalLight.shadow.camera, {
+        left: -shadowReach, right: shadowReach, top: shadowReach, bottom: -shadowReach,
+        near: 0.5, far: distance * 3 + 10,
+    });
+    locationDirectionalLight.shadow.camera.updateProjectionMatrix();
+    locationDirectionalLight.shadow.mapSize.set(1024, 1024);
+    const centerX = currentLocationData.grid_width / 2;
+    const centerZ = currentLocationData.grid_height / 2;
+    locationDirectionalLight.target.position.set(centerX, 1, centerZ);
+    locationDirectionalLight.position.set(
+        centerX + Math.cos(azimuth) * Math.cos(elevation) * distance,
+        1 + Math.sin(elevation) * distance,
+        centerZ + Math.sin(azimuth) * Math.cos(elevation) * distance,
+    );
+    locationDirectionalLight.target.updateMatrixWorld();
+    scene.background.set(profile.background_color);
+
+    if (locationLightGroup) {
+        scene.remove(locationLightGroup);
+        disposeObject(locationLightGroup);
+    }
+    locationLightGroup = new THREE.Group();
+    for (const [index, source] of (profile.local_lights || []).entries()) {
+        const x = Number(source.x);
+        const z = Number(source.z);
+        const tileX = Math.max(0, Math.min(currentLocationData.grid_width - 1, Math.floor(x)));
+        const tileZ = Math.max(0, Math.min(currentLocationData.grid_height - 1, Math.floor(z)));
+        const y = getTileHeight(tileX, tileZ) + Number(source.height);
+        const fixture = new THREE.Group();
+        fixture.userData.locationLampIndex = index;
+        fixture.position.set(x, y, z);
+        const isSpot = source.kind === 'spot';
+        const light = isSpot
+            ? new THREE.SpotLight(source.color, Number(source.intensity), Number(source.distance), Math.PI / 5, 0.55, 2)
+            : new THREE.PointLight(source.color, Number(source.intensity), Number(source.distance), 2);
+        light.castShadow = true;
+        light.shadow.mapSize.set(isSpot ? 512 : 256, isSpot ? 512 : 256);
+        fixture.add(light);
+        if (isSpot) {
+            const azimuth = Number(source.azimuth || 0) * Math.PI / 180;
+            light.target.position.set(Math.cos(azimuth) * 5, -Math.min(3, Number(source.height)), Math.sin(azimuth) * 5);
+            fixture.add(light.target);
+        }
+        const bulb = new THREE.Mesh(
+            isSpot ? new THREE.ConeGeometry(0.2, 0.34, 12) : new THREE.SphereGeometry(0.18, 12, 8),
+            new THREE.MeshStandardMaterial({ color: source.color, emissive: source.color, emissiveIntensity: 0.5 }),
+        );
+        if (isSpot) {
+            bulb.rotation.z = -Math.PI / 2;
+            bulb.rotation.y = -Number(source.azimuth || 0) * Math.PI / 180;
+        }
+        const base = baseAssetDimensions(isSpot ? 'spot' : 'point', 'lamp');
+        const dimensions = assetDimensions(source, 'lamp', isSpot ? 'spot' : 'point');
+        bulb.scale.set(dimensions.width / base.width, dimensions.height / base.height, dimensions.depth / base.depth);
+        fixture.add(bulb);
+        fixture.add(new THREE.Mesh(
+            new THREE.SphereGeometry(0.38, 8, 6),
+            new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+        ));
+        locationLightGroup.add(fixture);
+    }
+    scene.add(locationLightGroup);
+    refreshLocationDarkness(profile);
+    updateEditorSelectionVisual(settings && !persist ? settings : null);
+}
+
+function getSelectedEditorSource() {
+    if (!editorSelection || !currentLocationData) return null;
+    if (editorSelection.kind === 'structure') {
+        return (currentLocationData.objects || []).find(item => item.id === editorSelection.id) || null;
+    }
+    if (editorSelection.kind === 'lamp') {
+        return currentLocationData.lighting?.local_lights?.[editorSelection.index] || null;
+    }
+    return currentLocationData.tiles_data?.[editorSelection.z]?.[editorSelection.x]?.objects?.[editorSelection.index] || null;
+}
+
+export function getSelectedLocationEditorAsset() {
+    const source = getSelectedEditorSource();
+    if (!source) return null;
+    const kind = editorSelection.kind;
+    if (kind === 'structure') return {
+        kind, label: findLocationAsset(source.type)?.label || source.name || source.type,
+        x: Number(source.tile_x) + 0.5 + Number(source.properties?.offset_x || 0),
+        z: Number(source.tile_y) + 0.5 + Number(source.properties?.offset_z || 0),
+        rotation: Math.round((objectRotationToBearing(source.properties?.rotation || 0) + 360) % 360),
+        elevation: clampAssetElevation(source.properties?.elevation),
+        color: source.properties?.color || '#aa8866',
+        dimensions: assetDimensions(source, 'structure', source.type),
+        resizable: true,
+    };
+    if (kind === 'lamp') return {
+        kind, label: source.kind === 'spot' ? 'Прожектор' : 'Лампа',
+        x: source.x, z: source.z, rotation: Number(source.azimuth || 0),
+        height: source.height, elevation: source.height, color: source.color,
+        intensity: source.intensity, distance: source.distance,
+        lightKind: source.kind || 'point',
+        dimensions: assetDimensions(source, 'lamp', source.kind || 'point'),
+        resizable: true,
+    };
+    return {
+        kind, label: source.anomalyName || findLocationAsset(source.type)?.label || source.type,
+        x: editorSelection.x + 0.5 + Number(source.x || 0),
+        z: editorSelection.z + 0.5 + Number(source.z || 0),
+        rotation: Math.round((-(Number(source.rotation) || 0) + 360) % 360),
+        elevation: clampAssetElevation(source.elevation),
+        color: source.color || '#aa8866',
+        dimensions: assetDimensions(source, 'decor', source.type),
+        resizable: source.type !== 'anomaly',
+    };
+}
+
+function notifyEditorSelection() {
+    window.dispatchEvent(new CustomEvent('location-editor-selection', {
+        detail: getSelectedLocationEditorAsset(),
+    }));
+}
+
+export function getLocationAssetResizeState() {
+    return {
+        active: editorResizeMode,
+        axis: editorResizeAxis,
+        dimensions: editorResizeDimensions ? { ...editorResizeDimensions } : null,
+    };
+}
+
+function notifyEditorResize() {
+    window.dispatchEvent(new CustomEvent('location-editor-resize', {
+        detail: getLocationAssetResizeState(),
+    }));
+}
+
+export function cancelLocationAssetResize() {
+    if (!editorResizeMode) return false;
+    editorResizeMode = false;
+    editorResizeDimensions = null;
+    editorResizeBaseDimensions = null;
+    editorResizeAnchor = null;
+    notifyEditorResize();
+    updateBuildPreview();
+    return true;
+}
+
+function clearEditorSelection() {
+    if (editorSelection?.kind === 'lamp') applyLocationLighting();
+    editorSelection = null;
+    editorMoveMode = false;
+    editorMovePreviewPoint = null;
+    editorRotateMode = false;
+    editorResizeMode = false;
+    editorResizeDimensions = null;
+    editorResizeBaseDimensions = null;
+    editorResizeAnchor = null;
+    notifyEditorResize();
+    updateEditorSelectionVisual();
+    notifyEditorSelection();
+}
+
+function updateEditorSelectionVisual(lightingOverride = null) {
+    if (editorSelectionRing) {
+        scene?.remove(editorSelectionRing);
+        disposeObject(editorSelectionRing);
+        editorSelectionRing = null;
+    }
+    const source = editorSelection?.kind === 'lamp' && lightingOverride
+        ? lightingOverride.local_lights?.[editorSelection.index] : getSelectedEditorSource();
+    if (!source || !scene) return;
+    const x = editorSelection.kind === 'structure' ? Number(source.tile_x) + 0.5 + Number(source.properties?.offset_x || 0)
+        : editorSelection.kind === 'lamp' ? source.x : editorSelection.x + 0.5 + Number(source.x || 0);
+    const z = editorSelection.kind === 'structure' ? Number(source.tile_y) + 0.5 + Number(source.properties?.offset_z || 0)
+        : editorSelection.kind === 'lamp' ? source.z : editorSelection.z + 0.5 + Number(source.z || 0);
+    const tileX = Math.floor(x);
+    const tileZ = Math.floor(z);
+    editorSelectionRing = new THREE.Mesh(
+        new THREE.RingGeometry(0.38, 0.53, 28),
+        new THREE.MeshBasicMaterial({ color: 0x8be2cb, side: THREE.DoubleSide, depthTest: false }),
+    );
+    editorSelectionRing.rotation.x = -Math.PI / 2;
+    editorSelectionRing.position.set(x, getTileHeight(tileX, tileZ) + 0.04, z);
+    editorSelectionRing.renderOrder = 100;
+    editorSelectionRing.raycast = () => {};
+    scene.add(editorSelectionRing);
+}
+
+function pickEditorAsset(clientX, clientY) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const meshes = [...locationObjectMeshes, ...objectMeshes, ...(locationLightGroup?.children || [])];
+    for (const hit of raycaster.intersectObjects(meshes, true)) {
+        let item = hit.object;
+        while (item && item !== scene) {
+            if (item.userData?.locationObjectId) return { kind: 'structure', id: item.userData.locationObjectId };
+            if (Number.isInteger(item.userData?.locationLampIndex)) {
+                return { kind: 'lamp', index: item.userData.locationLampIndex };
+            }
+            if (item.userData?.sourceObject) {
+                const x = item.userData.tileX;
+                const z = item.userData.tileZ;
+                const index = currentLocationData.tiles_data[z][x].objects.indexOf(item.userData.sourceObject);
+                if (index >= 0) return { kind: 'decor', x, z, index };
+            }
+            item = item.parent;
+        }
+    }
+    return null;
+}
+
+function selectEditorAsset(clientX, clientY) {
+    if (editorSelection?.kind === 'lamp') applyLocationLighting();
+    editorSelection = pickEditorAsset(clientX, clientY);
+    editorMoveMode = false;
+    editorMovePreviewPoint = null;
+    editorRotateMode = false;
+    editorResizeMode = false;
+    editorResizeDimensions = null;
+    editorResizeBaseDimensions = null;
+    editorResizeAnchor = null;
+    notifyEditorResize();
+    updateEditorSelectionVisual();
+    notifyEditorSelection();
+    return Boolean(editorSelection);
+}
+
+async function persistLocationLights(lights) {
+    if (lampEditPending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return false;
+    lampEditPending = true;
+    const lighting = {
+        ...DEFAULT_LOCATION_LIGHTING,
+        ...(currentLocationData.lighting || {}),
+        local_lights: lights,
+    };
+    try {
+        await Server.updateLocation(window.currentLobbyId, currentLocationId, { lighting });
+        applyLocationLighting(lighting);
+        notifyEditorSelection();
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось сохранить светильник', 'system');
+        return false;
+    } finally {
+        lampEditPending = false;
+    }
+}
+
+function sendDecorTileUpdates(positions) {
+    const updates = positions.map(({ x, z }) => ({
+        x, z, objects: currentLocationData.tiles_data[z][x].objects,
+    }));
+    window.socket?.emit('update_location_tiles', {
+        token: localStorage.getItem('access_token'),
+        location_id: currentLocationId,
+        updates,
+    });
+    positions.forEach(({ x, z }) => rebuildTileObjects(x, z));
+    applyFogOfWar();
+    updateEditorSelectionVisual();
+    notifyEditorSelection();
+}
+
+export function setLocationAssetPreset(assetId) {
+    selectedLocationAsset = typeof assetId === 'object' ? assetId : findLocationAsset(assetId);
+    if (!selectedLocationAsset) return;
+    if (selectedLocationAsset.kind === 'structure') {
+        structurePreset = selectedLocationAsset.id;
+        const dimensions = assetDimensions(selectedLocationAsset, 'structure', selectedLocationAsset.id);
+        structureWidth = dimensions.width;
+        structureDepth = dimensions.depth;
+        structureHeight = dimensions.height;
+        structureColor = selectedLocationAsset.color;
+        structureRotation = 0;
+        buildMode = 'structure';
+    } else if (selectedLocationAsset.kind === 'decor') {
+        brushObjectType = selectedLocationAsset.id;
+        brushObjectColor = selectedLocationAsset.color;
+        setLocationBrushObjectOffsetX(selectedLocationAsset.offsetX || 0);
+        setLocationBrushObjectOffsetZ(selectedLocationAsset.offsetZ || 0);
+        setLocationBrushObjectScale(1);
+        setLocationBrushObjectRotation(-Number(selectedLocationAsset.rotation || 0));
+        brushObjectMode = true;
+        buildMode = 'terrain';
+    } else {
+        buildMode = 'light';
+    }
+    updateBuildPreview();
+}
+
+export function setLocationAssetElevation(value) {
+    if (!selectedLocationAsset) return;
+    if (selectedLocationAsset.kind === 'lamp') selectedLocationAsset.height = clampAssetElevation(value);
+    else selectedLocationAsset.elevation = clampAssetElevation(value);
+    updateBuildPreview();
+}
+
+export function setLocationAssetDimensions(dimensions) {
+    if (!selectedLocationAsset || !validAssetDimensions(dimensions)) return false;
+    selectedLocationAsset.dimensions = [dimensions.width, dimensions.depth, dimensions.height];
+    if (selectedLocationAsset.kind === 'structure') {
+        structureWidth = dimensions.width;
+        structureDepth = dimensions.depth;
+        structureHeight = dimensions.height;
+    }
+    updateBuildPreview();
+    return true;
+}
+
+export function clearLocationAssetPreset() {
+    selectedLocationAsset = null;
+    clearBuildPreview();
+}
+
+export function beginMoveSelectedLocationAsset() {
+    if (!getSelectedEditorSource()) {
+        showNotification('Сначала выберите объект инструментом «Выбор»', 'system');
+        return false;
+    }
+    cancelLocationAssetResize();
+    window.selectLocationEditorTool?.('select');
+    editorMoveMode = true;
+    editorMovePreviewPoint = null;
+    editorRotateMode = false;
+    showNotification('Наведите на точку и кликните. Объект можно перемещать внутри клетки; Esc отменит.', 'system');
+    updateBuildPreview();
+    return true;
+}
+
+export function beginRotateSelectedLocationAsset() {
+    const selection = getSelectedLocationEditorAsset();
+    if (!selection) {
+        showNotification('Сначала выберите объект инструментом «Выбор»', 'system');
+        return false;
+    }
+    if (selection.kind === 'lamp' && selection.lightKind !== 'spot') {
+        showNotification('Всенаправленной лампе поворот не нужен', 'system');
+        return false;
+    }
+    cancelLocationAssetResize();
+    window.selectLocationEditorTool?.('select');
+    editorMoveMode = false;
+    editorMovePreviewPoint = null;
+    editorRotateMode = true;
+    editorRotateAngle = Number(selection.rotation || 0);
+    showNotification('Двигайте курсор вокруг объекта и кликните для выбора угла. Shift: шаг 15°. Esc: отмена.', 'system');
+    updateBuildPreview();
+    return true;
+}
+
+export function beginResizeSelectedLocationAsset() {
+    const selection = getSelectedLocationEditorAsset();
+    if (!selection) return false;
+    if (editorResizeMode) return true;
+    if (!selection.resizable) {
+        showNotification('Размер этого объекта определяется его правилами', 'system');
+        return false;
+    }
+    window.selectLocationEditorTool?.('select');
+    editorMoveMode = false;
+    editorMovePreviewPoint = null;
+    editorRotateMode = false;
+    editorResizeMode = true;
+    editorResizeAxis = 'all';
+    editorResizeDimensions = { ...selection.dimensions };
+    editorResizeBaseDimensions = { ...selection.dimensions };
+    editorResizeAnchor = null;
+    showNotification('Размер: сейчас меняются все три оси. Для отдельной оси выберите X, Z или Y в панели. Клик сохранит, Esc отменит.', 'system');
+    notifyEditorResize();
+    updateBuildPreview();
+    return true;
+}
+
+export function setLocationAssetResizeAxis(axis) {
+    if (!editorResizeMode || !['all', 'width', 'depth', 'height'].includes(axis)) return false;
+    editorResizeAxis = axis;
+    editorResizeBaseDimensions = { ...editorResizeDimensions };
+    editorResizeAnchor = null;
+    notifyEditorResize();
+    updateBuildPreview();
+    return true;
+}
+
+export async function deleteSelectedLocationAsset() {
+    const source = getSelectedEditorSource();
+    if (!source) return;
+    if (editorSelection.kind === 'lamp') {
+        const lights = [...currentLocationData.lighting.local_lights];
+        lights.splice(editorSelection.index, 1);
+        if (!await persistLocationLights(lights)) return;
+    } else if (editorSelection.kind === 'structure') {
+        try {
+            await Server.deleteLocationObject(window.currentLobbyId, source.id);
+            removeLocationObjectMesh(source.id);
+            currentLocationData.objects = (currentLocationData.objects || []).filter(item => item.id !== source.id);
+            if (['wall', 'door', 'window'].includes(source.type)) refreshArchitecturalMeshes();
+        } catch (error) {
+            showNotification(error.message || 'Не удалось удалить объект', 'system');
+            return;
+        }
+    } else {
+        currentLocationData.tiles_data[editorSelection.z][editorSelection.x].objects.splice(editorSelection.index, 1);
+        sendDecorTileUpdates([{ x: editorSelection.x, z: editorSelection.z }]);
+    }
+    clearEditorSelection();
+}
+
+export async function updateSelectedLocationAssetDetails({ x, z, height, elevation, intensity, distance, color, rotation, dimensions }) {
+    const source = getSelectedEditorSource();
+    if (!source || !currentLocationData) return false;
+    if (!Number.isFinite(x) || !Number.isFinite(z)
+        || x < 0 || z < 0 || x >= currentLocationData.grid_width || z >= currentLocationData.grid_height) {
+        showNotification('Координаты вне подлокации', 'system');
+        return false;
+    }
+    if (elevation !== undefined && (!Number.isFinite(elevation) || elevation < 0 || elevation > 10)) {
+        showNotification('Высота должна быть от 0 до 10 м', 'system');
+        return false;
+    }
+    if (dimensions !== undefined && !validAssetDimensions(dimensions)) {
+        showNotification('Некорректные размеры объекта', 'system');
+        return false;
+    }
+    if (dimensions && editorSelection.kind === 'decor' && source.type === 'anomaly') {
+        showNotification('Размер аномалии задаётся её правилами', 'system');
+        return false;
+    }
+    if (color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(color)) return false;
+    if (editorSelection.kind === 'lamp') {
+        const lights = [...currentLocationData.lighting.local_lights];
+        const azimuth = ((Number(rotation) + 180) % 360 + 360) % 360 - 180;
+        lights[editorSelection.index] = {
+            ...source, x, z, height, intensity, distance, color, azimuth,
+            ...(dimensions ? { dimensions } : {}),
+        };
+        return persistLocationLights(lights);
+    }
+    if (editorSelection.kind === 'structure') {
+        try {
+            const object = await Server.updateLocationObject(window.currentLobbyId, source.id, {
+                tile_x: Math.floor(x), tile_y: Math.floor(z),
+                properties: {
+                    offset_x: x - Math.floor(x) - 0.5,
+                    offset_z: z - Math.floor(z) - 0.5,
+                    rotation: bearingToObjectRotation(rotation),
+                    elevation: elevation ?? clampAssetElevation(source.properties?.elevation),
+                    ...(color !== undefined ? { color } : {}),
+                    ...(dimensions ? { dimensions } : {}),
+                },
+            });
+            updateLocationObject(object);
+            notifyEditorSelection();
+            return true;
+        } catch (error) { showNotification(error.message || 'Не удалось сохранить объект', 'system'); }
+        return false;
+    }
+    const old = { x: editorSelection.x, z: editorSelection.z };
+    const next = { x: Math.floor(x), z: Math.floor(z) };
+    currentLocationData.tiles_data[old.z][old.x].objects.splice(editorSelection.index, 1);
+    source.rotation = -Number(rotation);
+    source.elevation = elevation ?? clampAssetElevation(source.elevation);
+    if (color !== undefined) source.color = color;
+    if (dimensions) {
+        source.dimensions = dimensions;
+        source.scale = 1;
+    }
+    source.x = x - next.x - 0.5;
+    source.z = z - next.z - 0.5;
+    const objects = currentLocationData.tiles_data[next.z][next.x].objects;
+    objects.push(source);
+    editorSelection = { kind: 'decor', ...next, index: objects.length - 1 };
+    sendDecorTileUpdates(old.x === next.x && old.z === next.z ? [old] : [old, next]);
+    return true;
+}
+
+export function previewSelectedLocationLamp(details) {
+    if (editorSelection?.kind !== 'lamp' || !currentLocationData?.lighting) return;
+    if (!Number.isFinite(details.x) || !Number.isFinite(details.z)
+        || details.x < 0 || details.z < 0
+        || details.x >= currentLocationData.grid_width || details.z >= currentLocationData.grid_height
+        || !Number.isFinite(details.height) || details.height < 0 || details.height > 10
+        || !Number.isFinite(details.intensity) || details.intensity < 0 || details.intensity > 10
+        || !Number.isFinite(details.distance) || details.distance < 1 || details.distance > 30) return;
+    const source = getSelectedEditorSource();
+    if (!source) return;
+    const lights = [...(currentLocationData.lighting.local_lights || [])];
+    lights[editorSelection.index] = { ...source, ...details, azimuth: Number(details.rotation ?? source.azimuth ?? 0) };
+    applyLocationLighting({ ...currentLocationData.lighting, local_lights: lights }, false);
+}
+
+function updateEditorRotatePreview(clientX, clientY, snap = false) {
+    if (!editorRotateMode || !editorSelection) return;
+    const selection = getSelectedLocationEditorAsset();
+    if (!selection) return;
+    const centerX = selection.x;
+    const centerZ = selection.z;
+    const point = getPointerWorldPoint(clientX, clientY, getTileHeight(Math.floor(centerX), Math.floor(centerZ)));
+    if (!point || Math.hypot(point.x - centerX, point.z - centerZ) < 0.25) return;
+    const nextAngle = bearingFromDelta(point.x - centerX, point.z - centerZ, snap);
+    if (nextAngle === editorRotateAngle) return;
+    editorRotateAngle = nextAngle;
+    if (selection.kind === 'lamp') {
+        previewSelectedLocationLamp({
+            x: selection.x, z: selection.z, height: selection.height,
+            intensity: selection.intensity, distance: selection.distance,
+            color: selection.color, rotation: editorRotateAngle,
+        });
+    } else {
+        updateBuildPreview();
+    }
+}
+
+function updateEditorResizePreview(clientX, clientY) {
+    if (!editorResizeMode || !editorResizeDimensions || !editorResizeBaseDimensions) return;
+    const selection = getSelectedLocationEditorAsset();
+    if (!selection) return;
+    const centerX = selection.x;
+    const centerZ = selection.z;
+    let coordinate;
+    if (editorResizeAxis === 'all') {
+        coordinate = clientX;
+    } else if (editorResizeAxis === 'height') {
+        coordinate = -clientY * 0.02;
+    } else {
+        const point = getPointerWorldPoint(clientX, clientY, getTileHeight(Math.floor(centerX), Math.floor(centerZ)));
+        if (!point) return;
+        const rotation = selection.kind === 'lamp' ? 0 : bearingToObjectRotation(selection.rotation);
+        const dx = point.x - centerX;
+        const dz = point.z - centerZ;
+        const localX = Math.cos(rotation) * dx - Math.sin(rotation) * dz;
+        const localZ = Math.sin(rotation) * dx + Math.cos(rotation) * dz;
+        coordinate = editorResizeAxis === 'width'
+            ? (selection.kind === 'decor' && getSelectedEditorSource()?.type === 'poster' ? localZ : localX)
+            : (selection.kind === 'decor' && getSelectedEditorSource()?.type === 'poster' ? localX : localZ);
+    }
+    if (!editorResizeAnchor) {
+        editorResizeAnchor = { coordinate, sign: editorResizeAxis === 'height' ? 1 : Math.sign(coordinate) || 1 };
+        return;
+    }
+    if (editorResizeAxis === 'all') {
+        const next = resizedUniformDimensions(
+            editorResizeBaseDimensions, 1 + (coordinate - editorResizeAnchor.coordinate) * 0.01,
+        );
+        if (Object.keys(next).every(axis => next[axis] === editorResizeDimensions[axis])) return;
+        editorResizeDimensions = next;
+        notifyEditorResize();
+        updateBuildPreview();
+        return;
+    }
+    const factor = editorResizeAxis === 'height' ? 1 : 2;
+    const min = editorResizeAxis === 'depth' ? 0.02 : 0.05;
+    const max = editorResizeAxis === 'height' ? 20 : 30;
+    const next = resizedAxis(editorResizeBaseDimensions[editorResizeAxis]
+        + (coordinate - editorResizeAnchor.coordinate) * editorResizeAnchor.sign * factor, min, max);
+    if (next === editorResizeDimensions[editorResizeAxis]) return;
+    editorResizeDimensions[editorResizeAxis] = next;
+    notifyEditorResize();
+    updateBuildPreview();
+}
+
+async function commitEditorAssetResize() {
+    const selection = getSelectedLocationEditorAsset();
+    if (!selection || !editorResizeDimensions) return;
+    const saved = await updateSelectedLocationAssetDetails({
+        x: selection.x, z: selection.z,
+        height: selection.height, intensity: selection.intensity,
+        distance: selection.distance, color: selection.color,
+        rotation: selection.rotation, elevation: selection.elevation,
+        dimensions: { ...editorResizeDimensions },
+    });
+    if (saved) cancelLocationAssetResize();
+}
+
+async function commitEditorAssetRotation() {
+    const selection = getSelectedLocationEditorAsset();
+    if (!selection) return;
+    const saved = await updateSelectedLocationAssetDetails({
+        x: selection.x, z: selection.z,
+        height: selection.height, intensity: selection.intensity,
+        distance: selection.distance, color: selection.color,
+        rotation: editorRotateAngle, elevation: selection.elevation,
+    });
+    if (saved) {
+        editorRotateMode = false;
+        updateBuildPreview();
+    }
+}
+
+async function commitEditorAssetMove(x, z) {
+    const current = getSelectedLocationEditorAsset();
+    if (!current) return;
+    const source = getSelectedEditorSource();
+    if (await updateSelectedLocationAssetDetails({
+        x, z, rotation: current.rotation,
+        height: source.height, intensity: source.intensity,
+        distance: source.distance, color: source.color, elevation: current.elevation,
+    })) {
+        editorMoveMode = false;
+        editorMovePreviewPoint = null;
+    }
+    updateBuildPreview();
+}
+
+async function placeSelectedLocationAsset(x, z) {
+    const asset = selectedLocationAsset;
+    if (!asset) return;
+    if (asset.kind === 'structure') {
+        const object = await placeStructureAtTile(x, z);
+        if (object) {
+            editorSelection = { kind: 'structure', id: object.id };
+            updateEditorSelectionVisual();
+            notifyEditorSelection();
+        }
+        return;
+    }
+    if (asset.kind === 'decor') {
+        processedTilesForObjects.clear();
+        applyLocationBrush(x, z, { addObject: true }, 0);
+        processedTilesForObjects.clear();
+        const objects = currentLocationData.tiles_data[z][x].objects || [];
+        if (objects.length) {
+            editorSelection = { kind: 'decor', x, z, index: objects.length - 1 };
+            updateEditorSelectionVisual();
+            notifyEditorSelection();
+        }
+        return;
+    }
+    const lights = [...(currentLocationData.lighting?.local_lights || [])];
+    lights.push({
+        x: x + 0.5, z: z + 0.5, height: asset.height,
+        color: asset.color, intensity: asset.intensity, distance: asset.distance,
+        kind: asset.lightKind || 'point', azimuth: 0,
+        dimensions: assetDimensions(asset, 'lamp', asset.lightKind || 'point'),
+    });
+    if (await persistLocationLights(lights)) {
+        editorSelection = { kind: 'lamp', index: lights.length - 1 };
+        updateEditorSelectionVisual();
+        notifyEditorSelection();
+    }
+}
 
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
@@ -9068,13 +10174,29 @@ export function loadLocation(data) {
     anomalyEffectMeshes = [];
     locationObjectMeshes = [];
     currentLocationData = data;
+    selectedLocationAsset = null;
+    editorSelection = null;
+    editorResizeMode = false;
+    editorResizeDimensions = null;
+    editorResizeBaseDimensions = null;
+    editorResizeAnchor = null;
+    editorMoveMode = false;
+    editorMovePreviewPoint = null;
+    editorRotateMode = false;
+    editorSelectionRing = null;
+    buildPreviewMesh = null;
+    buildPreviewKey = null;
     invalidateMovementMapCache();
     if (!scene) return;
 
     // Очистка старых объектов (кроме света и highlight)
+    if (waterTileMesh?.material.map) waterTileMesh.material.map.dispose();
+    waterTileMesh = null;
+    smoothTerrainMesh = null;
     const toRemove = [];
     scene.children.forEach(child => {
-        if (!child.isLight && child !== highlightBox) toRemove.push(child);
+        if (!child.isLight && child !== highlightBox && child !== locationLightGroup
+            && child !== locationDirectionalLight?.target) toRemove.push(child);
     });
     toRemove.forEach(child => {
         disposeObject(child);
@@ -9088,8 +10210,12 @@ export function loadLocation(data) {
     const centerZ = gridHeight / 2;
 
     // Сетка
-    const gridHelper = new THREE.GridHelper(gridWidth, gridHeight, 0x888888, 0x444444);
-    gridHelper.position.set(centerX, -0.1, centerZ);
+    const gridLines = [];
+    for (let x = 0; x <= gridWidth; x++) gridLines.push(x, -0.1, 0, x, -0.1, gridHeight);
+    for (let z = 0; z <= gridHeight; z++) gridLines.push(0, -0.1, z, gridWidth, -0.1, z);
+    const gridGeometry = new THREE.BufferGeometry();
+    gridGeometry.setAttribute('position', new THREE.Float32BufferAttribute(gridLines, 3));
+    const gridHelper = new THREE.LineSegments(gridGeometry, new THREE.LineBasicMaterial({ color: 0x555555 }));
     scene.add(gridHelper);
 
     // Пол
@@ -9107,20 +10233,28 @@ export function loadLocation(data) {
     const material = new THREE.MeshStandardMaterial();
     locationTileMesh = new THREE.InstancedMesh(geometry, material, tileCount);
     locationTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
+    waterTileMesh = new THREE.InstancedMesh(geometry.clone(), createWaterMaterial(), tileCount);
+    waterTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
+    waterTileMesh.castShadow = false;
+    waterTileMesh.receiveShadow = false;
+    waterTileMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     locationTileMesh.castShadow = false;
-    locationTileMesh.receiveShadow = false;
+    locationTileMesh.receiveShadow = true;
     locationTileMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     locationTileMesh.userData.tileByInstance = [];
     for (let y = 0; y < gridHeight; y++) {
         for (let x = 0; x < gridWidth; x++) {
             const tile = data.tiles_data[y][x];
-            updateTileInstance(y * gridWidth + x, x, y, tile, locationTileMesh);
+            updateTileInstance(y * gridWidth + x, x, y, tile);
         }
     }
     locationTileMesh.instanceMatrix.needsUpdate = true;
     locationTileMesh.instanceColor.needsUpdate = true;
-    tileCubes = [locationTileMesh];
-    scene.add(locationTileMesh);
+    waterTileMesh.instanceMatrix.needsUpdate = true;
+    waterTileMesh.instanceColor.needsUpdate = true;
+    tileCubes = [locationTileMesh, waterTileMesh];
+    scene.add(locationTileMesh, waterTileMesh);
+    rebuildSmoothTerrainMesh();
 
     // Объекты на тайлах
     for (let y = 0; y < data.tiles_data.length; y++) {
@@ -9133,6 +10267,7 @@ export function loadLocation(data) {
     if (data.objects && data.objects.length) {
         data.objects.forEach(object => addLocationObjectMesh(object, false));
     }
+    applyLocationLighting();
     applyFogOfWar();
 
     // Камера
@@ -9147,19 +10282,68 @@ export function loadLocation(data) {
 // ========== Обновление тайлов ==========
 function updateTileCube(x, z, tile) {
     if (!locationTileMesh || !currentLocationData) return;
-    updateTileInstance(z * currentLocationData.grid_width + x, x, z, tile, locationTileMesh);
+    updateTileInstance(z * currentLocationData.grid_width + x, x, z, tile);
     locationTileMesh.instanceMatrix.needsUpdate = true;
     locationTileMesh.instanceColor.needsUpdate = true;
+    waterTileMesh.instanceMatrix.needsUpdate = true;
+    waterTileMesh.instanceColor.needsUpdate = true;
+    if (smoothTerrainMesh || tile.surface === 'smooth') rebuildSmoothTerrainMesh();
 }
 
-function updateTileInstance(instanceId, x, z, tile, mesh) {
+function updateSmoothTerrainColors() {
+    if (!smoothTerrainMesh || !currentLocationData) return;
+    const colors = smoothTerrainMesh.geometry.getAttribute('color');
+    smoothTerrainMesh.userData.tileByVertex.forEach(({ x, z }, index) => {
+        const terrain = currentLocationData.tiles_data[z][x].terrain;
+        const color = new THREE.Color(terrainColors[terrain] || 0x3a5f0b)
+            .multiplyScalar(darknessFactorAt(x, z));
+        colors.setXYZ(index, color.r, color.g, color.b);
+    });
+    colors.needsUpdate = true;
+}
+
+function rebuildSmoothTerrainMesh() {
+    if (smoothTerrainMesh) {
+        scene.remove(smoothTerrainMesh);
+        disposeObject(smoothTerrainMesh);
+        smoothTerrainMesh = null;
+    }
+    const data = buildSmoothTerrainData(currentLocationData.tiles_data);
+    tileCubes = [locationTileMesh, waterTileMesh];
+    if (!data.positions.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(data.positions.length), 3));
+    geometry.computeVertexNormals();
+    smoothTerrainMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+        vertexColors: true, side: THREE.DoubleSide,
+    }));
+    smoothTerrainMesh.userData.tileByFace = data.tileByFace;
+    smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
+    smoothTerrainMesh.receiveShadow = true;
+    updateSmoothTerrainColors();
+    scene.add(smoothTerrainMesh);
+    tileCubes.push(smoothTerrainMesh);
+}
+
+function updateTileInstance(instanceId, x, z, tile) {
     const height = tile.height || 1.0;
+    const isWater = tile.terrain === 'water';
+    const isSmooth = tile.surface === 'smooth' && !isWater;
     tileInstanceTransform.position.set(x + 0.5, height / 2, z + 0.5);
     tileInstanceTransform.scale.set(1, height, 1);
     tileInstanceTransform.updateMatrix();
-    mesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
-    mesh.setColorAt(instanceId, new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b));
-    mesh.userData.tileByInstance[instanceId] = { x, z };
+    const activeMesh = isWater ? waterTileMesh : locationTileMesh;
+    const inactiveMesh = isWater ? locationTileMesh : waterTileMesh;
+    if (!isSmooth) activeMesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
+    activeMesh.setColorAt(instanceId, new THREE.Color(isWater ? 0xffffff : terrainColors[tile.terrain] || 0x3a5f0b)
+        .multiplyScalar(darknessFactorAt(x, z)));
+    tileInstanceTransform.scale.set(0, 0, 0);
+    tileInstanceTransform.updateMatrix();
+    inactiveMesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
+    if (isSmooth) activeMesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
+    activeMesh.userData.tileByInstance ??= [];
+    activeMesh.userData.tileByInstance[instanceId] = { x, z };
 }
 
 function rebuildTileObjects(tileX, tileZ) {
@@ -9207,6 +10391,10 @@ function rebuildTileObjects(tileX, tileZ) {
                 material = new THREE.MeshStandardMaterial({ color: 0xff6600 });
                 yOffset = 0.05;
                 break;
+            case 'poster':
+                mesh = createPosterMesh(obj.color);
+                yOffset = 0;
+                break;
             case 'anomaly':
                 mesh = createAnomalyEffect(
                     obj.anomalyType || 'electric',
@@ -9246,16 +10434,32 @@ function rebuildTileObjects(tileX, tileZ) {
                 mesh.add(foliage);
             });
             yOffset = 0;
-        } else {
+        } else if (obj.type !== 'poster') {
             mesh = new THREE.Mesh(geometry, material);
         }
         mesh.userData = { ...mesh.userData, tileX, tileZ, objType: obj.type, sourceObject: obj };
-        mesh.position.set(worldX, tileHeight + yOffset, worldZ);
-        mesh.rotation.y = obj.rotation || 0;
-        if (!isAnomalyEffect) mesh.scale.setScalar(obj.scale || 1);
+        mesh.position.set(
+            worldX + Number(obj.x || 0),
+            tileHeight + yOffset + clampAssetElevation(obj.elevation),
+            worldZ + Number(obj.z || 0),
+        );
+        mesh.rotation.y = THREE.MathUtils.degToRad(Number(obj.rotation) || 0);
+        if (!isAnomalyEffect) {
+            applyDecorSize(mesh, obj, obj.type);
+            mesh.position.y += yOffset * (mesh.scale.y - 1);
+        }
         scene.add(mesh);
         objectMeshes.push(mesh);
         if (isAnomalyEffect) anomalyEffectMeshes.push(mesh);
+        else {
+            mesh.traverse(child => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
+        }
     }
 }
 
@@ -9275,6 +10479,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
     }
     invalidateMovementMapCache();
     applyFogOfWar();
+    if (editorSelection) updateEditorSelectionVisual();
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
         entry.model.position.y = height;
@@ -9317,6 +10522,11 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                         z: brushObjectOffsetZ,
                         scale: brushObjectScale,
                         rotation: brushObjectRotation,
+                        elevation: window.locationEditorTool === 'assets'
+                            ? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
+                        dimensions: window.locationEditorTool === 'assets'
+                            ? assetDimensions(selectedLocationAsset, 'decor', selectedLocationAsset?.id)
+                            : undefined,
                         color: brushObjectColor
                     };
                     if (brushObjectType.startsWith('anomaly_')) {
@@ -9349,6 +10559,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         }
     }
     if (changed.length === 0) return;
+    if (updates.height !== undefined && editorSelection) updateEditorSelectionVisual();
     if (window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
             token: localStorage.getItem('access_token'),
@@ -9710,6 +10921,7 @@ function setupCharacterDragging() {
     const onContextMenu = (e) => {
         e.preventDefault();
         e.stopImmediatePropagation();
+        if (cameraDragMenuGuard.shouldSuppressMenu()) return;
         if (pendingCombatAction) {
             showNotification('Выберите цель левой кнопкой мыши или нажмите Esc для отмены', 'system');
             return;
@@ -9736,6 +10948,12 @@ function setupCharacterDragging() {
     handlers.canvas.contextmenu = onContextMenu;
 
     const onKeyDown = (e) => {
+        if (editorResizeMode && !isKeyboardInputTarget(e.target) && !e.altKey && !e.ctrlKey && !e.metaKey
+            && ['KeyX', 'KeyY', 'KeyZ'].includes(e.code)) {
+            e.preventDefault();
+            setLocationAssetResizeAxis({ KeyX: 'width', KeyY: 'height', KeyZ: 'depth' }[e.code]);
+            return;
+        }
         if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && !isKeyboardInputTarget(e.target)) {
             locationCameraKeys.add(e.code);
             e.preventDefault();
@@ -9749,6 +10967,31 @@ function setupCharacterDragging() {
             return;
         }
         if (e.key !== 'Escape') return;
+        if (editorResizeMode) {
+            e.preventDefault();
+            cancelLocationAssetResize();
+            return;
+        }
+        if (editorRotateMode) {
+            e.preventDefault();
+            editorRotateMode = false;
+            if (editorSelection?.kind === 'lamp') applyLocationLighting();
+            updateBuildPreview();
+            return;
+        }
+        if (editorMoveMode) {
+            e.preventDefault();
+            editorMoveMode = false;
+            editorMovePreviewPoint = null;
+            updateBuildPreview();
+            return;
+        }
+        if (window.locationEditMode && window.locationEditorTool === 'assets' && selectedLocationAsset) {
+            e.preventDefault();
+            window.selectLocationEditorTool?.('select');
+            clearLocationAssetPreset();
+            return;
+        }
         if (pendingCharacterPlacement) {
             e.preventDefault();
             pendingCharacterPlacement = null;
@@ -9835,6 +11078,7 @@ export function setupLocationEditing() {
     const locInfo = document.getElementById('location-tile-info');
     locationActive = true;
     const onCameraRotatePointerDown = (event) => {
+        if (event.button === 2) cameraDragMenuGuard.begin(event.clientX, event.clientY, event.pointerId);
         if (event.button === 2 && window.locationEditMode && !isDraggingCharacter) {
             controls.enabled = true;
         }
@@ -9844,6 +11088,13 @@ export function setupLocationEditing() {
 
     const onPointerMove = (e) => {
         if (!locationActive) return;
+        cameraDragMenuGuard.move(e.clientX, e.clientY, e.pointerId);
+        if (editorRotateMode && e.target === canvas) {
+            updateEditorRotatePreview(e.clientX, e.clientY, e.shiftKey);
+        }
+        if (editorResizeMode && e.target === canvas && !(e.buttons & 2)) {
+            updateEditorResizePreview(e.clientX, e.clientY);
+        }
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -9851,7 +11102,7 @@ export function setupLocationEditing() {
         const intersects = raycaster.intersectObjects(tileCubes);
         if (intersects.length > 0) {
             const hit = intersects[0];
-            const coords = hit.object.userData.tileByInstance?.[hit.instanceId];
+            const coords = hitTileCoords(hit);
             if (!coords) return;
             const { x, z } = coords;
             const tile = currentLocationData.tiles_data[z][x];
@@ -9867,6 +11118,10 @@ export function setupLocationEditing() {
                 lastHighlightCoords = { x, z };
             }
             hoveredTileCoords = { x, z };
+            if (editorMoveMode && e.target === canvas && !(e.buttons & 2)) {
+                const point = getPointerWorldPoint(e.clientX, e.clientY, getTileHeight(x, z));
+                if (point) editorMovePreviewPoint = { x: point.x, z: point.z };
+            }
             updateBuildPreview();
         } else {
             locInfo.style.display = 'none';
@@ -9878,6 +11133,11 @@ export function setupLocationEditing() {
     };
     window.addEventListener('pointermove', onPointerMove);
     handlers.window.pointerMove = onPointerMove;
+    const onCameraRotatePointerUp = event => {
+        if (event.button === 2 || event.type === 'pointercancel') cameraDragMenuGuard.end();
+    };
+    window.addEventListener('pointerup', onCameraRotatePointerUp);
+    window.addEventListener('pointercancel', onCameraRotatePointerUp);
 
     const onPointerDown = (e) => {
         if (!locationActive) return;
@@ -9909,7 +11169,48 @@ export function setupLocationEditing() {
             return;
         }
         if (!window.locationEditMode) return;
-        if (window.locationEditorTool === 'select' && !e.altKey && !e.shiftKey) return;
+        if (editorResizeMode) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            commitEditorAssetResize();
+            return;
+        }
+        if (editorRotateMode) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            updateEditorRotatePreview(e.clientX, e.clientY, e.shiftKey);
+            commitEditorAssetRotation();
+            return;
+        }
+        if (editorMoveMode) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const point = getPointerWorldPoint(e.clientX, e.clientY,
+                getTileHeight(hoveredTileCoords.x, hoveredTileCoords.z));
+            commitEditorAssetMove(point?.x ?? hoveredTileCoords.x + 0.5,
+                point?.z ?? hoveredTileCoords.z + 0.5);
+            return;
+        }
+        if (window.locationEditorTool === 'select' && !e.altKey && !e.shiftKey) {
+            if (selectEditorAsset(e.clientX, e.clientY)) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+            }
+            return;
+        }
+        if (window.locationEditorTool === 'assets' && !e.altKey && !e.shiftKey) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            placeSelectedLocationAsset(hoveredTileCoords.x, hoveredTileCoords.z);
+            return;
+        }
+        if (window.locationEditorTool === 'darkness' && !e.altKey && !e.shiftKey) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            canvas.setPointerCapture(e.pointerId);
+            window.locationDarknessPaintAtTile?.(hoveredTileCoords.x, hoveredTileCoords.z);
+            return;
+        }
         e.preventDefault();
         e.stopPropagation();
         canvas.setPointerCapture(e.pointerId);
@@ -9933,9 +11234,14 @@ export function setupLocationEditing() {
         if (!locationActive) return;
         if (e.buttons !== 1) return;
         if (!window.locationEditMode) return;
+        if ((window.locationEditorTool === 'assets' && !e.altKey && !e.shiftKey) || editorMoveMode || editorRotateMode || editorResizeMode) return;
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
         const { x, z } = hoveredTileCoords;
+        if (window.locationEditorTool === 'darkness' && !e.altKey && !e.shiftKey) {
+            window.locationDarknessPaintAtTile?.(x, z);
+            return;
+        }
         if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
             if (eraserMode) removeStructuresAtTile(x, z);
             return;
@@ -10071,6 +11377,9 @@ export function setupLocationEditing() {
     handlers.canvas.wheel = onWheel;
 
     eventCleanup = () => {
+        window.removeEventListener('pointerup', onCameraRotatePointerUp);
+        window.removeEventListener('pointercancel', onCameraRotatePointerUp);
+        cameraDragMenuGuard.reset();
         if (handlers.window.charDragPointerUp) {
             window.removeEventListener('pointerup', handlers.window.charDragPointerUp);
             delete handlers.window.charDragPointerUp;
@@ -10285,6 +11594,7 @@ export function setLocationEditMode(enabled) {
     if (!enabled) {
         hideHighlight();
         clearBuildPreview();
+        clearEditorSelection();
     }
     if (hoveredTileCoords && currentLocationData) {
         const { x, z } = hoveredTileCoords;
@@ -10364,21 +11674,28 @@ export function setLocationBrushObjectColor(color) {
 }
 export function setLocationBrushObjectOffsetX(offset) {
     brushObjectOffsetX = parseFloat(offset) || 0;
+    const input = document.getElementById('loc-obj-offset-x');
+    if (input) input.value = String(brushObjectOffsetX);
     const span = document.getElementById('loc-obj-offset-x-value');
     if (span) span.textContent = brushObjectOffsetX.toFixed(2);
 }
 export function setLocationBrushObjectOffsetZ(offset) {
     brushObjectOffsetZ = parseFloat(offset) || 0;
+    const input = document.getElementById('loc-obj-offset-z');
+    if (input) input.value = String(brushObjectOffsetZ);
     const span = document.getElementById('loc-obj-offset-z-value');
     if (span) span.textContent = brushObjectOffsetZ.toFixed(2);
 }
 export function setLocationBrushObjectScale(scale) {
     brushObjectScale = parseFloat(scale) || 1.0;
+    const input = document.getElementById('loc-obj-scale');
+    if (input) input.value = String(brushObjectScale);
     const span = document.getElementById('loc-obj-scale-value');
     if (span) span.textContent = brushObjectScale.toFixed(2);
 }
 export function setLocationBrushObjectRotation(rot) {
-    brushObjectRotation = parseInt(rot) || 0;
+    const degrees = parseInt(rot, 10) || 0;
+    brushObjectRotation = ((degrees % 360) + 360) % 360;
     const input = document.getElementById('loc-obj-rotation');
     if (input) input.value = String(brushObjectRotation);
     const span = document.getElementById('loc-obj-rotation-value');
@@ -10550,9 +11867,10 @@ export function destroyLocationScene() {
     clearFogOverlay();
     // Очищаем сцену
     if (scene) {
+        if (waterTileMesh?.material.map) waterTileMesh.material.map.dispose();
         const objectsToRemove = [];
         scene.traverse((child) => {
-            if (child.isLight || child.type === 'Camera' || child.type === 'GridHelper') return;
+            if (child.isLight || child.type === 'Camera') return;
             if (child === highlightBox) return;
             objectsToRemove.push(child);
         });
@@ -10562,6 +11880,8 @@ export function destroyLocationScene() {
         });
         tileCubes = [];
         locationTileMesh = null;
+        waterTileMesh = null;
+        smoothTerrainMesh = null;
         objectMeshes = [];
         anomalyEffectMeshes = [];
         combatAreaMeshes = [];
@@ -10575,6 +11895,22 @@ export function destroyLocationScene() {
         }
         scene = null;
     }
+    locationAmbientLight = null;
+    locationDirectionalLight = null;
+    locationLightGroup = null;
+    locationDarknessFactors = null;
+    activeLightingProfile = null;
+    selectedLocationAsset = null;
+    editorSelection = null;
+    editorMoveMode = false;
+    editorMovePreviewPoint = null;
+    editorRotateMode = false;
+    editorResizeMode = false;
+    editorResizeDimensions = null;
+    editorResizeBaseDimensions = null;
+    editorResizeAnchor = null;
+    editorSelectionRing = null;
+    lampEditPending = false;
 
     // Рендереры
     if (labelRenderer) {

@@ -166,6 +166,67 @@ class MapService:
         logger.info(f"Batch updated {len(updates_list)} tiles in lobby {lobby_id} by GM {gm_id}")
 
     @staticmethod
+    def connect_roads(lobby_id, gm_id, first, second):
+        """Add a GM-authored edge without replacing either road's automatic exits."""
+        lobby = Lobby.query.get(lobby_id)
+        if not lobby:
+            raise NotFoundError("Lobby not found")
+        if lobby.gm_id != gm_id:
+            raise PermissionDenied("Only GM can edit roads")
+        if (not isinstance(first, (list, tuple)) or not isinstance(second, (list, tuple))
+                or len(first) != 2 or len(second) != 2):
+            raise ValidationError("Invalid road coordinates")
+        if not all(isinstance(value, int) and not isinstance(value, bool)
+                   for value in (*first, *second)):
+            raise ValidationError("Invalid road coordinates")
+        x1, y1 = first
+        x2, y2 = second
+        dx, dy = x2 - x1, y2 - y1
+        directions = {
+            (1, 0): ('E', 'W'), (-1, 0): ('W', 'E'),
+            (0, 1): ('S', 'N'), (0, -1): ('N', 'S'),
+            (1, 1): ('SE', 'NW'), (-1, -1): ('NW', 'SE'),
+            (1, -1): ('NE', 'SW'), (-1, 1): ('SW', 'NE'),
+        }
+        if (dx, dy) not in directions:
+            raise ValidationError("Roads must be on adjacent tiles")
+        if not all(0 <= x < lobby.chunks_width * CHUNK_SIZE
+                   and 0 <= y < lobby.chunks_height * CHUNK_SIZE
+                   for x, y in (first, second)):
+            raise ValidationError("Road coordinates are outside the map")
+
+        chunks = {}
+        updates = []
+        for (x, y), direction in zip((first, second), directions[(dx, dy)]):
+            chunk_x, chunk_y = x // CHUNK_SIZE, y // CHUNK_SIZE
+            key = (chunk_x, chunk_y)
+            if key not in chunks:
+                chunk = MapChunk.query.filter_by(
+                    lobby_id=lobby_id, chunk_x=chunk_x, chunk_y=chunk_y,
+                ).first()
+                if not chunk:
+                    raise NotFoundError("Map chunk not loaded")
+                chunks[key] = (chunk, copy.deepcopy(chunk.data))
+            _, data = chunks[key]
+            tile_x, tile_y = x % CHUNK_SIZE, y % CHUNK_SIZE
+            tile = data[tile_y][tile_x]
+            objects = tile.get('objects') or []
+            road = next((obj for obj in objects if obj.get('type') == 'road'), None)
+            if road is None:
+                raise ValidationError("Both tiles must contain roads")
+            road['manual_connections'] = sorted(set(road.get('manual_connections') or ()) | {direction})
+            updates.append({
+                'chunk_x': chunk_x, 'chunk_y': chunk_y,
+                'tile_x': tile_x, 'tile_y': tile_y,
+                'updates': {'objects': objects},
+            })
+
+        for chunk, data in chunks.values():
+            chunk.data = data
+        db.session.commit()
+        return updates
+
+    @staticmethod
     def export_map(lobby_id, gm_id):
         """Экспорт карты в JSON."""
         lobby = Lobby.query.get(lobby_id)

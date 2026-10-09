@@ -6,9 +6,12 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.extensions import db
 from app.models import ConsumableUse, DeferredCombatAction, LocationCombatState
 from app.models.templates import ItemTemplate
+from app.models.lobby_templates import LobbyItemTemplate
 from app.services.consumable_effects import parse_consumable_effects
 from app.services.effects import advance_timed_effects
-from app.services.medical_procedure import _blood_packet_proof, _verified_blood_donor
+from app.services.medical_procedure import (
+    _blood_packet_from_template, _blood_packet_proof, _is_blood_packet, _verified_blood_donor,
+)
 from test_consumable_use import pair
 from test_atomic_inventory import treatment_payload
 
@@ -80,6 +83,33 @@ def test_bandage_closes_light_bleeding_and_creates_untreated_wound(client, pair,
     assert any(entry['type'] == 'untreated_wound' and entry['area'] == 'leftArm' for entry in effects)
     assert response.json['actor_data']['inventory']['backpack'][0]['quantity'] == 1
     assert ConsumableUse.query.count() == 1
+
+
+def test_local_clone_of_bandage_can_treat_without_matching_name(client, pair, auth_headers, monkeypatch):
+    effect = {'id': 'bleed-local', 'type': 'bleeding_external_light', 'area': 'leftArm', 'source': 'cut'}
+    _, profile, item = install_item(pair, 'Бинт', 'Останавливает Слабое кровотечение.', effects=[effect])
+    cloned = deepcopy(profile)
+    cloned['editor_version'] = 2
+    cloned['effects'] = [entry for entry in cloned['effects'] if entry.get('source') != 'direct']
+    local = LobbyItemTemplate(
+        lobby_id=pair['lobby'].id, created_by=pair['actor_user']['id'],
+        name='Новая повязка', category='consumable',
+        attributes={'uses': 1, 'consumable': cloned},
+    )
+    db.session.add(local)
+    db.session.flush()
+    item['templateId'] = local.id + 1_000_000
+    item['name'] = 'Просто ткань'
+    data = deepcopy(pair['actor_character'].data)
+    data['inventory']['backpack'] = [item]
+    pair['actor_character'].data = data
+    flag_modified(pair['actor_character'], 'data')
+    db.session.commit()
+    monkeypatch.setattr('app.services.medical_procedure.random.randint', lambda *_: 20)
+    response = apply(client, pair, auth_headers, payload(pair, item, selected_bleeding(profile, effect)))
+    assert response.status_code == 200, response.json
+    assert response.json['medical_result']['success'] is True
+    assert not any(entry['type'].startswith('bleeding_') for entry in response.json['actor_data']['health']['effects'])
 
 
 def test_stronger_bleeding_is_weakened_one_stage(client, pair, auth_headers, monkeypatch):
@@ -395,6 +425,21 @@ def test_blood_collection_creates_packet_and_worsens_donor_state(
     assert packet['attributes']['bloodTypeKnown'] is True
     assert packet['attributes']['donorCharacterId'] == pair['actor_character'].id
     assert packet['isStackable'] is False
+
+
+def test_blood_packet_keeps_type_after_template_and_item_rename(client, pair):
+    profile = parse_consumable_effects('Пакет крови. Восстанавливает стадию кровопотери.')
+    template = ItemTemplate(
+        name='Медицинский контейнер', category='consumable',
+        attributes={'consumable': profile},
+    )
+    db.session.add(template)
+    db.session.flush()
+    item = {'templateId': template.id, 'name': 'Совсем другое название', 'category': 'consumable'}
+    assert _is_blood_packet(item, pair['lobby'].id)
+    created = _blood_packet_from_template(2, True)
+    assert created['templateId'] == template.id
+    assert created['attributes']['bloodType'] == 2
 
 
 def test_unknown_donor_and_collected_packet_keep_one_blood_type(

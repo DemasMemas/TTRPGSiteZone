@@ -3,6 +3,8 @@ import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/cont
 import { updateRain } from './weather.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createFpsCounter } from './fpsCounter.js';
+import { roadNode, roadConnectsAt } from './worldRoadTopology.js';
+import { createWaterMaterial } from './waterSurface.js';
 import {
     createCompatibleWebGLRenderer,
     createUnavailableRenderer,
@@ -114,8 +116,11 @@ const WORLD_LANDMARKS = {
         [new THREE.ConeGeometry(0.25, 0.33, 4), 0.22, -0.05, 0.18, 1, 1, 1, Math.PI / 4],
     ]), width: 1, height: 0.5, depth: 0.85, color: '#9c8362' },
 };
-const WORLD_LANDMARK_TYPES = Object.keys(WORLD_LANDMARKS);
+const WORLD_LANDMARK_TYPES = Object.keys(WORLD_LANDMARKS).filter(type => type !== 'road');
 const landmarkMat = new THREE.MeshStandardMaterial();
+const roadMaterial = new THREE.MeshStandardMaterial({ roughness: 1 });
+const roadPadGeometry = new THREE.BoxGeometry(0.32, 0.028, 0.32);
+const roadLinkGeometry = new THREE.BoxGeometry(1, 0.028, 0.24);
 
 const treeMat = new THREE.MeshStandardMaterial();
 const houseMat = new THREE.MeshStandardMaterial();
@@ -465,14 +470,21 @@ function createAnomalyPreview(x, y, z, type, color, scale) {
 }
 
 export function createPreviewObject(tile, params) {
-    if (previewObject) scene.remove(previewObject);
-
     const { type, anomalyType, color, offsetX, offsetZ, scale, rotation } = params;
     const worldX = tile.chunkX * CHUNK_SIZE + tile.tileX + 0.5 + offsetX;
     const worldZ = tile.chunkY * CHUNK_SIZE + tile.tileY + 0.5 + offsetZ;
     const height = tile.tileData.height || 1.0;
     const baseHalf = getBaseGroundOffset(type, anomalyType);
     const yPos = height + baseHalf * scale;
+
+    if (previewObject?.userData.previewType === type && previewObject.userData.anomalyType === anomalyType) {
+        previewObject.position.set(worldX, yPos, worldZ);
+        previewObject.scale.setScalar(scale);
+        previewObject.rotation.y = THREE.MathUtils.degToRad(rotation);
+        previewObject.material.color.set(color);
+        return;
+    }
+    removePreviewObject();
 
     let obj;
     if (type === 'anomaly') {
@@ -485,6 +497,9 @@ export function createPreviewObject(tile, params) {
         obj.scale.set(scale, scale, scale);
         obj.rotation.y = THREE.MathUtils.degToRad(rotation);
     }
+    obj.userData.previewType = type;
+    obj.userData.anomalyType = anomalyType;
+    obj.userData.privateGeometry = type === 'anomaly';
     scene.add(obj);
     previewObject = obj;
 }
@@ -500,6 +515,8 @@ export function updatePreviewObject(params) {
 export function removePreviewObject() {
     if (previewObject) {
         scene.remove(previewObject);
+        previewObject.material.dispose();
+        if (previewObject.userData.privateGeometry) previewObject.geometry.dispose();
         previewObject = null;
     }
 }
@@ -871,45 +888,8 @@ function animateChunkAnomalies(time) {
     animateAnomalyEffects(visibleNearAnomalies, time);
 }
 
-function createWaterTexture() {
-    const size = 128;
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = size;
-    const context = canvas.getContext('2d');
-    const image = context.createImageData(size, size);
-    for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-            const u = x / size * Math.PI * 2;
-            const v = y / size * Math.PI * 2;
-            const waves = Math.sin(u * 4 + Math.sin(v * 2) * 0.7)
-                + 0.55 * Math.sin(v * 7 - u * 2)
-                + 0.25 * Math.sin((u + v) * 11);
-            const shade = Math.round(waves * 8);
-            const index = (y * size + x) * 4;
-            image.data[index] = 36 + shade;
-            image.data[index + 1] = 92 + shade;
-            image.data[index + 2] = 110 + shade;
-            image.data[index + 3] = 255;
-        }
-    }
-    context.putImageData(image, 0, 0);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.encoding = THREE.sRGBEncoding;
-    return texture;
-}
-
-const waterTexture = createWaterTexture();
-const waterMat = new THREE.MeshStandardMaterial({
-    map: waterTexture,
-    color: 0xc9e1e3,
-    roughness: 0.38,
-    metalness: 0.08,
-    emissive: 0x07121a,
-    transparent: false,
-    opacity: 1.0
-});
+const waterMat = createWaterMaterial();
+const waterTexture = waterMat.map;
 const groundGeo = new THREE.BoxGeometry(1, 1, 1);
 const groundMat = new THREE.MeshStandardMaterial();
 
@@ -1011,6 +991,123 @@ function fillLandmarkMeshes(meshes, tilesData, cx, cy) {
         scene.add(mesh);
     }
     return indices;
+}
+
+function loadedWorldTile(x, z) {
+    const cx = Math.floor(x / CHUNK_SIZE);
+    const cy = Math.floor(z / CHUNK_SIZE);
+    return chunksMap.get(`${cx},${cy}`)?.tilesData?.[z - cy * CHUNK_SIZE]?.[x - cx * CHUNK_SIZE] || null;
+}
+
+function disposeRoadMeshes(entry) {
+    for (const mesh of entry.roads || []) {
+        scene.remove(mesh);
+        mesh.dispose();
+    }
+    entry.roads = [];
+}
+
+function rebuildRoadMeshes(entry) {
+    disposeRoadMeshes(entry);
+    if (!entry.hasRoadNodes) return;
+    const pads = [];
+    const links = [];
+    const directions = [[1, 0], [0, 1], [1, 1], [-1, 1]];
+    const point = (x, z, tile, node) => new THREE.Vector3(
+        x + 0.5 + Number(node.road?.x || 0),
+        Number(tile.height || 1) + 0.035,
+        z + 0.5 + Number(node.road?.z || 0),
+    );
+    const roadNodeCache = new Map();
+    const nodeAt = (x, z) => {
+        const key = `${x},${z}`;
+        if (!roadNodeCache.has(key)) roadNodeCache.set(key, roadNode(loadedWorldTile(x, z)));
+        return roadNodeCache.get(key);
+    };
+    for (let localZ = 0; localZ < CHUNK_SIZE; localZ++) {
+        for (let localX = 0; localX < CHUNK_SIZE; localX++) {
+            const x = entry.chunkX * CHUNK_SIZE + localX;
+            const z = entry.chunkY * CHUNK_SIZE + localZ;
+            const tile = entry.tilesData[localZ]?.[localX];
+            const node = nodeAt(x, z);
+            if (!node) continue;
+            const center = point(x, z, tile, node);
+            let connections = 0;
+            for (const [dx, dz] of directions) {
+                const neighborTile = loadedWorldTile(x + dx, z + dz);
+                const neighbor = nodeAt(x + dx, z + dz);
+                if (!roadConnectsAt(nodeAt, x, z, dx, dz)) continue;
+                connections++;
+                links.push({ from: center, to: point(x + dx, z + dz, neighborTile, neighbor),
+                    color: node.road?.color || neighbor.road?.color || '#756f61',
+                    widthScale: (Number(node.road?.scale || 1) + Number(neighbor.road?.scale || 1)) / 2 });
+            }
+            for (const [dx, dz] of directions) {
+                if (roadConnectsAt(nodeAt, x - dx, z - dz, dx, dz)) connections++;
+            }
+            if (node.road || connections) pads.push({ position: center, color: node.road?.color || '#756f61',
+                scale: Number(node.road?.scale || 1) });
+            if (node.road && !connections) {
+                const angle = THREE.MathUtils.degToRad(Number(node.road.rotation || 0));
+                const direction = new THREE.Vector3(Math.cos(angle), 0, -Math.sin(angle));
+                links.push({ from: center.clone().addScaledVector(direction, -0.4),
+                    to: center.clone().addScaledVector(direction, 0.4),
+                    color: node.road.color || '#756f61', widthScale: Number(node.road.scale || 1) });
+            }
+        }
+    }
+    if (pads.length) {
+        const mesh = new THREE.InstancedMesh(roadPadGeometry, roadMaterial, pads.length);
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        const dummy = new THREE.Object3D();
+        pads.forEach(({ position, color, scale }, index) => {
+            dummy.position.copy(position);
+            dummy.rotation.set(0, 0, 0);
+            dummy.scale.set(scale, 1, scale);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(index, dummy.matrix);
+            mesh.setColorAt(index, new THREE.Color(color));
+        });
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        mesh.visible = entry.terrainVisible;
+        scene.add(mesh);
+        entry.roads.push(mesh);
+    }
+    if (links.length) {
+        const mesh = new THREE.InstancedMesh(roadLinkGeometry, roadMaterial, links.length);
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        const dummy = new THREE.Object3D();
+        const axis = new THREE.Vector3(1, 0, 0);
+        const delta = new THREE.Vector3();
+        links.forEach(({ from, to, color, widthScale }, index) => {
+            delta.subVectors(to, from);
+            dummy.position.copy(from).add(to).multiplyScalar(0.5);
+            dummy.quaternion.setFromUnitVectors(axis, delta.clone().normalize());
+            dummy.scale.set(delta.length(), 1, widthScale);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(index, dummy.matrix);
+            mesh.setColorAt(index, new THREE.Color(color));
+        });
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        mesh.visible = entry.terrainVisible;
+        scene.add(mesh);
+        entry.roads.push(mesh);
+    }
+}
+
+function refreshRoadNeighborhood(cx, cy) {
+    for (let offsetY = -1; offsetY <= 1; offsetY++) {
+        for (let offsetX = -1; offsetX <= 1; offsetX++) {
+            const entry = chunksMap.get(`${cx + offsetX},${cy + offsetY}`);
+            if (entry?.hasRoadNodes) rebuildRoadMeshes(entry);
+        }
+    }
 }
 
 export function addChunk(cx, cy, tilesData) {
@@ -1180,14 +1277,17 @@ export function addChunk(cx, cy, tilesData) {
         farAnomalies,
         farAnomalyActive: [],
         tilesData: tilesData,
+        hasRoadNodes: tilesData.some(row => row.some(tile => Boolean(roadNode(tile)))),
         chunkX: cx,
         chunkY: cy,
         terrainVisible: true,
         ...terrainIndices,
         bounds: box,
         objectIndices: objectIndices,
-        pendingRebuild: null
+        pendingRebuild: null,
+        roadBoundaryDirty: false
     });
+    refreshRoadNeighborhood(cx, cy);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
     markWorldShadowsDirty();
@@ -1222,6 +1322,7 @@ export function removeChunk(cx, cy) {
             mesh.dispose();
         }
     }
+    disposeRoadMeshes(entry);
     disposeChunkAnomalyLODs(entry.anomalyLODs);
     if (entry.farAnomalies) {
         scene.remove(entry.farAnomalies);
@@ -1229,6 +1330,7 @@ export function removeChunk(cx, cy) {
     }
 
     chunksMap.delete(key);
+    refreshRoadNeighborhood(cx, cy);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
     markWorldShadowsDirty();
@@ -1436,6 +1538,7 @@ function rebuildChunkObjects(entry) {
     entry.fences = fenceInstances;
     entry.landmarks = landmarkMeshes;
     entry.landmarkIndices = landmarkIndices;
+    rebuildRoadMeshes(entry);
     entry.anomalyLODs = anomalyLODs;
     entry.farAnomalies = createFarAnomalyInstances(anomalyLODs);
     entry.farAnomalyActive = [];
@@ -1452,6 +1555,14 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
 
     const tile = entry.tilesData[tileY][tileX];
     Object.assign(tile, updates);
+    if (updates.objects !== undefined) {
+        entry.hasRoadNodes = entry.tilesData.some(row => row.some(item => Boolean(roadNode(item))));
+    }
+    const touchesChunkEdge = tileX === 0 || tileX === CHUNK_SIZE - 1
+        || tileY === 0 || tileY === CHUNK_SIZE - 1;
+    if (touchesChunkEdge && (updates.objects !== undefined || updates.height !== undefined)) {
+        entry.roadBoundaryDirty = true;
+    }
     lastHoverRaycastAt = -Infinity;
 
     if (updates.terrain !== undefined || updates.height !== undefined) {
@@ -1488,6 +1599,11 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
 
     if (updates.height !== undefined) {
         updateTileObjectsPositions(entry, tileX, tileY, tile.height);
+        rebuildRoadMeshes(entry);
+        if (entry.roadBoundaryDirty && updates.objects === undefined && !entry.pendingRebuild) {
+            refreshRoadNeighborhood(chunkX, chunkY);
+            entry.roadBoundaryDirty = false;
+        }
         lastChunkVisibilityAt = -Infinity;
         markWorldShadowsDirty();
     }
@@ -1499,6 +1615,10 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         }
         entry.pendingRebuild = requestAnimationFrame(() => {
             rebuildChunkObjects(entry);
+            if (entry.roadBoundaryDirty) {
+                refreshRoadNeighborhood(chunkX, chunkY);
+                entry.roadBoundaryDirty = false;
+            }
             entry.pendingRebuild = null;
         });
     }
@@ -1568,12 +1688,14 @@ function setVisible(chunk, visible, naturalVisible = false, structureVisible = f
     for (const [type, mesh] of Object.entries(chunk.landmarks || {})) {
         if (mesh) mesh.visible = type === 'forest' ? naturalVisible : structureVisible;
     }
+    for (const mesh of chunk.roads || []) mesh.visible = visible;
     updateFarAnomalyInstances(chunk, anomalyVisible);
     if (visibilityChanged) markWorldShadowsDirty();
 }
 
 export function setEditMode(enabled) {
     editMode = enabled;
+    if (!enabled) removePreviewObject();
     if (!enabled && controlsDisabled) {
         controls.enabled = true;
         controlsDisabled = false;
@@ -1620,13 +1742,14 @@ function performRaycast(clientX, clientY) {
             const chunkEntry = chunksMap.get(key);
             if (chunkEntry) {
                 const tileData = chunkEntry.tilesData[tileY][tileX];
-                hoveredTile = { chunk: chunkEntry, tileX, tileY, tileData };
+                hoveredTile = { chunk: chunkEntry, tileX, tileY, tileData,
+                    pointX: globalX, pointZ: globalZ };
 
                 const worldX = chunkX * CHUNK_SIZE + tileX + 0.5;
                 const worldZ = chunkY * CHUNK_SIZE + tileY + 0.5;
                 const height = tileData.height || 1.0;
 
-                const areaSize = 2 * currentBrushRadius + 1;
+                const areaSize = window.worldEditorTool === 'objects' ? 1 : 2 * currentBrushRadius + 1;
                 highlightBox.scale.set(areaSize, 0.1, areaSize);
                 highlightBox.position.set(worldX, height + 0.1, worldZ);
                 highlightBox.visible = true;
@@ -1642,6 +1765,7 @@ function performRaycast(clientX, clientY) {
             }
         }
     }
+    if (editMode && window.worldEditorTool === 'objects') window.updateWorldObjectPreview?.(hoveredTile);
 }
 
 function canvasMouseDownHandler(event) {
@@ -1662,7 +1786,7 @@ function canvasMouseDownHandler(event) {
     lastProcessedTileKey = null;
 
     const isEditing = editMode && !window.isWorldTravelSelectionActive?.()
-        && (event.altKey || event.shiftKey || ['terrain', 'height', 'radiation', 'erase'].includes(window.worldEditorTool));
+        && (event.altKey || event.shiftKey || ['terrain', 'height', 'radiation', 'erase', 'objects'].includes(window.worldEditorTool));
 
     if (isEditing) {
         event.preventDefault();
@@ -1679,7 +1803,9 @@ function canvasMouseDownHandler(event) {
                     chunkY: hoveredTile.chunk.chunkY,
                     tileX: hoveredTile.tileX,
                     tileY: hoveredTile.tileY,
-                    tileData: hoveredTile.tileData
+                    tileData: hoveredTile.tileData,
+                    pointX: hoveredTile.pointX,
+                    pointZ: hoveredTile.pointZ,
                 },
                 event,
                 isDoubleClick: false,

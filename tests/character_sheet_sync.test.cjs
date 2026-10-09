@@ -78,5 +78,5 @@ test('awareness is one listed skill with a separate check mode', () => {
     assert.doesNotMatch(sheetCatalog, /awareness\.(visual|hearing)/);
     assert.match(locationSource, /function awarenessModePath\(form\)/);
     assert.match(locationSource, /name="awareness_mode"/);
-    assert.match(sheetSource, /getAwarenessModeChoices\(currentCharacterData\)/);
+    assert.match(sheetSource, /getAwarenessModeChoices\(currentCharacterData, darkness\)/);
 });

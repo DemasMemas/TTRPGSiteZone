@@ -99,6 +99,9 @@ test('actual sight ray sees a standing head but not a crouching head behind low 
         FOG_VIEW_RADIUS: 25, FOG_VIEW_HALF_ANGLE: Math.PI / 3,
         getTileHeight: () => 1,
         getVisionBlockerHeight: (x, y) => x === 1 && y === 0 ? 2.5 : -Infinity,
+        darknessFactorAt: () => 1,
+        lightPathOpen: () => true,
+        currentLocationData: { objects: [] },
     });
     for (const name of ['visionEyeHeight', 'hasLineOfSight', 'isPointVisibleToPlayer', 'isCharacterVisibleToPlayer']) {
         vm.runInContext(functionSource(name), context);
@@ -113,6 +116,8 @@ test('actual sight ray sees a standing head but not a crouching head behind low 
     const rearObserver = { posX: 4, posY: 0, posture: 'standing', facingX: -1, facingY: 0 };
     assert.equal(context.isCharacterVisibleToPlayer({ posX: 2, posY: 0, posture: 'sitting' }, [rearObserver]), true);
     assert.equal(context.isCharacterVisibleToPlayer({ posX: 2, posY: 3, posture: 'standing' }, sources), true);
+    context.darknessFactorAt = () => 0.07;
+    assert.equal(context.isCharacterVisibleToPlayer({ posX: 2, posY: 3, posture: 'standing' }, sources), false);
 });
 
 test('evasion is an unchecked independent checkbox next to automatic MP conversion', () => {

@@ -6,6 +6,7 @@ from app.services.effects import normalize_effect_list
 
 WITHDRAWAL_DAYS = 28
 MAX_DAILY_CHECKS = 5
+_UNSET_PROFILE = object()
 
 
 def _number(value, default=0.0):
@@ -18,10 +19,13 @@ def _number(value, default=0.0):
 def _dose_multiplier(dose, values):
     if dose <= 1 or not values:
         return 1.0
-    index = min(dose, max(values))
-    while index not in values and index > 1:
+    steps = {int(key): _number(value, 1) for key, value in values.items() if str(key).isdigit()}
+    if not steps:
+        return 1.0
+    index = min(dose, max(steps))
+    while index not in steps and index > 1:
         index -= 1
-    return values.get(index, 1.0)
+    return steps.get(index, 1.0)
 
 
 def addiction_profile(item_name: str, price=0) -> Optional[Dict[str, Any]]:
@@ -96,6 +100,14 @@ def addiction_profile(item_name: str, price=0) -> Optional[Dict[str, Any]]:
             'chance': 20, 'multipliers': {2: 1.5, 3: 2, 4: 3}, 'kind': 'medicine',
         }
     return None
+
+
+def resolve_addiction_profile(consumable_profile, template_name, price=0):
+    if isinstance(consumable_profile, dict) and 'addiction' in consumable_profile:
+        return consumable_profile['addiction']
+    # Existing templates have no stored addiction rule yet. Keep their old
+    # behavior, but never infer it from a mutable inventory display name.
+    return addiction_profile(template_name, price)
 
 
 def _state(health):
@@ -214,7 +226,7 @@ def _set_withdrawal_effect(health, record, active):
 
 def record_exposure(
     health, item_name, price, absolute_minute, intoxication=0,
-    exhaustion_relief=0, addiction_block_hours=0,
+    exhaustion_relief=0, addiction_block_hours=0, profile=_UNSET_PROFILE,
 ):
     meta = health.setdefault('combatMeta', {})
     block_hours = max(
@@ -228,7 +240,8 @@ def record_exposure(
         )
         meta['addictionBlockHours'] = 0
 
-    profile = addiction_profile(item_name, price)
+    if profile is _UNSET_PROFILE:
+        profile = addiction_profile(item_name, price)
     if not profile:
         return {
             'applicable': False,

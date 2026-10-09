@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from app.extensions import db
 from app.models import Location, LocationCharacter, LocationCombatState, LobbyParticipant, LobbyCharacter, LocationObject
+from app.services.lighting_rules import location_is_dark
 from app.models.templates import ItemTemplate
 from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
 from app.services.effects import advance_timed_effects, apply_effect_to_health, apply_expired_effects_to_health, apply_periodic_effects_to_health, normalize_character_effects, normalize_effect_list, sync_health_derived_statuses, tick_effects
@@ -503,9 +504,9 @@ class CombatService:
         obj_type = str(getattr(obj, 'type', '') or '').lower()
         if properties.get('cover_enabled') is False:
             return False
-        if obj_type in {'floor', 'ground_item', 'campfire', 'anomaly'}:
+        if obj_type in {'floor', 'ground_item', 'campfire', 'anomaly', 'poster'}:
             return False
-        if obj_type == 'door' and properties.get('is_open'):
+        if obj_type in {'door', 'window'} and properties.get('is_open'):
             return False
         return CombatService._object_height(obj) >= 0.3
 
@@ -573,8 +574,9 @@ class CombatService:
         """Return distance behind cover only for cells on the aimed ray."""
         start_x = float(shooter.pos_x) + 0.5
         start_y = float(shooter.pos_y) + 0.5
-        cover_x = float(cover.tile_x) + 0.5
-        cover_y = float(cover.tile_y) + 0.5
+        cover_props = cover.properties or {}
+        cover_x = float(cover.tile_x) + 0.5 + float(cover_props.get('offset_x', 0) or 0)
+        cover_y = float(cover.tile_y) + 0.5 + float(cover_props.get('offset_z', 0) or 0)
         target_x = float(target.pos_x) + 0.5
         target_y = float(target.pos_y) + 0.5
 
@@ -616,8 +618,9 @@ class CombatService:
     @staticmethod
     def _line_object_entry(shooter, target, obj):
         width, depth = CombatService._object_dimensions(obj)
-        center_x = float(obj.tile_x) + 0.5
-        center_y = float(obj.tile_y) + 0.5
+        properties = obj.properties or {}
+        center_x = float(obj.tile_x) + 0.5 + float(properties.get('offset_x', 0) or 0)
+        center_y = float(obj.tile_y) + 0.5 + float(properties.get('offset_z', 0) or 0)
         bounds = (
             center_x - width / 2,
             center_x + width / 2,
@@ -685,6 +688,7 @@ class CombatService:
                     'smoke': True,
                 }
         objects = LocationObject.query.filter_by(location_id=location_id).all()
+        doors = [item for item in objects if item.type == 'door' or (item.type == 'window' and (item.properties or {}).get('is_open'))]
         for obj in objects:
             if not CombatService._is_cover_object(obj):
                 continue
@@ -694,6 +698,11 @@ class CombatService:
             height = CombatService._object_height(obj)
             for zone, target_height in zone_heights.items():
                 ray_height = shooter_eye + (target_height - shooter_eye) * entry
+                if obj.type == 'wall' and any(
+                    CombatService._line_through_door(shooter, target, door, obj, ray_height)
+                    for door in doors
+                ):
+                    continue
                 if ray_height <= height:
                     previous = blocked.get(zone)
                     if not previous or entry < previous['distance_factor']:
@@ -1679,10 +1688,14 @@ class CombatService:
         }
 
     @staticmethod
-    def _has_roll_disadvantage(character_data, skill_path):
+    def _has_roll_disadvantage(character_data, skill_path, darkness=False):
         health = character_data.get('health') if isinstance(character_data, dict) else {}
         if not isinstance(health, dict):
-            return False
+            health = {}
+        if darkness and skill_path in {'skills.physical.awareness', 'skills.physical.shooting'}:
+            immunity = 'darkness_visual_immunity' if skill_path == 'skills.physical.awareness' else 'darkness_shooting_immunity'
+            if CombatService._consumable_stat_value_bonus(character_data, immunity) <= 0:
+                return True
         psy_state = CombatService._coerce_int(health.get('psyState', health.get('psy_state')), 0)
         threshold_disadvantage = (
             skill_path == 'skills.physical.shooting' and psy_state >= 30
@@ -2095,7 +2108,19 @@ class CombatService:
     trigger_stress = apply_stress_trigger
 
     @staticmethod
-    def _narrative_skill_check(character_data, skill_path, advantage=False):
+    def _is_dark_at_character(location, character):
+        return CombatService._is_dark_at_position(location, character.pos_x, character.pos_y)
+
+    @staticmethod
+    def _is_dark_at_position(location, x, y):
+        return location_is_dark(
+            location.lighting, x, y,
+            location.lobby.game_time_minutes,
+            LocationObject.query.filter_by(location_id=location.id).all(),
+        )
+
+    @staticmethod
+    def _narrative_skill_check(character_data, skill_path, advantage=False, darkness=False):
         if skill_path not in CombatService.NARRATIVE_SKILLS:
             raise ValidationError("Unknown skill")
         requested_skill_path = skill_path
@@ -2137,7 +2162,12 @@ class CombatService:
                 equipment_modifier += CombatService._consumable_stat_value_bonus(
                     character_data, 'vision_awareness',
                 )
-        disadvantage = CombatService._has_roll_disadvantage(character_data, skill_path)
+                equipment_modifier += CombatService._consumable_stat_value_bonus(
+                    character_data, 'darkness_awareness' if darkness else 'light_awareness',
+                )
+        disadvantage = CombatService._has_roll_disadvantage(
+            character_data, skill_path, darkness=darkness and awareness_mode == 'visual',
+        )
         advantage = bool(
             advantage or CombatService._has_roll_advantage(character_data, skill_path, consume=True)
         )
@@ -2169,6 +2199,7 @@ class CombatService:
             'base_skill_path': skill_path,
             'skill_label': CombatService.NARRATIVE_SKILLS[requested_skill_path],
             'awareness_mode': awareness_mode,
+            'darkness': bool(darkness) if awareness_mode == 'visual' else None,
             'deafness': deafness,
             'automatic_failure': hearing_blocked,
             'failure_reason': 'Персонаж не слышит' if hearing_blocked else None,
@@ -6270,10 +6301,17 @@ class CombatService:
             'pos_y': target_y,
         })()
         highest = 0.0
-        for obj in LocationObject.query.filter_by(location_id=location_id).all():
+        objects = LocationObject.query.filter_by(location_id=location_id).all()
+        doors = [item for item in objects if item.type == 'door' or (item.type == 'window' and (item.properties or {}).get('is_open'))]
+        for obj in objects:
             if not CombatService._is_cover_object(obj):
                 continue
             if CombatService._line_object_entry(thrower, target, obj) is not None:
+                if obj.type == 'wall' and any(
+                    CombatService._line_through_door(thrower, target, door, obj, 1.3)
+                    for door in doors
+                ):
+                    continue
                 highest = max(highest, CombatService._object_height(obj))
         if highest <= 0:
             return 0
@@ -9031,26 +9069,26 @@ class CombatService:
             rotation = float(properties.get('rotation', 0) or 0)
         except (TypeError, ValueError):
             rotation = 0.0
-        quarter_turns = int(round(rotation / (math.pi / 2))) % 4
-        if quarter_turns % 2 == 1:
-            width, depth = depth, width
-
-        return max(0.1, width), max(0.1, depth)
+        cosine = abs(math.cos(rotation))
+        sine = abs(math.sin(rotation))
+        return max(0.1, width * cosine + depth * sine), max(0.1, width * sine + depth * cosine)
 
     @staticmethod
     def _object_footprint_tiles(obj):
         if isinstance(obj, dict):
             tile_x = obj.get('tile_x', obj.get('x'))
             tile_y = obj.get('tile_y', obj.get('z'))
+            properties = obj.get('properties') or {}
         else:
             tile_x = getattr(obj, 'tile_x', getattr(obj, 'x', None))
             tile_y = getattr(obj, 'tile_y', getattr(obj, 'z', None))
+            properties = getattr(obj, 'properties', {}) or {}
         if tile_x is None or tile_y is None:
             return set()
 
         width, depth = CombatService._object_dimensions(obj)
-        center_x = float(tile_x) + 0.5
-        center_y = float(tile_y) + 0.5
+        center_x = float(tile_x) + 0.5 + float(properties.get('offset_x', 0) or 0)
+        center_y = float(tile_y) + 0.5 + float(properties.get('offset_z', 0) or 0)
         min_x = center_x - (width / 2)
         max_x = center_x + (width / 2)
         min_y = center_y - (depth / 2)
@@ -9062,6 +9100,72 @@ class CombatService:
                 if min_x < x + 1 and max_x > x and min_y < y + 1 and max_y > y:
                     tiles.add((x, y))
         return tiles
+
+    @staticmethod
+    def _door_is_in_wall(door, wall):
+        if getattr(door, 'type', None) not in {'door', 'window'} or getattr(wall, 'type', None) != 'wall':
+            return False
+        wall_props = wall.properties or {}
+        door_props = door.properties or {}
+        wall_bottom = float(wall_props.get('elevation', 0) or 0)
+        portal_bottom = float(door_props.get('elevation', 0) or 0)
+        if door.type == 'window':
+            wall_height = float((wall_props.get('dimensions') or {}).get('height', 2.4))
+            portal_height = float((door_props.get('dimensions') or {}).get('height', 1))
+            if portal_bottom < wall_bottom or portal_bottom + portal_height > wall_bottom + wall_height + 0.15:
+                return False
+        elif abs(wall_bottom - portal_bottom) > 0.15:
+            return False
+        wall_dims = wall_props.get('dimensions') or {}
+        door_dims = door_props.get('dimensions') or {}
+        wall_angle = float(wall_props.get('rotation', 0) or 0)
+        door_angle = float(door_props.get('rotation', 0) or 0)
+        if abs(math.cos(wall_angle - door_angle)) < 0.94:
+            return False
+        wall_x = wall.tile_x + 0.5 + float(wall_props.get('offset_x', 0) or 0)
+        wall_y = wall.tile_y + 0.5 + float(wall_props.get('offset_z', 0) or 0)
+        door_x = door.tile_x + 0.5 + float(door_props.get('offset_x', 0) or 0)
+        door_y = door.tile_y + 0.5 + float(door_props.get('offset_z', 0) or 0)
+        dx, dy = door_x - wall_x, door_y - wall_y
+        along = dx * math.cos(wall_angle) - dy * math.sin(wall_angle)
+        away = abs(dx * math.sin(wall_angle) + dy * math.cos(wall_angle))
+        wall_width = float(wall_dims.get('width', 3))
+        wall_depth = float(wall_dims.get('depth', 0.2))
+        door_width = float(door_dims.get('width', 0.9))
+        door_depth = float(door_dims.get('depth', 0.18))
+        return away <= (wall_depth + door_depth) / 2 + 0.12 and abs(along) <= (wall_width + door_width) / 2
+
+    @staticmethod
+    def _line_through_door(shooter, target, door, wall, ray_height=None):
+        if not CombatService._door_is_in_wall(door, wall):
+            return False
+        wall_props = wall.properties or {}
+        door_props = door.properties or {}
+        wall_angle = float(wall_props.get('rotation', 0) or 0)
+        normal_x, normal_y = math.sin(wall_angle), math.cos(wall_angle)
+        axis_x, axis_y = math.cos(wall_angle), -math.sin(wall_angle)
+        start_x, start_y = float(shooter.pos_x) + 0.5, float(shooter.pos_y) + 0.5
+        end_x, end_y = float(target.pos_x) + 0.5, float(target.pos_y) + 0.5
+        delta_x, delta_y = end_x - start_x, end_y - start_y
+        denominator = delta_x * normal_x + delta_y * normal_y
+        if abs(denominator) < 1e-9:
+            return False
+        wall_x = wall.tile_x + 0.5 + float(wall_props.get('offset_x', 0) or 0)
+        wall_y = wall.tile_y + 0.5 + float(wall_props.get('offset_z', 0) or 0)
+        fraction = ((wall_x - start_x) * normal_x + (wall_y - start_y) * normal_y) / denominator
+        if not 0.01 < fraction < 0.99:
+            return False
+        door_x = door.tile_x + 0.5 + float(door_props.get('offset_x', 0) or 0)
+        door_y = door.tile_y + 0.5 + float(door_props.get('offset_z', 0) or 0)
+        hit_x = start_x + fraction * delta_x
+        hit_y = start_y + fraction * delta_y
+        along = (hit_x - door_x) * axis_x + (hit_y - door_y) * axis_y
+        door_width = float((door_props.get('dimensions') or {}).get('width', 0.9))
+        door_height = float((door_props.get('dimensions') or {}).get('height', 2))
+        opening_bottom = float(door_props.get('elevation', 0) or 0) - float(wall_props.get('elevation', 0) or 0)
+        return abs(along) <= door_width / 2 and (
+            ray_height is None or opening_bottom <= ray_height <= opening_bottom + door_height
+        )
 
     @staticmethod
     def _grid_move_cost(start_x, start_y, end_x, end_y):
@@ -9088,7 +9192,7 @@ class CombatService:
         if obj_type == 'anomaly':
             return {'blocked': False, 'climb_cost': 0}
 
-        if properties.get('passable') is True or obj_type == 'campfire':
+        if properties.get('passable') is True or obj_type in {'campfire', 'poster', 'floor'}:
             return {'blocked': False, 'climb_cost': 0}
 
         if obj_type == 'door':
@@ -9096,6 +9200,9 @@ class CombatService:
                 return {'blocked': False, 'climb_cost': 0}
             if properties.get('climbable'):
                 return {'blocked': False, 'climb_cost': max(1, CombatService._coerce_int(properties.get('climb_cost'), 12))}
+            return {'blocked': True, 'climb_cost': 0}
+
+        if obj_type == 'window':
             return {'blocked': True, 'climb_cost': 0}
 
         if properties.get('blocks_movement') is False or properties.get('block_movement') is False:
@@ -9520,9 +9627,18 @@ class CombatService:
                         elif profile['climb_cost'] > 0 and footprint_tile not in blocked_tiles:
                             climb_cost_tiles[footprint_tile] = max(climb_cost_tiles.get(footprint_tile, 0), profile['climb_cost'])
 
-        for obj in LocationObject.query.filter_by(location_id=location.id).all():
+        location_objects = LocationObject.query.filter_by(location_id=location.id).all()
+        open_doors = [obj for obj in location_objects if obj.type == 'door' and (obj.properties or {}).get('is_open')]
+        for obj in location_objects:
             profile = CombatService._object_movement_profile(obj)
+            doorway_tiles = set()
+            if obj.type == 'wall':
+                for door in open_doors:
+                    if CombatService._door_is_in_wall(door, obj):
+                        doorway_tiles.update(CombatService._object_footprint_tiles(door))
             for coords in CombatService._object_footprint_tiles(obj):
+                if coords in doorway_tiles:
+                    continue
                 if profile['blocked']:
                     blocked_tiles.add(coords)
                     climb_cost_tiles.pop(coords, None)
@@ -12570,6 +12686,7 @@ class CombatService:
                     or launcher_movement['disadvantage']
                     or CombatService._has_roll_disadvantage(
                         data, 'skills.physical.shooting',
+                        darkness=CombatService._is_dark_at_position(location, impact_x, impact_y),
                     )
                     or (launcher_jam and launcher_jam.get('shooting_disadvantage'))
                 )
@@ -13867,6 +13984,9 @@ class CombatService:
             base_shooting_disadvantage = (
                 CombatService._has_roll_disadvantage(
                     data, 'skills.physical.shooting',
+                    darkness=CombatService._is_dark_at_position(
+                        location, facing_target_x, facing_target_y,
+                    ),
                 )
                 or movement_modifiers['disadvantage']
             )
@@ -14682,6 +14802,7 @@ class CombatService:
                         data,
                         narrative_action_details['skill_path'],
                         advantage=bool(help_bonus),
+                        darkness=CombatService._is_dark_at_character(location, character),
                     )
                     if help_bonus:
                         narrative_action_details['help'] = help_bonus
@@ -14726,6 +14847,7 @@ class CombatService:
                 if must_do_details.get('kind') != 'attack':
                     check = CombatService._narrative_skill_check(
                         data, must_do_details['skill_path'],
+                        darkness=CombatService._is_dark_at_character(location, character),
                     )
                     check['difficulty'] = CombatService._coerce_int(
                         must_do_details['difficulty'], 1,

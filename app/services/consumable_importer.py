@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from app.extensions import db
 from app.models.templates import ItemTemplate
+from app.services.addictions import addiction_profile
 from app.services.consumable_effects import parse_consumable_effects
 
 
@@ -206,6 +207,7 @@ def parse_consumable_templates(workbook_path: Path) -> List[Dict[str, Any]]:
             volume = 1.0
 
         profile = parse_consumable_profile(description)
+        profile["addiction"] = addiction_profile(name, _as_int(col_c, 0))
         template = {
             "name": name,
             "category": "consumable",
@@ -293,10 +295,12 @@ def parse_consumable_templates_v2(workbook_path: Path) -> List[Dict[str, Any]]:
             volume = 1.0
 
         profile = parse_consumable_profile(f"{name}. {description}")
+        profile["addiction"] = addiction_profile(name, price)
         filter_charges = profile["direct"].get("filter_charges")
         is_gas_mask_filter = filter_charges is not None
         attributes = {
             "section": current_section,
+            "catalog_name": name,
             "source_order": len(templates),
             "import_tier": import_tier,
             "consumable": profile,
@@ -354,10 +358,30 @@ def upsert_consumable_templates(workbook_path: str | Path, session=None) -> Dict
         normalized_name = _normalize_consumable_name(data["name"])
         item = None
         best_score = 0.0
+        matched_by_description = False
         for candidate in candidates:
             if candidate.id in used_ids:
                 continue
-            candidate_name = _normalize_consumable_name(candidate.name)
+            original_name = (candidate.attributes or {}).get("catalog_name")
+            if original_name and _normalize_consumable_name(original_name) == normalized_name:
+                item = candidate
+                break
+        if item is None and data["description"]:
+            matching_descriptions = [
+                candidate for candidate in candidates
+                if candidate.id not in used_ids
+                and (candidate.attributes or {}).get("raw_description") == data["description"]
+            ]
+            if matching_descriptions:
+                item = next((
+                    candidate for candidate in matching_descriptions
+                    if (candidate.attributes or {}).get("source_order") == data["attributes"]["source_order"]
+                ), matching_descriptions[0])
+                matched_by_description = True
+        for candidate in candidates if item is None else []:
+            if candidate.id in used_ids:
+                continue
+            candidate_name = _normalize_consumable_name((candidate.attributes or {}).get("catalog_name") or candidate.name)
             if candidate_name == normalized_name:
                 item = candidate
                 break
@@ -366,7 +390,7 @@ def upsert_consumable_templates(workbook_path: str | Path, session=None) -> Dict
                 best_score = score
                 item = candidate
 
-        if item is not None and _normalize_consumable_name(item.name) != normalized_name and best_score < 0.72:
+        if item is not None and not matched_by_description and _normalize_consumable_name((item.attributes or {}).get("catalog_name") or item.name) != normalized_name and best_score < 0.72:
             item = None
 
         if item is None:
@@ -378,6 +402,11 @@ def upsert_consumable_templates(workbook_path: str | Path, session=None) -> Dict
         changed = False
         for field in ["name", "category", "subcategory", "item_class", "description", "price", "weight", "volume"]:
             value = data[field]
+            if field == "name" and (
+                (item.attributes or {}).get("catalog_name") not in (None, item.name)
+                or (matched_by_description and _normalize_consumable_name(item.name) != normalized_name)
+            ):
+                continue
             if getattr(item, field) != value:
                 setattr(item, field, value)
                 changed = True

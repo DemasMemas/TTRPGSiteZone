@@ -155,7 +155,13 @@ def _road_path(start, goal, lobby_id, width, height, map_type, sites, blocked_st
                 continue
             if neighbor in sites and neighbor != goal:
                 continue
-            next_cost = cost + 1
+            # Keep roads off the immediate shoreline when a dry inland route exists.
+            shore_neighbors = sum(
+                0 <= nx + dx < width and 0 <= ny + dy < height
+                and _terrain_at(lobby_id, nx + dx, ny + dy, width, height, map_type) == 'water'
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            )
+            next_cost = cost + 1 + shore_neighbors * 3
             if next_cost >= costs.get(neighbor, float('inf')):
                 continue
             costs[neighbor] = next_cost
@@ -213,9 +219,11 @@ def world_plan(lobby_id, chunks_width, chunks_height, map_type):
     edges = set()
     def add_road(path):
         for first, second in zip(path, path[1:]):
-            direction = 'horizontal' if first[1] == second[1] else 'vertical'
-            roads.setdefault(first, set()).add(direction)
-            roads.setdefault(second, set()).add(direction)
+            dx, dy = second[0] - first[0], second[1] - first[1]
+            forward = {(1, 0): 'E', (-1, 0): 'W', (0, 1): 'S', (0, -1): 'N'}[(dx, dy)]
+            backward = {'E': 'W', 'W': 'E', 'S': 'N', 'N': 'S'}[forward]
+            roads.setdefault(first, set()).add(forward)
+            roads.setdefault(second, set()).add(backward)
 
     for site in settlements:
         closest = sorted(
@@ -274,18 +282,19 @@ def generated_world_tile(lobby_id, x, y, chunks_width, chunks_height, map_type):
     objects = []
     if terrain != 'water':
         site = plan['sites'].get((x, y))
-        if site in HABITATIONS or (site and (x, y) not in plan['roads']):
+        connections = plan['roads'].get((x, y))
+        if connections:
+            objects.append({
+                'type': 'road', 'x': 0, 'z': 0, 'scale': 1.1,
+                'rotation': 90 if len(connections & {'N', 'S'}) > len(connections & {'E', 'W'}) else 0,
+                'connections': sorted(connections),
+                'color': LANDMARK_COLORS['road'],
+            })
+        if site in HABITATIONS or (site and not connections):
             objects.append({
                 'type': site, 'x': 0, 'z': 0, 'scale': 1,
                 'rotation': 0, 'color': LANDMARK_COLORS[site],
             })
-        else:
-            for direction in sorted(plan['roads'].get((x, y), ())):
-                objects.append({
-                    'type': 'road', 'x': 0, 'z': 0, 'scale': 1.1,
-                    'rotation': 90 if direction == 'vertical' else 0,
-                    'color': LANDMARK_COLORS['road'],
-                })
     result = {'terrain': terrain, 'height': _height_at(lobby_id, x, y, terrain), 'objects': objects}
     if terrain != 'water' and (x, y) in plan['fields']:
         result['anomaly_field'] = dict(plan['fields'][(x, y)])

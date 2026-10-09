@@ -346,6 +346,14 @@ export const Server = {
         });
     },
 
+    async connectWorldRoads(lobbyId, first, second) {
+        return apiFetch(`/lobbies/${lobbyId}/world-roads/connect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ first, second }),
+        });
+    },
+
     async exportMap(lobbyId) {
         const response = await fetch(`/lobbies/${lobbyId}/export`, {
             headers: { 'Authorization': `Bearer ${token}` },

@@ -12,13 +12,16 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.extensions import db
 from app.models import CharacterInteractionRequest, DeferredCombatAction, LobbyCharacter, LocationCharacter, LocationCombatState
 from app.models.templates import ItemTemplate
+from app.services.addictions import resolve_addiction_profile
 from app.services.character import CharacterService
 from app.services.character_interaction import CharacterInteractionService
 from app.services.consumable_use import apply_consumable_use, validate_consumable_use
+from app.services.consumable_effects import with_darkness_modifiers
 from app.services.deferred_consumable import claim_completion, finish_completion
 from app.services.effects import apply_effect_to_health, normalize_effect_list, sync_health_derived_statuses
 from app.services.exceptions import ConflictError, NotFoundError, PermissionDenied, ValidationError
 from app.services.inventory_access import calculate_inventory_access
+from app.services.item_template_lookup import resolve_item_template
 from app.services.magazine import inventory_slot
 from app.services.transaction import atomic_operation
 
@@ -47,12 +50,8 @@ class MedicalProcedureResult:
     related_characters: list = field(default_factory=list)
 
 
-def _profile(item):
-    try:
-        template_id = int(item.get('templateId') or 0)
-    except (TypeError, ValueError):
-        template_id = 0
-    template = db.session.get(ItemTemplate, template_id) if template_id else None
+def _profile(item, lobby_id=None):
+    template = resolve_item_template(item, lobby_id)
     if not template or template.category != 'consumable':
         raise ValidationError('Для этого предмета нет серверных медицинских правил')
     attributes = template.attributes if isinstance(template.attributes, dict) else {}
@@ -364,7 +363,18 @@ def _validate_infusion(actor_data, target_health, direct, item):
     return 1 if any('капельница' in name for name in tools) else 0
 
 
-def _blood_test_context(actor_data, application):
+def _is_blood_packet(item, lobby_id=None):
+    template = resolve_item_template(item, lobby_id)
+    profile = ((template.attributes or {}).get('consumable') or {}) if template else (item.get('attributes') or {}).get('consumable') or {}
+    direct = profile.get('direct') if isinstance(profile, dict) else None
+    if isinstance(direct, dict) and direct:
+        return bool(direct.get('blood_packet') or (
+            direct.get('blood_compatibility_required') and direct.get('requires_infusion_tool')
+        ))
+    return str(item.get('name') or '').strip().casefold() == 'пакет крови'
+
+
+def _blood_test_context(actor_data, application, lobby_id=None):
     if application.get('target') != 'packet':
         return None
     selected = application.get('entry')
@@ -372,13 +382,17 @@ def _blood_test_context(actor_data, application):
         raise ValidationError('Не выбран пакет крови')
     parent, index = inventory_slot(actor_data, selected.get('path'))
     packet = parent[index]
-    if packet != selected['item'] or str(packet.get('name') or '').strip().casefold() != 'пакет крови':
+    if packet != selected['item'] or not _is_blood_packet(packet, lobby_id):
         raise ConflictError('Выбранный пакет крови изменился')
     return packet
 
 
 def _blood_packet_from_template(blood_type, known=False):
-    template = ItemTemplate.query.filter_by(category='consumable', name='Пакет крови').first()
+    templates = ItemTemplate.query.filter_by(category='consumable').all()
+    template = next((
+        entry for entry in templates
+        if _is_blood_packet({'name': entry.name, 'attributes': entry.attributes})
+    ), None)
     if not template:
         raise ConflictError('Шаблон пакета крови не найден')
     attributes = deepcopy(template.attributes or {})
@@ -435,7 +449,7 @@ def _synchronize_blood_knowledge(actor, target, actor_data, target_data, applica
         current_data = (actor_data if character.id == actor.id else
                         target_data if character.id == target.id else character.data or {})
         has_linked_packet = any(
-            str(entry.get('name') or '').strip().casefold() == 'пакет крови'
+            _is_blood_packet(entry, actor.lobby_id)
             and _verified_blood_donor(entry) == donor.id
             for _, _, entry in _inventory_entries(current_data)
         )
@@ -453,7 +467,7 @@ def _synchronize_blood_knowledge(actor, target, actor_data, target_data, applica
             meta['bloodTypeTested'] = True
             changed = True
         for _, _, entry in _inventory_entries(data):
-            if str(entry.get('name') or '').strip().casefold() != 'пакет крови':
+            if not _is_blood_packet(entry, actor.lobby_id):
                 continue
             attributes = entry.get('attributes') or {}
             if _verified_blood_donor(entry) != donor.id:
@@ -501,7 +515,7 @@ def _minimum_treatment_cost(character_data, direct, canonical_application=None):
     return max(0, int(cost))
 
 
-def minimum_consumable_payment(actor_data, target_data, selection):
+def minimum_consumable_payment(actor_data, target_data, selection, lobby_id=None):
     source = selection.get('source') if isinstance(selection, dict) else None
     application = selection.get('application') if isinstance(selection, dict) else None
     if not isinstance(source, dict) or not isinstance(source.get('snapshot'), dict):
@@ -515,7 +529,7 @@ def minimum_consumable_payment(actor_data, target_data, selection):
     template = None
     direct = None
     try:
-        template, direct = _profile(item)
+        template, direct = _profile(item, lobby_id)
     except ValidationError:
         item_profile = ((item.get('attributes') or {}).get('consumable') or {})
         direct = item_profile.get('direct') if isinstance(item_profile, dict) else None
@@ -1018,8 +1032,10 @@ class MedicalProcedureService:
         item = parent[index]
         if item != source['snapshot']:
             raise ConflictError('Расходник изменился. Выберите его заново.')
-        template, direct = _profile(item)
-        profile = ((template.attributes or {}).get('consumable') or {})
+        template, direct = _profile(item, actor.lobby_id)
+        profile = with_darkness_modifiers(
+            (template.attributes or {}).get('consumable') or {}, template.description or '',
+        )
         application = payload.get('application')
         if not isinstance(application, dict):
             raise ValidationError('Не выбрана медицинская процедура')
@@ -1034,7 +1050,7 @@ class MedicalProcedureService:
         requires_roll = requirements['requires_roll']
         generic_self = application.get('kind') == 'self'
         procedure_context = {
-            'blood_packet': _blood_test_context(actor_data, application),
+            'blood_packet': _blood_test_context(actor_data, application, actor.lobby_id),
             'blood_donor_id': target.id,
         }
         infusion_bonus = (
@@ -1052,7 +1068,7 @@ class MedicalProcedureService:
             'source': source,
             'application': application,
             'server_authoritative': True,
-        })
+        }, actor.lobby_id)
         if completion:
             paid_action_points = completion.payload.get('paid_action_points')
             if (
@@ -1134,7 +1150,12 @@ class MedicalProcedureService:
             target.data = target_data
             flag_modified(target, 'data')
         posture_updates = CharacterService.sync_location_health(target, health)
-        use_result = apply_consumable_use(actor, target, envelope, location_id=payload.get('combat_location_id'))
+        use_result = apply_consumable_use(
+            actor, target, envelope, location_id=payload.get('combat_location_id'),
+            addiction_profile=resolve_addiction_profile(
+                profile, (template.attributes or {}).get('catalog_name') or template.name, template.price,
+            ),
+        )
         finish_completion(actor, completion)
 
         interaction = None
@@ -1179,8 +1200,10 @@ class MedicalProcedureService:
         application = retry.get('application')
         if not isinstance(item, dict) or not isinstance(application, dict):
             raise ValidationError('Параметры медицинского повтора повреждены')
-        template, direct = _profile(item)
-        profile = ((template.attributes or {}).get('consumable') or {})
+        template, direct = _profile(item, actor.lobby_id)
+        profile = with_darkness_modifiers(
+            (template.attributes or {}).get('consumable') or {}, template.description or '',
+        )
         target_data = deepcopy(target.data or {})
         health = target_data.setdefault('health', {})
         requirements = _procedure_requirements(health, direct, application)

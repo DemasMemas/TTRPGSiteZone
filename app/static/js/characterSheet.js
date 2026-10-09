@@ -25,6 +25,8 @@ import { lobbyParticipants } from './ui.js';
 import { getSocket } from './socketHandlers.js';
 import { consumeChangedSheetInputs, rememberCharacterSnapshots } from './characterPersistence.js';
 import { diffCharacterData, pathTouches } from './characterSheetSync.js';
+import { isWorldDarkTime } from './darknessRules.js';
+import { copyProfileComponent, profileComponentOptions, renderConsumableProfileTree } from './consumableProfileEditor.js';
 import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
 
 // ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
@@ -1827,12 +1829,13 @@ function getConsumableStatValue(data, statName) {
     }, 0);
 }
 
-function getAwarenessModeChoices(data) {
+function getAwarenessModeChoices(data, darkness = false) {
     const headphones = Number(
         data?.equipment?.headphones?.awarenessBonus
         ?? data?.equipment?.headphones?.awareness_bonus,
     ) || 0;
-    const vision = getConsumableStatValue(data, 'vision_awareness');
+    const vision = getConsumableStatValue(data, 'vision_awareness')
+        + getConsumableStatValue(data, darkness ? 'darkness_awareness' : 'light_awareness');
     const deafness = getDeafnessLevel(data);
     const signed = value => `${value >= 0 ? '+' : ''}${value}`;
     const visualParts = [
@@ -3017,13 +3020,19 @@ function renderHealthTab(data, container = null) {
     const modifierLabels = {
         strength: 'Сила', agility: 'Ловкость', accuracy: 'Точность', weight: 'Штраф к весу',
         will: 'Воля', psy_defense: 'Пси-защита', vision_awareness: 'Внимательность (зрение)',
+        darkness_awareness: 'Внимательность в темноте', light_awareness: 'Внимательность на свету',
+        darkness_visual_immunity: 'Без помехи к зрению в темноте',
+        darkness_shooting_immunity: 'Без помехи к стрельбе в темноте',
         action_points: 'ОД', organ_toughness_multiplier: 'Живучесть органов', rest_heal_multiplier: 'Лечение на отдыхе'
     };
     const modifierChips = (health.combatMeta?.consumableModifiers || []).map(modifier => {
         const label = modifierLabels[modifier.stat] || modifier.stat || 'Модификатор';
         const value = Number(modifier.value || 0);
-        const remaining = modifier.remaining !== null && modifier.remaining !== undefined ? ` · ост. ${modifier.remaining}` : '';
-        return `${label}: ${value >= 0 ? '+' : ''}${value}${remaining}`;
+        const remaining = modifier.remaining !== null && modifier.remaining !== undefined
+            ? ` · ост. ${modifier.tick === 'time_elapsed'
+                ? `${Math.ceil(Number(modifier.remaining_seconds ?? Number(modifier.remaining) * 60) / 60)} мин`
+                : modifier.remaining}` : '';
+        return `${label}: ${modifier.stat?.endsWith('_immunity') ? 'активно' : `${value >= 0 ? '+' : ''}${value}`}${remaining}`;
     });
     const visibleEffectChips = [
         ...directStatusChips.map((item) => {
@@ -10109,9 +10118,18 @@ function getInventoryItemAvailableUses(item) {
     return currentUses + Math.max(0, quantity - 1) * maxUses;
 }
 
+function isWaterSupplyConsumable(item) {
+    const template = (allTemplatesCache || []).find(entry => entry.id == item?.templateId);
+    const direct = template?.attributes?.consumable?.direct || item?.attributes?.consumable?.direct;
+    if (direct && Object.keys(direct).length) {
+        return Boolean(direct.water_source || (direct.satisfy_water && direct.nutrition === undefined));
+    }
+    return String(item?.name || '').trim().toLowerCase() === 'вода';
+}
+
 function spendWaterRequirement(data, fraction, allowAlcohol = false, consume = true) {
     const charges = Math.max(1, Math.ceil((Number(fraction) || 0) * 3 - 1e-6));
-    const water = collectInventoryEntries(data, item => String(item?.name || '').trim().toLowerCase() === 'вода')
+    const water = collectInventoryEntries(data, isWaterSupplyConsumable)
         .find(entry => {
             const maxUses = Math.max(1, Number(entry.item.maxUses ?? entry.item.attributes?.uses ?? 3) || 3);
             const currentUses = Math.max(0, Number(entry.item.uses ?? entry.item.attributes?.uses_remaining ?? maxUses) || 0);
@@ -10183,12 +10201,22 @@ function chooseConsumableApplication(title, choices, { alwaysShow = false } = {}
     });
 }
 
+function isBloodPacketItem(item, template = null) {
+    const resolved = template || (allTemplatesCache || []).find(entry => entry.id == item?.templateId);
+    const profile = resolved?.attributes?.consumable || item?.attributes?.consumable;
+    const direct = profile?.direct;
+    if (direct && Object.keys(direct).length) {
+        return Boolean(direct.blood_packet || (direct.blood_compatibility_required && direct.requires_infusion_tool));
+    }
+    return String(item?.name || '').trim().toLowerCase() === 'пакет крови';
+}
+
 async function resolveMedicalApplication(direct, health, itemName, costContext = null) {
     const effects = Array.isArray(health.effects) ? health.effects : [];
     const applications = Array.isArray(direct.applications) ? direct.applications : [];
     if (direct.blood_type_test) {
         const choices = [{ label: 'Определить группу крови персонажа', target: 'character', actionPoints: 0 }];
-        collectInventoryEntries(currentCharacterData, item => String(item?.name || '').trim().toLowerCase() === 'пакет крови')
+        collectInventoryEntries(currentCharacterData, item => isBloodPacketItem(item))
             .forEach(entry => choices.push({
                 label: `Определить группу пакета крови${entry.item.attributes?.bloodTypeKnown ? ' (уже известна)' : ''}`,
                 target: 'packet', entry, actionPoints: 0
@@ -10400,7 +10428,7 @@ async function resolveMedicalApplication(direct, health, itemName, costContext =
 }
 
 async function useConsumable(item, itemPath, options = {}) {
-    const template = (allTemplatesCache || []).find(entry => entry.id == item.templateId);
+    const template = (await getAllItemTemplates()).find(entry => entry.id == item.templateId);
     const templateAttributes = template?.attributes || {};
     const itemConsumable = item.attributes?.consumable || {};
     const templateConsumable = templateAttributes.consumable || {};
@@ -10488,14 +10516,12 @@ async function useConsumable(item, itemPath, options = {}) {
     effects.forEach(effect => {
         if (String(effect?.type || '').toLowerCase() !== 'radiation_filter') return;
         effect.tick = 'time_elapsed';
-        effect.remaining = 24;
-        effect.duration = 24;
+        effect.remaining = Number(effect.remaining ?? effect.max_hours ?? 24);
+        effect.duration = effect.remaining;
         effect.time_unit = 'hour';
-        effect.remaining_seconds = 24 * 60 * 60;
+        effect.remaining_seconds = effect.remaining * 60 * 60;
         effect.capacity = Number(effect.capacity ?? direct.radiation_filter_capacity ?? 0);
-        effect.remaining_capacity = Number(
-            effect.remaining_capacity ?? effect.capacity ?? direct.radiation_filter_capacity ?? 0
-        );
+        effect.remaining_capacity = effect.capacity;
     });
     if (Number(direct.radiation_filter_percent) > 0
         && !effects.some(effect => effect?.type === 'radiation_filter')) {
@@ -10513,6 +10539,7 @@ async function useConsumable(item, itemPath, options = {}) {
             max_hours: 24,
         });
     }
+    if (!templateConsumable?.direct) {
     const isFullRadist = itemName.includes('радист') && !itemName.includes('радист"-л')
         && !itemName.includes('радист-л');
     if (isFullRadist && !effects.some(effect => effect?.type === 'temporary_exhaustion')) {
@@ -10589,6 +10616,7 @@ async function useConsumable(item, itemPath, options = {}) {
     }
     if (itemName.includes('физраств') || itemName.includes('соляной раствор')) {
         direct.not_consumed = true;
+    }
     }
 
     const adjust = (field, delta, min = 0, max = null) => {
@@ -11236,11 +11264,11 @@ async function useConsumable(item, itemPath, options = {}) {
         hasChanges = true;
     }
 
-    if (direct.satisfy_sleep || direct.nutrition !== undefined || direct.satisfy_water || /^вода$/i.test(String(item.name || '').trim())) {
+    if (direct.satisfy_sleep || direct.nutrition !== undefined || direct.satisfy_water) {
         health.needs = normalizeDailyNeeds(health.needs);
         if (direct.satisfy_sleep) health.needs.sleptToday = true;
         if (direct.nutrition !== undefined) health.needs.mealsToday = Math.min(3, health.needs.mealsToday + 1);
-        if (/^вода$/i.test(String(item.name || '').trim()) || direct.satisfy_water) {
+        if (direct.satisfy_water) {
             health.needs.drinksToday = Math.min(3, health.needs.drinksToday + 1);
         }
         hasChanges = true;
@@ -11248,7 +11276,7 @@ async function useConsumable(item, itemPath, options = {}) {
 
     if (direct.blood_collection) {
         const packetTemplate = (allTemplatesCache || []).find(entry =>
-            entry.category === 'consumable' && String(entry.name || '').trim().toLowerCase() === 'пакет крови'
+            entry.category === 'consumable' && isBloodPacketItem(entry, entry)
         );
         if (!packetTemplate) {
             showNotification('Шаблон пакета крови не найден');
@@ -11422,8 +11450,8 @@ async function useConsumable(item, itemPath, options = {}) {
             stat: 'bleeding',
             value: Number(direct.bleeding_modifier_delta) || 0,
             remaining: direct.duration ?? null,
-            note: itemName.includes('гематоген') ? 'hematogen' : 'consumable',
-            scope: itemName.includes('гематоген') ? 'combat' : 'character',
+            note: direct.bleeding_modifier_scope === 'combat' ? 'hematogen' : 'consumable',
+            scope: direct.bleeding_modifier_scope || 'character',
         });
         hasChanges = true;
     }
@@ -13917,19 +13945,83 @@ function showItemCategoryFields() {
     }
 }
 
-window.openCreateInventoryItemModal = function() {
+const CONSUMABLE_EDITOR_IMMEDIATE = [
+    ['hp', 'ОЗ'], ['radiation_delta', 'Радиация'], ['stress_delta', 'Стресс'],
+    ['pain_delta', 'Боль'], ['exhaustion_delta', 'Истощение'], ['psy_delta', 'Пси-состояние'],
+    ['infection_delta', 'Заражение'], ['intoxication_delta', 'Опьянение'], ['temperature_delta', 'Температура']
+];
+const CONSUMABLE_EDITOR_DELAYED = [
+    ['radiation', 'Радиация'], ['stress', 'Стресс'], ['painLevel', 'Боль'],
+    ['exhaustion', 'Истощение'], ['psyState', 'Пси-состояние'], ['infection', 'Заражение'],
+    ['intoxication', 'Опьянение'], ['temperature', 'Температура']
+];
+const CONSUMABLE_EDITOR_MODIFIERS = [
+    ['strength', 'Сила'], ['agility', 'Ловкость'], ['accuracy', 'Точность'],
+    ['will', 'Воля'], ['psy_defense', 'Пси-защита'], ['weight', 'Переносимый вес']
+];
+
+window.addConsumableProfileRow = function(config = {}) {
+    const container = document.getElementById('consumable-effects-container');
+    const row = document.createElement('div');
+    row.className = 'consumable-profile-row';
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0';
+    row.innerHTML = `
+        <select class="form-control profile-kind" aria-label="Тип эффекта">
+            <option value="immediate">Сразу</option><option value="temporary">Временный бонус</option>
+            <option value="delayed">После задержки</option><option value="trigger">По событию</option>
+        </select>
+        <select class="form-control profile-field" aria-label="Состояние"></select>
+        <input class="form-control number-input profile-value" type="number" step="any" value="0" aria-label="Изменение" style="width:85px">
+        <input class="form-control number-input profile-duration" type="number" min="1" max="10000" step="1" value="1" aria-label="Длительность" style="width:70px">
+        <select class="form-control profile-unit" aria-label="Когда срабатывает">
+            <option value="turn_end">Раундов</option><option value="time_elapsed">Минут</option>
+            <option value="movement_end">Перемещений</option><option value="day_start">Дней</option>
+        </select>
+        <button type="button" class="btn btn-sm btn-danger" aria-label="Удалить эффект">×</button>`;
+    container.appendChild(row);
+    const kind = row.querySelector('.profile-kind');
+    const field = row.querySelector('.profile-field');
+    const unit = row.querySelector('.profile-unit');
+    const refresh = () => {
+        const choices = kind.value === 'temporary' ? CONSUMABLE_EDITOR_MODIFIERS
+            : kind.value === 'immediate' ? CONSUMABLE_EDITOR_IMMEDIATE : CONSUMABLE_EDITOR_DELAYED;
+        const previous = config.field || field.value;
+        field.innerHTML = choices.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+        if (choices.some(([value]) => value === previous)) field.value = previous;
+        const isImmediate = kind.value === 'immediate';
+        row.querySelector('.profile-duration').style.display = isImmediate ? 'none' : '';
+        unit.style.display = isImmediate ? 'none' : '';
+        for (const option of unit.options) {
+            option.hidden = kind.value === 'trigger'
+                ? !['movement_end', 'day_start'].includes(option.value)
+                : kind.value === 'delayed' && !['turn_end', 'time_elapsed'].includes(option.value);
+        }
+        if (kind.value === 'trigger' && !['movement_end', 'day_start'].includes(unit.value)) unit.value = 'movement_end';
+        if (kind.value === 'delayed' && !['turn_end', 'time_elapsed'].includes(unit.value)) unit.value = 'turn_end';
+    };
+    kind.value = config.kind || 'immediate';
+    kind.addEventListener('change', () => { config = {}; refresh(); });
+    refresh();
+    if (config.unit) unit.value = config.unit;
+    if (config.value !== undefined) row.querySelector('.profile-value').value = config.value;
+    if (config.duration !== undefined) row.querySelector('.profile-duration').value = config.duration;
+    row.querySelector('button').onclick = () => row.remove();
+};
+
+window.openCreateInventoryItemModal = function(template = null) {
     let modal = document.getElementById('create-inventory-item-modal');
     if (!modal) {
         modal = document.createElement('div');
         modal.id = 'create-inventory-item-modal';
         modal.className = 'modal';
+        modal.style.zIndex = '1320';
         modal.style.display = 'flex';
         modal.style.alignItems = 'center';
         modal.style.justifyContent = 'center';
         modal.innerHTML = `
-            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+            <div class="modal-content" style="max-width:760px;max-height:80vh;overflow-y:auto;">
                 <span class="close" onclick="document.getElementById('create-inventory-item-modal').style.display='none'">&times;</span>
-                <h3>Создать кастомный предмет</h3>
+                <h3 id="inventory-item-editor-title">Создать кастомный предмет</h3>
                 <div class="form-group">
                     <label>Категория</label>
                     <select id="item-category-select" class="form-control" onchange="window.itemCategoryChanged(this)">
@@ -13957,10 +14049,29 @@ window.openCreateInventoryItemModal = function() {
                         <label>Количество использований</label>
                         <input type="number" id="consumable-uses" class="form-control number-input" value="1">
                     </div>
-                    <div class="form-group">
-                        <label>Эффекты</label>
+                    <div class="form-group" id="consumable-basic-action-cost">
+                        <label>Стоимость применения, ОД</label>
+                        <input type="number" id="consumable-action-points" class="form-control number-input" min="0" max="1000" value="0">
+                    </div>
+                    <div class="form-group" id="consumable-basic-effects">
+                        <label>Эффекты препарата</label>
+                        <p style="opacity:.7;font-size:12px;margin:3px 0 8px">Отрицательное число снижает состояние. Событие: конец перемещения или начало дня.</p>
                         <div id="consumable-effects-container"></div>
-                        <button type="button" class="btn btn-sm btn-primary" onclick="addEffectToModal('consumable')">+ Добавить эффект</button>
+                        <button type="button" class="btn btn-sm btn-primary" onclick="addConsumableProfileRow()">+ Добавить эффект</button>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-secondary" id="consumable-advanced-enable" onclick="enableAdvancedConsumableEditor()">Точная настройка: все правила каталога</button>
+                    <div id="consumable-advanced-panel" style="display:none; margin-top:10px;">
+                        <p style="opacity:.7;font-size:12px;">Выберите готовый препарат и добавьте его отдельное правило или весь профиль. Все вложенные параметры ниже можно изменить. Связанные правила лучше переносить вместе.</p>
+                        <div class="form-group">
+                            <label>Препарат-образец</label>
+                            <select id="consumable-profile-source" class="form-control" onchange="refreshConsumableProfileComponents()"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Правило для добавления</label>
+                            <select id="consumable-profile-component" class="form-control"></select>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-primary" onclick="addCatalogConsumableComponent()">Добавить правило</button>
+                        <div id="consumable-advanced-fields" style="margin-top:10px"></div>
                     </div>
                 </div>
 
@@ -14000,14 +14111,100 @@ window.openCreateInventoryItemModal = function() {
         `;
         document.body.appendChild(modal);
     }
-    // Сброс на категорию по умолчанию
-    document.getElementById('item-category-select').value = 'consumable';
+    modal._editingTemplate = template;
+    modal._advancedProfile = null;
+    document.getElementById('consumable-advanced-panel').style.display = 'none';
+    document.getElementById('consumable-advanced-enable').style.display = '';
+    document.getElementById('consumable-basic-action-cost').style.display = '';
+    document.getElementById('consumable-basic-effects').style.display = '';
+    document.getElementById('inventory-item-editor-title').textContent = template ? 'Настроить предмет' : 'Создать кастомный предмет';
+    document.getElementById('item-name').value = template?.name || '';
+    document.getElementById('consumable-weight').value = template?.weight ?? 0;
+    document.getElementById('consumable-volume').value = template?.volume ?? 0;
+    document.getElementById('consumable-uses').value = template?.attributes?.uses ?? 1;
+    document.getElementById('consumable-action-points').value = template?.attributes?.consumable?.direct?.action_points_cost ?? 0;
+    document.getElementById('item-category-select').value = template?.category === 'crafting_material'
+        ? 'material' : template?.category || 'consumable';
+    document.getElementById('item-category-select').disabled = Boolean(template);
     window.itemCategoryChanged(document.getElementById('item-category-select'));
     const consumableContainer = document.getElementById('consumable-effects-container');
     if (consumableContainer) consumableContainer.innerHTML = '';
+    const profile = template?.attributes?.consumable;
+    if (profile) {
+        Object.entries(profile.direct || {}).forEach(([field, value]) => {
+            if (CONSUMABLE_EDITOR_IMMEDIATE.some(([key]) => key === field)) addConsumableProfileRow({ kind: 'immediate', field, value });
+        });
+        (profile.modifiers || []).forEach(modifier => addConsumableProfileRow({
+            kind: 'temporary', field: modifier.stat, value: modifier.value,
+            duration: modifier.remaining, unit: modifier.tick
+        }));
+        (profile.effects || []).filter(effect => effect.type === 'delayed_adjustment').forEach(effect => addConsumableProfileRow({
+            kind: ['movement_end', 'day_start'].includes(effect.tick) ? 'trigger' : 'delayed',
+            field: effect.adjustments?.[0]?.field, value: effect.adjustments?.[0]?.delta,
+            duration: effect.remaining, unit: effect.tick
+        }));
+    }
     const artifactContainer = document.getElementById('artifact-effects-container');
     if (artifactContainer) artifactContainer.innerHTML = '';
     modal.style.display = 'flex';
+    if (profile && (profile.editor_version === 2 || !profile.editor_version)) {
+        window.enableAdvancedConsumableEditor();
+    }
+};
+
+window.enableAdvancedConsumableEditor = async function() {
+    const modal = document.getElementById('create-inventory-item-modal');
+    if (!modal._advancedProfile) {
+        const original = modal._editingTemplate?.attributes?.consumable;
+        if (original) modal._advancedProfile = JSON.parse(JSON.stringify(original));
+        else {
+            try {
+                modal._advancedProfile = document.querySelectorAll('#consumable-effects-container .consumable-profile-row').length
+                    ? readCustomConsumableProfile()
+                    : { editor_version: 2, direct: {}, effects: [], modifiers: [] };
+            }
+            catch (error) { showNotification(error.message); return; }
+        }
+        modal._advancedProfile.editor_version = 2;
+    }
+    document.getElementById('consumable-basic-action-cost').style.display = 'none';
+    document.getElementById('consumable-basic-effects').style.display = 'none';
+    document.getElementById('consumable-advanced-enable').style.display = 'none';
+    document.getElementById('consumable-advanced-panel').style.display = '';
+    renderConsumableProfileTree(document.getElementById('consumable-advanced-fields'), modal._advancedProfile);
+    const templates = (await getAllItemTemplates()).filter(entry =>
+        entry.category === 'consumable' && entry.attributes?.consumable?.direct
+    );
+    modal._profileSources = templates;
+    const sourceSelect = document.getElementById('consumable-profile-source');
+    sourceSelect.innerHTML = templates.map(entry =>
+        `<option value="${entry.id}">${escapeHtml(entry.name)}</option>`
+    ).join('');
+    window.refreshConsumableProfileComponents();
+};
+
+window.refreshConsumableProfileComponents = function() {
+    const modal = document.getElementById('create-inventory-item-modal');
+    const templateId = Number(document.getElementById('consumable-profile-source').value);
+    const source = (modal._profileSources || []).find(entry => entry.id === templateId);
+    modal._profileComponentOptions = profileComponentOptions(source);
+    document.getElementById('consumable-profile-component').innerHTML = modal._profileComponentOptions.map((entry, index) =>
+        `<option value="${index}">${escapeHtml(entry.label)}</option>`
+    ).join('');
+};
+
+window.addCatalogConsumableComponent = function() {
+    const modal = document.getElementById('create-inventory-item-modal');
+    const templateId = Number(document.getElementById('consumable-profile-source').value);
+    const source = (modal._profileSources || []).find(entry => entry.id === templateId);
+    const component = modal._profileComponentOptions?.[Number(document.getElementById('consumable-profile-component').value)];
+    if (!source || !component) return;
+    modal._advancedProfile = copyProfileComponent(modal._advancedProfile, source, component);
+    if (component.section === 'whole' || (component.section === 'direct' && component.index === 'uses')) {
+        const uses = Number(modal._advancedProfile.direct?.uses ?? source.attributes?.uses);
+        if (Number.isInteger(uses) && uses > 0) document.getElementById('consumable-uses').value = uses;
+    }
+    renderConsumableProfileTree(document.getElementById('consumable-advanced-fields'), modal._advancedProfile);
 };
 
 function renderInventoryTemplatePicker(templates, query = '') {
@@ -14071,7 +14268,9 @@ function renderInventoryTemplatePicker(templates, query = '') {
                         <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:6px;">
                             ${chips.map(chip => `<span style="font-size:11px; padding:2px 6px; border-radius:999px; background: rgba(255,255,255,0.08);">${chip}</span>`).join('')}
                         </div>
-                    </button>`;
+                    </button>
+                    ${t.source === 'local' && t.category === 'consumable' && window.isGM
+                        ? `<button type="button" class="btn btn-sm btn-secondary" style="margin-top:4px" onclick="editInventoryConsumableTemplate(${t.id})">Настроить эффекты</button>` : ''}`;
             }).join('')}
         </div>`;
 
@@ -14232,7 +14431,7 @@ window.selectInventoryTemplate = async function(templateId) {
         return;
     }
 
-    if (template.category === 'consumable' && template.name.trim().toLowerCase() === 'пакет крови') {
+    if (template.category === 'consumable' && isBloodPacketItem(template, template)) {
         closeInventoryTemplatePicker();
         const savePacket = async (bloodType, bloodTypeKnown) => {
             const attributes = { bloodType, bloodTypeKnown };
@@ -14539,6 +14738,52 @@ window.itemCategoryChanged = function(select) {
     showItemCategoryFields();
 };
 
+window.editInventoryConsumableTemplate = async function(templateId) {
+    const templates = await loadTemplatesForLobby('consumable');
+    const template = templates.find(entry => entry.id === templateId && entry.source === 'local');
+    if (!template) return showNotification('Шаблон расходника не найден');
+    closeInventoryTemplatePicker();
+    window.openCreateInventoryItemModal(template);
+};
+
+function readCustomConsumableProfile() {
+    const profile = { editor_version: 1, direct: {}, modifiers: [], effects: [] };
+    const seenTimedStats = new Set();
+    const actionPoints = Number(document.getElementById('consumable-action-points').value);
+    if (!Number.isFinite(actionPoints) || actionPoints < 0 || actionPoints > 1000) throw new Error('Проверьте стоимость в ОД');
+    profile.direct.action_points_cost = actionPoints;
+    for (const [index, row] of [...document.querySelectorAll('#consumable-effects-container .consumable-profile-row')].entries()) {
+        const kind = row.querySelector('.profile-kind').value;
+        const field = row.querySelector('.profile-field').value;
+        const value = Number(row.querySelector('.profile-value').value);
+        const duration = Number(row.querySelector('.profile-duration').value);
+        const tick = row.querySelector('.profile-unit').value;
+        if (!Number.isFinite(value) || value === 0 || !field) throw new Error('Значение эффекта должно отличаться от нуля');
+        if (kind === 'immediate') {
+            profile.direct[field] = (profile.direct[field] || 0) + value;
+            continue;
+        }
+        if (!Number.isInteger(duration) || duration < 1 || duration > 10000) throw new Error('Проверьте длительность эффекта');
+        if (kind === 'temporary') {
+            if (seenTimedStats.has(field)) throw new Error('Для одной характеристики можно задать только один временный бонус');
+            seenTimedStats.add(field);
+            profile.modifiers.push({ stat: field, value, remaining: duration, tick });
+            continue;
+        }
+        const bounds = { stress: 10, painLevel: 10, exhaustion: 10, psyState: 50, infection: 100, intoxication: 100 };
+        profile.effects.push({
+            type: 'delayed_adjustment', name: `Отложенное изменение: ${row.querySelector('.profile-field').selectedOptions[0].textContent}`,
+            area: `editor-${index}`, remaining: duration, tick,
+            ...(tick === 'time_elapsed' ? { time_unit: 'minute' } : {}),
+            adjustments: [{ field, delta: value, min: 0, ...(bounds[field] ? { max: bounds[field] } : {}) }]
+        });
+    }
+    if (Object.keys(profile.direct).length === 1 && !profile.modifiers.length && !profile.effects.length) {
+        throw new Error('Добавьте хотя бы один эффект препарата');
+    }
+    return profile;
+}
+
 window.saveInventoryItemTemplate = async function() {
     const name = document.getElementById('item-name').value;
     if (!name) {
@@ -14549,28 +14794,22 @@ window.saveInventoryItemTemplate = async function() {
     let category, attributes;
     if (currentItemCategory === 'consumable') {
         category = 'consumable';
-        const effects = [];
-        const items = document.querySelectorAll('#consumable-effects-container .effect-item');
-        items.forEach(item => {
-            let type = '';
-            const categorySelect = item.querySelector('.effect-category');
-            const customInput = item.querySelector('.effect-custom-category');
-            if (customInput && customInput.value) {
-                type = customInput.value;
-            } else if (categorySelect && categorySelect.value !== '__custom__') {
-                type = categorySelect.value;
-            }
-            const value = item.querySelector('.effect-value').value;
-            if (type && value) {
-                effects.push({ type, value });
-            }
-        });
+        let profile;
+        try {
+            profile = document.getElementById('create-inventory-item-modal')._advancedProfile
+                || readCustomConsumableProfile();
+        }
+        catch (error) { showNotification(error.message); return; }
         attributes = {
+            ...(document.getElementById('create-inventory-item-modal')._editingTemplate?.attributes || {}),
             weight: parseFloat(document.getElementById('consumable-weight').value) || 0,
             volume: parseFloat(document.getElementById('consumable-volume').value) || 0,
             uses: parseInt(document.getElementById('consumable-uses').value) || 1,
-            effects: effects
+            consumable: profile
         };
+        if (profile.editor_version === 2 && profile.direct?.uses !== undefined) {
+            attributes.uses = Number(profile.direct.uses);
+        }
     } else if (currentItemCategory === 'material') {
         category = 'crafting_material';
         attributes = {
@@ -14602,18 +14841,21 @@ window.saveInventoryItemTemplate = async function() {
         };
     }
 
+    const editing = document.getElementById('create-inventory-item-modal')._editingTemplate;
     const data = {
         name: name,
         category: category,
-        subcategory: null,
-        price: 0,
+        subcategory: editing?.subcategory ?? null,
+        description: editing?.description ?? null,
+        price: editing?.price ?? 0,
         weight: attributes.weight || 0,
         volume: attributes.volume || 0,
         attributes: attributes
     };
 
     try {
-        await Server.createLobbyTemplate(currentLobbyId, data);
+        if (editing) await Server.updateLobbyTemplate(currentLobbyId, editing.id - 1_000_000, data);
+        else await Server.createLobbyTemplate(currentLobbyId, data);
         clearAllTemplatesCache();
         await renderInventoryTab(currentCharacterData);
         document.getElementById('create-inventory-item-modal').style.display = 'none';
@@ -14860,7 +15102,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         itemDiv._toggleIcon = toggleIcon;
     }
     nameWrapper.appendChild(nameCell);
-    const isBloodPacket = String(item.name || '').trim().toLowerCase() === 'пакет крови';
+    const isBloodPacket = isBloodPacketItem(item);
     if (isBloodPacket) {
         const bloodBadge = document.createElement('span');
         bloodBadge.className = 'inventory-blood-type';
@@ -15254,7 +15496,7 @@ function showItemDetailsModal(item) {
 
     let html = `<h3>${escapeHtml(item.name)}</h3>`;
     html += '<hr>';
-    if (String(item.name || '').trim().toLowerCase() === 'пакет крови') {
+    if (isBloodPacketItem(item)) {
         const knownType = item.attributes?.bloodTypeKnown
             ? Number(item.attributes?.bloodType || item.attributes?.blood_type || 0) : 0;
         html += `<p><strong>Группа крови:</strong> ${knownType ? escapeHtml(formatBloodType(knownType)) : 'Неизвестна'}</p>`;
@@ -15743,11 +15985,16 @@ export function importCharacter(file) {
 
 window.rollSkill = async function(skillPath, skillLabel) {
     if (!currentCharacterData) return;
+    let darkness = isWorldDarkTime(window.lobbyGameTimeMinutes ?? 480);
+    if (window.isLocationActive && (skillPath === 'physical.awareness' || skillPath === 'physical.shooting')) {
+        const scene = await import('./locationScene.js');
+        darkness = scene.isLocationCharacterInDarkness(currentCharacterId) ?? darkness;
+    }
     let awarenessMode = null;
     if (skillPath === 'physical.awareness') {
         const choice = await chooseConsumableApplication(
             'Проверка Внимательности',
-            getAwarenessModeChoices(currentCharacterData),
+            getAwarenessModeChoices(currentCharacterData, darkness),
             { alwaysShow: true },
         );
         if (!choice) return;
@@ -15799,6 +16046,9 @@ window.rollSkill = async function(skillPath, skillLabel) {
         }
         if (awarenessMode === 'visual') {
             equipmentBonus += getConsumableStatValue(currentCharacterData, 'vision_awareness');
+            equipmentBonus += getConsumableStatValue(
+                currentCharacterData, darkness ? 'darkness_awareness' : 'light_awareness',
+            );
         }
     }
 
@@ -15810,7 +16060,15 @@ window.rollSkill = async function(skillPath, skillLabel) {
     const deafness = awarenessMode === 'hearing' ? getDeafnessLevel(currentCharacterData) : 0;
     const hearingBlocked = awarenessMode === 'hearing' && deafness >= 90;
     const firstDice = hearingBlocked ? 0 : Math.floor(Math.random() * 20) + 1;
-    const disadvantaged = !hearingBlocked && hasHealthRollDisadvantage(currentCharacterData, skillPath);
+    const darknessImmunity = getConsumableStatValue(
+        currentCharacterData,
+        awarenessMode === 'visual' ? 'darkness_visual_immunity' : 'darkness_shooting_immunity',
+    ) > 0;
+    const darknessDisadvantage = darkness && (awarenessMode === 'visual' || skillPath === 'physical.shooting')
+        && !darknessImmunity;
+    const disadvantaged = !hearingBlocked && (
+        hasHealthRollDisadvantage(currentCharacterData, skillPath) || darknessDisadvantage
+    );
     const secondDice = disadvantaged ? Math.floor(Math.random() * 20) + 1 : firstDice;
     const dice = disadvantaged ? Math.min(firstDice, secondDice) : firstDice;
     const total = dice + totalBonus;

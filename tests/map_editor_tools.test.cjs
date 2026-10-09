@@ -9,9 +9,9 @@ const read = file => fs.readFileSync(path.join(__dirname, '../app/static/js', fi
 test('world editor tool selection keeps eraser and toolbar state in sync', () => {
     const source = read('mapEdit.js');
     const start = source.indexOf('export function selectWorldEditorTool(');
-    const end = source.indexOf('\nexport function getEditMode()', start);
+    const end = source.indexOf('\nexport function selectWorldObject(', start);
     assert.ok(start >= 0 && end > start);
-    const buttons = ['select', 'terrain', 'height', 'erase'].map(tool => ({
+    const buttons = ['select', 'terrain', 'height', 'erase', 'objects'].map(tool => ({
         dataset: { worldTool: tool },
         setAttribute(name, value) { this[name] = value; },
     }));
@@ -22,7 +22,8 @@ test('world editor tool selection keeps eraser and toolbar state in sync', () =>
     const expansions = [];
     const context = vm.createContext({
         document: { getElementById(id) { return { 'gm-only-controls': root, 'eraser-checkbox': eraser, 'world-editor-hint': hint }[id]; } },
-        AppState: state, window: {},
+        AppState: state, window: {}, roadLinkActive: false,
+        getHoveredTile() { return null; }, updateWorldObjectPreview() {}, removePreviewObject() {},
         expandMapToolsPanelOnToolChange(previous, next) { expansions.push([previous, next]); },
     });
     vm.runInContext(source.slice(start, end).replace('export function', 'function'), context);
@@ -38,8 +39,10 @@ test('world editor tool selection keeps eraser and toolbar state in sync', () =>
     assert.deepEqual(expansions, [[undefined, 'erase'], ['erase', 'terrain']]);
     context.selectWorldEditorTool('select', { autoExpand: false });
     assert.equal(expansions.length, 2);
+    context.selectWorldEditorTool('objects', { autoExpand: false });
+    assert.equal(buttons[4]['aria-pressed'], 'true');
     context.selectWorldEditorTool('unknown');
-    assert.equal(context.window.worldEditorTool, 'select');
+    assert.equal(context.window.worldEditorTool, 'objects');
 });
 
 test('editor panel expands only for a new tool when the preference is enabled', () => {
@@ -187,6 +190,103 @@ test('world radiation brush updates every tile in its radius', () => {
     assert.equal(painted.every(call => call[4].radiation === 4.5), true);
 });
 
+test('world object tool places once at the pointer without replacing other tile objects', async () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('export async function placeWorldObjectAtTile(');
+    const end = source.indexOf('\nwindow.updateWorldObjectPreview', start);
+    assert.ok(start >= 0 && end > start);
+    const updates = [];
+    const notifications = [];
+    const context = vm.createContext({
+        AppState: { isGM: true, editMode: true },
+        window: { worldEditorTool: 'objects' },
+        placingObjectTiles: new Set(), lastPlacedObjectKey: null, lastPlacedObjectAt: 0,
+        roadLinkActive: false,
+        CHUNK_SIZE: 32,
+        worldObjectSettings() { return { type: 'tree', color: '#2d5a27', scale: 1, rotation: 0 }; },
+        async handleTileUpdate(...args) { updates.push(args); return true; },
+        showNotification(message) { notifications.push(message); },
+    });
+    vm.runInContext(source.slice(start, end).replace('export async function', 'async function'), context);
+    const original = { type: 'base', color: '#66747b' };
+    const tile = { chunkX: 0, chunkY: 0, tileX: 2, tileY: 3,
+        pointX: 2.7, pointZ: 3.4, tileData: { terrain: 'grass', objects: [original] } };
+    assert.equal(await context.placeWorldObjectAtTile(tile), true);
+    assert.equal(updates.length, 1);
+    const objects = updates[0][4].objects;
+    assert.equal(objects.length, 2);
+    assert.equal(objects[0], original);
+    assert.equal(objects[1].type, 'tree');
+    assert.ok(Math.abs(objects[1].x - 0.2) < 1e-9);
+    assert.ok(Math.abs(objects[1].z + 0.1) < 1e-9);
+    assert.equal(await context.placeWorldObjectAtTile(tile), false);
+    assert.equal(updates.length, 1);
+    assert.equal(await context.placeWorldObjectAtTile({ ...tile, tileData: { terrain: 'water' } }), false);
+    assert.equal(notifications.length, 1);
+    assert.match(read('lobbyData.js'), /worldEditorTool === 'objects'[\s\S]*?placeWorldObjectAtTile/);
+});
+
+test('road connector links two existing adjacent roads without placing a third object', async () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('function updateWorldRoadLinkStatus(');
+    const end = source.indexOf('\nfunction worldObjectSettings(', start);
+    assert.ok(start >= 0 && end > start);
+    const updates = [];
+    const calls = [];
+    const labels = {
+        'world-road-link-button': { setAttribute(name, value) { this[name] = value; } },
+        'world-road-link-status': { textContent: '' },
+    };
+    const context = vm.createContext({
+        roadLinkActive: false, roadLinkFirst: null, roadLinkSaving: false,
+        CHUNK_SIZE: 32, currentLobbyId: 7,
+        document: { getElementById(id) { return labels[id]; } },
+        getHoveredTile() { return null; }, updateWorldObjectPreview() {},
+        showNotification() {}, updateTileInChunk(...args) { updates.push(args); },
+        Server: { async connectWorldRoads(...args) {
+            calls.push(args);
+            return { updates: [
+                { chunk_x: 0, chunk_y: 0, tile_x: 31, tile_y: 5, updates: { objects: [{ type: 'road' }] } },
+                { chunk_x: 1, chunk_y: 0, tile_x: 0, tile_y: 5, updates: { objects: [{ type: 'road' }] } },
+            ] };
+        } },
+    });
+    vm.runInContext(source.slice(start, end).replace('export function toggleWorldRoadLink', 'function toggleWorldRoadLink'), context);
+    context.toggleWorldRoadLink(true);
+    const tile = (chunkX, tileX, tileY, type = 'road') => ({ chunkX, chunkY: 0, tileX, tileY,
+        tileData: { objects: [{ type }] } });
+    assert.equal(await context.connectRoadAtTile(tile(0, 31, 5)), true);
+    assert.equal(await context.connectRoadAtTile(tile(1, 0, 7)), false);
+    assert.equal(await context.connectRoadAtTile(tile(1, 0, 5, 'tree')), false);
+    assert.equal(calls.length, 0);
+    assert.equal(await context.connectRoadAtTile(tile(1, 0, 5)), true);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[7, [31, 5], [32, 5]]]);
+    assert.equal(updates.length, 2);
+    assert.match(labels['world-road-link-status'].textContent, /соединены/);
+    assert.equal(labels['world-road-link-button']['aria-pressed'], 'true');
+});
+
+test('road connector button is visible in the object tool and selects roads itself', () => {
+    const template = fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8');
+    const objectPanel = template.slice(template.indexOf('data-world-settings="objects"'),
+        template.indexOf('data-world-settings="brush"'));
+    assert.match(objectPanel, /data-world-object="road"[\s\S]*?id="world-road-link-button"/);
+    assert.doesNotMatch(objectPanel, /id="world-road-link-controls"[^>]*hidden/);
+    assert.match(read('mapEdit.js'), /closest\('#world-road-link-button'\)[\s\S]*?selectWorldObject\('road'\)/);
+});
+
+test('world object palette uses compact icon previews for every placeable object', () => {
+    const template = fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8');
+    const types = ['tree', 'forest', 'road', 'hamlet', 'village', 'factory', 'base', 'camp', 'house', 'fence'];
+    for (const type of types) {
+        assert.ok(template.includes(`<symbol id="world-icon-${type}"`));
+        assert.match(template, new RegExp(`data-world-object="${type}"[^>]*><svg class="world-object-thumb" viewBox="0 0 48 40"[^>]*><use href="#world-icon-${type}"`));
+    }
+    const css = fs.readFileSync(path.join(__dirname, '../app/static/style.css'), 'utf8');
+    assert.match(css, /\.world-object-palette \{[\s\S]*?grid-template-columns: repeat\(10, minmax\(0, 1fr\)\)/);
+    assert.match(css, /\.world-object-palette button \{[\s\S]*?height: 34px/);
+});
+
 test('world anomaly fields use a visual matching their field type', () => {
     const source = read('lobby3d.js');
     const start = source.indexOf('function createAnomalyFieldLOD(');
@@ -220,7 +320,7 @@ test('new world landmarks are available without deleting legacy map objects', ()
         assert.match(scene, new RegExp(`\\b${type}: \\{ geometry:`));
     }
     for (const legacy of ['tree', 'house', 'fence']) {
-        assert.doesNotMatch(options, new RegExp(`value="${legacy}"`));
+        assert.match(options, new RegExp(`value="${legacy}"`));
         assert.match(scene, new RegExp(`case '${legacy}'`));
     }
     assert.match(scene, /fillLandmarkMeshes\(landmarkMeshes, tilesData, cx, cy\)/);
@@ -251,8 +351,10 @@ test('held Q selects the highlighted full-ring sector on release', () => {
     const listeners = {};
     const appended = [];
     const selected = [];
+    const actions = [];
     let enabled = true;
     let location = false;
+    let selectedObject = false;
     const createElement = tagName => ({
         tagName, style: {}, children: [], handlers: {}, attributes: {},
         classList: {
@@ -282,13 +384,18 @@ test('held Q selects the highlighted full-ring sector on release', () => {
         isEnabled: () => enabled,
         isLocation: () => location,
         selectTool(tool) { selected.push(tool); },
+        locationAction(action) { actions.push(action); return action === 'resize' && selectedObject; },
     });
     listeners.pointermove({ clientX: 400, clientY: 300 });
-    const press = code => listeners.keydown({
+    const press = code => {
+        let prevented = false;
+        listeners.keydown({
         code, repeat: false, altKey: false, ctrlKey: false, metaKey: false,
         target: { closest() { return null; } },
-        preventDefault() {}, stopImmediatePropagation() {},
-    });
+        preventDefault() { prevented = true; }, stopImmediatePropagation() {},
+        });
+        return prevented;
+    };
     const release = code => listeners.keyup({
         code, preventDefault() {}, stopImmediatePropagation() {},
     });
@@ -332,7 +439,7 @@ test('held Q selects the highlighted full-ring sector on release', () => {
     location = true;
     press('KeyQ');
     const locationMenu = appended.at(-1);
-    assert.equal(locationMenu.children[0].children.length, 9);
+    assert.equal(locationMenu.children[0].children.length, 10);
     let outsideClickBlocked = false;
     listeners.pointerdown({
         target: {},
@@ -345,6 +452,18 @@ test('held Q selects the highlighted full-ring sector on release', () => {
     press('Digit7');
     assert.deepEqual(selected, ['terrain', 'terrain', 'erase']);
     assert.equal(appended.at(-1).removed, true);
+    press('Digit8');
+    press('KeyV');
+    press('KeyB');
+    press('KeyG');
+    press('KeyT');
+    assert.deepEqual(selected, ['terrain', 'terrain', 'erase', 'assets', 'select', 'assets']);
+    assert.deepEqual(actions, ['move', 'rotate']);
+    assert.equal(press('KeyR'), false);
+    assert.deepEqual(actions, ['move', 'rotate', 'resize']);
+    selectedObject = true;
+    assert.equal(press('KeyR'), true);
+    assert.deepEqual(actions, ['move', 'rotate', 'resize', 'resize']);
 });
 
 test('right drag while painting remains available to world and location cameras', () => {

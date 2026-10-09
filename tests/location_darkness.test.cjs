@@ -1,0 +1,61 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
+const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+const architectureUrl = dataUrl(read('locationArchitecture.js'));
+const darknessUrl = dataUrl(read('locationDarkness.js').replace('./locationArchitecture.js', architectureUrl));
+
+const wall = { type: 'wall', tile_x: 2, tile_y: 2,
+    properties: { dimensions: { width: 3, depth: 0.2, height: 2.4 } } };
+const door = { type: 'door', tile_x: 2, tile_y: 2,
+    properties: { dimensions: { width: 0.9, depth: 0.18, height: 2 }, is_open: false } };
+
+test('dark cells stay dim until a lamp has a clear path through the wall', async () => {
+    const { computeDarknessFactors, lightPathOpen } = await import(darknessUrl);
+    const cells = [{ x: 2, z: 3 }];
+    const source = { x: 2.5, z: 1.5, distance: 6, intensity: 3 };
+    const unlit = computeDarknessFactors(5, 5, cells, [wall, door], [], 1);
+    assert.ok(Math.abs(unlit[3 * 5 + 2] - 0.07) < 1e-6);
+    assert.equal(unlit[1 * 5 + 2], 1);
+    const closed = computeDarknessFactors(5, 5, cells, [wall, door], [source], 0);
+    assert.ok(Math.abs(closed[3 * 5 + 2] - 0.07) < 1e-6);
+    const opened = { ...door, properties: { ...door.properties, is_open: true } };
+    assert.equal(lightPathOpen(source, { x: 2.5, z: 3.5 }, [wall, opened]), true);
+    const lit = computeDarknessFactors(5, 5, cells, [wall, opened], [source], 0);
+    assert.ok(lit[3 * 5 + 2] > closed[3 * 5 + 2]);
+});
+
+test('an exterior opening admits daylight, but a free-standing door does not', async () => {
+    const { computeDarknessFactors } = await import(darknessUrl);
+    const cells = [{ x: 2, z: 3 }];
+    const opened = { ...door, properties: { ...door.properties, is_open: true } };
+    const withWall = computeDarknessFactors(5, 5, cells, [wall, opened], [], 1);
+    const withoutWall = computeDarknessFactors(5, 5, cells, [opened], [], 1);
+    assert.ok(withWall[3 * 5 + 2] > withoutWall[3 * 5 + 2]);
+    assert.ok(Math.abs(withoutWall[3 * 5 + 2] - 0.07) < 1e-6);
+});
+
+test('opening an elevated window also admits light without making it a doorway', async () => {
+    const { computeDarknessFactors } = await import(darknessUrl);
+    const window = { ...door, type: 'window', properties: {
+        dimensions: { width: 1.2, depth: 0.14, height: 1 }, elevation: 1, is_open: true,
+    } };
+    const open = computeDarknessFactors(5, 5, [{ x: 2, z: 3 }], [wall, window], [], 1);
+    window.properties.is_open = false;
+    const closed = computeDarknessFactors(5, 5, [{ x: 2, z: 3 }], [wall, window], [], 1);
+    assert.ok(open[3 * 5 + 2] > closed[3 * 5 + 2]);
+});
+
+test('editor forwards painted cells to lighting save and map pointer handling', () => {
+    const main = read('main.js');
+    const scene = read('locationScene.js');
+    const editor = read('locationLightingEditor.js');
+    assert.match(editor, /value\.dark_tiles = getDarkTiles\(\)/);
+    assert.match(main, /window\.locationDarknessPaintAtTile = \(x, z\)/);
+    assert.match(main, /Server\.updateLocation\(currentLobbyId, currentLocationData\.id, \{ lighting: settings \}\)/);
+    assert.match(scene, /window\.locationDarknessPaintAtTile\?\.\(hoveredTileCoords\.x, hoveredTileCoords\.z\)/);
+    assert.match(scene, /window\.locationDarknessPaintAtTile\?\.\(x, z\)/);
+});

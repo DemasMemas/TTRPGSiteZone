@@ -21,6 +21,10 @@ import AppState, {
 } from './ui_interactions.js';
 import { initMapEditorQuickMenu, closeMapEditorQuickMenu } from './mapEditorQuickMenu.js';
 import { initWeather, applyWeather } from './weather.js';
+import { createLocationLightingEditor } from './locationLightingEditor.js';
+import { LOCATION_ASSETS } from './locationAssetCatalog.js';
+import { assetDimensions, validAssetDimensions } from './locationAssetDimensions.js';
+import { clampAssetElevation } from './locationAssetTransforms.js';
 import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
 fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
@@ -35,7 +39,11 @@ import {
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
-        setLocationStructureRotation
+    setLocationStructureRotation, applyLocationLighting, setLocationAssetPreset, setLocationAssetElevation,
+    setLocationAssetDimensions, getSelectedLocationEditorAsset, beginMoveSelectedLocationAsset,
+    beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
+    setLocationAssetResizeAxis, getLocationAssetResizeState,
+    deleteSelectedLocationAsset, updateSelectedLocationAssetDetails, previewSelectedLocationLamp,
 } from './locationScene.js';
 import { getUserColorHex, updateMyColor } from './colors.js';
 import { openLobbyRestModal, closeLobbyRestModal, saveLobbyTimeActivity, startLobbyRest } from './rest.js';
@@ -177,6 +185,16 @@ initMapEditorQuickMenu({
     selectTool: tool => {
         if (window.isLocationActive) window.selectLocationEditorTool?.(tool);
         else selectWorldEditorTool(tool);
+    },
+    locationAction: action => {
+        if (action === 'move') return beginMoveSelectedLocationAsset();
+        if (action === 'rotate') return beginRotateSelectedLocationAsset();
+        if (action === 'resize') {
+            if (!getSelectedLocationEditorAsset()) return false;
+            beginResizeSelectedLocationAsset();
+            return true;
+        }
+        return false;
     },
 });
 
@@ -407,12 +425,15 @@ window.enterLocation = async function(locationId) {
                     <button type="button" data-location-tool="radiation">Радиация</button>
                     <button type="button" data-location-tool="structure">Постройки</button>
                     <button type="button" data-location-tool="erase">Ластик</button>
+                    <button type="button" data-location-tool="assets">Ассеты</button>
+                    <button type="button" data-location-tool="darkness">Темнота</button>
+                    <button type="button" data-location-action="resize" title="R" disabled>Размер</button>
                 `;
                 const hint = document.createElement('p');
                 hint.className = 'map-editor-hint';
                 const shortcuts = document.createElement('p');
                 shortcuts.className = 'map-editor-shortcuts';
-                shortcuts.textContent = 'Удерживайте Q, наведите на сектор и отпустите · 1–7: инструмент · E: редактор · R: ластик';
+                shortcuts.textContent = 'Q / 1–8: инструменты · V: выбор · B: ассеты · G: двигать · T: повернуть · E: редактор · R: ластик';
                 toolsRoot.prepend(toolbar);
                 toolbar.after(hint);
                 hint.after(shortcuts);
@@ -423,8 +444,10 @@ window.enterLocation = async function(locationId) {
                 eraseSettings.hidden = true;
                 toolsRoot.appendChild(eraseSettings);
 
+                let activeAsset = null;
                 const selectLocationTool = tool => {
-                    if (!sections[tool] && !['select', 'erase'].includes(tool)) return;
+                    if (!sections[tool] && !['select', 'erase', 'assets', 'darkness'].includes(tool)) return;
+                    if (tool !== 'select') cancelLocationAssetResize();
                     const previousTool = window.locationEditorTool;
                     window.locationEditorTool = tool;
                     expandMapToolsPanelOnToolChange(previousTool, tool);
@@ -436,27 +459,422 @@ window.enterLocation = async function(locationId) {
                             && !(name === 'brush' && ['terrain', 'height', 'decor', 'radiation', 'erase'].includes(tool));
                     });
                     eraseSettings.hidden = tool !== 'erase';
-                    setLocationBuildMode(tool === 'structure' ? 'structure' : 'terrain');
+                    if (tool !== 'assets') setLocationBuildMode(tool === 'structure' ? 'structure' : 'terrain');
+                    else if (activeAsset) setLocationAssetPreset(activeAsset);
                     setLocationEraserMode(tool === 'erase');
-                    setLocationBrushObjectMode(tool === 'decor');
+                    if (tool !== 'assets') setLocationBrushObjectMode(tool === 'decor');
                     const radCheck = document.getElementById('loc-rad-mode');
                     if (radCheck) radCheck.checked = tool === 'radiation';
                     hint.textContent = {
                         select: 'Выберите объект или персонажа без рисования.',
+                        assets: 'Выберите ассет в библиотеке, наведите на карту и кликните для размещения.',
                         terrain: 'Кликните по клетке или проведите кистью, чтобы сменить покрытие.',
                         height: 'Кликните по клетке или проведите кистью, чтобы изменить высоту.',
                         decor: 'Кликните по клетке, чтобы разместить объект или аномалию.',
                         radiation: 'Кликните по клетке или проведите кистью, чтобы задать радиацию.',
+                        darkness: 'Закрасьте клетки без дневного света; открытые двери и лампы осветят их.',
                         structure: 'Кликните по клетке, чтобы разместить постройку.',
                         erase: 'Удаляет декор. Поставьте галочку, чтобы удалять и постройки на выбранной клетке.',
                     }[tool];
+                    renderPlacementSettings();
                     if (tool !== 'select' && !getLocationEditMode()) setLocationEditMode(true);
                 };
                 toolbar.addEventListener('click', event => {
+                    if (event.target.closest('[data-location-action="resize"]')) {
+                        beginResizeSelectedLocationAsset();
+                        return;
+                    }
                     const button = event.target.closest('[data-location-tool]');
                     if (button) selectLocationTool(button.dataset.locationTool);
                 });
                 window.selectLocationEditorTool = selectLocationTool;
+
+                const assetSection = document.createElement('section');
+                assetSection.className = 'map-editor-section location-asset-library';
+                assetSection.innerHTML = `
+                    <div class="location-asset-library-heading">
+                        <strong class="map-editor-section-heading">Библиотека ассетов</strong>
+                        <span>Выберите карточку, затем место на карте</span>
+                    </div>
+                    <input class="form-control location-asset-search" type="search" placeholder="Найти ассет или аномалию" aria-label="Поиск по ассетам">
+                    <div class="location-asset-tabs"></div>
+                    <div class="location-asset-grid"></div>
+                    <div class="location-asset-placement" hidden>
+                        <span data-placement-name></span>
+                        <label>Высота от земли, м
+                            <input class="form-control" type="number" data-placement-height min="0" max="10" step="0.1">
+                        </label>
+                        <div class="location-asset-dimensions" data-placement-size>
+                            <label>Длина X, м <input class="form-control" type="number" data-placement-dimension="width" min="0.05" max="30" step="any"></label>
+                            <label>Ширина Z, м <input class="form-control" type="number" data-placement-dimension="depth" min="0.02" max="30" step="any"></label>
+                            <label>Высота модели, м <input class="form-control" type="number" data-placement-dimension="height" min="0.05" max="20" step="any"></label>
+                        </div>
+                        <span class="location-asset-placement-hint">Наведите на карту и кликните для размещения</span>
+                    </div>
+                    <div class="location-asset-inspector"></div>
+                `;
+                toolsRoot.appendChild(assetSection);
+                const assetTabs = assetSection.querySelector('.location-asset-tabs');
+                const assetGrid = assetSection.querySelector('.location-asset-grid');
+                const assetInspector = assetSection.querySelector('.location-asset-inspector');
+                const assetPlacement = assetSection.querySelector('.location-asset-placement');
+                const placementHeight = assetPlacement.querySelector('[data-placement-height]');
+                const assetSearch = assetSection.querySelector('.location-asset-search');
+                const anomalyAssets = (locationWorldRules.anomalies || []).map(anomaly => ({
+                    id: `anomaly_${anomaly.key}`, group: 'Аномалии', kind: 'decor',
+                    label: anomaly.name, icon: '✧', color: '#79d7dd',
+                }));
+                const allLocationAssets = [...LOCATION_ASSETS, ...anomalyAssets];
+                const groups = [...new Set(allLocationAssets.map(asset => asset.group))];
+                let activeGroup = 'Свет';
+                const renderPlacementSettings = () => {
+                    assetPlacement.hidden = !activeAsset || window.locationEditorTool !== 'assets';
+                    if (!activeAsset) return;
+                    assetPlacement.querySelector('[data-placement-name]').textContent = activeAsset.label;
+                    placementHeight.value = activeAsset.kind === 'lamp'
+                        ? activeAsset.height : activeAsset.elevation ?? 0;
+                    assetPlacement.querySelector('[data-placement-size]').hidden = activeAsset.id?.startsWith('anomaly_');
+                    const dimensions = assetDimensions(activeAsset, activeAsset.kind, activeAsset.lightKind || activeAsset.id);
+                    assetPlacement.querySelectorAll('[data-placement-dimension]').forEach(input => {
+                        input.value = dimensions[input.dataset.placementDimension];
+                    });
+                };
+                assetPlacement.addEventListener('change', event => {
+                    if (!event.target.matches('[data-placement-dimension]') || !activeAsset) return;
+                    const dimensions = Object.fromEntries(Array.from(
+                        assetPlacement.querySelectorAll('[data-placement-dimension]'),
+                        input => [input.dataset.placementDimension, Number(input.value)],
+                    ));
+                    if (validAssetDimensions(dimensions)) {
+                        activeAsset.dimensions = [dimensions.width, dimensions.depth, dimensions.height];
+                        setLocationAssetDimensions(dimensions);
+                    } else {
+                        showNotification('Размеры объекта вне допустимого диапазона', 'system');
+                    }
+                    renderPlacementSettings();
+                });
+                placementHeight.addEventListener('change', () => {
+                    if (!activeAsset) return;
+                    const value = clampAssetElevation(placementHeight.value);
+                    placementHeight.value = value;
+                    if (activeAsset.kind === 'lamp') activeAsset.height = value;
+                    else activeAsset.elevation = value;
+                    setLocationAssetElevation(value);
+                });
+                const renderAssetCards = () => {
+                    assetTabs.replaceChildren();
+                    assetGrid.replaceChildren();
+                    groups.forEach(group => {
+                        const tab = document.createElement('button');
+                        tab.type = 'button';
+                        tab.textContent = group;
+                        tab.setAttribute('aria-pressed', String(group === activeGroup));
+                        tab.onclick = () => { activeGroup = group; renderAssetCards(); };
+                        assetTabs.appendChild(tab);
+                    });
+                    const search = assetSearch.value.trim().toLocaleLowerCase('ru');
+                    allLocationAssets.filter(asset => search
+                        ? asset.label.toLocaleLowerCase('ru').includes(search)
+                        : asset.group === activeGroup).forEach(asset => {
+                        const card = document.createElement('button');
+                        card.type = 'button';
+                        card.className = 'location-asset-card';
+                        card.setAttribute('aria-pressed', String(activeAsset?.id === asset.id));
+                        const symbol = document.createElement('span');
+                        symbol.className = 'location-asset-symbol';
+                        symbol.style.setProperty('--asset-color', asset.color);
+                        symbol.textContent = asset.icon;
+                        const label = document.createElement('span');
+                        label.textContent = asset.label;
+                        card.append(symbol, label);
+                        card.onclick = () => {
+                            activeAsset = { ...asset };
+                            setLocationAssetPreset(activeAsset);
+                            selectLocationTool('assets');
+                            renderAssetCards();
+                        };
+                        assetGrid.appendChild(card);
+                    });
+                };
+                const renderAssetSelection = () => {
+                    const selection = getSelectedLocationEditorAsset();
+                    toolbar.querySelector('[data-location-action="resize"]').disabled = !selection?.resizable;
+                    const keepPreciseOpen = assetInspector.querySelector('.location-asset-precise')?.open || false;
+                    assetInspector.replaceChildren();
+                    if (!selection) {
+                        const hint = document.createElement('p');
+                        hint.textContent = 'Для настройки уже размещённого объекта выберите инструмент «Выбор» и кликните по нему.';
+                        assetInspector.appendChild(hint);
+                        return;
+                    }
+                    assetInspector.innerHTML = `
+                        <div class="location-asset-selection-heading"><strong data-asset-name></strong><span data-asset-position></span></div>
+                        <div class="location-asset-height-control">
+                            <label>Высота от земли, м
+                                <input class="form-control" type="number" data-asset-elevation min="0" max="10" step="0.1">
+                            </label>
+                            <button type="button" data-height-step="-0.25" aria-label="Опустить на 25 см">−</button>
+                            <button type="button" data-height-step="0.25" aria-label="Поднять на 25 см">+</button>
+                        </div>
+                        <div class="location-asset-actions">
+                            <button type="button" data-asset-action="move" title="G">Переместить</button>
+                            <button type="button" data-asset-action="rotate" title="T">Повернуть на карте</button>
+                            <button type="button" data-asset-action="resize" title="R">Изменить размер</button>
+                            <button type="button" data-asset-action="delete">Удалить</button>
+                        </div>
+                        <div class="location-asset-dimensions" data-selected-size>
+                            <label>Длина X, м <input class="form-control" type="number" data-selected-dimension="width" min="0.05" max="30" step="any"></label>
+                            <label>Ширина Z, м <input class="form-control" type="number" data-selected-dimension="depth" min="0.02" max="30" step="any"></label>
+                            <label>Высота модели, м <input class="form-control" type="number" data-selected-dimension="height" min="0.05" max="20" step="any"></label>
+                        </div>
+                        <div class="location-asset-resize-tools" data-resize-tools hidden>
+                            <span>Ось размера:</span>
+                            <button type="button" data-resize-axis="all" title="Все оси">Все</button>
+                            <button type="button" data-resize-axis="width" title="X">X</button>
+                            <button type="button" data-resize-axis="depth" title="Z">Z</button>
+                            <button type="button" data-resize-axis="height" title="Y">Y</button>
+                            <span>ЛКМ сохранить, Esc отменить</span>
+                        </div>
+                        <details class="location-asset-precise">
+                            <summary>Точная настройка</summary>
+                            <div class="location-asset-fields">
+                                <label>X, м <input class="form-control" type="number" data-asset-field="x" step="0.1"></label>
+                                <label>Z, м <input class="form-control" type="number" data-asset-field="z" step="0.1"></label>
+                                <label data-angle-label>Угол, ° <input class="form-control" type="number" data-asset-field="rotation" step="1"></label>
+                                <label data-lamp-field>Яркость <input class="form-control" type="number" data-asset-field="intensity" min="0" max="10" step="0.1"></label>
+                                <label data-lamp-field>Радиус, м <input class="form-control" type="number" data-asset-field="distance" min="1" max="30" step="0.1"></label>
+                                <label>Цвет <input class="form-control" type="color" data-asset-field="color"></label>
+                            </div>
+                            <button type="button" class="btn btn-secondary" data-asset-save>Сохранить параметры</button>
+                        </details>
+                    `;
+                    assetInspector.querySelector('[data-asset-name]').textContent = selection.label;
+                    if (keepPreciseOpen) assetInspector.querySelector('.location-asset-precise').open = true;
+                    assetInspector.querySelector('[data-asset-position]').textContent = `Клетка ${Math.floor(selection.x)}, ${Math.floor(selection.z)}`;
+                    const heightInput = assetInspector.querySelector('[data-asset-elevation]');
+                    heightInput.value = selection.elevation ?? 0;
+                    assetInspector.querySelectorAll('[data-lamp-field]').forEach(field => {
+                        field.hidden = selection.kind !== 'lamp';
+                    });
+                    assetInspector.querySelector('[data-angle-label]').hidden = selection.kind === 'lamp' && selection.lightKind !== 'spot';
+                    assetInspector.querySelector('[data-asset-action="resize"]').hidden = !selection.resizable;
+                    assetInspector.querySelector('[data-selected-size]').hidden = !selection.resizable;
+                    if (selection.resizable) assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
+                        input.value = selection.dimensions[input.dataset.selectedDimension];
+                    });
+                    for (const input of assetInspector.querySelectorAll('[data-asset-field]')) {
+                        input.value = selection[input.dataset.assetField] ?? '';
+                    }
+                    const readFields = () => {
+                        const fields = {};
+                        for (const input of assetInspector.querySelectorAll('[data-asset-field]')) {
+                            fields[input.dataset.assetField] = input.type === 'color' ? input.value : Number(input.value);
+                        }
+                        fields[selection.kind === 'lamp' ? 'height' : 'elevation'] = Number(heightInput.value);
+                        return fields;
+                    };
+                    if (selection.kind === 'lamp') {
+                        assetInspector.querySelector('.location-asset-fields').addEventListener('input', () => {
+                            previewSelectedLocationLamp(readFields());
+                        });
+                        heightInput.addEventListener('input', () => previewSelectedLocationLamp(readFields()));
+                        assetInspector.querySelector('.location-asset-precise').addEventListener('toggle', event => {
+                            if (!event.target.open) applyLocationLighting();
+                        });
+                    }
+                    assetInspector.querySelector('[data-asset-action="move"]').onclick = () => beginMoveSelectedLocationAsset();
+                    assetInspector.querySelector('[data-asset-action="rotate"]').onclick = () => beginRotateSelectedLocationAsset();
+                    assetInspector.querySelector('[data-asset-action="resize"]').onclick = () => beginResizeSelectedLocationAsset();
+                    assetInspector.querySelector('[data-asset-action="delete"]').onclick = () => deleteSelectedLocationAsset();
+                    assetInspector.querySelectorAll('[data-resize-axis]').forEach(button => {
+                        button.onclick = () => setLocationAssetResizeAxis(button.dataset.resizeAxis);
+                    });
+                    assetInspector.querySelector('[data-selected-size]').addEventListener('change', async event => {
+                        if (!event.target.matches('[data-selected-dimension]')) return;
+                        const dimensions = Object.fromEntries(Array.from(
+                            assetInspector.querySelectorAll('[data-selected-dimension]'),
+                            input => [input.dataset.selectedDimension, Number(input.value)],
+                        ));
+                        if (!validAssetDimensions(dimensions)) {
+                            showNotification('Размеры объекта вне допустимого диапазона', 'system');
+                            renderAssetSelection();
+                            return;
+                        }
+                        cancelLocationAssetResize();
+                        await updateSelectedLocationAssetDetails({
+                            ...readFields(), dimensions,
+                        });
+                    });
+                    assetInspector.querySelector('[data-asset-action="rotate"]').disabled = selection.kind === 'lamp' && selection.lightKind !== 'spot';
+                    let savingHeight = false;
+                    const saveHeight = async value => {
+                        if (savingHeight) return;
+                        savingHeight = true;
+                        const next = clampAssetElevation(value);
+                        heightInput.value = next;
+                        const details = {
+                            x: selection.x, z: selection.z, rotation: selection.rotation,
+                            height: selection.height, intensity: selection.intensity,
+                            distance: selection.distance, color: selection.color,
+                            elevation: selection.elevation,
+                        };
+                        details[selection.kind === 'lamp' ? 'height' : 'elevation'] = next;
+                        const saved = await updateSelectedLocationAssetDetails(details);
+                        if (!saved) {
+                            heightInput.value = selection.elevation ?? 0;
+                            if (selection.kind === 'lamp') applyLocationLighting();
+                        }
+                        savingHeight = false;
+                    };
+                    heightInput.addEventListener('change', () => saveHeight(heightInput.value));
+                    assetInspector.querySelectorAll('[data-height-step]').forEach(button => {
+                        button.onclick = () => saveHeight(Number(heightInput.value) + Number(button.dataset.heightStep));
+                    });
+                    assetInspector.querySelector('[data-asset-save]').onclick = async () => {
+                        if (await updateSelectedLocationAssetDetails(readFields())) showNotification('Параметры обновлены', 'success');
+                    };
+                    const resizeState = getLocationAssetResizeState();
+                    const resizeTools = assetInspector.querySelector('[data-resize-tools]');
+                    resizeTools.hidden = !resizeState.active;
+                    resizeTools.querySelectorAll('[data-resize-axis]').forEach(button => {
+                        button.setAttribute('aria-pressed', String(button.dataset.resizeAxis === resizeState.axis));
+                    });
+                    if (resizeState.active && resizeState.dimensions) {
+                        assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
+                            input.value = resizeState.dimensions[input.dataset.selectedDimension];
+                        });
+                    }
+                };
+                if (window.locationAssetSelectionHandler) {
+                    window.removeEventListener('location-editor-selection', window.locationAssetSelectionHandler);
+                }
+                window.locationAssetSelectionHandler = renderAssetSelection;
+                window.addEventListener('location-editor-selection', renderAssetSelection);
+                if (window.locationAssetResizeHandler) {
+                    window.removeEventListener('location-editor-resize', window.locationAssetResizeHandler);
+                }
+                window.locationAssetResizeHandler = event => {
+                    const tools = assetInspector.querySelector('[data-resize-tools]');
+                    if (!tools) return;
+                    tools.hidden = !event.detail.active;
+                    tools.querySelectorAll('[data-resize-axis]').forEach(button => {
+                        button.setAttribute('aria-pressed', String(button.dataset.resizeAxis === event.detail.axis));
+                    });
+                    if (event.detail.active && event.detail.dimensions) {
+                        assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
+                            if (document.activeElement !== input) input.value = event.detail.dimensions[input.dataset.selectedDimension];
+                        });
+                    } else if (getSelectedLocationEditorAsset()) {
+                        const dimensions = getSelectedLocationEditorAsset().dimensions;
+                        assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
+                            if (document.activeElement !== input) input.value = dimensions[input.dataset.selectedDimension];
+                        });
+                    }
+                };
+                window.addEventListener('location-editor-resize', window.locationAssetResizeHandler);
+                assetSearch.addEventListener('input', renderAssetCards);
+                renderAssetCards();
+                renderAssetSelection();
+
+                let darkTilesDraft = (currentLocationData.lighting?.dark_tiles || []).map(tile => ({ ...tile }));
+                let darknessBrushMode = 'paint';
+                const environmentSection = document.createElement('section');
+                environmentSection.className = 'map-editor-section location-environment-section';
+                environmentSection.innerHTML = `
+                    <button type="button" class="location-environment-toggle" aria-expanded="false">Свет и атмосфера <span>▾</span></button>
+                    <div class="location-environment-body" style="display:none;">
+                        <div class="location-environment-editor"></div>
+                        <div class="location-darkness-controls">
+                            <strong>Тёмные области</strong>
+                            <button type="button" data-darkness-brush="paint" aria-pressed="true">Затемнять клетки</button>
+                            <button type="button" data-darkness-brush="erase" aria-pressed="false">Стереть затемнение</button>
+                            <span data-darkness-count></span>
+                        </div>
+                        <div class="location-environment-actions">
+                            <button type="button" class="btn btn-primary" data-save-environment>Сохранить свет</button>
+                            <button type="button" class="btn btn-secondary" data-revert-environment>Отменить предпросмотр</button>
+                            <span data-environment-status>Изменения видны на карте до сохранения</span>
+                        </div>
+                    </div>
+                `;
+                toolsRoot.appendChild(environmentSection);
+                const environmentBody = environmentSection.querySelector('.location-environment-body');
+                const environmentStatus = environmentSection.querySelector('[data-environment-status]');
+                let environmentEditor;
+                const mountEnvironmentEditor = () => {
+                    environmentEditor = createLocationLightingEditor(
+                        environmentSection.querySelector('.location-environment-editor'),
+                        currentLocationData.lighting,
+                        settings => {
+                            applyLocationLighting(settings, false);
+                            environmentStatus.textContent = 'Предпросмотр: изменения ещё не сохранены';
+                        },
+                        () => currentLocationData.lighting?.local_lights || [],
+                        () => darkTilesDraft,
+                    );
+                };
+                mountEnvironmentEditor();
+                const updateDarknessCount = () => {
+                    environmentSection.querySelector('[data-darkness-count]').textContent = `Клеток: ${darkTilesDraft.length}`;
+                };
+                updateDarknessCount();
+                environmentSection.querySelectorAll('[data-darkness-brush]').forEach(button => {
+                    button.onclick = () => {
+                        darknessBrushMode = button.dataset.darknessBrush;
+                        environmentSection.querySelectorAll('[data-darkness-brush]').forEach(item => {
+                            item.setAttribute('aria-pressed', String(item === button));
+                        });
+                        selectLocationTool('darkness');
+                    };
+                });
+                window.locationDarknessPaintAtTile = (x, z) => {
+                    const index = darkTilesDraft.findIndex(tile => tile.x === x && tile.z === z);
+                    if (darknessBrushMode === 'paint' && index < 0) darkTilesDraft.push({ x, z });
+                    else if (darknessBrushMode === 'erase' && index >= 0) darkTilesDraft.splice(index, 1);
+                    else return;
+                    applyLocationLighting(environmentEditor.get(), false);
+                    updateDarknessCount();
+                    environmentStatus.textContent = 'Предпросмотр: изменения ещё не сохранены';
+                };
+                toolbar.addEventListener('click', event => {
+                    if (event.target.closest('[data-location-tool="darkness"]')
+                        && environmentSection.querySelector('.location-environment-toggle').getAttribute('aria-expanded') !== 'true') {
+                        environmentSection.querySelector('.location-environment-toggle').click();
+                    }
+                });
+                environmentSection.querySelector('.location-environment-toggle').onclick = event => {
+                    const open = event.currentTarget.getAttribute('aria-expanded') !== 'true';
+                    event.currentTarget.setAttribute('aria-expanded', String(open));
+                    environmentBody.style.display = open ? 'block' : 'none';
+                    if (!open) {
+                        if (window.locationEditorTool === 'darkness') selectLocationTool('select');
+                        darkTilesDraft = (currentLocationData.lighting?.dark_tiles || []).map(tile => ({ ...tile }));
+                        updateDarknessCount();
+                        applyLocationLighting();
+                        mountEnvironmentEditor();
+                        environmentStatus.textContent = 'Изменения видны на карте до сохранения';
+                    }
+                };
+                environmentSection.querySelector('[data-revert-environment]').onclick = () => {
+                    darkTilesDraft = (currentLocationData.lighting?.dark_tiles || []).map(tile => ({ ...tile }));
+                    updateDarknessCount();
+                    applyLocationLighting();
+                    mountEnvironmentEditor();
+                    environmentStatus.textContent = 'Изменения видны на карте до сохранения';
+                };
+                environmentSection.querySelector('[data-save-environment]').onclick = async () => {
+                    const settings = environmentEditor.get();
+                    try {
+                        await Server.updateLocation(currentLobbyId, currentLocationData.id, { lighting: settings });
+                        applyLocationLighting(settings);
+                        darkTilesDraft = settings.dark_tiles.map(tile => ({ ...tile }));
+                        updateDarknessCount();
+                        environmentStatus.textContent = 'Свет сохранён';
+                        showNotification('Освещение сохранено', 'success');
+                    } catch (error) {
+                        showNotification(error.message || 'Не удалось сохранить освещение');
+                    }
+                };
 
                 // Получаем элементы
                 const editCheckbox = document.getElementById('loc-edit-toggle-checkbox');
@@ -617,6 +1035,7 @@ window.exitLocation = function() {
     window.isLocationActive = false;
     window.locationEditorTool = 'select';
     delete window.selectLocationEditorTool;
+    delete window.locationDarknessPaintAtTile;
     window.currentLocationId = null;
     window.currentLocationCharacterId = null;
 
@@ -790,7 +1209,7 @@ function openLocationEditModal(locationData) {
     const modal = document.createElement('div');
     modal.className = 'modal';
     modal.innerHTML = `
-        <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-content" style="max-width: 620px;max-height:90vh;overflow:auto;">
             <span class="close" onclick="this.closest('.modal').remove()">&times;</span>
             <h3>Редактирование локации</h3>
             <div class="form-group">
@@ -841,7 +1260,6 @@ function openLocationEditModal(locationData) {
     `;
     document.body.appendChild(modal);
     modal.style.display = 'flex';
-
     let tempTiles = null;
     document.getElementById('regenerate-loc-btn').onclick = () => {
         const newWidth = parseInt(document.getElementById('edit-loc-width').value);
@@ -866,13 +1284,16 @@ function openLocationEditModal(locationData) {
             finalTiles = resizeTilesData(finalTiles, newWidth, newHeight);
         }
         try {
-            await Server.updateLocation(currentLobbyId, locationData.id, {
+            const updates = {
                 name: newName,
                 grid_width: newWidth,
                 grid_height: newHeight,
-                tiles_data: finalTiles,
                 delete_structures: deleteStructures,
-            });
+            };
+            if (tempTiles || newWidth !== locationData.grid_width || newHeight !== locationData.grid_height) {
+                updates.tiles_data = finalTiles;
+            }
+            await Server.updateLocation(currentLobbyId, locationData.id, updates);
             showNotification('Локация обновлена', 'success');
             modal.remove();
             window.enterLocation(locationData.id);

@@ -694,6 +694,7 @@ export function isAlcoholConsumable(item = {}) {
     if (item?.attributes?.is_alcohol === true
         || item?.attributes?.alcohol === true
         || direct.is_alcohol === true) return true;
+    if (Object.keys(direct).length) return false;
     const section = String(item?.attributes?.section || item?.subcategory || '').trim().toLowerCase();
     if (section === 'продукты' && Number(direct.intoxication_delta || 0) > 0) return true;
     return /водка|самогон|вино|пиво|алкогол/i.test(String(item?.name || ''));

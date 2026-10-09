@@ -21,12 +21,14 @@ from app.services.container_transfer import ContainerTransferService
 from app.services.treatment import TreatmentService
 from app.services.medical_procedure import MedicalProcedureService
 from app.services.general_consumable import GeneralConsumableService
+from app.services.custom_consumable_profile import validate_custom_consumable
 from app.services.exceptions import ConflictError, PermissionDenied, ValidationError, NotFoundError
 from app.services.character_events import emit_character_update, publish_character_save
 from app.services.combat import CombatService
 from app.services.artifact_effects import apply_artifact_world_movement
 from app.services.character_interaction import CharacterInteractionService
 from app.services.health import apply_health_maximums, heal_character_fully, health_zones_to_location
+from app.services.location_lighting import normalize_location_lighting
 from app.services.equipment_repair import repair_equipment, resolve_item_path
 from app.services.gas_mask_filters import consume_equipped_filter_charges
 from app.services.addictions import advance_addictions, record_exposure, withdrawal_check, remove_addiction
@@ -2122,6 +2124,17 @@ def batch_update_tiles(lobby_id, lobby):
     socketio.emit('tiles_updated', data, room=f"lobby_{lobby_id}")
     return jsonify({'message': 'Tiles updated successfully'}), 200
 
+@lobbies_bp.route('/<int:lobby_id>/world-roads/connect', methods=['POST'])
+@jwt_required()
+@requires_gm
+def connect_world_roads(lobby_id, lobby):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ValidationError('Expected road coordinates')
+    updates = MapService.connect_roads(lobby_id, lobby.gm_id, data.get('first'), data.get('second'))
+    socketio.emit('tiles_updated', updates, room=f"lobby_{lobby_id}")
+    return jsonify({'updates': updates}), 200
+
 @lobbies_bp.route('/<int:lobby_id>/export', methods=['GET'])
 @jwt_required()
 @requires_gm
@@ -2214,6 +2227,7 @@ def create_lobby_template(lobby_id, lobby):
     data = request.get_json()
     schema = LobbyItemTemplateSchema()
     validated_data = schema.load(data)
+    validate_custom_consumable(validated_data.get('category'), validated_data.get('attributes'))
     template = LobbyItemTemplate(
         lobby_id=lobby_id,
         created_by=int(get_jwt_identity()),
@@ -2232,6 +2246,10 @@ def update_lobby_template(lobby_id, lobby, template_id):
     data = request.get_json()
     schema = LobbyItemTemplateSchema(partial=True)
     validated_data = schema.load(data)
+    validate_custom_consumable(
+        validated_data.get('category', template.category),
+        validated_data.get('attributes', template.attributes),
+    )
     for key, value in validated_data.items():
         setattr(template, key, value)
     db.session.commit()
@@ -2263,6 +2281,7 @@ def create_location(lobby_id, lobby):
         grid_width=data['grid_width'],
         grid_height=data['grid_height'],
         tiles_data=data['tiles_data'],
+        lighting=normalize_location_lighting(data['lighting'], data['grid_width'], data['grid_height']),
         world_tile_x=data['world_tile_x'],
         world_tile_z=data['world_tile_z'],
         world_radius=data['world_radius'],
@@ -2323,6 +2342,7 @@ def get_location_detail(lobby_id, location_id, lobby, participant):
         'grid_width': location.grid_width,
         'grid_height': location.grid_height,
         'tiles_data': location.tiles_data,
+        'lighting': location.lighting,
         'spawn_points': location.spawn_points,
         'objects': obj_schema.dump(objects)
     }), 200
@@ -2353,6 +2373,14 @@ def update_location(lobby_id, location_id, lobby):
     for field in allowed:
         if field in data:
             setattr(location, field, data[field])
+    if 'lighting' in data:
+        location.lighting = normalize_location_lighting(
+            data['lighting'], location.grid_width, location.grid_height,
+        )
+    elif 'grid_width' in data or 'grid_height' in data:
+        location.lighting = normalize_location_lighting(
+            location.lighting or {}, location.grid_width, location.grid_height,
+        )
 
     deleted_structure_ids = []
     if delete_structures:
@@ -2403,7 +2431,10 @@ def update_location(lobby_id, location_id, lobby):
         'lobby_id': lobby_id,
         'location_id': location.id,
         'location': location_marker,
-        'updates': {k: data[k] for k in allowed if k in data}
+        'updates': {
+            **{k: data[k] for k in allowed if k in data},
+            **({'lighting': location.lighting} if 'lighting' in data else {}),
+        }
     }, room=f"lobby_{lobby_id}")
 
     for object_id in deleted_structure_ids:

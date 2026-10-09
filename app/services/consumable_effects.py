@@ -3,6 +3,14 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from app.services.consumable_catalog_rules import (
+    BLEEDING_CATALOG_RULES, EARLY_CATALOG_RULES,
+    EVERYDAY_CATALOG_RULES, LATE_CATALOG_RULES,
+    MEDICAL_CATALOG_RULES, SURGERY_POST_CATALOG_RULES,
+    SURGERY_PRE_CATALOG_RULES,
+    apply_catalog_rules,
+)
+
 
 def _normalize(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
@@ -59,6 +67,55 @@ def _parse_duration(text: str) -> Optional[int]:
         if match:
             return _to_int(match.group(1), 0)
     return None
+
+
+def darkness_modifiers_from_description(description: str) -> List[Dict[str, Any]]:
+    """Parse conditional vision/shooting modifiers independently of item names."""
+    lower = _normalize(description).lower()
+    duration = re.search(r"(?:длится|действует|на)\s+(\d+)\s*(час(?:а|ов)?|минут(?:ы|у)?|ход(?:а|ов)?)\b", lower)
+    if not duration:
+        return []
+    amount = int(duration.group(1))
+    unit = duration.group(2)
+    if unit.startswith("час"):
+        remaining, tick = amount * 60, "time_elapsed"
+    elif unit.startswith("минут"):
+        remaining, tick = amount, "time_elapsed"
+    else:
+        remaining, tick = amount, "turn_end"
+    modifiers = []
+
+    def add(stat, value, note):
+        modifiers.append({
+            "stat": stat, "value": value, "remaining": remaining,
+            "tick": tick, "note": note,
+        })
+
+    for match in re.finditer(
+        r"([+-]\s*\d+)\s*(?:на|к)\s*броск\w*\s+внимательности\s+(в\s+темноте|на\s+свету)",
+        lower,
+    ):
+        stat = "darkness_awareness" if "темноте" in match.group(2) else "light_awareness"
+        add(stat, int(match.group(1).replace(" ", "")),
+            "Внимательность в темноте" if stat == "darkness_awareness" else "Внимательность на свету")
+    immunity = re.search(r"убирает\s+помех\w*\s+на\s+броск[^.]*в\s+темноте", lower)
+    if immunity:
+        if "внимательност" in immunity.group():
+            add("darkness_visual_immunity", 1, "Зрение в темноте")
+        if "точност" in immunity.group() or "стрельб" in immunity.group():
+            add("darkness_shooting_immunity", 1, "Стрельба в темноте")
+    return modifiers
+
+
+def with_darkness_modifiers(profile: Dict[str, Any], description: str) -> Dict[str, Any]:
+    """Backfill previously imported templates without changing their other rules."""
+    result = {**profile, "modifiers": list(profile.get("modifiers") or [])}
+    existing = {modifier.get("stat") for modifier in result["modifiers"] if isinstance(modifier, dict)}
+    result["modifiers"].extend(
+        modifier for modifier in darkness_modifiers_from_description(description)
+        if modifier["stat"] not in existing
+    )
+    return result
 
 
 def _effect(effect_type: str, value: Any = 0, *, remaining: Optional[int] = None, tick: str = "manual", **extra: Any) -> Dict[str, Any]:
@@ -183,96 +240,11 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
         profile["direct"]["medical_difficulty"] = 4
         profile["direct"]["application_form"] = "injectable"
 
-    if "жаропонижающее средство" in lower and "мороз" in lower:
-        profile["direct"]["temperature_delta"] = -1
-        profile["notes"].append("temperature_drop_1")
-    if "ингибитор" in lower:
-        remove_statuses(
-            "bleeding",
-            "bleeding_external_light",
-            "bleeding_external_medium",
-            "bleeding_external_severe",
-            "bleeding_external_extreme",
-            "bleeding_internal_light",
-            "bleeding_internal_medium",
-            "bleeding_internal_severe",
-            "bleeding_internal_extreme",
-            "pain",
-            "exhaustion",
-            "stress",
-            "intoxication",
-            "infection",
-            "blindness",
-            "deafness",
-            "shock",
-            "unconsciousness",
-            "amputation",
-            "organ_loss",
-        )
-        profile["direct"]["delay"] = 1
-        profile["direct"]["sleep_duration"] = 60
-        profile["notes"].append("inhibitor_cleanup")
-    if "подавитель эмоций" in lower:
-        profile["direct"]["stress_advantage"] = True
-        profile["direct"]["stress_attack_block_chance"] = 50
-        profile["direct"]["psy_delta"] = -25
-    if "стимулятор котик" in lower:
-        profile["direct"]["addiction_block_hours"] = 24
-    if "психостимулирующее" in lower and "прорыв" in lower:
-        profile["direct"].update({
-            "withdrawal_check_difficulty_reduction": 5,
-            "withdrawal_support_delay_minutes": 1,
-            "withdrawal_support_duration_minutes": 60,
-        })
-    if "препарат к.о.д." in lower or "препарат код" in lower:
-        profile["direct"].update({
-            "withdrawal_check_difficulty_reduction": 10,
-            "withdrawal_support_delay_minutes": 1,
-            "withdrawal_support_duration_minutes": 60,
-        })
-    if "стимулятор воля-н" in lower:
-        profile["direct"]["pain_block_turns"] = 3
-        profile["direct"]["stress_block_turns"] = 3
-    elif "стимулятор воля" in lower:
-        profile["direct"]["pain_block_turns"] = 3
-        profile["direct"]["stress_block_turns"] = 3
-    if "стимулятор гармония" in lower:
-        profile["direct"]["stress_delta"] = -3
-        profile["direct"]["psy_delta"] = -20
-        profile["direct"]["stress_advantage"] = True
-        profile["direct"]["duration"] = 30
-        profile["direct"]["duration_phase"] = "time_elapsed"
-    if "стимулятор гора-д" in lower:
-        profile["direct"]["strength_delta"] = 2
-        profile["direct"]["weight_delta"] = -3
-        profile["direct"]["hp"] = -100
-    if "стимулятор мозгоправ" in lower:
-        profile["direct"]["psy_defense_delta"] = 25
-        profile["direct"]["will_delta"] = 3
-        profile["direct"]["exhaustion_delta"] = 1
-        profile["direct"]["psy_delta"] = -5
-    if "стимулятор покой" in lower:
-        profile["direct"]["stress_in_combat_delta"] = -3
-        profile["direct"]["stress_safe_delta"] = -5
-        profile["direct"]["psy_delta"] = -10
-    if "стимулятор скала-н" in lower:
-        profile["direct"]["organ_toughness_multiplier"] = 2
-        profile["direct"]["hp_max_delta"] = 200
-        profile["direct"]["hp"] = 200
-        profile["direct"]["post_duration_hp_delta"] = -100
-    elif "стимулятор скала" in lower:
-        profile["direct"]["organ_toughness_multiplier"] = 2
-        profile["direct"]["post_duration_hp_delta"] = -100
-    if "стимулятор сова-н" in lower:
-        profile["direct"]["sleep_block_hours"] = 8
-        profile["direct"]["darkness_awareness_bonus"] = 5
-    if "стимулятор шумодав" in lower:
-        profile["direct"]["deafness"] = True
-        profile["direct"]["vision_awareness_bonus"] = 4
-        profile["direct"]["duration"] = 3
+    apply_catalog_rules(profile, lower, EARLY_CATALOG_RULES)
 
     if "тяжесть кровотечений" in lower and "1/3 бутылки воды" in lower:
         profile["direct"]["bleeding_modifier_delta"] = -2
+        profile["direct"]["bleeding_modifier_scope"] = "combat"
         profile["direct"]["requires_water_fraction"] = 1 / 3
         profile["direct"]["exhaustion_if_no_water"] = 1
         profile["notes"].append("hematogen_bleeding_reduction")
@@ -286,49 +258,6 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
         profile["direct"]["fracture_restore_health"] = 1
         profile["direct"]["fracture_duration_turns"] = 4
         profile["notes"].append("splint")
-    if "губка коллагеновая" in lower:
-        profile["direct"]["bleeding_stop_light_cost"] = 1
-        profile["direct"]["bleeding_stop_medium_cost"] = 2
-        profile["direct"]["bleeding_stop_type"] = "external"
-        profile["notes"].append("collagen_sponge")
-    if "бинт" in lower and "bleeding_stop_light_cost" not in profile["direct"]:
-        profile["direct"]["bleeding_stop_light_cost"] = 1
-        profile["direct"]["bleeding_stop_type"] = "external"
-        profile["notes"].append("bandage_bleeding_stop")
-    if "вода" in lower or "бутылка воды" in lower:
-        profile["direct"].setdefault("radiation_delta", -1)
-        profile["direct"].setdefault("intoxication_delta", -1)
-        profile["direct"].setdefault("exhaustion_delta", -1)
-        profile["direct"].setdefault("uses", 3)
-        profile["notes"].append("water_basic_cleanup")
-    if "физраствор" in lower or "соляной раствор" in lower:
-        profile["direct"]["not_consumed"] = True
-        profile["notes"].append("saline_not_consumed")
-    if lower == "-" or "хлеб" in lower:
-        profile["direct"]["nutrition"] = 1
-        profile["notes"].append("food")
-    if "протеин" in lower:
-        profile["direct"]["rest_heal_multiplier"] = 2
-        profile["direct"]["requires_water_fraction"] = 1
-        profile["notes"].append("protein_rest_bonus")
-    if "протеин" in lower and "здоров" in lower:
-        profile["direct"]["rest_heal_multiplier"] = 2
-        profile["notes"].append("protein_rest_bonus_health")
-    if "набор для определения группы крови" in lower or ("групп" in lower and "кров" in lower and "определ" in lower):
-        profile["direct"]["blood_type_test"] = True
-        profile["notes"].append("blood_type_test")
-    if any(fragment in lower for fragment in ("вино", "алког", "спирт")):
-        profile["direct"].setdefault("intoxication_delta", 1)
-        profile["notes"].append("alcohol_intoxication")
-    if "рад. защита противогаза не работает" in lower and "заряд" in lower:
-        profile["direct"]["filter_charges"] = 20
-        profile["direct"]["requires_gas_mask"] = True
-        profile["notes"].append("gas_mask_filter")
-    if "кустарный фильтр" in lower and "заряд" in lower:
-        profile["direct"]["filter_charges"] = 10
-        profile["direct"]["requires_gas_mask"] = True
-        profile["notes"].append("gas_mask_filter")
-
     if "останов" in lower and "заражени" in lower:
         percent_match = re.search(r"(\d+(?:[.,]\d+)?)\s*%\s*прогресса заражения крови", lower)
         if percent_match:
@@ -549,7 +478,7 @@ def parse_consumable_effects(description: str) -> Dict[str, Any]:
         profile["requirements"].append("requires_gas_mask")
 
     _apply_canonical_consumable_rules(profile, lower)
-    return profile
+    return with_darkness_modifiers(profile, text)
 
 
 def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> None:
@@ -576,329 +505,28 @@ def _apply_canonical_consumable_rules(profile: Dict[str, Any], lower: str) -> No
         effect("regeneration", regeneration, name=f"Регенерация {regeneration:g}/ход",
                remaining=regeneration_duration, tick="turn_end")
 
-    # Food, drinks and delayed everyday effects.
-    if any(name in lower for name in ("хлеб", "колбаса", "консервы", "сушеная рыба", "сухой паек")):
-        direct["nutrition"] = max(1, _to_float(direct.get("nutrition", 1), 1))
-        direct["satisfy_food"] = True
-    if lower.startswith("вода.") or " вода." in lower:
-        direct["satisfy_water"] = True
-    if "сухой паек" in lower:
-        direct["satisfy_water"] = True
-    if "консервы" in lower:
-        direct.update({"exhaustion_delta": -1, "nutrition": 1, "uses": 2})
-    if "сушеная рыба" in lower:
-        direct.pop("intoxication_delta", None)
-        direct.update({"stress_delta": -1, "exhaustion_delta": -0.5, "nutrition": 1, "uses": 3,
-                       "requires_water_fraction": 1 / 3, "water_or_alcohol": True})
-        remove_effect_types("intoxication")
-    if lower.startswith("сахар.") or " сахар." in lower:
-        direct.update({"stress_delta": -1, "exhaustion_delta": -3, "uses": 3, "requires_water_fraction": 2 / 3})
-    if "кофе" in lower:
-        direct.update({"action_points_delta": 2, "exhaustion_delta": -2, "uses": 3,
-                       "requires_water_fraction": 1 / 3})
-    if lower.startswith("энергетик."):
-        direct.update({"action_points_delta": 5, "exhaustion_delta": -1, "duration": 3,
-                       "weight_delta": -2, "use_limit": 1, "limit_scope": "turn",
-                       "exclusive_group": "combat_stimulant", "clear_breathless": True})
-    if lower.startswith("адреналин."):
-        direct.update({"action_points_delta": 3, "action_points_duration": 3, "duration": 3,
-                       "hp": -50, "exhaustion_delta": -1, "use_limit": 1,
-                       "exclusive_group": "combat_stimulant", "clear_breathless": True})
-        direct.pop("weight_delta", None)
-    if lower.startswith("эпинефрин."):
-        direct.update({"action_points_delta": 5, "action_points_duration": 3, "duration": 3,
-                       "hp": 50, "exhaustion_delta": -2, "use_limit": 1,
-                       "exclusive_group": "combat_stimulant", "clear_breathless": True})
-        direct.pop("weight_delta", None)
-    alcohol_rules = {
-        "водка": (-1, 15, -0.25, -1, -1, 0.5, 6),
-        "самогон": (-2.5, 25, -0.5, -1, -2, 1, 8),
-        "вино": (-5, 10, 0, -1, -1, 0, 10),
-        "банка пива": (-1, 20, -0.5, -1, 0, 0, 1),
-    }
-    for name, (radiation, intoxication, exhaustion, stress, pain, next_day_exhaustion, uses) in alcohol_rules.items():
-        if name not in lower:
-            continue
-        direct.update({"radiation_delta": radiation, "intoxication_delta": intoxication,
-                       "exhaustion_delta": exhaustion, "stress_delta": stress, "pain_delta": pain,
-                       "uses": uses, "is_alcohol": True})
-        if next_day_exhaustion:
-            effect("deferred_adjustment", next_day_exhaustion, name="Истощение на следующие сутки",
-                   remaining=1, tick="day_start", trigger="next_day",
-                   adjustments=[{"field": "exhaustion", "delta": next_day_exhaustion, "min": 0, "max": 10}])
-        break
-    tobacco_stress = 1 if "самокрутка" in lower else 2
-    if any(name in lower for name in ("самокрутка", "сигареты ", "сигары")):
-        effect("delayed_adjustment", tobacco_stress, name="Снижение стресса через 5 минут",
-               remaining=5, tick="time_elapsed", time_unit="minute", remaining_seconds=300,
-               adjustments=[{"field": "stress", "delta": -tobacco_stress, "min": 0, "max": 10}])
-        direct["requires_fire"] = True
-        if "сигареты " in lower:
-            direct["uses"] = 20
-        elif "сигары" in lower:
-            direct["uses"] = 5
-    if "протеин" in lower:
-        direct.update({"rest_heal_multiplier": 2, "requires_water_fraction": 1 / 3})
-        effect("next_rest_healing", 2, name="Удвоенное лечение на следующем отдыхе", tick="rest", trigger="next_rest")
+    apply_catalog_rules(profile, lower, EVERYDAY_CATALOG_RULES)
 
-    # Targeted bleeding and wound treatment.
-    applications = []
-    def bleeding(max_stage: str, *, internal: bool = False, ap: int = 1, treated: bool = False, all_bleeds: bool = False) -> None:
-        applications.append({"kind": "bleeding", "max_stage": max_stage, "internal": internal,
-                             "action_points": ap, "treated": treated, "all": all_bleeds,
-                             "allow_weakening": True})
-
-    if "бинт" in lower:
-        direct["uses"] = 1
-        direct["treatment_action_points"] = 4
-        direct["treatment_time_uses_medicine"] = True
-        bleeding("light", treated="стерильный" in lower)
-        applications.append({"kind": "bleeding", "max_stage": "medium", "internal": False,
-                             "action_points": 1, "treated": "стерильный" in lower,
-                             "item_uses": 2, "medicine_bonus": 2, "allow_weakening": True})
-    if "антисептический тампон" in lower:
-        direct["treatment_action_points"] = 2
-        direct["treatment_time_uses_medicine"] = True
-        bleeding("light", treated=True)
-    if "пластырь с гемостатиком" in lower:
-        bleeding("medium", ap=2)
-        bleeding("severe", ap=4)
-    if 'пластырь "стазис"' in lower:
-        bleeding("medium", ap=1)
-        bleeding("severe", ap=2)
-    if "губка коллагеновая" in lower:
-        bleeding("light", ap=1)
-        bleeding("medium", ap=2)
-    if any(name in lower for name in ("жгут", "турникет")) and "шина шарнирова" not in lower:
-        direct["treatment_action_points"] = 4
-        direct["treatment_time_uses_medicine"] = True
-        stage = "extreme" if "альфа" in lower else "severe" if "турникет" in lower else "medium"
-        bleeding(stage)
-        direct.update({"tourniquet": True, "limb_only": True})
-    if "оксицел" in lower:
-        bleeding("light")
-    if "тромбин-л" in lower:
-        bleeding("light", internal=True)
-    elif "тромбин" in lower:
-        bleeding("severe")
-        bleeding("medium", internal=True)
-    if "глобулин" in lower or "контрикал" in lower:
-        bleeding("severe", internal=True)
-    if 'гемостатик "шов"' in lower:
-        bleeding("severe", internal=True)
-        applications[-1]["internal_only"] = True
-    if "соляного раствора" in lower:
-        direct.update({"wound_treatment": True, "pain_delta": 1, "uses": 10, "action_points_cost": 1})
-        direct.pop("not_consumed", None)
-    if lower.startswith("спирт.") or " спирт." in lower:
-        direct.update({"wound_treatment": True, "pain_delta": 3, "uses": 10,
-                       "action_points_cost": 1, "external_use_only": True})
-        direct.pop("intoxication_delta", None)
-        remove_effect_types("intoxication")
-    if applications:
-        direct["applications"] = applications
+    apply_catalog_rules(profile, lower, BLEEDING_CATALOG_RULES)
+    if direct.get("applications"):
         direct["requires_injury"] = True
         profile["status_removals"] = [
             status for status in profile["status_removals"]
             if not str(status).startswith("bleeding")
         ]
-        profile["status_removals"] = [
-            status for status in profile["status_removals"]
-            if not str(status).startswith("bleeding")
-        ]
 
-    if 'кровоостанавливающее "желе"' in lower:
-        remove_effect_types("bleeding_block")
-        effect("blood_loss_freeze", 1, name="Стабилизация кровопотери", remaining=5, tick="turn_end")
-    if 'кровоостанавливающее' in lower and 'хлопок' in lower:
-        remove_effect_types("bleeding_block")
-        direct["stop_all_bleeding"] = True
-        direct["exhaustion_delta"] = 1
-        effect("bleeding_prevention", 1, name="Блок новых кровотечений", remaining=10, tick="turn_end")
+    apply_catalog_rules(profile, lower, MEDICAL_CATALOG_RULES)
 
-    # Infection and transfusion.
-    if 'стимулятор "полукровка"' in lower:
-        direct.update({"infection_delta": -50, "infection_block_days": 3})
-        effect("infection_growth_block", 1, name="Блок нарастания заражения", remaining=3,
-               tick="day_start", time_unit="day")
-    if "пенициллин" in lower:
-        direct.update({"infection_delta": -5, "infection_block_chance": 20, "temperature_delta": 1})
-    if "сангвинил" in lower:
-        direct.update({"infection_delta": -5, "infection_block_chance": 50, "temperature_delta": 1})
-    if "настойка мяты" in lower:
-        direct.update({"infection_delta": -25, "exhaustion_delta": 1})
-    is_saline_packet = lower.startswith("пакет физраствора.")
-    is_blood_packet = lower.startswith("пакет крови.")
-    is_fullblood = lower.startswith('стимулятор "полнокровка".')
-    if is_saline_packet or is_blood_packet or is_fullblood:
-        duration = 4 if is_blood_packet else 5 if is_fullblood else 2
-        remove_effect_types("blood_recovery")
-        effect("blood_recovery", 1, name="Восстановление стадии кровопотери", remaining=duration, tick="turn_end")
-        if is_saline_packet or is_blood_packet:
-            direct.update({"requires_infusion_tool": True, "blood_compatibility_required": is_blood_packet})
-            direct.pop("not_consumed", None)
-        if is_fullblood:
-            direct["exhaustion_delta"] = 1
-    if "набор для забора крови" in lower:
-        direct.pop("requires_infusion_tool", None)
-        direct.pop("blood_compatibility_required", None)
-        remove_effect_types("blood_recovery")
-        direct.update({"blood_collection": True, "target_required": True, "blood_stage_delta": 2,
-                       "exhaustion_delta": 2})
-    if "бутылек нашатыря" in lower:
-        direct.update({
-            "target_required": True, "requires_shock": True, "not_consumed": True,
-            "will_shock_bonus": 2, "will_shock_advantage": True,
-        })
-
-    # Painkillers and delayed drugs.
-    painkillers = {
-        "анальгин": (2, 1, 8, 0.5, 0, 0),
-        "аспирин": (2, 3, 2, -1, 0, 0),
-        "ибупрофен": (1, 1, 10, -0.5, -10, -1),
-        "настойка боярышника": (2, 1, 3, 0, 0, 0),
-    }
-    for name, (delay, pain, duration, temperature, infection, stress) in painkillers.items():
-        if name not in lower:
-            continue
-        effect("delayed_treatment", pain, name=f"{name.capitalize()}: ожидание действия", remaining=delay,
-               tick="turn_end", adjustments=[
-                   {"field": "painLevel", "delta": -pain, "min": 0, "max": 10},
-                   {"field": "temperature", "delta": temperature, "min": 0},
-                   {"field": "infection", "delta": infection, "min": 0, "max": 100},
-                   {"field": "stress", "delta": stress, "min": 0, "max": 10},
-               ], activate_effects=[{"type": "analgesia", "name": f"Обезболивание {pain}", "value": pain,
-                                     "remaining": duration, "tick": "turn_end"}])
-        direct.pop("pain_delta", None)
-        break
-    if "морфин" in lower:
-        direct.update({"exhaustion_delta": -1})
-        effect("delayed_treatment", 3, name="Морфин: ожидание действия", remaining=1, tick="turn_end",
-               adjustments=[{"field": "painLevel", "delta": -3, "min": 0, "max": 10},
-                            {"field": "stress", "delta": -2, "min": 0, "max": 10}],
-               activate_effects=[{"type": "analgesia", "name": "Морфин: блок боли", "value": 3,
-                                  "remaining": 3, "tick": "turn_end", "blocks_new_pain": True}])
-        effect("deferred_adjustment", 2, name="Морфин: истощение через час", remaining=1, tick="hour_start", trigger="one_hour",
-               adjustments=[{"field": "exhaustion", "delta": 2, "min": 0, "max": 10}])
-
-    # Combat stimulants and special preparations.
-    if "научный стимулятор волкодав" in lower:
-        profile["status_additions"] = [status for status in profile["status_additions"] if status != "sleep"]
-        direct.update({"strength_delta": 5, "accuracy_delta": 5, "duration": 15})
-        effect("stimulant_crash", 0, name="Волкодав", remaining=15, tick="turn_end",
-               on_expire=[{"field": "current", "delta": -50, "min": 0}],
-               activate_effects=[{"type": "sleep", "name": "Сон после Волкодава", "remaining": 1,
-                                  "tick": "hour_start", "time_unit": "hour"}])
-    if "стимулятор варвар" in lower:
-        direct["pain_delta"] = -3
-        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
-                       "affects_all_limbs": True})
-    if "стимулятор викинг" in lower:
-        direct["pain_delta"] = -5
-        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
-                       "minimum_limb_health": 1, "affects_all_limbs": True})
-    if "ампула миколия" in lower:
-        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
-                       "affects_all_limbs": True})
-    if "препарат 02" in lower:
-        direct.update({"temporary_limb_health_minutes": 10, "suppress_limb_trauma": True,
-                       "affects_all_limbs": True})
-    if "научный стимпак" in lower:
-        direct["radiation_delta"] = -5
-    if "военный стимпак" in lower:
-        direct["bleeding_modifier_delta"] = -2
-    if "стимулятор шумодав" in lower:
-        direct["duration"] = 3
-        effect("deafness", 100, name="Глухота", remaining=3, tick="movement_end")
-        profile["modifiers"].append({"stat": "vision_awareness", "value": 4, "remaining": 3,
-                                     "tick": "movement_end", "note": "Шумодав"})
-    if lower.startswith("стимулятор воля-н."):
-        direct.update({"pain_block_turns": 5, "stress_block_turns": 5,
-                       "blocked_pain_return_fraction": 0.5, "exhaustion_on_expire": 0})
-    elif lower.startswith("стимулятор воля."):
-        direct.update({"pain_block_turns": 3, "stress_block_turns": 3,
-                       "blocked_pain_return_fraction": 1, "exhaustion_on_expire": 1})
-    if "стимулятор сова-н" in lower or "стимулятор сова" in lower:
-        profile["status_additions"] = [status for status in profile["status_additions"] if status != "sleep"]
-        direct["satisfy_sleep"] = True
-        direct["sleep_block_hours"] = 8 if "сова-н" in lower else 4
-        if "сова-н" not in lower:
-            direct.pop("exhaustion_delta", None)
-            remove_effect_types("exhaustion")
-            effect("deferred_adjustment", 2, name="Истощение на следующие сутки", tick="day_start",
-                   remaining=1, trigger="next_day", adjustments=[{"field": "exhaustion", "delta": 2, "min": 0, "max": 10}])
-    if any(name in lower for name in ("антирад-а", "антирад-б", "антирад-г", "йод-плюс")):
-        dose = -5 if "антирад-б" in lower else -3 if "антирад-г" in lower else -2.5
-        duration = 4 if "антирад-а" in lower or "антирад-б" in lower else 10
-        direct.pop("radiation_delta", None)
-        direct["exhaustion_delta"] = 1
-        remove_effect_types("radiation")
-        effect("radiation_treatment", dose, name=f"Выведение радиации {abs(dose):g}/ход",
-               remaining=duration, tick="turn_end")
-    radiation_shields = {
-        'препарат "радист"-л': (100, 50),
-        'препарат "радист"': (100, 100),
-        'противорадиационное "брезент"-пб': (50, 100),
-    }
-    for name, (percent, capacity) in radiation_shields.items():
-        if name in lower:
-            direct.update({"radiation_filter_percent": percent, "radiation_filter_capacity": capacity,
-                           "exhaustion_delta": 1})
-            effect("radiation_filter", percent, name=f"Выведение входящей радиации {percent}%",
-                   tick="time_elapsed", remaining=24, time_unit="hour", remaining_seconds=86400,
-                   capacity=capacity, remaining_capacity=capacity, max_hours=24)
-            if name == 'препарат "радист"':
-                effect("temporary_exhaustion", 0, name="Радист: истощение",
-                       remaining=3, tick="turn_end",
-                       onExpire=[{"field": "exhaustion", "delta": -1, "min": 0, "max": 10}])
-            break
-    if "жаропонижающее средство" in lower and "мороз" in lower:
-        direct["temperature_delta"] = -1
-        effect("temperature_control", -1, name="Жаропонижающее", remaining=4, tick="turn_end")
-
-    # Fractures, surgery and named limb restoratives require an explicit target.
-    if "шина шарнирова" in lower:
-        direct.update({"fracture_splint": True, "fracture_restore_health": 1,
-                       "temporary_limb_health_minutes": 10, "action_points_cost": 6,
-                       "requires_injury": True})
-    elif lower.strip().startswith("шина"):
-        direct.update({"fracture_splint": True, "fracture_restore_health": 1,
-                       "temporary_limb_health_turns": 4, "action_points_cost": 6,
-                       "requires_injury": True})
-    if any(name in lower for name in ("шина.", "химера", "вторая жизнь", "хирургический набор",
-                                      'кустарный набор "айболит"', "набор полного восстановления конечности")):
-        direct["requires_injury"] = True
-        direct["target_body_part"] = True
-    if "кустарный набор" in lower and "айболит" in lower:
-        direct["surgical_kit"] = True
-        direct["requires_injury"] = True
-        direct["target_body_part"] = True
-    if "набор полного восстановления конечности" in lower:
-        direct.update({
-            "surgical_kit": True,
-            "catastrophic_limb_surgery": "full_restoration",
-            "restore_missing_part": True,
-            "restore_full_body_part": True,
-        })
-    if "хирургический набор" in lower:
-        direct.update({
-            "surgical_kit": True,
-            "catastrophic_limb_surgery": "surgeon",
-        })
+    # Legacy catalogue overrides are data; new profiles can express these effects directly.
+    apply_catalog_rules(profile, lower, LATE_CATALOG_RULES)
+    apply_catalog_rules(profile, lower, SURGERY_PRE_CATALOG_RULES)
     surgery_match = re.search(r"восстанавливает (?:часть тела|утерянный орган или искореженную конечность).*?она имеет\s+(\d+)\s+здоров", lower)
     if surgery_match:
         direct["restore_limb_health"] = _to_int(surgery_match.group(1), 1)
         action_match = re.search(r"время использования\s*-\s*(\d+)\s*од", lower)
         direct["action_points_cost"] = _to_int(action_match.group(1), 1) if action_match else 1
         direct["restore_missing_part"] = True
-    if "химера" in lower:
-        direct.update({"cure_fracture": True, "close_area_bleeding": True, "delay": 1,
-                       "delayed_limb_treatment_minutes": 1, "special_limb_treatment": "chimera",
-                       "invalid_limb_damage": -200, "head_lethal": True})
-    if "вторая жизнь" in lower:
-        direct.update({"cure_fracture": True, "restore_limb_health": 50, "close_area_bleeding": True,
-                       "pain_delta": 5, "delay": 1, "delayed_limb_treatment_minutes": 1,
-                       "special_limb_treatment": "second_life"})
+    apply_catalog_rules(profile, lower, SURGERY_POST_CATALOG_RULES)
 
     visible_fields = {
         "radiation_delta": "Радиация", "intoxication_delta": "Опьянение",

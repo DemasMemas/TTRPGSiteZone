@@ -31,7 +31,16 @@ let anomalyCatalog = [];
 const WORLD_OBJECT_COLORS = {
     forest: '#315f3b', hamlet: '#aa8665', village: '#b39474',
     road: '#756f61', factory: '#66747b', base: '#6c765d', camp: '#9c8362',
+    tree: '#2d5a27', house: '#8b4513', fence: '#8b5a2b',
 };
+const WORLD_OBJECT_TYPES = new Set(Object.keys(WORLD_OBJECT_COLORS));
+const placingObjectTiles = new Set();
+let selectedWorldObject = 'tree';
+let lastPlacedObjectKey = null;
+let lastPlacedObjectAt = 0;
+let roadLinkActive = false;
+let roadLinkFirst = null;
+let roadLinkSaving = false;
 
 const ANOMALY_TYPE_LABELS = {
     void: 'гравитационная',
@@ -53,6 +62,15 @@ export function initMapEdit(lobbyId, authToken) {
     document.getElementById('panel-tools')?.addEventListener('click', event => {
         const button = event.target.closest('[data-world-tool]');
         if (button) selectWorldEditorTool(button.dataset.worldTool);
+        const objectButton = event.target.closest('[data-world-object]');
+        if (objectButton) selectWorldObject(objectButton.dataset.worldObject);
+        if (event.target.closest('#world-road-link-button')) {
+            if (!roadLinkActive) selectWorldObject('road');
+            toggleWorldRoadLink();
+        }
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && roadLinkActive) toggleWorldRoadLink(false);
     });
     document.getElementById('panel-tools')?.addEventListener('change', event => {
         if (event.target.id === 'tile-type-select') AppState.setCurrentTileType(event.target.value);
@@ -63,6 +81,16 @@ export function initMapEdit(lobbyId, authToken) {
     });
     syncMapEditorAutoExpandCheckbox();
     selectWorldEditorTool('select');
+    for (const id of ['world-object-color', 'world-object-scale', 'world-object-rotation']) {
+        document.getElementById(id)?.addEventListener('input', () => updateWorldObjectPreview(getHoveredTile()));
+    }
+    document.getElementById('object-type-select')?.addEventListener('change', event => {
+        const color = document.getElementById('object-color');
+        if (color && WORLD_OBJECT_COLORS[event.target.value]) {
+            color.value = WORLD_OBJECT_COLORS[event.target.value];
+            updatePreviewFromModal();
+        }
+    });
 
     const previewFields = [
         'object-type-select',
@@ -116,6 +144,10 @@ export function updateAnomalyFieldRankOptions() {
 
 export function setEditMode(enabled) {
     AppState.setEditMode(enabled);
+    if (!enabled) {
+        toggleWorldRoadLink(false);
+        removePreviewObject();
+    }
     import('./lobby3d.js').then(module => {
         module.setEditMode(enabled);
     });
@@ -128,21 +160,17 @@ export function setEditMode(enabled) {
 
 export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     const root = document.getElementById('gm-only-controls');
-    if (!root || !['select', 'terrain', 'height', 'radiation', 'erase'].includes(tool)) return;
+    if (!root || !['select', 'terrain', 'height', 'radiation', 'erase', 'objects'].includes(tool)) return;
     const previousTool = window.worldEditorTool;
+    if (tool !== 'objects' && roadLinkActive) toggleWorldRoadLink(false);
     root.dataset.tool = tool;
     window.worldEditorTool = tool;
     if (autoExpand) expandMapToolsPanelOnToolChange(previousTool, tool);
     root.querySelectorAll('[data-world-tool]').forEach(button => {
         button.setAttribute('aria-pressed', String(button.dataset.worldTool === tool));
     });
-    document.getElementById('object-type-select')?.addEventListener('change', event => {
-        const color = document.getElementById('object-color');
-        if (color && WORLD_OBJECT_COLORS[event.target.value]) {
-            color.value = WORLD_OBJECT_COLORS[event.target.value];
-            updatePreviewFromModal();
-        }
-    });
+    if (tool === 'objects') updateWorldObjectPreview(getHoveredTile());
+    else if (previousTool === 'objects') removePreviewObject();
     const eraser = document.getElementById('eraser-checkbox');
     if (eraser) eraser.checked = tool === 'erase';
     AppState.setEraserMode(tool === 'erase');
@@ -153,8 +181,141 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
         height: 'Проведите кистью по карте, чтобы изменить высоту.',
         radiation: 'Проведите кистью по карте, чтобы изменить радиацию.',
         erase: 'Проведите по карте, чтобы удалить объекты с тайлов.',
+        objects: 'Выберите объект и поставьте его кликом по карте. Двойной клик открывает точные настройки тайла.',
     }[tool];
 }
+
+export function selectWorldObject(type) {
+    if (!WORLD_OBJECT_TYPES.has(type)) return;
+    if (type !== 'road' && roadLinkActive) toggleWorldRoadLink(false);
+    selectedWorldObject = type;
+    document.querySelectorAll('[data-world-object]').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.worldObject === type));
+    });
+    const color = document.getElementById('world-object-color');
+    if (color) color.value = WORLD_OBJECT_COLORS[type];
+    updateWorldObjectPreview(getHoveredTile());
+}
+
+function updateWorldRoadLinkStatus(message) {
+    const button = document.getElementById('world-road-link-button');
+    const status = document.getElementById('world-road-link-status');
+    if (button) button.setAttribute('aria-pressed', String(roadLinkActive));
+    if (status) status.textContent = message || 'Выберите две соседние клетки с дорогами.';
+}
+
+export function toggleWorldRoadLink(enabled = !roadLinkActive) {
+    roadLinkActive = Boolean(enabled);
+    roadLinkFirst = null;
+    updateWorldRoadLinkStatus(roadLinkActive
+        ? 'Кликните по первой дороге, затем по соседней дороге. Esc отменяет.'
+        : null);
+    updateWorldObjectPreview(getHoveredTile());
+}
+
+async function connectRoadAtTile(tile) {
+    if (roadLinkSaving) return false;
+    if (!tile.tileData.objects?.some(object => object.type === 'road')) {
+        showNotification('На выбранной клетке нет дороги.');
+        return false;
+    }
+    const point = [tile.chunkX * CHUNK_SIZE + tile.tileX, tile.chunkY * CHUNK_SIZE + tile.tileY];
+    if (!roadLinkFirst) {
+        roadLinkFirst = point;
+        updateWorldRoadLinkStatus(`Первая дорога: (${point[0]}, ${point[1]}). Выберите соседнюю.`);
+        return true;
+    }
+    if (point[0] === roadLinkFirst[0] && point[1] === roadLinkFirst[1]) return false;
+    if (Math.max(Math.abs(point[0] - roadLinkFirst[0]), Math.abs(point[1] - roadLinkFirst[1])) !== 1) {
+        showNotification('Для соединения выберите соседнюю клетку с дорогой.');
+        return false;
+    }
+    roadLinkSaving = true;
+    try {
+        const result = await Server.connectWorldRoads(currentLobbyId, roadLinkFirst, point);
+        for (const update of result.updates) {
+            updateTileInChunk(update.chunk_x, update.chunk_y, update.tile_x, update.tile_y, update.updates);
+        }
+        roadLinkFirst = null;
+        updateWorldRoadLinkStatus('Дороги соединены. Выберите следующую пару или нажмите Esc.');
+        showNotification('Дороги соединены.', 'success');
+        return true;
+    } catch (error) {
+        showNotification(error.message, 'error');
+        return false;
+    } finally {
+        roadLinkSaving = false;
+    }
+}
+
+function worldObjectSettings() {
+    const scale = Math.max(0.2, Math.min(2, Number(document.getElementById('world-object-scale')?.value) || 1));
+    const rotation = Math.max(0, Math.min(359, Number(document.getElementById('world-object-rotation')?.value) || 0));
+    const scaleOutput = document.getElementById('world-object-scale-value');
+    const rotationOutput = document.getElementById('world-object-rotation-value');
+    if (scaleOutput) scaleOutput.textContent = scale.toFixed(2);
+    if (rotationOutput) rotationOutput.textContent = `${rotation}°`;
+    return { type: selectedWorldObject, color: document.getElementById('world-object-color')?.value
+        || WORLD_OBJECT_COLORS[selectedWorldObject], scale, rotation };
+}
+
+export function updateWorldObjectPreview(tile) {
+    if (document.getElementById('tile-edit-modal')?.style.display === 'flex') return;
+    if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects' || !tile || roadLinkActive) {
+        removePreviewObject();
+        return;
+    }
+    const globalX = tile.chunk.chunkX * CHUNK_SIZE + tile.tileX + 0.5;
+    const globalZ = tile.chunk.chunkY * CHUNK_SIZE + tile.tileY + 0.5;
+    createPreviewObject({
+        chunkX: tile.chunk.chunkX, chunkY: tile.chunk.chunkY,
+        tileX: tile.tileX, tileY: tile.tileY, tileData: tile.tileData,
+    }, {
+        ...worldObjectSettings(),
+        offsetX: Math.max(-0.49, Math.min(0.49, (tile.pointX ?? globalX) - globalX)),
+        offsetZ: Math.max(-0.49, Math.min(0.49, (tile.pointZ ?? globalZ) - globalZ)),
+    });
+}
+
+export async function placeWorldObjectAtTile(tile) {
+    if (roadLinkActive) {
+        return AppState.isGM && AppState.editMode && window.worldEditorTool === 'objects' && tile?.tileData
+            ? connectRoadAtTile(tile) : false;
+    }
+    if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects'
+        || !tile?.tileData || tile.tileData.terrain === 'water') {
+        if (tile?.tileData?.terrain === 'water') showNotification('На воде этот объект разместить нельзя');
+        return false;
+    }
+    const { chunkX, chunkY, tileX, tileY } = tile;
+    const key = `${chunkX},${chunkY},${tileX},${tileY}`;
+    if (placingObjectTiles.has(key) || (lastPlacedObjectKey === key && Date.now() - lastPlacedObjectAt < 400)) {
+        return false;
+    }
+    placingObjectTiles.add(key);
+    try {
+        const globalX = chunkX * CHUNK_SIZE + tileX + 0.5;
+        const globalZ = chunkY * CHUNK_SIZE + tileY + 0.5;
+        const object = {
+            ...worldObjectSettings(),
+            x: Math.max(-0.49, Math.min(0.49, (tile.pointX ?? globalX) - globalX)),
+            z: Math.max(-0.49, Math.min(0.49, (tile.pointZ ?? globalZ) - globalZ)),
+        };
+        const objects = [...(tile.tileData.objects || []), object];
+        const saved = await handleTileUpdate(chunkX, chunkY, tileX, tileY, { objects });
+        if (saved) {
+            lastPlacedObjectKey = key;
+            lastPlacedObjectAt = Date.now();
+        }
+        return saved;
+    } finally {
+        placingObjectTiles.delete(key);
+    }
+}
+
+window.updateWorldObjectPreview = updateWorldObjectPreview;
+window.placeWorldObjectAtTile = placeWorldObjectAtTile;
+window.isWorldRoadLinkActive = () => roadLinkActive;
 
 export function getEditMode() {
     return AppState.editMode;
@@ -275,8 +436,10 @@ export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
     try {
         await Server.updateTile(currentLobbyId, chunkX, chunkY, tileX, tileY, filteredUpdates);
         updateTileInChunk(chunkX, chunkY, tileX, tileY, filteredUpdates);
+        return true;
     } catch (error) {
         showNotification(error.message);
+        return false;
     }
 }
 

@@ -50,6 +50,20 @@ def test_stimulants_are_assigned_to_their_rule_groups():
     assert addictions.addiction_profile('Стимулятор Гора') is None
 
 
+def test_saved_profile_string_multiplier_keys_are_used_for_repeat_doses(monkeypatch):
+    monkeypatch.setattr(addictions.random, 'random', lambda: 0.99)
+    health = {}
+    profile = {
+        'key': 'custom', 'label': 'Особая зависимость', 'chance': 2,
+        'multipliers': {'2': 3}, 'kind': 'medicine',
+    }
+
+    addictions.record_exposure(health, 'Переименованный препарат', 0, 100, profile=profile)
+    second = addictions.record_exposure(health, 'Переименованный препарат', 0, 105, profile=profile)
+
+    assert second['chance'] == 6
+
+
 def test_repeated_analgin_uses_ten_minute_multiplier(monkeypatch):
     monkeypatch.setattr(addictions.random, 'random', lambda: 0.99)
     health = {}

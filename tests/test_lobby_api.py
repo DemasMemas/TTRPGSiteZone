@@ -10,6 +10,7 @@ from app.models import (
     Lobby,
     LobbyCharacter,
     LobbyParticipant,
+    MapChunk,
     LocationCombatState,
     Location,
     LocationCharacter,
@@ -4178,3 +4179,56 @@ def test_new_burst_replaces_stale_must_do_target(
         result["target_character_id"]
         for result in repeated.get_json()["attack"]["results"]
     } == {mutant_target["id"]}
+
+
+def test_gm_connects_adjacent_world_roads_across_chunks(client, create_user, auth_headers):
+    gm = create_user()
+    player = create_user()
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    lobby_id = lobby["id"]
+    road = {"type": "road", "connections": ["N", "S"], "color": "#756f61"}
+    MapService.update_tile(lobby_id, gm["id"], 0, 0, 31, 4, {"objects": [road]})
+    MapService.update_tile(lobby_id, gm["id"], 1, 0, 0, 4, {"objects": [road]})
+    url = f"/lobbies/{lobby_id}/world-roads/connect"
+
+    forbidden = client.post(url, headers=auth_headers(player), json={"first": [31, 4], "second": [32, 4]})
+    assert forbidden.status_code == 403
+    assert client.post(url, headers=auth_headers(gm), json=[31, 4, 32, 4]).status_code == 400
+    for first, second in ((None, [32, 4]), ([31, 4], [33, 4])):
+        response = client.post(url, headers=auth_headers(gm), json={"first": first, "second": second})
+        assert response.status_code == 400
+    assert MapService.get_tile_data(lobby_id, 31, 4)["objects"][0].get("manual_connections") is None
+
+    response = client.post(url, headers=auth_headers(gm), json={"first": [31, 4], "second": [32, 4]})
+    assert response.status_code == 200
+    assert len(response.get_json()["updates"]) == 2
+    db.session.expire_all()
+    first_road = MapService.get_tile_data(lobby_id, 31, 4)["objects"][0]
+    second_road = MapService.get_tile_data(lobby_id, 32, 4)["objects"][0]
+    assert first_road["manual_connections"] == ["E"]
+    assert second_road["manual_connections"] == ["W"]
+    assert first_road["connections"] == ["N", "S"]
+    assert MapChunk.query.filter_by(lobby_id=lobby_id).count() == 2
+
+    duplicate = client.post(url, headers=auth_headers(gm), json={"first": [31, 4], "second": [32, 4]})
+    assert duplicate.status_code == 200
+    assert MapService.get_tile_data(lobby_id, 31, 4)["objects"][0]["manual_connections"] == ["E"]
+
+
+def test_world_road_connector_requires_roads_on_both_tiles(client, create_user, auth_headers):
+    gm = create_user()
+    lobby = create_lobby(client, gm, auth_headers)
+    lobby_id = lobby["id"]
+    MapService.update_tile(lobby_id, gm["id"], 0, 0, 3, 3, {"objects": [{"type": "road"}]})
+    response = client.post(f"/lobbies/{lobby_id}/world-roads/connect", headers=auth_headers(gm),
+                           json={"first": [3, 3], "second": [4, 3]})
+    assert response.status_code == 400
+    assert MapService.get_tile_data(lobby_id, 3, 3)["objects"][0].get("manual_connections") is None
+
+    MapService.update_tile(lobby_id, gm["id"], 0, 0, 4, 4, {"objects": [{"type": "road"}]})
+    diagonal = client.post(f"/lobbies/{lobby_id}/world-roads/connect", headers=auth_headers(gm),
+                           json={"first": [3, 3], "second": [4, 4]})
+    assert diagonal.status_code == 200
+    assert MapService.get_tile_data(lobby_id, 3, 3)["objects"][0]["manual_connections"] == ["SE"]
+    assert MapService.get_tile_data(lobby_id, 4, 4)["objects"][0]["manual_connections"] == ["NW"]

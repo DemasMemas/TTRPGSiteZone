@@ -19,6 +19,7 @@ function frameHarness(local) {
         renderer: { render: mark('render') }, labelRenderer: { render: mark('labels') },
         controls: { update: mark('controls') }, scene: {}, camera: {},
         waterTexture: { offset: { set: mark('water') } },
+        waterTileMesh: { material: { map: { offset: { set: mark('water') } } } },
         worldSkySphere: { position: { copy: mark('sky') } },
         stars: { position: { copy: mark('stars') } },
         updateLocationCameraMovement: mark('camera'), updateGlobalCameraMovement: mark('camera'),

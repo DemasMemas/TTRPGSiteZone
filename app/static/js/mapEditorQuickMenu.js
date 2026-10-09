@@ -4,6 +4,7 @@ const WORLD_TOOLS = [
     ['height', 'Высота'],
     ['radiation', 'Радиация'],
     ['erase', 'Ластик'],
+    ['objects', 'Объекты'],
 ];
 
 const LOCATION_TOOLS = [
@@ -14,6 +15,7 @@ const LOCATION_TOOLS = [
     ['radiation', 'Радиация'],
     ['structure', 'Постройки'],
     ['erase', 'Ластик'],
+    ['assets', 'Ассеты'],
 ];
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -51,7 +53,7 @@ export function closeMapEditorQuickMenu() {
     qHeld = false;
 }
 
-export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool }) {
+export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool, locationAction = () => {} }) {
     let pointerX = window.innerWidth / 2;
     let pointerY = window.innerHeight / 2;
 
@@ -194,10 +196,22 @@ export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool }) {
         if (event.code === 'KeyQ') {
             if (qHeld) return;
             openMenu(true);
-        } else if (/^(Digit|Numpad)[1-7]$/.test(event.code)) {
+        } else if (/^(Digit|Numpad)[1-8]$/.test(event.code)) {
             const tool = toolsForScene()[Number(event.code.slice(-1)) - 1]?.[0];
             if (!tool) return;
             selectTool(tool);
+            closeMapEditorQuickMenu();
+        } else if (event.code === 'KeyV') {
+            selectTool('select');
+            closeMapEditorQuickMenu();
+        } else if (isLocation() && event.code === 'KeyB') {
+            selectTool('assets');
+            closeMapEditorQuickMenu();
+        } else if (isLocation() && ['KeyG', 'KeyT'].includes(event.code)) {
+            locationAction(event.code === 'KeyG' ? 'move' : 'rotate');
+            closeMapEditorQuickMenu();
+        } else if (isLocation() && event.code === 'KeyR') {
+            if (!locationAction('resize')) return;
             closeMapEditorQuickMenu();
         } else {
             return;

@@ -15,6 +15,21 @@ def default_weather_settings():
     }
 
 
+def default_location_lighting():
+    return {
+        'mode': 'world',
+        'ambient_color': '#b9c4d0',
+        'ambient_intensity': 0.55,
+        'directional_color': '#fff0d5',
+        'directional_intensity': 1.0,
+        'directional_azimuth': 45,
+        'directional_elevation': 50,
+        'background_color': '#283642',
+        'local_lights': [],
+        'dark_tiles': [],
+    }
+
+
 def default_hp_zones():
     return {
         'head': {'current': 50, 'max': 50},

@@ -5,8 +5,12 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.extensions import db
 from app.models import ConsumableUse, DeferredCombatAction, LocationCombatState
 from app.models.templates import ItemTemplate
+from app.models.lobby_templates import LobbyItemTemplate
 from app.services.consumable_effects import parse_consumable_effects
 from app.services.general_consumable import _apply_profile
+from app.services.effects import advance_timed_effects
+from app.services.item_template_lookup import resolve_item_template
+from app.services.medical_procedure import minimum_consumable_payment
 from test_consumable_use import pair
 
 
@@ -64,6 +68,198 @@ def apply_general(client, pair, auth_headers, item, *, operation="general-1", de
     )
 
 
+def test_custom_lobby_consumable_uses_profile_after_rename(client, pair, auth_headers):
+    LocationCombatState.query.one().status = "idle"
+    profile = {
+        "editor_version": 1,
+        "direct": {"action_points_cost": 0, "stress_delta": -2},
+        "modifiers": [{"stat": "strength", "value": 3, "remaining": 2, "tick": "turn_end"}],
+        "effects": [{
+            "type": "delayed_adjustment", "name": "Отложенное истощение", "area": "editor-2",
+            "remaining": 2, "tick": "time_elapsed", "time_unit": "minute",
+            "adjustments": [{"field": "exhaustion", "delta": 1, "min": 0, "max": 10}],
+        }, {
+            "type": "delayed_adjustment", "name": "Отложенная радиация", "area": "editor-3",
+            "remaining": 2, "tick": "time_elapsed", "time_unit": "minute",
+            "adjustments": [{"field": "radiation", "delta": 4, "min": 0}],
+        }],
+    }
+    response = client.post(
+        f"/lobbies/{pair['lobby'].id}/templates",
+        headers=auth_headers(pair["actor_user"]),
+        json={"name": "Состав А", "category": "consumable", "weight": 0.1, "volume": 0.1,
+              "attributes": {"uses": 2, "consumable": profile}},
+    )
+    assert response.status_code == 201, response.json
+    template_id = response.json["id"]
+    renamed = client.put(
+        f"/lobbies/{pair['lobby'].id}/templates/{template_id}",
+        headers=auth_headers(pair["actor_user"]), json={"name": "Совсем другое название"},
+    )
+    assert renamed.status_code == 200, renamed.json
+    item = {
+        "id": "custom-1", "templateId": template_id + 1_000_000,
+        "name": "Старое название в инвентаре", "category": "consumable",
+        "quantity": 1, "maxUses": 2, "uses": 2,
+    }
+    data = deepcopy(pair["actor_character"].data)
+    data["inventory"]["backpack"] = [item]
+    data["health"]["stress"] = 5
+    pair["actor_character"].data = data
+    flag_modified(pair["actor_character"], "data")
+    db.session.commit()
+    applied = apply_general(client, pair, auth_headers, item)
+    assert applied.status_code == 200, applied.json
+    health = applied.json["data"]["health"]
+    assert health["stress"] == 3
+    assert any(entry.get("stat") == "strength" and entry.get("value") == 3
+               for entry in health["combatMeta"]["consumableModifiers"])
+    assert any(effect.get("type") == "delayed_adjustment" and effect.get("area") == "editor-2"
+               for effect in health["effects"])
+    assert any(effect.get("type") == "delayed_adjustment" and effect.get("area") == "editor-3"
+               for effect in health["effects"])
+    advance_timed_effects(health, health["effects"], 120)
+    assert health["exhaustion"] == 1
+    assert health["radiation"] == 4
+    assert applied.json["data"]["inventory"]["backpack"][0]["uses"] == 1
+
+
+def test_custom_profile_rejects_unknown_health_field(client, pair, auth_headers):
+    profile = {"editor_version": 1, "direct": {"secret": 100}, "modifiers": [], "effects": []}
+    response = client.post(
+        f"/lobbies/{pair['lobby'].id}/templates",
+        headers=auth_headers(pair["actor_user"]),
+        json={"name": "Некорректный препарат", "category": "consumable",
+              "attributes": {"uses": 1, "consumable": profile}},
+    )
+    assert response.status_code == 400
+    assert LobbyItemTemplate.query.filter_by(lobby_id=pair["lobby"].id, name="Некорректный препарат").first() is None
+
+
+def test_local_consumable_payment_uses_lobby_template_not_client_cost(client, pair):
+    template = LobbyItemTemplate(
+        lobby_id=pair["lobby"].id, created_by=pair["actor_user"]["id"],
+        name="Безымянный состав", category="consumable",
+        attributes={"uses": 1, "consumable": {
+            "editor_version": 1, "direct": {"action_points_cost": 3, "stress_delta": -1},
+            "modifiers": [], "effects": [],
+        }},
+    )
+    db.session.add(template)
+    db.session.flush()
+    item = {"id": "payment-local", "templateId": template.id + 1_000_000,
+            "name": "Не совпадает с шаблоном", "category": "consumable", "quantity": 1}
+    actor_data = deepcopy(pair["actor_character"].data)
+    actor_data["inventory"]["backpack"] = [item]
+    details = minimum_consumable_payment(actor_data, actor_data, {
+        "source": {"path": ["inventory", "backpack", 0], "snapshot": deepcopy(item)},
+        "application": {"kind": "self", "actionPoints": 0},
+        "server_authoritative": True, "server_operation": "general",
+    }, pair["lobby"].id)
+    assert details["treatment_action_points"] == 3
+    assert resolve_item_template(item, pair["lobby"].id).id == template.id
+    assert resolve_item_template(item, pair["lobby"].id + 1) is None
+
+
+def test_advanced_editor_can_clone_official_stress_profile(client, pair, auth_headers):
+    LocationCombatState.query.one().status = "idle"
+    profile = parse_consumable_effects("Подавитель эмоций. Действует 6 перемещений. -25 пси-состояний.")
+    official = ItemTemplate(
+        name="Подавитель эмоций", category="consumable",
+        attributes={"uses": 1, "consumable": deepcopy(profile)},
+    )
+    db.session.add(official)
+    db.session.flush()
+    cloned = deepcopy(profile)
+    cloned["editor_version"] = 2
+    cloned["effects"] = [effect for effect in cloned["effects"] if effect.get("source") != "direct"]
+    response = client.post(
+        f"/lobbies/{pair['lobby'].id}/templates",
+        headers=auth_headers(pair["actor_user"]),
+        json={"name": "Безымянное средство", "category": "consumable",
+              "attributes": {"uses": 1, "consumable": cloned}},
+    )
+    assert response.status_code == 201, response.json
+    item = {"id": "renamed-suppressor", "templateId": response.json["id"] + 1_000_000,
+            "name": "Никакой связи с оригиналом", "category": "consumable", "quantity": 1}
+    data = deepcopy(pair["actor_character"].data)
+    data["inventory"]["backpack"] = [item]
+    data["health"].update({"stress": 4, "psyState": 30})
+    pair["actor_character"].data = data
+    flag_modified(pair["actor_character"], "data")
+    db.session.commit()
+    result = apply_general(client, pair, auth_headers, item)
+    assert result.status_code == 200, result.json
+    assert result.json["data"]["health"]["psyState"] == 5
+    assert any(effect["type"] == "stress_resistance" and effect["stress_attack_block_chance"] == 50
+               for effect in result.json["data"]["health"]["effects"])
+
+
+def test_advanced_editor_rejects_unknown_effect_type(client, pair, auth_headers):
+    profile = {"editor_version": 2, "direct": {"stress_delta": -1}, "modifiers": [],
+               "effects": [{"type": "invented_server_effect", "value": 100}]}
+    response = client.post(
+        f"/lobbies/{pair['lobby'].id}/templates",
+        headers=auth_headers(pair["actor_user"]),
+        json={"name": "Неверный эффект", "category": "consumable",
+              "attributes": {"uses": 1, "consumable": profile}},
+    )
+    assert response.status_code == 400
+
+
+def test_renamed_official_water_satisfies_profile_requirement(client, pair, auth_headers):
+    LocationCombatState.query.one().status = "idle"
+    water_profile = parse_consumable_effects("Вода. -1 радиации.")
+    protein_profile = parse_consumable_effects("Протеин. Восстановление здоровья на отдыхе.")
+    assert water_profile["direct"]["satisfy_water"] is True
+    assert protein_profile["direct"]["requires_water_fraction"] > 0
+    templates = [
+        ItemTemplate(name="Переименованная жидкость", category="consumable",
+                     attributes={"uses": 3, "consumable": water_profile}),
+        ItemTemplate(name="Белковая смесь", category="consumable",
+                     attributes={"uses": 1, "consumable": protein_profile}),
+    ]
+    db.session.add_all(templates)
+    db.session.flush()
+    water = {"id": "renamed-water", "templateId": templates[0].id,
+             "name": "Канистра №1", "category": "consumable", "quantity": 1, "uses": 3, "maxUses": 3}
+    protein = {"id": "protein", "templateId": templates[1].id,
+               "name": "Не протеин", "category": "consumable", "quantity": 2}
+    data = deepcopy(pair["actor_character"].data)
+    data["inventory"]["backpack"] = [water, protein]
+    pair["actor_character"].data = data
+    flag_modified(pair["actor_character"], "data")
+    db.session.commit()
+    response = client.post(
+        f"/lobbies/characters/{pair['actor_character'].id}/general-consumable",
+        headers=auth_headers(pair["actor_user"]),
+        json={"operation_id": "renamed-water-use",
+              "source": {"path": ["inventory", "backpack", 1], "snapshot": deepcopy(protein)},
+              "application": application()},
+    )
+    assert response.status_code == 200, response.json
+    stored = response.json["data"]["inventory"]["backpack"]
+    assert [item["id"] for item in stored] == ["renamed-water", "protein"]
+    assert stored[0]["uses"] == 2
+
+
+def test_edited_radiation_filter_uses_profile_duration_and_full_capacity():
+    profile = {
+        "direct": {"radiation_filter_percent": 50, "radiation_filter_capacity": 100},
+        "effects": [{"type": "radiation_filter", "name": "Полевой фильтр", "value": 50,
+                     "remaining": 12, "tick": "time_elapsed", "time_unit": "hour",
+                     "capacity": 40, "remaining_capacity": 2}],
+        "modifiers": [],
+    }
+    health = {"effects": [], "combatMeta": {}}
+    assert _apply_profile(health, profile, profile["direct"],
+                          {"name": "Другой препарат", "templateId": 42}, in_combat=False)
+    effect = next(entry for entry in health["effects"] if entry["type"] == "radiation_filter")
+    assert effect["remaining"] == 12
+    assert effect["remaining_seconds"] == 12 * 3600
+    assert effect["capacity"] == effect["remaining_capacity"] == 40
+
+
 def test_food_and_drink_are_applied_and_consumed_on_server(client, pair, auth_headers):
     LocationCombatState.query.one().status = "idle"
     item, _ = install_consumable(
@@ -84,6 +280,29 @@ def test_food_and_drink_are_applied_and_consumed_on_server(client, pair, auth_he
     assert stored["quantity"] == 1
     assert stored["uses"] == 1
     assert ConsumableUse.query.count() == 1
+
+
+def test_existing_template_gains_generic_darkness_modifier_without_reimport(client, pair, auth_headers):
+    LocationCombatState.query.one().status = "idle"
+    item, profile = install_consumable(
+        pair, "Ночной настой",
+        "Убирает помехи на броски внимательности и точности в темноте. "
+        "+5 на броски внимательности в темноте. Длится 8 часов",
+        quantity=1,
+    )
+    template = db.session.get(ItemTemplate, item['templateId'])
+    old_profile = {**profile, 'modifiers': []}
+    template.attributes = {**template.attributes, 'consumable': old_profile}
+    db.session.commit()
+
+    response = apply_general(client, pair, auth_headers, item, operation='night-infusion')
+
+    assert response.status_code == 200, response.json
+    modifiers = response.json['data']['health']['combatMeta']['consumableModifiers']
+    assert {entry['stat'] for entry in modifiers} == {
+        'darkness_awareness', 'darkness_visual_immunity', 'darkness_shooting_immunity',
+    }
+    assert all(entry['remaining_seconds'] == 8 * 3600 for entry in modifiers)
 
 
 def test_consumable_stress_reduction_expires_manifestation(client, pair, auth_headers):
@@ -390,7 +609,7 @@ def test_stress_resistance_profiles_create_timed_effects():
         health,
         suppressor_profile,
         suppressor_profile["direct"],
-        {"id": "suppressor-1", "name": "Подавитель эмоций"},
+        {"id": "suppressor-1", "name": "Препарат спокойствия"},
         in_combat=True,
     ) is True
     suppressor = next(
@@ -406,15 +625,99 @@ def test_stress_resistance_profiles_create_timed_effects():
         health,
         harmony_profile,
         harmony_profile["direct"],
-        {"id": "harmony-1", "name": "Стимулятор Гармония"},
+        {"id": "harmony-1", "name": "Препарат равновесия"},
         in_combat=False,
     ) is True
     harmony = next(
         effect for effect in health["effects"]
-        if effect["source"] == "Стимулятор Гармония"
+        if effect["source"] == "Препарат равновесия"
     )
     assert harmony["remaining"] == 30
     assert harmony["remaining_seconds"] == 30 * 60
     assert harmony["tick"] == "time_elapsed"
     assert harmony["stress_advantage"] is True
     assert harmony["stress_attack_block_chance"] == 0
+
+
+def test_custom_stress_profile_does_not_need_a_canonical_item_name():
+    profile = {
+        "effects": [], "modifiers": [],
+        "direct": {
+            "stress_advantage": True,
+            "stress_attack_block_chance": 35,
+            "duration": 12,
+            "duration_phase": "time_elapsed",
+        },
+    }
+    health = {"effects": [], "combatMeta": {}}
+
+    assert _apply_profile(health, profile, profile["direct"], {"name": "Настой"}, in_combat=False)
+
+    effect = next(effect for effect in health["effects"] if effect["type"] == "stress_resistance")
+    assert effect["stress_advantage"] is True
+    assert effect["stress_attack_block_chance"] == 35
+    assert effect["remaining_seconds"] == 12 * 60
+
+
+def test_radiation_reduction_ceiling_comes_from_profile_not_item_name():
+    profile = {"effects": [], "modifiers": [], "direct": {"radiation_delta": -5, "radiation_reduction_ceiling": 50}}
+    health = {"radiation": 60, "effects": [], "combatMeta": {}}
+
+    _apply_profile(health, profile, profile["direct"], {"name": "Экстракт"}, in_combat=False)
+    assert health["radiation"] == 60
+
+    profile["direct"]["radiation_reduction_ceiling"] = 100
+    _apply_profile(health, profile, profile["direct"], {"name": "Банка пива"}, in_combat=False)
+    assert health["radiation"] == 55
+
+
+def test_old_radiation_profiles_use_effect_metadata_without_item_name():
+    old_profile = {"effects": [], "modifiers": [], "direct": {"radiation_delta": -1, "is_alcohol": True}}
+    health = {"radiation": 51, "effects": [], "combatMeta": {}}
+
+    _apply_profile(health, old_profile, old_profile["direct"], {"name": "Переименованный напиток"}, in_combat=False)
+
+    assert health["radiation"] == 51
+
+
+def test_radiation_ceiling_does_not_apply_to_cigars():
+    profile = parse_consumable_effects("Сигары. -1 радиации")
+    assert "radiation_reduction_ceiling" not in profile["direct"]
+    health = {"radiation": 60, "effects": [], "combatMeta": {}}
+
+    _apply_profile(health, profile, profile["direct"], {"name": "Переименованные сигары"}, in_combat=False)
+
+    assert health["radiation"] == 59
+
+
+def test_template_addiction_profile_is_used_after_item_rename(client, pair, auth_headers, monkeypatch):
+    LocationCombatState.query.one().status = "idle"
+    monkeypatch.setattr('app.services.addictions.random.random', lambda: 0)
+    item, profile = install_consumable(pair, "Новый напиток", "-1 Радиации", quantity=1)
+    profile["addiction"] = {
+        "key": "test_custom", "label": "Проверочная зависимость", "chance": 100,
+        "multipliers": {}, "kind": "medicine",
+    }
+    template = db.session.get(ItemTemplate, item["templateId"])
+    template.attributes = {**template.attributes, "consumable": profile}
+    db.session.commit()
+
+    response = apply_general(client, pair, auth_headers, item, operation="custom-addiction")
+
+    assert response.status_code == 200, response.json
+    assert "test_custom" in response.json["data"]["health"]["addictions"]["records"]
+
+
+def test_explicitly_nonaddictive_profile_overrides_legacy_name(client, pair, auth_headers, monkeypatch):
+    LocationCombatState.query.one().status = "idle"
+    monkeypatch.setattr('app.services.addictions.random.random', lambda: 0)
+    item, profile = install_consumable(pair, "Банка пива", "-1 Радиации", quantity=1)
+    profile["addiction"] = None
+    template = db.session.get(ItemTemplate, item["templateId"])
+    template.attributes = {**template.attributes, "consumable": profile}
+    db.session.commit()
+
+    response = apply_general(client, pair, auth_headers, item, operation="no-addiction")
+
+    assert response.status_code == 200, response.json
+    assert response.json["consumable_result"]["consumable"]["addiction"]["applicable"] is False

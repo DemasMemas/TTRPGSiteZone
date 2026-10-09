@@ -105,7 +105,9 @@ export async function loadLobbyInfo() {
                     window.showNotification('Только ГМ может редактировать тайлы');
                     return;
                 }
-                if (isDoubleClick) {
+                if (window.isWorldRoadLinkActive?.()) {
+                    window.placeWorldObjectAtTile?.(tile);
+                } else if (isDoubleClick) {
                     window.openTileEditModal(tile);
                 } else if (window.eraserMode) {
                     window.applyBrush(tile, { objects: [] }, window.brushRadius);
@@ -119,6 +121,8 @@ export async function loadLobbyInfo() {
                     window.applyBrush(tile, { height: window.tileHeight }, window.brushRadius);
                 } else if (window.worldEditorTool === 'radiation') {
                     window.applyBrush(tile, { radiation: window.worldBrushRadiation ?? 0 }, window.brushRadius);
+                } else if (window.worldEditorTool === 'objects') {
+                    window.placeWorldObjectAtTile?.(tile);
                 }
             });
         }

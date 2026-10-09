@@ -10,11 +10,14 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.extensions import db
 from app.models import LobbyCharacter
 from app.models.templates import ItemTemplate
+from app.services.addictions import resolve_addiction_profile
 from app.services.character import CharacterService
 from app.services.consumable_use import apply_consumable_use, validate_consumable_use
+from app.services.consumable_effects import with_darkness_modifiers
 from app.services.deferred_consumable import claim_completion, finish_completion
 from app.services.effects import apply_effect_to_health, normalize_effect_list, sync_health_derived_statuses
 from app.services.exceptions import ConflictError, NotFoundError, ValidationError
+from app.services.item_template_lookup import resolve_item_template
 from app.services.magazine import inventory_slot
 from app.services.medical_procedure import (
     _combat_context,
@@ -70,13 +73,10 @@ def _adjust(health, field, delta, minimum=0, maximum=None):
 
 
 def _source_name(item):
-    name = str(item.get("name") or "").strip()
-    if name:
-        return name
     template_id = item.get("templateId")
     if template_id not in (None, ""):
         return f"consumable-template:{template_id}"
-    return item.get("id") or "consumable"
+    return str(item.get("name") or "").strip() or item.get("id") or "consumable"
 
 
 def _inventory_entries(data):
@@ -155,8 +155,8 @@ def _consume_entry(parent, index, amount):
     return True
 
 
-def _is_alcohol(item):
-    template = _template_for_item(item)
+def _is_alcohol(item, lobby_id=None):
+    template = resolve_item_template(item, lobby_id)
     attributes = {
         **((template.attributes or {}) if template else {}),
         **((item.get("attributes") or {})),
@@ -165,19 +165,21 @@ def _is_alcohol(item):
     direct = profile.get("direct") if isinstance(profile, dict) else {}
     if attributes.get("is_alcohol") is True or attributes.get("alcohol") is True or direct.get("is_alcohol") is True:
         return True
+    if isinstance(profile, dict) and isinstance(direct, dict) and direct:
+        return False
     section = str(attributes.get("section") or item.get("subcategory") or "").strip().casefold()
     if section == "продукты" and _number(direct.get("intoxication_delta")) > 0:
         return True
     return any(name in str(item.get("name") or "").casefold() for name in ("водка", "самогон", "вино", "пиво", "алкогол"))
 
 
-def _consume_requirements(data, direct):
+def _consume_requirements(data, direct, lobby_id=None):
     result = {}
     if direct.get("requires_water_fraction"):
         charges = max(1, ceil(_number(direct["requires_water_fraction"]) * 3 - 1e-6))
         water = next((
             entry for entry in _inventory_entries(data)
-            if str(entry[2].get("name") or "").strip().casefold() == "вода"
+            if _is_water_supply(entry[2], lobby_id)
             and _available_uses(entry[2], _template_for_item(entry[2])) >= charges
         ), None)
         if water:
@@ -186,7 +188,7 @@ def _consume_requirements(data, direct):
         elif direct.get("water_or_alcohol"):
             alcohol = next((
                 entry for entry in _inventory_entries(data)
-                if _is_alcohol(entry[2]) and _available_uses(entry[2], _template_for_item(entry[2])) >= 1
+                if _is_alcohol(entry[2], lobby_id) and _available_uses(entry[2], _template_for_item(entry[2])) >= 1
             ), None)
             if not alcohol:
                 if not direct.get("exhaustion_if_no_water"):
@@ -222,6 +224,15 @@ def _consume_requirements(data, direct):
         else:
             result["fire_source"] = lighter[2].get("name") or "Зажигалка"
     return result
+
+
+def _is_water_supply(item, lobby_id=None):
+    template = resolve_item_template(item, lobby_id)
+    profile = ((template.attributes or {}).get("consumable") or {}) if template else {}
+    direct = profile.get("direct") if isinstance(profile, dict) else None
+    if isinstance(direct, dict) and direct:
+        return bool(direct.get("water_source") or (direct.get("satisfy_water") and direct.get("nutrition") is None))
+    return str(item.get("name") or "").strip().casefold() == "вода"
 
 
 def _validate_general_profile(direct, application):
@@ -292,6 +303,7 @@ def _apply_profile(health, profile, direct, item, *, in_combat):
     changed = False
     source = _source_name(item)
     replaced_types = _effect_types_replaced_by_direct(direct)
+    has_profile_radiation_filter = False
     for raw_effect in profile.get("effects") or []:
         if not isinstance(raw_effect, dict) or raw_effect.get("source") == "direct":
             continue
@@ -300,17 +312,23 @@ def _apply_profile(health, profile, direct, item, *, in_combat):
         effect = deepcopy(raw_effect)
         effect["source"] = effect.get("source") or source
         if effect.get("type") == "radiation_filter":
+            has_profile_radiation_filter = True
+            hours = max(1, _number(effect.get("remaining"), _number(effect.get("max_hours"), 24)))
             effect.update({
-                "remaining": 24, "duration": 24, "tick": "time_elapsed",
-                "time_unit": "hour", "remaining_seconds": 86400,
+                "remaining": hours, "duration": hours, "tick": "time_elapsed",
+                "time_unit": "hour", "remaining_seconds": hours * 3600,
             })
             capacity = _number(effect.get("capacity"), _number(direct.get("radiation_filter_capacity")))
             effect["capacity"] = capacity
-            effect["remaining_capacity"] = _number(effect.get("remaining_capacity"), capacity)
+            effect["remaining_capacity"] = capacity
+        elif effect.get("tick") == "time_elapsed" and effect.get("remaining") is not None:
+            unit_seconds = {"second": 1, "minute": 60, "hour": 3600}
+            seconds = unit_seconds.get(str(effect.get("time_unit") or "minute"), 60)
+            effect["remaining_seconds"] = _number(effect["remaining"]) * seconds
         apply_effect_to_health(health, effect)
         changed = True
 
-    if _number(direct.get("radiation_filter_percent")) > 0:
+    if not has_profile_radiation_filter and _number(direct.get("radiation_filter_percent")) > 0:
         percent = _number(direct["radiation_filter_percent"])
         capacity = _number(direct.get("radiation_filter_capacity"))
         apply_effect_to_health(health, {
@@ -322,7 +340,6 @@ def _apply_profile(health, profile, direct, item, *, in_combat):
         changed = True
 
     item_name = str(item.get("name") or "")
-    lower_name = item_name.casefold()
     if direct.get("hp") is not None:
         hp = _number(direct.get("hp"))
         if hp > 0:
@@ -333,11 +350,18 @@ def _apply_profile(health, profile, direct, item, *, in_combat):
 
     radiation_delta = direct.get("radiation_delta")
     current_radiation = _number(health.get("radiation"))
-    weak_cleaner = any(value in lower_name for value in ("самокрут", "сигарет", "пиво", "водк"))
     food = direct.get("nutrition") is not None or direct.get("satisfy_food")
-    if _number(radiation_delta) < 0 and (
-        (current_radiation > 50 and weak_cleaner) or (current_radiation > 75 and food)
-    ):
+    reduction_ceiling = direct.get("radiation_reduction_ceiling")
+    if reduction_ceiling is None and _number(radiation_delta) < 0:
+        # Profiles imported before the ceiling field can still be identified by
+        # their effects, without depending on the inventory item's display name.
+        if (direct.get("requires_fire") and _number(direct.get("uses"), 1) != 5) or (
+            direct.get("is_alcohol") and _number(radiation_delta) == -1
+        ):
+            reduction_ceiling = 50
+        elif food:
+            reduction_ceiling = 75
+    if _number(radiation_delta) < 0 and reduction_ceiling is not None and current_radiation > _number(reduction_ceiling):
         radiation_delta = None
 
     changed |= _adjust(health, "radiation", radiation_delta, 0)
@@ -450,13 +474,6 @@ def _apply_profile(health, profile, direct, item, *, in_combat):
 
     stress_advantage = bool(direct.get("stress_advantage"))
     attack_block_chance = _number(direct.get("stress_attack_block_chance"))
-    if "подавитель эмоций" in lower_name:
-        stress_advantage = True
-        attack_block_chance = 50
-    if "стимулятор гармония" in lower_name:
-        stress_advantage = True
-        duration = 30
-        tick = "time_elapsed"
     if stress_advantage or attack_block_chance > 0:
         effect_duration = max(1, _number(duration, 1))
         effect = {
@@ -500,10 +517,13 @@ def _apply_profile(health, profile, direct, item, *, in_combat):
 
     if direct.get("bleeding_modifier_delta") is not None:
         bleeding_modifiers = meta.setdefault("bleedingModifiers", [])
+        bleeding_scope = direct.get("bleeding_modifier_scope") or (
+            "combat" if "hematogen_bleeding_reduction" in (profile.get("notes") or []) else "character"
+        )
         replacement = {
             "stat": "bleeding", "value": _number(direct["bleeding_modifier_delta"]),
-            "remaining": duration, "note": "hematogen" if "гематоген" in lower_name else "consumable",
-            "scope": "combat" if "гематоген" in lower_name else "character",
+            "remaining": duration, "note": "hematogen" if bleeding_scope == "combat" else "consumable",
+            "scope": bleeding_scope,
             "tick": tick, "source": source,
         }
         existing = next((
@@ -570,7 +590,7 @@ def _apply_profile(health, profile, direct, item, *, in_combat):
             needs["sleptToday"] = True
         if direct.get("nutrition") is not None:
             needs["mealsToday"] = min(3, needs["mealsToday"] + 1)
-        if direct.get("satisfy_water") or item_name.strip().casefold() == "вода":
+        if direct.get("satisfy_water"):
             needs["drinksToday"] = min(3, needs["drinksToday"] + 1)
         changed = True
 
@@ -610,9 +630,11 @@ class GeneralConsumableService:
         item = parent[index]
         if item != source["snapshot"]:
             raise ConflictError("Расходник изменился. Выберите его заново.")
-        template, direct = _profile(item)
+        template, direct = _profile(item, character.lobby_id)
         direct = deepcopy(direct)
-        profile = ((template.attributes or {}).get("consumable") or {})
+        profile = with_darkness_modifiers(
+            (template.attributes or {}).get("consumable") or {}, template.description or "",
+        )
         application = payload.get("application")
         _validate_general_profile(direct, application)
         if completion and completion.payload["selection"].get("application") != application:
@@ -621,7 +643,7 @@ class GeneralConsumableService:
         payment = minimum_consumable_payment(data, data, {
             "source": source, "application": application,
             "server_authoritative": True, "server_operation": "general",
-        })
+        }, character.lobby_id)
         if completion and completion.payload.get("paid_action_points", -1) < payment["total_action_points"]:
             raise ConflictError("Применение предмета оплачено неверно. Отмените его и начните заново.")
 
@@ -636,7 +658,7 @@ class GeneralConsumableService:
         # same list and removing it would otherwise invalidate the saved index.
         if not direct.get("not_consumed"):
             _consume_uses(parent, index, 1, template)
-        requirements = _consume_requirements(data, direct)
+        requirements = _consume_requirements(data, direct, character.lobby_id)
         if not _apply_profile(health, profile, direct, item, in_combat=state is not None):
             raise ValidationError("Предмет не имеет применимых эффектов")
         if direct.get("use_limit"):
@@ -662,6 +684,9 @@ class GeneralConsumableService:
             envelope["side_effects"]["action_points_delta"] = _number(direct["action_points_delta"])
         use_result = apply_consumable_use(
             character, character, envelope, location_id=payload.get("combat_location_id"),
+            addiction_profile=resolve_addiction_profile(
+                profile, (template.attributes or {}).get("catalog_name") or template.name, template.price,
+            ),
         )
         finish_completion(character, completion)
         return GeneralConsumableResult(character, {

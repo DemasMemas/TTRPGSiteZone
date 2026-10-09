@@ -1,4 +1,5 @@
 from marshmallow import Schema, fields, validate
+from app.utils.defaults import default_location_lighting
 
 class LocationCreateSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
@@ -7,6 +8,7 @@ class LocationCreateSchema(Schema):
     grid_width = fields.Int(load_default=20, validate=validate.Range(min=5, max=200))
     grid_height = fields.Int(load_default=20, validate=validate.Range(min=5, max=200))
     tiles_data = fields.List(fields.List(fields.Dict()), load_default=list)
+    lighting = fields.Dict(load_default=default_location_lighting)
     world_tile_x = fields.Int(required=True)
     world_tile_z = fields.Int(required=True)
     world_radius = fields.Int(load_default=0)
@@ -21,6 +23,7 @@ class LocationSchema(Schema):
     grid_width = fields.Int(load_default=20, validate=validate.Range(min=5, max=200))
     grid_height = fields.Int(load_default=20, validate=validate.Range(min=5, max=200))
     tiles_data = fields.List(fields.Dict())
+    lighting = fields.Dict()
     world_tile_x = fields.Int()
     world_tile_z = fields.Int()
     world_radius = fields.Int()

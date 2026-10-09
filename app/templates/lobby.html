@@ -161,6 +161,7 @@
                         <button type="button" data-world-tool="height" aria-pressed="false">Высота</button>
                         <button type="button" data-world-tool="radiation" aria-pressed="false">Радиация</button>
                         <button type="button" data-world-tool="erase" aria-pressed="false">Ластик</button>
+                        <button type="button" data-world-tool="objects" aria-pressed="false">Объекты</button>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="select">
                         <label><input type="checkbox" data-map-editor-auto-expand checked> Раскрывать панель при смене инструмента</label>
@@ -182,13 +183,68 @@
                         <label>Уровень радиации <input type="range" id="world-brush-radiation" min="0" max="10" step="0.1" value="0" oninput="setWorldBrushRadiation(this.value)"></label>
                         <output id="world-brush-radiation-value" for="world-brush-radiation">0.0</output>
                     </div>
+                    <div class="map-editor-inspector world-object-editor" data-world-settings="objects">
+                        <svg class="world-object-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+                            <symbol id="world-icon-tree" viewBox="0 0 48 40">
+                                <path d="M21 27h6v10h-6z" fill="#68503a"/><path d="M24 3 12 22h5l-6 9h26l-6-9h5z" fill="#44794a"/><path d="M24 3 19 22h-2l-6 9h13z" fill="#58915a"/>
+                            </symbol>
+                            <symbol id="world-icon-forest" viewBox="0 0 48 40">
+                                <path d="M8 28h3v7H8zm18 0h3v7h-3zm10 1h3v6h-3z" fill="#66503b"/><path d="M10 10 3 27h14zm18-7L18 30h20zm9 9-7 18h15z" fill="#437347"/><path d="M28 3 18 30h10zM10 10 3 27h7z" fill="#608b55"/>
+                            </symbol>
+                            <symbol id="world-icon-road" viewBox="0 0 48 40">
+                                <path d="M0 16 48 16v11H0z" fill="#817766"/><path d="M0 18h48M0 25h48" stroke="#b3a48a" stroke-width="1.5"/><path d="M5 21.5h7m6 0h7m6 0h7m6 0h4" stroke="#dbccb0" stroke-width="1.5" stroke-dasharray="7 5"/>
+                            </symbol>
+                            <symbol id="world-icon-house" viewBox="0 0 48 40">
+                                <path d="M8 19 24 7l16 12v17H8z" fill="#b99870"/><path d="m5 20 19-15 19 15H5z" fill="#704d3d"/><path d="M20 25h8v11h-8z" fill="#605046"/><path d="M11 23h6v6h-6zm20 0h6v6h-6z" fill="#e0c990"/>
+                            </symbol>
+                            <symbol id="world-icon-hamlet" viewBox="0 0 48 40">
+                                <path d="M3 20h20v15H3zm24 5h18v10H27z" fill="#a98b69"/><path d="m1 21 12-11 12 11zm24 5 11-9 11 9z" fill="#765342"/><path d="M10 27h5v8h-5zm23 2h5v6h-5z" fill="#584b41"/>
+                            </symbol>
+                            <symbol id="world-icon-village" viewBox="0 0 48 40">
+                                <path d="M1 25h15v10H1zm16-8h17v18H17zm18 9h12v9H35z" fill="#b59a73"/><path d="m0 25 8-8 9 8zm15-8 10-10 11 10zm19 9 7-7 7 7z" fill="#725647"/><path d="M23 25h5v10h-5z" fill="#5b4e42"/>
+                            </symbol>
+                            <symbol id="world-icon-factory" viewBox="0 0 48 40">
+                                <path d="M4 19v17h40V18l-10 6v-6l-10 6v-6l-10 6v-5z" fill="#758088"/><path d="M8 5h6v16H8zm21 3h5v13h-5z" fill="#59656d"/><path d="M9 27h6m5 0h6m5 0h6" stroke="#d6caa1" stroke-width="3"/>
+                            </symbol>
+                            <symbol id="world-icon-base" viewBox="0 0 48 40">
+                                <path d="M3 15h42v21H3z" fill="#6d7865"/><path d="M1 11h11v8H1zm35 0h11v8H36z" fill="#8e987e"/><path d="M9 21h30v15H9z" fill="#929e86"/><path d="M20 26h8v10h-8z" fill="#4b564d"/><path d="M3 21h6m30 0h6" stroke="#bdc7a7" stroke-width="2"/>
+                            </symbol>
+                            <symbol id="world-icon-camp" viewBox="0 0 48 40">
+                                <path d="M4 35 19 10l15 25z" fill="#978765"/><path d="M19 10 13 35h21z" fill="#b09a6f"/><path d="m19 23-5 12h10z" fill="#524f42"/><path d="M37 34c-3-4 1-5 0-9 5 4 5 7 2 9z" fill="#e8ad62"/><path d="M35 35h9" stroke="#75553c" stroke-width="2"/>
+                            </symbol>
+                            <symbol id="world-icon-fence" viewBox="0 0 48 40">
+                                <path d="M4 14h40v4H4zm0 11h40v4H4z" fill="#a18463"/><path d="M6 7h5v29H6zm17 0h5v29h-5zm16 0h5v29h-5z" fill="#73583f"/>
+                            </symbol>
+                        </svg>
+                        <div class="world-object-palette" role="group" aria-label="Объекты мировой карты">
+                            <button type="button" data-world-object="tree" aria-pressed="true"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-tree"/></svg><span>Дерево</span></button>
+                            <button type="button" data-world-object="forest" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-forest"/></svg><span>Лес</span></button>
+                            <button type="button" data-world-object="road" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-road"/></svg><span>Дорога</span></button>
+                            <button type="button" data-world-object="hamlet" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-hamlet"/></svg><span>Хутор</span></button>
+                            <button type="button" data-world-object="village" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-village"/></svg><span>Деревня</span></button>
+                            <button type="button" data-world-object="factory" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-factory"/></svg><span>Завод</span></button>
+                            <button type="button" data-world-object="base" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-base"/></svg><span>База</span></button>
+                            <button type="button" data-world-object="camp" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-camp"/></svg><span>Лагерь</span></button>
+                            <button type="button" data-world-object="house" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-house"/></svg><span>Дом</span></button>
+                            <button type="button" data-world-object="fence" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-fence"/></svg><span>Забор</span></button>
+                        </div>
+                        <div id="world-road-link-controls" class="world-road-link-controls">
+                            <button id="world-road-link-button" type="button" aria-pressed="false">Соединить существующие дороги</button>
+                            <span id="world-road-link-status">Выберите две соседние клетки с дорогами.</span>
+                        </div>
+                        <div class="world-object-options">
+                            <label>Цвет <input id="world-object-color" type="color" value="#2d5a27"></label>
+                            <label>Масштаб <input id="world-object-scale" type="range" min="0.2" max="2" step="0.05" value="1"><output id="world-object-scale-value">1.00</output></label>
+                            <label>Поворот <input id="world-object-rotation" type="range" min="0" max="359" step="1" value="0"><output id="world-object-rotation-value">0°</output></label>
+                        </div>
+                    </div>
                     <div class="map-editor-inspector" data-world-settings="brush">
                         <label>Радиус кисти <input type="range" id="brush-radius" min="0" max="5" value="0" oninput="setBrushRadiusFromInput(this.value)"></label>
                         <output id="brush-radius-value" for="brush-radius">0</output>
                     </div>
                     <input type="checkbox" id="eraser-checkbox" hidden onchange="setEraserModeFromInput(this.checked)">
                     <p class="map-editor-hint" id="world-editor-hint">Выберите инструмент. Двойной клик открывает настройки тайла.</p>
-                    <p class="map-editor-shortcuts">Удерживайте Q, наведите на сектор и отпустите · 1–5: инструмент · E: редактор · R: ластик</p>
+                    <p class="map-editor-shortcuts">Удерживайте Q, наведите на сектор и отпустите · 1–6: инструмент · E: редактор · R: ластик</p>
                 </div>
             </div>
         </div>
@@ -244,12 +300,15 @@
                     <label>Тип объекта:</label>
                     <select id="object-type-select">
                         <option value="forest">🌲 Лес</option>
+                        <option value="tree">🌳 Дерево</option>
                         <option value="hamlet">🏚️ Хутор</option>
                         <option value="village">🏘️ Деревня</option>
                         <option value="road">🛣️ Дорога</option>
                         <option value="factory">🏭 Завод</option>
                         <option value="base">🏢 База</option>
                         <option value="camp">⛺ Лагерь</option>
+                        <option value="house">🏠 Дом</option>
+                        <option value="fence">🪵 Забор</option>
                     </select>
                     <label>Цвет:</label>
                     <input type="color" id="object-color" value="#315f3b">

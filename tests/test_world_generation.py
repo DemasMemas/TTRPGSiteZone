@@ -1,8 +1,9 @@
 from collections import Counter
+from unittest.mock import patch
 
 import pytest
 
-from app.services.world_generation import HABITATIONS, _inside_patch, generated_world_tile, world_plan
+from app.services.world_generation import HABITATIONS, _inside_patch, _road_path, generated_world_tile, world_plan
 
 
 def test_generated_world_is_grass_based_and_has_connected_landmarks():
@@ -26,11 +27,31 @@ def test_generated_world_is_grass_based_and_has_connected_landmarks():
     for (x, y), kind in plan['sites'].items():
         if kind not in HABITATIONS:
             continue
+        tile = generated_world_tile(lobby_id, x, y, chunks_width, chunks_height, 'random')
+        assert {obj['type'] for obj in tile['objects']} >= {kind, 'road'}
         entrances = sum(
             (x + dx, y + dy) in plan['roads']
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
         )
         assert entrances >= 2
+
+    opposites = {'E': ('W', 1, 0), 'W': ('E', -1, 0), 'S': ('N', 0, 1), 'N': ('S', 0, -1)}
+    for (x, y), directions in plan['roads'].items():
+        tile = generated_world_tile(lobby_id, x, y, chunks_width, chunks_height, 'random')
+        road = next(obj for obj in tile['objects'] if obj['type'] == 'road')
+        assert set(road['connections']) == directions
+        for direction in directions:
+            opposite, dx, dy = opposites[direction]
+            assert opposite in plan['roads'][(x + dx, y + dy)]
+
+
+def test_generated_road_avoids_shoreline_when_inland_route_exists():
+    with patch('app.services.world_generation._terrain_at', side_effect=lambda *args: 'water' if args[2] == 2 else 'grass'):
+        path = _road_path((0, 3), (9, 3), 1, 10, 7, 'random', {})
+    assert path[0] == (0, 3)
+    assert path[-1] == (9, 3)
+    assert any(y >= 4 for _, y in path)
+    assert all(y != 2 for _, y in path)
 
 
 def test_world_plan_is_stable_across_chunk_loading_order():

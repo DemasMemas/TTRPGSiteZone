@@ -90,7 +90,7 @@ def required_payment(actor, user_id, selection):
 
     target, consent = validate_selection(actor, user_id, selection)
     details = minimum_consumable_payment(
-        actor.character.data or {}, target.character.data or {}, selection,
+        actor.character.data or {}, target.character.data or {}, selection, actor.character.lobby_id,
     )
     return target, consent, details
 

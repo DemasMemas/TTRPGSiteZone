@@ -16,6 +16,9 @@ from app.services.exceptions import ConflictError, ValidationError
 from app.services.magazine import inventory_slot
 
 
+_UNSET_ADDICTION_PROFILE = object()
+
+
 def _number(value):
     if type(value) not in (int, float) or not isfinite(value) or abs(value) > 1000000:
         raise ValidationError('Некорректное значение эффекта расходника')
@@ -44,7 +47,7 @@ def validate_consumable_use(actor, envelope):
             raise ConflictError('Расходник изменился. Обновите лист и выберите его заново.')
 
 
-def apply_consumable_use(actor, target, envelope, *, location_id=None):
+def apply_consumable_use(actor, target, envelope, *, location_id=None, addiction_profile=_UNSET_ADDICTION_PROFILE):
     if envelope is None:
         return None
     operation_id = envelope['id']
@@ -73,6 +76,7 @@ def apply_consumable_use(actor, target, envelope, *, location_id=None):
         result['addiction'] = record_exposure(
             data.setdefault('health', {}), exposure['item_name'], values.pop('price'),
             (lobby.game_day or 1) * 1440 + (lobby.game_time_minutes or 0), **values,
+            **({} if addiction_profile is _UNSET_ADDICTION_PROFILE else {'profile': addiction_profile}),
         )
         target.data = data
         flag_modified(target, 'data')

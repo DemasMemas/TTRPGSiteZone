@@ -6,7 +6,7 @@ import { addMessage, updateParticipantsList, onlineUserIds, lobbyParticipants } 
 import { updateTileInChunk } from './lobby3d.js';
 import { applyWeather } from './weather.js';
 import { setUserColor } from './colors.js';
-import { refreshUserColor } from './locationScene.js';
+import { applyLocationLighting, refreshUserColor } from './locationScene.js';
 import AppState from './ui_interactions.js';
 
 let socket;
@@ -181,6 +181,13 @@ export function initSocket(lobbyId, token) {
 
     socket.on('lobby_time_updated', (data) => {
         updateDisplayedLobbyTime(data);
+        applyLocationLighting();
+    });
+
+    socket.on('location_updated', data => {
+        if (Number(data?.location_id) === Number(window.currentLocationId) && data?.updates?.lighting) {
+            applyLocationLighting(data.updates.lighting);
+        }
     });
 
     socket.on('kicked', () => {
@@ -209,6 +216,7 @@ export function initSocket(lobbyId, token) {
     socket.on('weather_updated', (settings) => {
         applyWeather(settings);
         window.weatherSettings = settings;
+        applyLocationLighting();
     });
 
     return socket;
