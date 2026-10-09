@@ -139,10 +139,8 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
     assert {tile['terrain'] for row in location.tiles_data for tile in row} == {
         'grass', 'rock', 'sand', 'swamp', 'water',
     }
-    smooth = [tile['height'] for row in location.tiles_data for tile in row
-              if tile.get('surface') == 'smooth']
-    assert len(smooth) > 30
-    assert max(smooth) >= 2.3
+    assert location.tiles_data[20][5]['height'] >= 2.3
+    assert location.tiles_data[20][8]['height'] > location.tiles_data[20][9]['height']
     assert location.tiles_data[22][23]['height'] == 2.6
     assert location.tiles_data[25][23]['height'] < 1.2
     assert sum(obj.get('type') == 'anomaly' for row in location.tiles_data for tile in row

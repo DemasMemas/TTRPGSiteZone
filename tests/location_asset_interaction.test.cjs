@@ -61,7 +61,8 @@ test('location editor routes R to resize selected assets and keeps eraser fallba
     const scene = read('locationScene.js');
     assert.match(quickMenu, /event\.code === 'KeyR'[\s\S]*?locationAction\('resize'\)/);
     assert.match(main, /action === 'resize'[\s\S]*?getSelectedLocationEditorAsset\(\)/);
-    assert.match(main, /data-location-action="resize"/);
+    assert.match(main, /data-asset-action="resize"/);
+    assert.doesNotMatch(main, /data-location-action="resize"/);
     assert.match(scene, /commitEditorAssetResize\(\)/);
     assert.match(scene, /cameraDragMenuGuard\.shouldSuppressMenu\(\)/);
 });

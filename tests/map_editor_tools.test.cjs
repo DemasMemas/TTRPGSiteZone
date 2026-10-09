@@ -439,7 +439,7 @@ test('held Q selects the highlighted full-ring sector on release', () => {
     location = true;
     press('KeyQ');
     const locationMenu = appended.at(-1);
-    assert.equal(locationMenu.children[0].children.length, 10);
+    assert.equal(locationMenu.children[0].children.length, 9);
     let outsideClickBlocked = false;
     listeners.pointerdown({
         target: {},
@@ -450,14 +450,14 @@ test('held Q selects the highlighted full-ring sector on release', () => {
     assert.equal(locationMenu.removed, true);
     press('KeyQ');
     press('Digit7');
-    assert.deepEqual(selected, ['terrain', 'terrain', 'erase']);
+    assert.deepEqual(selected, ['terrain', 'terrain', 'light']);
     assert.equal(appended.at(-1).removed, true);
     press('Digit8');
     press('KeyV');
     press('KeyB');
     press('KeyG');
     press('KeyT');
-    assert.deepEqual(selected, ['terrain', 'terrain', 'erase', 'assets', 'select', 'assets']);
+    assert.deepEqual(selected, ['terrain', 'terrain', 'light', 'select', 'assets']);
     assert.deepEqual(actions, ['move', 'rotate']);
     assert.equal(press('KeyR'), false);
     assert.deepEqual(actions, ['move', 'rotate', 'resize']);

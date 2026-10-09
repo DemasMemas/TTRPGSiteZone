@@ -14,7 +14,7 @@ import { createDeferredActionResumer } from './deferredCombatActions.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { createWaterMaterial } from './waterSurface.js';
-import { buildSmoothTerrainData } from './locationTerrain.js';
+import { buildSmoothTerrainData, isSmoothTerrainTile } from './locationTerrain.js';
 import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting } from './locationLighting.js';
 import { findLocationAsset } from './locationAssetCatalog.js';
 import {
@@ -190,6 +190,8 @@ let tileCubes = [];
 let locationTileMesh = null;
 let waterTileMesh = null;
 let smoothTerrainMesh = null;
+let darknessEditorOverlay = null;
+let darknessOverlayRequested = false;
 let fogMemoryKey = null;
 let fogMemory = new Map();
 let fogMemoryGhosts = new Map();
@@ -6580,7 +6582,7 @@ export function initLocationScene(containerId) {
     locationAmbientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(locationAmbientLight);
     locationDirectionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    locationDirectionalLight.castShadow = true;
+    locationDirectionalLight.castShadow = false;
     scene.add(locationDirectionalLight);
     scene.add(locationDirectionalLight.target);
 
@@ -9017,7 +9019,7 @@ function createLocationObjectMesh(obj) {
     group.rotation.y = properties.rotation || 0;
     group.traverse(child => {
         if (!child.isMesh) return;
-        child.castShadow = true;
+        child.castShadow = obj.type !== 'floor';
         child.receiveShadow = true;
     });
     group.userData = { locationObjectId: obj.id, locationObject: obj };
@@ -9065,6 +9067,43 @@ function tintLocationMesh(mesh, factor) {
     });
 }
 
+function refreshDarknessEditorOverlay(darkTiles = activeLightingProfile?.dark_tiles || []) {
+    if (darknessEditorOverlay) {
+        scene?.remove(darknessEditorOverlay);
+        disposeObject(darknessEditorOverlay);
+        darknessEditorOverlay = null;
+    }
+    if (!scene || !currentLocationData || !darkTiles.length) return;
+    const geometry = new THREE.PlaneGeometry(0.86, 0.86);
+    const material = new THREE.MeshBasicMaterial({
+        color: 0x65d8ed, transparent: true, opacity: 0.45, side: THREE.DoubleSide,
+        depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2,
+    });
+    darknessEditorOverlay = new THREE.InstancedMesh(geometry, material, darkTiles.length);
+    const transform = new THREE.Object3D();
+    for (let index = 0; index < darkTiles.length; index++) {
+        const { x, z } = darkTiles[index];
+        transform.position.set(x + 0.5, getTileHeight(x, z) + 0.045, z + 0.5);
+        transform.rotation.set(-Math.PI / 2, 0, 0);
+        transform.updateMatrix();
+        darknessEditorOverlay.setMatrixAt(index, transform.matrix);
+    }
+    darknessEditorOverlay.instanceMatrix.needsUpdate = true;
+    darknessEditorOverlay.visible = darknessOverlayRequested && editMode;
+    darknessEditorOverlay.renderOrder = 6;
+    scene.add(darknessEditorOverlay);
+}
+
+export function setLocationDarknessOverlayVisible(visible) {
+    darknessOverlayRequested = Boolean(visible);
+    if (darknessEditorOverlay) darknessEditorOverlay.visible = darknessOverlayRequested && editMode;
+}
+
+export function previewLocationDarkTiles(darkTiles) {
+    if (!activeLightingProfile) return;
+    refreshLocationDarkness({ ...activeLightingProfile, dark_tiles: darkTiles });
+}
+
 function refreshLocationDarkness(profile = activeLightingProfile) {
     if (!currentLocationData || !profile) return;
     activeLightingProfile = profile;
@@ -9074,6 +9113,7 @@ function refreshLocationDarkness(profile = activeLightingProfile) {
         currentLocationData.grid_width, currentLocationData.grid_height,
         profile.dark_tiles || [], currentLocationData.objects || [], profile.local_lights || [], daylight,
     );
+    refreshDarknessEditorOverlay(profile.dark_tiles || []);
     if (locationTileMesh) {
         for (let z = 0; z < currentLocationData.grid_height; z++) {
             for (let x = 0; x < currentLocationData.grid_width; x++) {
@@ -9521,17 +9561,9 @@ export function applyLocationLighting(settings, persist = true) {
     locationAmbientLight.intensity = Number(profile.ambient_intensity);
     locationDirectionalLight.color.set(profile.directional_color);
     locationDirectionalLight.intensity = Number(profile.directional_intensity);
-    locationDirectionalLight.castShadow = locationDirectionalLight.intensity > 0.05;
     const azimuth = Number(profile.directional_azimuth) * Math.PI / 180;
     const elevation = Number(profile.directional_elevation) * Math.PI / 180;
     const distance = Math.max(currentLocationData.grid_width, currentLocationData.grid_height);
-    const shadowReach = distance / 2 + 2;
-    Object.assign(locationDirectionalLight.shadow.camera, {
-        left: -shadowReach, right: shadowReach, top: shadowReach, bottom: -shadowReach,
-        near: 0.5, far: distance * 3 + 10,
-    });
-    locationDirectionalLight.shadow.camera.updateProjectionMatrix();
-    locationDirectionalLight.shadow.mapSize.set(1024, 1024);
     const centerX = currentLocationData.grid_width / 2;
     const centerZ = currentLocationData.grid_height / 2;
     locationDirectionalLight.target.position.set(centerX, 1, centerZ);
@@ -10173,6 +10205,7 @@ export function loadLocation(data) {
     objectMeshes = [];
     anomalyEffectMeshes = [];
     locationObjectMeshes = [];
+    darknessEditorOverlay = null;
     currentLocationData = data;
     selectedLocationAsset = null;
     editorSelection = null;
@@ -10280,14 +10313,21 @@ export function loadLocation(data) {
 }
 
 // ========== Обновление тайлов ==========
-function updateTileCube(x, z, tile) {
-    if (!locationTileMesh || !currentLocationData) return;
-    updateTileInstance(z * currentLocationData.grid_width + x, x, z, tile);
+function updateTileCube(x, z, tile, rebuildTerrain = true) {
+    if (!locationTileMesh || !currentLocationData) return false;
+    const neighbors = [[x, z], [x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]];
+    for (const [nx, nz] of neighbors) {
+        const next = currentLocationData.tiles_data[nz]?.[nx];
+        if (next) updateTileInstance(nz * currentLocationData.grid_width + nx, nx, nz, next);
+    }
     locationTileMesh.instanceMatrix.needsUpdate = true;
     locationTileMesh.instanceColor.needsUpdate = true;
     waterTileMesh.instanceMatrix.needsUpdate = true;
     waterTileMesh.instanceColor.needsUpdate = true;
-    if (smoothTerrainMesh || tile.surface === 'smooth') rebuildSmoothTerrainMesh();
+    const needsRebuild = Boolean(smoothTerrainMesh) || neighbors.some(([nx, nz]) =>
+        isSmoothTerrainTile(currentLocationData.tiles_data, nx, nz));
+    if (rebuildTerrain && needsRebuild) rebuildSmoothTerrainMesh();
+    return needsRebuild;
 }
 
 function updateSmoothTerrainColors() {
@@ -10329,7 +10369,7 @@ function rebuildSmoothTerrainMesh() {
 function updateTileInstance(instanceId, x, z, tile) {
     const height = tile.height || 1.0;
     const isWater = tile.terrain === 'water';
-    const isSmooth = tile.surface === 'smooth' && !isWater;
+    const isSmooth = isSmoothTerrainTile(currentLocationData.tiles_data, x, z);
     tileInstanceTransform.position.set(x + 0.5, height / 2, z + 0.5);
     tileInstanceTransform.scale.set(1, height, 1);
     tileInstanceTransform.updateMatrix();
@@ -10467,16 +10507,18 @@ function rebuildTileObjects(tileX, tileZ) {
 export function applyLocationTilesUpdate(locationId, updates) {
     if (getCurrentLocationId() !== locationId) return;
     if (!currentLocationData) return;
+    let terrainNeedsRebuild = false;
     for (const upd of updates) {
         const tile = currentLocationData.tiles_data[upd.z][upd.x];
         if (upd.terrain !== undefined) tile.terrain = upd.terrain;
         if (upd.height !== undefined) tile.height = upd.height;
         if (upd.objects !== undefined) tile.objects = upd.objects;
         if (upd.radiation !== undefined) tile.radiation = upd.radiation;
-        updateTileCube(upd.x, upd.z, tile);
+        terrainNeedsRebuild = updateTileCube(upd.x, upd.z, tile, false) || terrainNeedsRebuild;
         rebuildTileObjects(upd.x, upd.z);
         updateLocationObjectHeight(upd.x, upd.z);
     }
+    if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
     invalidateMovementMapCache();
     applyFogOfWar();
     if (editorSelection) updateEditorSelectionVisual();
@@ -10492,6 +10534,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     if (!currentLocationData) return;
     const tiles = currentLocationData.tiles_data;
     const changed = [];
+    let terrainNeedsRebuild = false;
     for (let dz = -radius; dz <= radius; dz++) {
         for (let dx = -radius; dx <= radius; dx++) {
             const x = centerX + dx;
@@ -10549,7 +10592,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 needUpdate = true;
             }
             if (needUpdate) {
-                updateTileCube(x, z, tile);
+                terrainNeedsRebuild = updateTileCube(x, z, tile, false) || terrainNeedsRebuild;
                 if (updates.height !== undefined) updateLocationObjectHeight(x, z);
                 if (updates.objects !== undefined || updates.addObject) {
                     rebuildTileObjects(x, z);
@@ -10559,6 +10602,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         }
     }
     if (changed.length === 0) return;
+    if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
     if (updates.height !== undefined && editorSelection) updateEditorSelectionVisual();
     if (window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
@@ -11204,7 +11248,7 @@ export function setupLocationEditing() {
             placeSelectedLocationAsset(hoveredTileCoords.x, hoveredTileCoords.z);
             return;
         }
-        if (window.locationEditorTool === 'darkness' && !e.altKey && !e.shiftKey) {
+        if (window.locationEditorTool === 'light' && !e.altKey && !e.shiftKey) {
             e.preventDefault();
             e.stopImmediatePropagation();
             canvas.setPointerCapture(e.pointerId);
@@ -11238,7 +11282,7 @@ export function setupLocationEditing() {
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
         const { x, z } = hoveredTileCoords;
-        if (window.locationEditorTool === 'darkness' && !e.altKey && !e.shiftKey) {
+        if (window.locationEditorTool === 'light' && !e.altKey && !e.shiftKey) {
             window.locationDarknessPaintAtTile?.(x, z);
             return;
         }
@@ -11591,6 +11635,7 @@ export function beginCharacterPlacement(characterOrCharacters) {
 export function setLocationEditMode(enabled) {
     editMode = enabled;
     window.locationEditMode = enabled;
+    if (darknessEditorOverlay) darknessEditorOverlay.visible = darknessOverlayRequested && enabled;
     if (!enabled) {
         hideHighlight();
         clearBuildPreview();
@@ -11611,6 +11656,10 @@ export function setLocationEditMode(enabled) {
 export function getLocationEditMode() { return editMode; }
 export function setLocationBrushRadius(r) {
     brushRadius = r;
+    const darknessRadius = document.querySelector('[data-darkness-radius]');
+    const darknessRadiusValue = document.querySelector('[data-darkness-radius-value]');
+    if (darknessRadius) darknessRadius.value = r;
+    if (darknessRadiusValue) darknessRadiusValue.textContent = `${r * 2 + 1} × ${r * 2 + 1}`;
     const radiusSlider = document.getElementById('brush-radius');
     const radiusSpan = document.getElementById('brush-radius-value');
     if (radiusSlider) radiusSlider.value = r;
@@ -11886,6 +11935,8 @@ export function destroyLocationScene() {
         anomalyEffectMeshes = [];
         combatAreaMeshes = [];
         locationObjectMeshes = [];
+        darknessEditorOverlay = null;
+        darknessOverlayRequested = false;
         clearAllCharacters();
 
         if (highlightBox) {

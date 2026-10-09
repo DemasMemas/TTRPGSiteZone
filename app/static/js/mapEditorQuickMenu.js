@@ -11,11 +11,10 @@ const LOCATION_TOOLS = [
     ['select', 'Выбор'],
     ['terrain', 'Ландшафт'],
     ['height', 'Высота'],
-    ['decor', 'Объекты'],
     ['radiation', 'Радиация'],
-    ['structure', 'Постройки'],
     ['erase', 'Ластик'],
     ['assets', 'Ассеты'],
+    ['light', 'Свет'],
 ];
 
 const SVG_NS = 'http://www.w3.org/2000/svg';

@@ -49,6 +49,24 @@ test('opening an elevated window also admits light without making it a doorway',
     assert.ok(open[3 * 5 + 2] > closed[3 * 5 + 2]);
 });
 
+test('darkness brush paints and erases square areas without leaving the map', async () => {
+    const { paintDarkTiles } = await import(darknessUrl);
+    const painted = paintDarkTiles([], 5, 4, 0, 0, 1);
+    assert.deepEqual(painted, [{ x: 0, z: 0 }, { x: 1, z: 0 }, { x: 0, z: 1 }, { x: 1, z: 1 }]);
+    assert.equal(paintDarkTiles(painted, 5, 4, 0, 0, 1), painted);
+    const erased = paintDarkTiles(painted, 5, 4, 1, 1, 0, true);
+    assert.deepEqual(erased, [{ x: 0, z: 0 }, { x: 1, z: 0 }, { x: 0, z: 1 }]);
+    assert.equal(paintDarkTiles(erased, 5, 4, 1, 1, 0, true), erased);
+});
+
+test('roofless rooms keep local shadows without projected daylight wall shadows', () => {
+    const scene = read('locationScene.js');
+    assert.match(scene, /locationDirectionalLight\.castShadow = false/);
+    assert.match(scene, /child\.castShadow = obj\.type !== 'floor'/);
+    assert.match(scene, /child\.receiveShadow = true/);
+    assert.match(scene, /light\.castShadow = true/);
+});
+
 test('editor forwards painted cells to lighting save and map pointer handling', () => {
     const main = read('main.js');
     const scene = read('locationScene.js');
@@ -58,4 +76,7 @@ test('editor forwards painted cells to lighting save and map pointer handling', 
     assert.match(main, /Server\.updateLocation\(currentLobbyId, currentLocationData\.id, \{ lighting: settings \}\)/);
     assert.match(scene, /window\.locationDarknessPaintAtTile\?\.\(hoveredTileCoords\.x, hoveredTileCoords\.z\)/);
     assert.match(scene, /window\.locationDarknessPaintAtTile\?\.\(x, z\)/);
+    assert.match(main, /data-darkness-radius/);
+    assert.match(main, /previewLocationDarkTiles\(darkTilesDraft\)/);
+    assert.match(scene, /refreshDarknessEditorOverlay\(profile\.dark_tiles \|\| \[\]\)/);
 });

@@ -1135,7 +1135,7 @@ body.light-theme .lobby-time-field input[type="time"] {
   background: rgba(255, 255, 255, 0.06);
   border-radius: 6px;
 }
-.location-asset-library > .location-asset-inspector {
+.map-editor-section > .location-asset-inspector {
   display: block;
   border-top: 1px solid var(--panel-border);
   padding-top: 10px;
@@ -1258,26 +1258,6 @@ body.light-theme .lobby-time-field input[type="time"] {
 .location-asset-fields input {
   width: 100%;
 }
-.location-environment-toggle {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  color: var(--username-color);
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-  font-weight: 700;
-  text-align: left;
-}
-.location-environment-toggle span {
-  transition: transform 0.18s ease;
-}
-.location-environment-toggle[aria-expanded="true"] span {
-  transform: rotate(180deg);
-}
 .location-environment-body {
   padding-top: 8px;
 }
@@ -1335,6 +1315,23 @@ body.light-theme .lobby-time-field input[type="time"] {
 .location-darkness-controls button[aria-pressed="true"] {
   border-color: var(--username-color);
   color: var(--username-color);
+}
+.location-darkness-radius {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-basis: 100%;
+  color: var(--text-color);
+  font-size: 0.8rem;
+}
+.location-darkness-radius input {
+  flex: 1;
+  min-width: 90px;
+  accent-color: var(--username-color);
+}
+.location-darkness-radius output {
+  min-width: 45px;
+  text-align: right;
 }
 .location-darkness-controls span {
   color: var(--text-muted);

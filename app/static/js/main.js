@@ -44,7 +44,9 @@ import {
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
     setLocationAssetResizeAxis, getLocationAssetResizeState,
     deleteSelectedLocationAsset, updateSelectedLocationAssetDetails, previewSelectedLocationLamp,
+    previewLocationDarkTiles, setLocationDarknessOverlayVisible,
 } from './locationScene.js';
+import { paintDarkTiles } from './locationDarkness.js';
 import { getUserColorHex, updateMyColor } from './colors.js';
 import { openLobbyRestModal, closeLobbyRestModal, saveLobbyTimeActivity, startLobbyRest } from './rest.js';
 import {
@@ -190,7 +192,10 @@ initMapEditorQuickMenu({
         if (action === 'move') return beginMoveSelectedLocationAsset();
         if (action === 'rotate') return beginRotateSelectedLocationAsset();
         if (action === 'resize') {
-            if (!getSelectedLocationEditorAsset()) return false;
+            if (!getSelectedLocationEditorAsset()) {
+                window.selectLocationEditorTool?.('erase');
+                return true;
+            }
             beginResizeSelectedLocationAsset();
             return true;
         }
@@ -398,8 +403,6 @@ window.enterLocation = async function(locationId) {
                     brush: createToolSection('Кисть', ['loc-edit-radius']),
                     terrain: createToolSection('Ландшафт', ['loc-edit-terrain']),
                     height: createToolSection('Высота', ['loc-edit-height']),
-                    structure: createToolSection('Строительство', ['loc-structure-preset']),
-                    decor: createToolSection('Объекты и аномалии', ['loc-obj-type', 'loc-obj-offset-x']),
                     radiation: createToolSection('Радиация', ['loc-edit-radiation']),
                 };
                 const autoExpandLabel = document.createElement('label');
@@ -421,19 +424,16 @@ window.enterLocation = async function(locationId) {
                     <button type="button" data-location-tool="select">Выбор</button>
                     <button type="button" data-location-tool="terrain">Ландшафт</button>
                     <button type="button" data-location-tool="height">Высота</button>
-                    <button type="button" data-location-tool="decor">Объекты</button>
                     <button type="button" data-location-tool="radiation">Радиация</button>
-                    <button type="button" data-location-tool="structure">Постройки</button>
                     <button type="button" data-location-tool="erase">Ластик</button>
                     <button type="button" data-location-tool="assets">Ассеты</button>
-                    <button type="button" data-location-tool="darkness">Темнота</button>
-                    <button type="button" data-location-action="resize" title="R" disabled>Размер</button>
+                    <button type="button" data-location-tool="light">Свет</button>
                 `;
                 const hint = document.createElement('p');
                 hint.className = 'map-editor-hint';
                 const shortcuts = document.createElement('p');
                 shortcuts.className = 'map-editor-shortcuts';
-                shortcuts.textContent = 'Q / 1–8: инструменты · V: выбор · B: ассеты · G: двигать · T: повернуть · E: редактор · R: ластик';
+                shortcuts.textContent = 'Q / 1–7: инструменты · V: выбор · B: ассеты · G: двигать · T: повернуть · E: редактор · R: размер / ластик';
                 toolsRoot.prepend(toolbar);
                 toolbar.after(hint);
                 hint.after(shortcuts);
@@ -445,8 +445,10 @@ window.enterLocation = async function(locationId) {
                 toolsRoot.appendChild(eraseSettings);
 
                 let activeAsset = null;
+                let assetSection = null;
+                let environmentSection = null;
                 const selectLocationTool = tool => {
-                    if (!sections[tool] && !['select', 'erase', 'assets', 'darkness'].includes(tool)) return;
+                    if (!['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'light'].includes(tool)) return;
                     if (tool !== 'select') cancelLocationAssetResize();
                     const previousTool = window.locationEditorTool;
                     window.locationEditorTool = tool;
@@ -456,13 +458,16 @@ window.enterLocation = async function(locationId) {
                     });
                     Object.entries(sections).forEach(([name, section]) => {
                         section.hidden = name !== 'mode' && name !== tool
-                            && !(name === 'brush' && ['terrain', 'height', 'decor', 'radiation', 'erase'].includes(tool));
+                            && !(name === 'brush' && ['terrain', 'height', 'radiation', 'erase'].includes(tool));
                     });
                     eraseSettings.hidden = tool !== 'erase';
-                    if (tool !== 'assets') setLocationBuildMode(tool === 'structure' ? 'structure' : 'terrain');
+                    if (assetSection) assetSection.hidden = tool !== 'assets';
+                    if (environmentSection) environmentSection.hidden = tool !== 'light';
+                    setLocationDarknessOverlayVisible(tool === 'light');
+                    if (tool !== 'assets') setLocationBuildMode('terrain');
                     else if (activeAsset) setLocationAssetPreset(activeAsset);
                     setLocationEraserMode(tool === 'erase');
-                    if (tool !== 'assets') setLocationBrushObjectMode(tool === 'decor');
+                    if (tool !== 'assets') setLocationBrushObjectMode(false);
                     const radCheck = document.getElementById('loc-rad-mode');
                     if (radCheck) radCheck.checked = tool === 'radiation';
                     hint.textContent = {
@@ -470,26 +475,20 @@ window.enterLocation = async function(locationId) {
                         assets: 'Выберите ассет в библиотеке, наведите на карту и кликните для размещения.',
                         terrain: 'Кликните по клетке или проведите кистью, чтобы сменить покрытие.',
                         height: 'Кликните по клетке или проведите кистью, чтобы изменить высоту.',
-                        decor: 'Кликните по клетке, чтобы разместить объект или аномалию.',
                         radiation: 'Кликните по клетке или проведите кистью, чтобы задать радиацию.',
-                        darkness: 'Закрасьте клетки без дневного света; открытые двери и лампы осветят их.',
-                        structure: 'Кликните по клетке, чтобы разместить постройку.',
+                        light: 'Настройте освещение или закрасьте клетки без дневного света.',
                         erase: 'Удаляет декор. Поставьте галочку, чтобы удалять и постройки на выбранной клетке.',
                     }[tool];
                     renderPlacementSettings();
                     if (tool !== 'select' && !getLocationEditMode()) setLocationEditMode(true);
                 };
                 toolbar.addEventListener('click', event => {
-                    if (event.target.closest('[data-location-action="resize"]')) {
-                        beginResizeSelectedLocationAsset();
-                        return;
-                    }
                     const button = event.target.closest('[data-location-tool]');
                     if (button) selectLocationTool(button.dataset.locationTool);
                 });
                 window.selectLocationEditorTool = selectLocationTool;
 
-                const assetSection = document.createElement('section');
+                assetSection = document.createElement('section');
                 assetSection.className = 'map-editor-section location-asset-library';
                 assetSection.innerHTML = `
                     <div class="location-asset-library-heading">
@@ -514,9 +513,11 @@ window.enterLocation = async function(locationId) {
                     <div class="location-asset-inspector"></div>
                 `;
                 toolsRoot.appendChild(assetSection);
+                assetSection.hidden = window.locationEditorTool !== 'assets';
                 const assetTabs = assetSection.querySelector('.location-asset-tabs');
                 const assetGrid = assetSection.querySelector('.location-asset-grid');
                 const assetInspector = assetSection.querySelector('.location-asset-inspector');
+                sections.select.appendChild(assetInspector);
                 const assetPlacement = assetSection.querySelector('.location-asset-placement');
                 const placementHeight = assetPlacement.querySelector('[data-placement-height]');
                 const assetSearch = assetSection.querySelector('.location-asset-search');
@@ -598,7 +599,6 @@ window.enterLocation = async function(locationId) {
                 };
                 const renderAssetSelection = () => {
                     const selection = getSelectedLocationEditorAsset();
-                    toolbar.querySelector('[data-location-action="resize"]').disabled = !selection?.resizable;
                     const keepPreciseOpen = assetInspector.querySelector('.location-asset-precise')?.open || false;
                     assetInspector.replaceChildren();
                     if (!selection) {
@@ -777,17 +777,22 @@ window.enterLocation = async function(locationId) {
                 renderAssetSelection();
 
                 let darkTilesDraft = (currentLocationData.lighting?.dark_tiles || []).map(tile => ({ ...tile }));
-                let darknessBrushMode = 'paint';
-                const environmentSection = document.createElement('section');
+                let darknessBrushMode = null;
+                environmentSection = document.createElement('section');
                 environmentSection.className = 'map-editor-section location-environment-section';
                 environmentSection.innerHTML = `
-                    <button type="button" class="location-environment-toggle" aria-expanded="false">Свет и атмосфера <span>▾</span></button>
-                    <div class="location-environment-body" style="display:none;">
+                    <strong class="map-editor-section-heading">Свет и атмосфера</strong>
+                    <div class="location-environment-body">
                         <div class="location-environment-editor"></div>
                         <div class="location-darkness-controls">
                             <strong>Тёмные области</strong>
-                            <button type="button" data-darkness-brush="paint" aria-pressed="true">Затемнять клетки</button>
+                            <button type="button" data-darkness-brush="paint" aria-pressed="false">Затемнять клетки</button>
                             <button type="button" data-darkness-brush="erase" aria-pressed="false">Стереть затемнение</button>
+                            <label class="location-darkness-radius">Размер кисти
+                                <input type="range" data-darkness-radius min="0" max="5" value="0">
+                                <output data-darkness-radius-value>1 × 1</output>
+                            </label>
+                            <span>Выберите кисть перед рисованием.</span>
                             <span data-darkness-count></span>
                         </div>
                         <div class="location-environment-actions">
@@ -798,7 +803,7 @@ window.enterLocation = async function(locationId) {
                     </div>
                 `;
                 toolsRoot.appendChild(environmentSection);
-                const environmentBody = environmentSection.querySelector('.location-environment-body');
+                environmentSection.hidden = window.locationEditorTool !== 'light';
                 const environmentStatus = environmentSection.querySelector('[data-environment-status]');
                 let environmentEditor;
                 const mountEnvironmentEditor = () => {
@@ -818,42 +823,32 @@ window.enterLocation = async function(locationId) {
                     environmentSection.querySelector('[data-darkness-count]').textContent = `Клеток: ${darkTilesDraft.length}`;
                 };
                 updateDarknessCount();
+                const darknessRadiusInput = environmentSection.querySelector('[data-darkness-radius]');
+                darknessRadiusInput.value = document.getElementById('loc-edit-radius')?.value || '0';
+                environmentSection.querySelector('[data-darkness-radius-value]').textContent =
+                    `${Number(darknessRadiusInput.value) * 2 + 1} × ${Number(darknessRadiusInput.value) * 2 + 1}`;
+                darknessRadiusInput.oninput = event => {
+                    setLocationBrushRadius(Number(event.target.value));
+                };
                 environmentSection.querySelectorAll('[data-darkness-brush]').forEach(button => {
                     button.onclick = () => {
                         darknessBrushMode = button.dataset.darknessBrush;
                         environmentSection.querySelectorAll('[data-darkness-brush]').forEach(item => {
                             item.setAttribute('aria-pressed', String(item === button));
                         });
-                        selectLocationTool('darkness');
+                        selectLocationTool('light');
                     };
                 });
                 window.locationDarknessPaintAtTile = (x, z) => {
-                    const index = darkTilesDraft.findIndex(tile => tile.x === x && tile.z === z);
-                    if (darknessBrushMode === 'paint' && index < 0) darkTilesDraft.push({ x, z });
-                    else if (darknessBrushMode === 'erase' && index >= 0) darkTilesDraft.splice(index, 1);
-                    else return;
-                    applyLocationLighting(environmentEditor.get(), false);
+                    if (!darknessBrushMode) return;
+                    const radius = Number(environmentSection.querySelector('[data-darkness-radius]').value);
+                    const next = paintDarkTiles(darkTilesDraft, currentLocationData.grid_width,
+                        currentLocationData.grid_height, x, z, radius, darknessBrushMode === 'erase');
+                    if (next === darkTilesDraft) return;
+                    darkTilesDraft = next;
+                    previewLocationDarkTiles(darkTilesDraft);
                     updateDarknessCount();
                     environmentStatus.textContent = 'Предпросмотр: изменения ещё не сохранены';
-                };
-                toolbar.addEventListener('click', event => {
-                    if (event.target.closest('[data-location-tool="darkness"]')
-                        && environmentSection.querySelector('.location-environment-toggle').getAttribute('aria-expanded') !== 'true') {
-                        environmentSection.querySelector('.location-environment-toggle').click();
-                    }
-                });
-                environmentSection.querySelector('.location-environment-toggle').onclick = event => {
-                    const open = event.currentTarget.getAttribute('aria-expanded') !== 'true';
-                    event.currentTarget.setAttribute('aria-expanded', String(open));
-                    environmentBody.style.display = open ? 'block' : 'none';
-                    if (!open) {
-                        if (window.locationEditorTool === 'darkness') selectLocationTool('select');
-                        darkTilesDraft = (currentLocationData.lighting?.dark_tiles || []).map(tile => ({ ...tile }));
-                        updateDarknessCount();
-                        applyLocationLighting();
-                        mountEnvironmentEditor();
-                        environmentStatus.textContent = 'Изменения видны на карте до сохранения';
-                    }
                 };
                 environmentSection.querySelector('[data-revert-environment]').onclick = () => {
                     darkTilesDraft = (currentLocationData.lighting?.dark_tiles || []).map(tile => ({ ...tile }));

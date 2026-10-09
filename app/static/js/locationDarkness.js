@@ -2,6 +2,22 @@ import { doorOnWall, structurePose } from './locationArchitecture.js';
 
 const key = (x, z) => `${x},${z}`;
 
+export function paintDarkTiles(tiles, width, height, centerX, centerZ, radius, erase = false) {
+    const existing = new Set(tiles.map(tile => key(tile.x, tile.z)));
+    const next = tiles.slice();
+    let changed = false;
+    for (let z = Math.max(0, centerZ - radius); z <= Math.min(height - 1, centerZ + radius); z++) {
+        for (let x = Math.max(0, centerX - radius); x <= Math.min(width - 1, centerX + radius); x++) {
+            const cell = key(x, z);
+            if (erase ? existing.delete(cell) : !existing.has(cell)) {
+                if (!erase) { existing.add(cell); next.push({ x, z }); }
+                changed = true;
+            }
+        }
+    }
+    return changed ? (erase ? next.filter(tile => existing.has(key(tile.x, tile.z))) : next) : tiles;
+}
+
 function segmentCrossing(start, end, wall) {
     const pose = structurePose(wall);
     const dx = end.x - start.x;

@@ -51,15 +51,11 @@ def _tiles():
             if 10 <= x <= 18 and 24 <= z <= 31:
                 terrain, height = 'rock', 1
             hill_distance = math.hypot(x - 5, z - 20)
-            smooth = 2 <= x <= 9 and 17 <= z <= 23 and hill_distance < 4.5
-            if smooth:
+            if 2 <= x <= 9 and 17 <= z <= 23 and hill_distance < 4.5:
                 height = round(1 + 1.4 * max(0, 1 - (hill_distance / 4.5) ** 2) ** 2, 2)
             if 22 <= x <= 26 and 21 <= z <= 24:
                 height = 2.6
-            row.append({
-                'terrain': terrain, 'height': height, 'objects': [], 'radiation': 0,
-                **({'surface': 'smooth'} if smooth else {}),
-            })
+            row.append({'terrain': terrain, 'height': height, 'objects': [], 'radiation': 0})
         tiles.append(row)
 
     decor = (

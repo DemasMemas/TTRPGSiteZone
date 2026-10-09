@@ -25,6 +25,24 @@ test('side inspector saves live lighting while location edits avoid resending un
     assert.match(source, /if \(tempTiles \|\| newWidth !== locationData\.grid_width \|\| newHeight !== locationData\.grid_height\) \{\s*updates\.tiles_data = finalTiles;/);
 });
 
+test('location tools keep light, asset library and selection inspector in separate views', () => {
+    const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
+    const quickMenu = fs.readFileSync(path.join(__dirname, '../app/static/js/mapEditorQuickMenu.js'), 'utf8');
+    const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
+    const toolbar = main.match(/toolbar\.innerHTML = `([\s\S]*?)`;/)?.[1] || '';
+    assert.deepEqual([...toolbar.matchAll(/data-location-tool="([^"]+)"/g)].map(match => match[1]),
+        ['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'light']);
+    assert.doesNotMatch(toolbar, /data-location-action="resize"/);
+    assert.match(main, /assetSection\.hidden = tool !== 'assets'/);
+    assert.match(main, /environmentSection\.hidden = tool !== 'light'/);
+    assert.match(main, /sections\.select\.appendChild\(assetInspector\)/);
+    assert.match(main, /window\.selectLocationEditorTool\?\.\('erase'\)/);
+    assert.match(scene, /locationEditorTool === 'light'/);
+    assert.match(quickMenu, /\['light', 'Свет'\]/);
+    assert.doesNotMatch(quickMenu.match(/const LOCATION_TOOLS = \[([\s\S]*?)\];/)?.[1] || '',
+        /'decor'|'structure'|'darkness'/);
+});
+
 test('lighting editor fields share the location editor control styling', () => {
     const editor = fs.readFileSync(path.join(__dirname, '../app/static/js/locationLightingEditor.js'), 'utf8');
     const css = fs.readFileSync(path.join(__dirname, '../app/static/style.css'), 'utf8');
