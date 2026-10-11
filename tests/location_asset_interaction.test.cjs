@@ -131,13 +131,23 @@ test('asset color is editable beyond lamps and is persisted on structures and de
     assert.match(scene, /if \(color !== undefined\) source\.color = color/);
 });
 
-test('local water shares the world material and grid fits both map dimensions', () => {
+test('local water shares the world material and surface grid fits both map dimensions', async () => {
     const local = read('locationScene.js');
     const world = read('lobby3d.js');
     assert.match(local, /new THREE\.InstancedMesh\(geometry\.clone\(\), createWaterMaterial\(\), tileCount\)/);
     assert.match(world, /const waterMat = createWaterMaterial\(\)/);
-    assert.match(local, /x <= gridWidth; x\+\+\) gridLines\.push\(x, -0\.1, 0, x, -0\.1, gridHeight\)/);
-    assert.match(local, /z <= gridHeight; z\+\+\) gridLines\.push\(0, -0\.1, z, gridWidth, -0\.1, z\)/);
+    assert.match(local, /buildTerrainGridData\(currentLocationData\.tiles_data, uncovered\)/);
+    const terrain = read('locationTerrain.js');
+    const url = `data:text/javascript;base64,${Buffer.from(terrain).toString('base64')}`;
+    const { buildTerrainGridData } = await import(url);
+    const tiles = Array.from({ length: 3 }, () => Array.from({ length: 2 }, () => ({ terrain: 'water', height: 1 })));
+    const grid = buildTerrainGridData(tiles);
+    const xs = grid.positions.filter((_, index) => index % 3 === 0);
+    const zs = grid.positions.filter((_, index) => index % 3 === 2);
+    assert.equal(Math.min(...xs), 0);
+    assert.equal(Math.max(...xs), 2);
+    assert.equal(Math.min(...zs), 0);
+    assert.equal(Math.max(...zs), 3);
 });
 
 test('anomaly label stays outside the pulsing visual group', () => {

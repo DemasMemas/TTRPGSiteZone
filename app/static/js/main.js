@@ -33,13 +33,15 @@ import { setCurrentLobbyId as setCharLobbyId } from './characterSheet.js';
 import {
     initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
     loadCombatStartRequests, handleCombatStartRequest, handleCombatStartRequestResolved,
-    addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible, destroyLocationScene,
+    addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible,
+    addLocationGridButton, destroyLocationScene,
     setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationEraserMode, setLocationEditMode,
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
-    setLocationStructureRotation, applyLocationLighting, setLocationAssetPreset, setLocationAssetElevation,
+    setLocationStructureRotation, applyLocationLighting, setLocationAssetPreset, clearLocationAssetPreset,
+    setLocationAssetElevation,
     setLocationAssetDimensions, getSelectedLocationEditorAsset, beginMoveSelectedLocationAsset,
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
     setLocationAssetResizeAxis, getLocationAssetResizeState,
@@ -264,6 +266,7 @@ window.enterLocation = async function(locationId) {
             setDeleteButtonVisible(true);
             addEditLocationButton(() => openLocationEditModal(currentLocationData));
             setEditButtonVisible(true);
+            addLocationGridButton();
 
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) {
@@ -451,6 +454,11 @@ window.enterLocation = async function(locationId) {
                     if (!['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'light'].includes(tool)) return;
                     if (tool !== 'select') cancelLocationAssetResize();
                     const previousTool = window.locationEditorTool;
+                    if (previousTool === 'assets' && tool !== 'assets') {
+                        activeAsset = null;
+                        clearLocationAssetPreset();
+                        renderAssetCards();
+                    }
                     window.locationEditorTool = tool;
                     expandMapToolsPanelOnToolChange(previousTool, tool);
                     toolbar.querySelectorAll('button').forEach(button => {
@@ -589,9 +597,15 @@ window.enterLocation = async function(locationId) {
                         label.textContent = asset.label;
                         card.append(symbol, label);
                         card.onclick = () => {
-                            activeAsset = { ...asset };
-                            setLocationAssetPreset(activeAsset);
-                            selectLocationTool('assets');
+                            if (activeAsset?.id === asset.id) {
+                                activeAsset = null;
+                                clearLocationAssetPreset();
+                                renderPlacementSettings();
+                            } else {
+                                activeAsset = { ...asset };
+                                setLocationAssetPreset(activeAsset);
+                                selectLocationTool('assets');
+                            }
                             renderAssetCards();
                         };
                         assetGrid.appendChild(card);
@@ -1047,6 +1061,7 @@ window.exitLocation = function() {
     if (delBtn) delBtn.remove();
     const editBtn = document.getElementById('edit-location-btn');
     if (editBtn) editBtn.remove();
+    document.getElementById('location-grid-btn')?.remove();
 
     // Восстанавливаем оригинальную панель инструментов (для глобальной карты)
     if (window.isGM && window._originalToolsContent) {

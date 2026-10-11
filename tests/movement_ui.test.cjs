@@ -76,6 +76,7 @@ test('a crouching target hidden by a low cover keeps its last visible snapshot',
         fogMemory: memory, characterModels: new Map([[42, entry]]),
         getTileHeight: () => 1,
         isPointVisibleToPlayer: (x, y, height) => x === 2 && height > 2.5,
+        isTileVisibleToPlayer: () => false,
     });
     vm.runInContext(functionSource('isCharacterVisibleToPlayer'), context);
     vm.runInContext(functionSource('rememberVisibleCharacters'), context);
@@ -92,6 +93,23 @@ test('a crouching target hidden by a low cover keeps its last visible snapshot',
     context.rememberVisibleCharacters([]);
     assert.equal(memory.get('2:0').characters.length, 0);
     assert.equal(memory.get('3:0').characters[0].posX, 3);
+});
+
+test('an empty visible tile forgets a removed or moved character', () => {
+    const memory = new Map([['2:0', { characters: [{ characterId: 42, posX: 2, posY: 0 }] }]]);
+    const models = new Map();
+    const context = vm.createContext({
+        fogMemory: memory, characterModels: models,
+        isTileVisibleToPlayer: () => true,
+        isCharacterVisibleToPlayer: () => false,
+    });
+    vm.runInContext(functionSource('rememberVisibleCharacters'), context);
+    assert.equal(context.rememberVisibleCharacters([]), true);
+    assert.equal(memory.get('2:0').characters.length, 0);
+    memory.get('2:0').characters = [{ characterId: 42, posX: 2, posY: 0 }];
+    models.set(42, { posX: 3, posY: 0 });
+    assert.equal(context.rememberVisibleCharacters([]), true);
+    assert.equal(memory.get('2:0').characters.length, 0);
 });
 
 test('actual sight ray sees a standing head but not a crouching head behind low cover', () => {

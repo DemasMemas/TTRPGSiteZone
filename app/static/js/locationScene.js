@@ -14,14 +14,16 @@ import { createDeferredActionResumer } from './deferredCombatActions.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { createWaterMaterial } from './waterSurface.js';
-import { buildSmoothTerrainData, isSmoothTerrainTile } from './locationTerrain.js';
+import {
+    buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData, isSmoothTerrainTile,
+} from './locationTerrain.js';
 import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting } from './locationLighting.js';
 import { findLocationAsset } from './locationAssetCatalog.js';
 import {
     bearingFromDelta, bearingToObjectRotation, clampAssetElevation, objectRotationToBearing,
 } from './locationAssetTransforms.js';
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
-import { doorOnWall, doorFrameStyle, wallVisualPlan } from './locationArchitecture.js';
+import { doorOnWall, doorFrameStyle, floorVisualPose, wallVisualPlan } from './locationArchitecture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
 import { isWorldDarkTime } from './darknessRules.js';
 import {
@@ -190,6 +192,8 @@ let tileCubes = [];
 let locationTileMesh = null;
 let waterTileMesh = null;
 let smoothTerrainMesh = null;
+let locationGridMesh = null;
+let locationGridVisible = false;
 let darknessEditorOverlay = null;
 let darknessOverlayRequested = false;
 let fogMemoryKey = null;
@@ -197,6 +201,7 @@ let fogMemory = new Map();
 let fogMemoryGhosts = new Map();
 let fogMemoryDecorationTemplates = new Map();
 const fogOverlayMeshes = new Map();
+let fogSurfaceData = null;
 let visionBlockerHeightCache = null;
 let gmVisionCharacterId = null;
 const tileInstanceTransform = new THREE.Object3D();
@@ -453,6 +458,14 @@ const terrainColors = {
     swamp: 0x4B3B2A,
     water: 0x1E90FF
 };
+const terrainGridColors = {
+    grass: new THREE.Color(0xaac27c),
+    sand: new THREE.Color(0x524b33),
+    rock: new THREE.Color(0x3c4140),
+    swamp: new THREE.Color(0xb49d83),
+    water: new THREE.Color(0xb3d2df),
+};
+const floorGridColor = new THREE.Color(0xc5c0b3);
 
 // ========== Вспомогательные функции ==========
 function isKeyboardInputTarget(target) {
@@ -4951,7 +4964,15 @@ function rememberVisibleCharacters(sources) {
         const previous = memory.characters || [];
         const observed = byTile.get(tileKey) || [];
         if (!previous.length && !observed.length) return;
-        const next = previous.filter(item => !visible.has(Number(item.characterId))).concat(observed);
+        const [tileX, tileY] = tileKey.split(':').map(Number);
+        const tileVisible = isTileVisibleToPlayer(tileX, tileY, sources);
+        const next = previous.filter(item => {
+            const id = Number(item.characterId);
+            if (visible.has(id)) return false;
+            const current = characterModels.get(id);
+            return !tileVisible || Boolean(current && Number(current.posX) === tileX
+                && Number(current.posY) === tileY);
+        }).concat(observed);
         if (JSON.stringify(previous) !== JSON.stringify(next)) {
             memory.characters = next;
             changed = true;
@@ -4984,8 +5005,11 @@ function syncFogMemoryGhosts(active, sources) {
     if (active) {
         fogMemory.forEach((memory, tileKey) => {
             (memory.characters || []).forEach((snapshot) => {
-                const current = characterModels.get(snapshot.characterId);
+                const current = characterModels.get(Number(snapshot.characterId));
                 if (current && isCharacterVisibleToPlayer(current, sources)) return;
+                const [x, y] = tileKey.split(':').map(Number);
+                if (isTileVisibleToPlayer(x, y, sources)
+                    && (!current || Number(current.posX) !== x || Number(current.posY) !== y)) return;
                 desired.set(`character:${snapshot.characterId}`, {
                     create: () => createCharacterFogGhost({ ...snapshot, height: memory.height }),
                 });
@@ -5173,6 +5197,7 @@ function clearFogOverlay() {
         mesh.material.dispose();
     });
     fogOverlayMeshes.clear();
+    fogSurfaceData = null;
 }
 
 function updateFogOverlay(active, sources) {
@@ -5184,49 +5209,47 @@ function updateFogOverlay(active, sources) {
     const height = Number(currentLocationData?.grid_height) || 0;
     const capacity = width * height;
     if (!capacity) return;
+    fogSurfaceData ??= buildFogSurfaceData(currentLocationData.tiles_data);
     const tiles = { explored: [], unexplored: [] };
     for (let y = 0; y < height; y += 1) {
         for (let x = 0; x < width; x += 1) {
             if (isTileVisibleToPlayer(x, y, sources)) continue;
             const key = fogMemory.has(`${x}:${y}`) ? 'explored' : 'unexplored';
-            tiles[key].push({ x, y });
+            tiles[key].push(y * width + x);
         }
     }
-    const transform = new THREE.Object3D();
-    for (const [kind, positions] of Object.entries(tiles)) {
+    for (const [kind, tileNumbers] of Object.entries(tiles)) {
         let mesh = fogOverlayMeshes.get(kind);
-        if (!mesh || mesh.instanceMatrix.count < capacity) {
-            if (mesh) {
-                scene.remove(mesh);
-                mesh.geometry.dispose();
-                mesh.material.dispose();
-            }
-            mesh = new THREE.InstancedMesh(
-                new THREE.PlaneGeometry(0.98, 0.98),
-                new THREE.MeshBasicMaterial({
-                    color: 0x071019,
-                    transparent: true,
-                    opacity: kind === 'explored' ? 0.24 : 0.48,
-                    depthWrite: false,
-                    side: THREE.DoubleSide,
-                }),
-                capacity,
-            );
+        if (!mesh) {
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(fogSurfaceData.positions, 3));
+            const indexArray = fogSurfaceData.positions.length / 3 > 65535
+                ? new Uint32Array(capacity * 24) : new Uint16Array(capacity * 24);
+            const indexBuffer = new THREE.BufferAttribute(indexArray, 1);
+            indexBuffer.setUsage(THREE.DynamicDrawUsage);
+            geometry.setIndex(indexBuffer);
+            mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+                color: 0x071019,
+                transparent: true,
+                opacity: kind === 'explored' ? 0.24 : 0.48,
+                depthWrite: false,
+                side: THREE.DoubleSide,
+            }));
             mesh.raycast = () => {};
             mesh.frustumCulled = false;
             mesh.renderOrder = 4;
             scene.add(mesh);
             fogOverlayMeshes.set(kind, mesh);
         }
-        positions.forEach(({ x, y }, index) => {
-            transform.position.set(x + 0.5, getTileHeight(x, y) + 0.045, y + 0.5);
-            transform.rotation.set(-Math.PI / 2, 0, 0);
-            transform.updateMatrix();
-            mesh.setMatrixAt(index, transform.matrix);
-        });
-        mesh.count = positions.length;
-        mesh.visible = positions.length > 0;
-        mesh.instanceMatrix.needsUpdate = true;
+        const index = mesh.geometry.index;
+        let count = 0;
+        for (const tileNumber of tileNumbers) {
+            const triangles = fogSurfaceData.tileIndices[tileNumber] || [];
+            for (const vertex of triangles) index.array[count++] = vertex;
+        }
+        mesh.geometry.setDrawRange(0, count);
+        mesh.visible = count > 0;
+        index.needsUpdate = true;
     }
 }
 
@@ -8878,7 +8901,7 @@ function getStructureDimensions(preset = structurePreset) {
         && selectedLocationAsset.id === preset) {
         return { width: structureWidth, depth: structureDepth, height: structureHeight };
     }
-    if (preset === 'floor') return { width: structureWidth, depth: structureWidth, height: 0.12 };
+    if (preset === 'floor') return { width: structureWidth, depth: structureDepth, height: 0.12 };
     if (preset === 'door') return { width: 0.9, depth: 0.18, height: Math.max(1.8, structureHeight) };
     if (preset === 'window') return { width: 1.2, depth: 0.14, height: 1 };
     if (preset === 'table') return { width: structureWidth, depth: structureDepth, height: Math.max(0.6, structureHeight) };
@@ -8889,9 +8912,10 @@ function getStructureDimensions(preset = structurePreset) {
 
 function createLocationObjectMesh(obj) {
     const properties = obj.properties || {};
-    const dimensions = properties.dimensions || getStructureDimensions(obj.type);
-    const width = dimensions.width || 1;
-    const depth = dimensions.depth || 1;
+    const floorPose = obj.type === 'floor' ? floorVisualPose(obj, currentLocationData?.objects) : null;
+    const dimensions = properties.dimensions || floorPose || getStructureDimensions(obj.type);
+    const width = floorPose?.width || dimensions.width || 1;
+    const depth = floorPose?.depth || dimensions.depth || 1;
     const height = dimensions.height || 1;
     const material = new THREE.MeshStandardMaterial({ color: properties.color || '#aa8866' });
     const group = new THREE.Group();
@@ -9009,10 +9033,10 @@ function createLocationObjectMesh(obj) {
     const objectPosition = getObjectGridPosition(obj);
     const tileX = objectPosition.x ?? 0;
     const tileY = objectPosition.y ?? 0;
-    group.position.set(tileX + 0.5 + Number(properties.offset_x || 0),
+    group.position.set(floorPose?.x ?? tileX + 0.5 + Number(properties.offset_x || 0),
         getTileHeight(tileX, tileY) + clampAssetElevation(properties.elevation)
             - (obj.type === 'floor' ? height - 0.005 : 0),
-        tileY + 0.5 + Number(properties.offset_z || 0));
+        floorPose?.z ?? tileY + 0.5 + Number(properties.offset_z || 0));
     if (obj.type === 'ground_item' || properties.is_ground_item) {
         group.position.y += 0.04;
     }
@@ -9131,6 +9155,7 @@ function refreshLocationDarkness(profile = activeLightingProfile) {
         if (waterTileMesh?.instanceColor) waterTileMesh.instanceColor.needsUpdate = true;
     }
     updateSmoothTerrainColors();
+    updateLocationGridColors();
     for (const mesh of locationObjectMeshes) {
         tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
     }
@@ -9171,7 +9196,7 @@ function refreshArchitecturalMeshes() {
     for (let index = 0; index < locationObjectMeshes.length; index++) {
         const oldMesh = locationObjectMeshes[index];
         const source = (currentLocationData.objects || []).find(item => item.id === oldMesh.userData.locationObjectId);
-        if (!source || !['wall', 'door', 'window'].includes(source.type)) continue;
+        if (!source || !['wall', 'door', 'window', 'floor'].includes(source.type)) continue;
         scene.remove(oldMesh);
         disposeLocationObject(oldMesh);
         const newMesh = createLocationObjectMesh(source);
@@ -9179,6 +9204,7 @@ function refreshArchitecturalMeshes() {
         scene.add(newMesh);
         locationObjectMeshes[index] = newMesh;
     }
+    rebuildLocationGrid();
     applyFogOfWar();
     refreshLocationDarkness();
 }
@@ -9457,6 +9483,7 @@ async function placeStructureAtTile(x, z) {
         currentLocationData.objects = currentLocationData.objects || [];
         if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
         addLocationObjectMesh(object);
+        if (object.type === 'floor') rebuildLocationGrid();
         if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
         return object;
     } catch (error) {
@@ -9485,8 +9512,10 @@ async function removeStructuresAtTile(x, z) {
         const objectId = objectIds[index];
         structureDeletionInFlight.delete(objectId);
         if (result.status === 'fulfilled') {
+            const removed = (currentLocationData.objects || []).find(object => object.id === objectId);
             removeLocationObjectMesh(objectId);
             currentLocationData.objects = currentLocationData.objects.filter(object => object.id !== objectId);
+            if (removed?.type === 'floor') rebuildLocationGrid();
             refreshArchitecturalMeshes();
         } else {
             showNotification(result.reason?.message || 'Не удалось удалить объект');
@@ -9507,6 +9536,7 @@ export function addLocationObject(object) {
     currentLocationData.objects = currentLocationData.objects || [];
     if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
     addLocationObjectMesh(object);
+    if (object.type === 'floor') rebuildLocationGrid();
     if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
     invalidateMovementMapCache();
 }
@@ -9519,6 +9549,7 @@ export function removeLocationObject(objectId) {
     if (Number(containerInteractionState?.objectId) === Number(objectId)) closeContainerInteractionMenu();
     removeLocationObjectMesh(objectId);
     currentLocationData.objects = (currentLocationData.objects || []).filter(object => Number(object.id) !== Number(objectId));
+    if (removed?.type === 'floor') rebuildLocationGrid();
     if (['wall', 'door', 'window'].includes(removed?.type)) refreshArchitecturalMeshes();
     invalidateMovementMapCache();
     applyFogOfWar();
@@ -9530,9 +9561,11 @@ export function updateLocationObject(object) {
     if (!currentLocationData) return;
     currentLocationData.objects = currentLocationData.objects || [];
     const index = currentLocationData.objects.findIndex(item => item.id === object.id);
+    const previous = index === -1 ? null : currentLocationData.objects[index];
     if (index === -1) currentLocationData.objects.push(object);
     else currentLocationData.objects[index] = object;
     replaceLocationObjectMesh(object);
+    if (object.type === 'floor' || previous?.type === 'floor') rebuildLocationGrid();
     if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
     invalidateMovementMapCache();
     if (typeof editorSelection !== 'undefined' && editorSelection?.kind === 'structure' && editorSelection.id === object.id) {
@@ -10226,6 +10259,7 @@ export function loadLocation(data) {
     if (waterTileMesh?.material.map) waterTileMesh.material.map.dispose();
     waterTileMesh = null;
     smoothTerrainMesh = null;
+    locationGridMesh = null;
     const toRemove = [];
     scene.children.forEach(child => {
         if (!child.isLight && child !== highlightBox && child !== locationLightGroup
@@ -10242,15 +10276,6 @@ export function loadLocation(data) {
     const centerX = gridWidth / 2;
     const centerZ = gridHeight / 2;
 
-    // Сетка
-    const gridLines = [];
-    for (let x = 0; x <= gridWidth; x++) gridLines.push(x, -0.1, 0, x, -0.1, gridHeight);
-    for (let z = 0; z <= gridHeight; z++) gridLines.push(0, -0.1, z, gridWidth, -0.1, z);
-    const gridGeometry = new THREE.BufferGeometry();
-    gridGeometry.setAttribute('position', new THREE.Float32BufferAttribute(gridLines, 3));
-    const gridHelper = new THREE.LineSegments(gridGeometry, new THREE.LineBasicMaterial({ color: 0x555555 }));
-    scene.add(gridHelper);
-
     // Пол
     const planeMat = new THREE.MeshStandardMaterial({ color: 0x3a6b3a, side: THREE.DoubleSide, transparent: true, opacity: 0.2 });
     const planeGeo = new THREE.PlaneGeometry(gridWidth, gridHeight);
@@ -10262,7 +10287,7 @@ export function loadLocation(data) {
 
     // Тайлы
     const tileCount = gridWidth * gridHeight;
-    const geometry = new THREE.BoxGeometry(0.98, 1, 0.98);
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material = new THREE.MeshStandardMaterial();
     locationTileMesh = new THREE.InstancedMesh(geometry, material, tileCount);
     locationTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
@@ -10288,6 +10313,7 @@ export function loadLocation(data) {
     tileCubes = [locationTileMesh, waterTileMesh];
     scene.add(locationTileMesh, waterTileMesh);
     rebuildSmoothTerrainMesh();
+    rebuildLocationGrid();
 
     // Объекты на тайлах
     for (let y = 0; y < data.tiles_data.length; y++) {
@@ -10340,6 +10366,54 @@ function updateSmoothTerrainColors() {
         colors.setXYZ(index, color.r, color.g, color.b);
     });
     colors.needsUpdate = true;
+}
+
+function updateLocationGridColors() {
+    if (!locationGridMesh || !currentLocationData) return;
+    const colors = locationGridMesh.geometry.getAttribute('color');
+    locationGridMesh.userData.tileByVertex.forEach(({ x, z, floor }, index) => {
+        const terrain = floor ? null : currentLocationData.tiles_data[z][x].terrain;
+        const color = floor ? floorGridColor : terrainGridColors[terrain] || terrainGridColors.grass;
+        const shade = darknessFactorAt(x, z);
+        colors.setXYZ(index, color.r * shade, color.g * shade, color.b * shade);
+    });
+    colors.needsUpdate = true;
+}
+
+function rebuildLocationGrid() {
+    if (locationGridMesh) {
+        scene.remove(locationGridMesh);
+        disposeObject(locationGridMesh);
+        locationGridMesh = null;
+    }
+    if (!scene || !currentLocationData || !locationGridVisible) return;
+    const objects = currentLocationData.objects || [];
+    const floors = objects.filter(object => object.type === 'floor').map(object => ({
+        ...floorVisualPose(object, objects),
+        top: getTileHeight(object.tile_x, object.tile_y)
+            + clampAssetElevation(object.properties?.elevation) + 0.005,
+    }));
+    const uncovered = (x, z) => !floors.some(floor => {
+        const dx = x + 0.5 - floor.x;
+        const dz = z + 0.5 - floor.z;
+        const along = dx * floor.axis.x + dz * floor.axis.z;
+        const across = dx * floor.normal.x + dz * floor.normal.z;
+        return Math.abs(along) < floor.width / 2 && Math.abs(across) < floor.depth / 2;
+    });
+    const data = buildTerrainGridData(currentLocationData.tiles_data, uncovered);
+    const floorData = buildFloorGridData(floors);
+    const positions = data.positions.concat(floorData.positions);
+    if (!positions.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(positions.length), 3));
+    locationGridMesh = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({
+        vertexColors: true, transparent: true, opacity: 0.45, depthWrite: false, toneMapped: false,
+    }));
+    locationGridMesh.raycast = () => {};
+    locationGridMesh.userData.tileByVertex = data.tileByVertex.concat(floorData.tileByVertex);
+    updateLocationGridColors();
+    scene.add(locationGridMesh);
 }
 
 function rebuildSmoothTerrainMesh() {
@@ -10508,8 +10582,10 @@ export function applyLocationTilesUpdate(locationId, updates) {
     if (getCurrentLocationId() !== locationId) return;
     if (!currentLocationData) return;
     let terrainNeedsRebuild = false;
+    let gridNeedsRebuild = false;
     for (const upd of updates) {
         const tile = currentLocationData.tiles_data[upd.z][upd.x];
+        if (upd.terrain !== undefined || upd.height !== undefined) gridNeedsRebuild = true;
         if (upd.terrain !== undefined) tile.terrain = upd.terrain;
         if (upd.height !== undefined) tile.height = upd.height;
         if (upd.objects !== undefined) tile.objects = upd.objects;
@@ -10519,6 +10595,8 @@ export function applyLocationTilesUpdate(locationId, updates) {
         updateLocationObjectHeight(upd.x, upd.z);
     }
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
+    if (gridNeedsRebuild) rebuildLocationGrid();
+    if (gridNeedsRebuild) clearFogOverlay();
     invalidateMovementMapCache();
     applyFogOfWar();
     if (editorSelection) updateEditorSelectionVisual();
@@ -10603,6 +10681,8 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     }
     if (changed.length === 0) return;
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
+    if (updates.terrain !== undefined || updates.height !== undefined) rebuildLocationGrid();
+    if (updates.terrain !== undefined || updates.height !== undefined) clearFogOverlay();
     if (updates.height !== undefined && editorSelection) updateEditorSelectionVisual();
     if (window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
@@ -10616,6 +10696,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         entry.model.position.y = height;
         entry.label.position.y = height + (entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55);
     });
+    applyFogOfWar();
 }
 
 // ========== Перетаскивание персонажей (3D) ==========
@@ -11243,6 +11324,14 @@ export function setupLocationEditing() {
             return;
         }
         if (window.locationEditorTool === 'assets' && !e.altKey && !e.shiftKey) {
+            if (!selectedLocationAsset) {
+                if (selectEditorAsset(e.clientX, e.clientY)) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    window.selectLocationEditorTool?.('select');
+                }
+                return;
+            }
             e.preventDefault();
             e.stopImmediatePropagation();
             placeSelectedLocationAsset(hoveredTileCoords.x, hoveredTileCoords.z);
@@ -11818,6 +11907,39 @@ export function setEditButtonVisible(visible) {
     if (btn) btn.style.display = visible ? 'block' : 'none';
 }
 
+export function addLocationGridButton() {
+    document.getElementById('location-grid-btn')?.remove();
+    const btn = document.createElement('button');
+    btn.id = 'location-grid-btn';
+    btn.type = 'button';
+    btn.textContent = '▦';
+    btn.style.position = 'absolute';
+    btn.style.top = '20px';
+    btn.style.right = '271px';
+    btn.style.zIndex = '20';
+    btn.style.color = 'white';
+    btn.style.border = 'none';
+    btn.style.padding = '8px 12px';
+    btn.style.borderRadius = '8px';
+    btn.style.cursor = 'pointer';
+    btn.style.fontSize = '18px';
+    btn.style.lineHeight = '1';
+    const sync = () => {
+        btn.style.background = locationGridVisible ? '#3d7959' : '#465261';
+        btn.title = locationGridVisible ? 'Скрыть сетку' : 'Показать сетку';
+        btn.setAttribute('aria-label', btn.title);
+        btn.setAttribute('aria-pressed', String(locationGridVisible));
+    };
+    btn.onclick = () => {
+        locationGridVisible = !locationGridVisible;
+        rebuildLocationGrid();
+        sync();
+    };
+    sync();
+    document.getElementById('location-container').appendChild(btn);
+    return btn;
+}
+
 export function destroyLocationScene() {
     locationFpsCounter?.destroy();
     locationFpsCounter = null;
@@ -11931,6 +12053,7 @@ export function destroyLocationScene() {
         locationTileMesh = null;
         waterTileMesh = null;
         smoothTerrainMesh = null;
+        locationGridMesh = null;
         objectMeshes = [];
         anomalyEffectMeshes = [];
         combatAreaMeshes = [];

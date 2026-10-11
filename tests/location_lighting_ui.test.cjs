@@ -43,6 +43,15 @@ test('location tools keep light, asset library and selection inspector in separa
         /'decor'|'structure'|'darkness'/);
 });
 
+test('asset tool selects existing objects only when placement is inactive', () => {
+    const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
+    const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
+    assert.match(scene, /if \(window\.locationEditorTool === 'assets' && !e\.altKey && !e\.shiftKey\) \{\s*if \(!selectedLocationAsset\) \{\s*if \(selectEditorAsset\(e\.clientX, e\.clientY\)\)/);
+    assert.match(scene, /window\.selectLocationEditorTool\?\.\('select'\);\s*\}\s*return;\s*\}\s*e\.preventDefault\(\);\s*e\.stopImmediatePropagation\(\);\s*placeSelectedLocationAsset/);
+    assert.match(main, /if \(activeAsset\?\.id === asset\.id\) \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\)/);
+    assert.match(main, /if \(previousTool === 'assets' && tool !== 'assets'\) \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\)/);
+});
+
 test('lighting editor fields share the location editor control styling', () => {
     const editor = fs.readFileSync(path.join(__dirname, '../app/static/js/locationLightingEditor.js'), 'utf8');
     const css = fs.readFileSync(path.join(__dirname, '../app/static/style.css'), 'utf8');

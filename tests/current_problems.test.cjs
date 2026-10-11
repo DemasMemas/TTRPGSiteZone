@@ -191,31 +191,40 @@ test('fog overlay distinguishes explored from unknown tiles and hides for GM', (
     const context = vm.createContext({
         fogOverlayMeshes,
         fogMemory: new Map([['1:0', {}]]),
-        currentLocationData: { grid_width: 2, grid_height: 2 },
+        currentLocationData: { grid_width: 2, grid_height: 2, tiles_data: [] },
         scene: { add() {}, remove() {} },
-        getTileHeight: () => 0,
+        fogSurfaceData: null,
+        buildFogSurfaceData: () => ({
+            positions: Array(4 * 9 * 3).fill(0),
+            tileIndices: Array.from({ length: 4 }, (_, tile) => [tile * 9, tile * 9 + 1, tile * 9 + 2]),
+        }),
         isTileVisibleToPlayer: (x, y) => x === 0 && y === 0,
         THREE: {
             DoubleSide: 2,
-            PlaneGeometry: class { dispose() {} },
-            MeshBasicMaterial: class { dispose() {} },
-            Object3D: class {
-                constructor() { this.position = { set() {} }; this.rotation = { set() {} }; this.matrix = {}; }
-                updateMatrix() {}
+            DynamicDrawUsage: 35048,
+            BufferGeometry: class {
+                setAttribute() {}
+                setIndex(index) { this.index = index; }
+                setDrawRange(_start, count) { this.drawCount = count; }
+                dispose() {}
             },
-            InstancedMesh: class {
-                constructor(_geometry, _material, count) {
-                    this.geometry = _geometry; this.material = _material;
-                    this.instanceMatrix = { count }; this.count = count;
+            Float32BufferAttribute: class {},
+            BufferAttribute: class {
+                constructor(array) { this.array = array; }
+                setUsage() {}
+            },
+            MeshBasicMaterial: class { dispose() {} },
+            Mesh: class {
+                constructor(geometry, material) {
+                    this.geometry = geometry; this.material = material;
                 }
-                setMatrixAt() {}
             },
         },
     });
     vm.runInContext(source.slice(start, end), context);
     context.updateFogOverlay(true, []);
-    assert.equal(fogOverlayMeshes.get('explored').count, 1);
-    assert.equal(fogOverlayMeshes.get('unexplored').count, 2);
+    assert.equal(fogOverlayMeshes.get('explored').geometry.drawCount, 3);
+    assert.equal(fogOverlayMeshes.get('unexplored').geometry.drawCount, 6);
     context.updateFogOverlay(false, []);
     assert.equal(fogOverlayMeshes.get('explored').visible, false);
     assert.equal(fogOverlayMeshes.get('unexplored').visible, false);

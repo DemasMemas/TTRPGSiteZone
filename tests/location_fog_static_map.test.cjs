@@ -62,3 +62,25 @@ test('old fog memory does not create duplicate ghosts for visible structures', (
     context.syncFogMemoryGhosts(true, []);
     assert.equal(context.fogMemoryGhosts.size, 0);
 });
+
+test('a removed character leaves no ghost on a visible empty tile', () => {
+    const ghostStart = source.indexOf('function syncFogMemoryGhosts(');
+    const ghostEnd = source.indexOf('\nfunction getFogVisionSources(', ghostStart);
+    const oldGhost = { visible: true };
+    const ghosts = new Map([['character:42', oldGhost]]);
+    const removed = [];
+    const context = vm.createContext({
+        fogMemory: new Map([['2:0', { characters: [{ characterId: 42, posX: 2, posY: 0 }] }]]),
+        fogMemoryGhosts: ghosts,
+        characterModels: new Map(),
+        fogMemoryDecorationTemplates: new Map(),
+        scene: { add() {}, remove(ghost) { removed.push(ghost); } },
+        disposeObject() {},
+        isTileVisibleToPlayer: () => true,
+        getFogGhost() { throw new Error('A visible empty tile must not create a ghost'); },
+    });
+    vm.runInContext(source.slice(ghostStart, ghostEnd), context);
+    context.syncFogMemoryGhosts(true, []);
+    assert.equal(ghosts.size, 0);
+    assert.deepEqual(removed, [oldGhost]);
+});

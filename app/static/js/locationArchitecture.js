@@ -2,6 +2,7 @@ const DEFAULT_DIMENSIONS = {
     wall: { width: 3, depth: 0.2, height: 2.4 },
     door: { width: 0.9, depth: 0.18, height: 2 },
     window: { width: 1.2, depth: 0.14, height: 1 },
+    floor: { width: 2, depth: 2, height: 0.12 },
 };
 
 export function structurePose(object) {
@@ -17,6 +18,41 @@ export function structurePose(object) {
         width: Number(dimensions.width),
         depth: Number(dimensions.depth),
         height: Number(dimensions.height),
+    };
+}
+
+export function floorVisualPose(object, objects) {
+    const pose = structurePose(object);
+    let minAlong = -pose.width / 2;
+    let maxAlong = pose.width / 2;
+    let minAcross = -pose.depth / 2;
+    let maxAcross = pose.depth / 2;
+    for (const wall of objects || []) {
+        if (wall.type !== 'wall') continue;
+        const edge = structurePose(wall);
+        const dx = edge.x - pose.x;
+        const dz = edge.z - pose.z;
+        const along = dx * pose.axis.x + dz * pose.axis.z;
+        const across = dx * pose.normal.x + dz * pose.normal.z;
+        const parallel = Math.abs(edge.axis.x * pose.axis.x + edge.axis.z * pose.axis.z);
+        if (parallel >= 0.98 && edge.width >= pose.width * 0.5
+            && Math.abs(Math.abs(across) - pose.depth / 2) <= 0.2) {
+            if (across < 0) minAcross = Math.min(minAcross, across - edge.depth / 2);
+            else maxAcross = Math.max(maxAcross, across + edge.depth / 2);
+        } else if (parallel <= 0.02 && edge.width >= pose.depth * 0.5
+            && Math.abs(Math.abs(along) - pose.width / 2) <= 0.2) {
+            if (along < 0) minAlong = Math.min(minAlong, along - edge.depth / 2);
+            else maxAlong = Math.max(maxAlong, along + edge.depth / 2);
+        }
+    }
+    const shiftAlong = (minAlong + maxAlong) / 2;
+    const shiftAcross = (minAcross + maxAcross) / 2;
+    return {
+        ...pose,
+        x: pose.x + shiftAlong * pose.axis.x + shiftAcross * pose.normal.x,
+        z: pose.z + shiftAlong * pose.axis.z + shiftAcross * pose.normal.z,
+        width: maxAlong - minAlong,
+        depth: maxAcross - minAcross,
     };
 }
 
