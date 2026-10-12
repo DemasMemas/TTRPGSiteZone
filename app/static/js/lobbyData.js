@@ -100,7 +100,7 @@ export async function loadLobbyInfo() {
             }
 
             setTileClickCallback((options) => {
-                const { tile, event, isDoubleClick } = options;
+                const { tile, isDoubleClick } = options;
                 if (!window.isGM) {
                     window.showNotification('Только ГМ может редактировать тайлы');
                     return;
@@ -111,10 +111,6 @@ export async function loadLobbyInfo() {
                     window.openTileEditModal(tile);
                 } else if (window.eraserMode) {
                     window.applyBrush(tile, { objects: [] }, window.brushRadius);
-                } else if (event.altKey) {
-                    window.applyBrush(tile, { terrain: window.currentTileType }, window.brushRadius);
-                } else if (event.shiftKey) {
-                    window.applyBrush(tile, { height: window.tileHeight }, window.brushRadius);
                 } else if (window.worldEditorTool === 'terrain') {
                     window.applyBrush(tile, { terrain: window.currentTileType }, window.brushRadius);
                 } else if (window.worldEditorTool === 'height') {
