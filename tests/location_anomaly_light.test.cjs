@@ -26,6 +26,8 @@ test('visible elemental anomalies add weak light; hidden and other types do not'
 test('anomaly light feeds both three-dimensional lighting and darkness rules', () => {
     assert.match(scene, /getLocationEmissiveSources\(\)/);
     assert.match(scene, /getAnomalyLightSources\(currentLocationData\?\.tiles_data\)/);
-    assert.match(scene, /for \(const source of \[\.\.\.getLocationDecorFireSources\(\),\s*\.\.\.getAnomalyLightSources\(currentLocationData\?\.tiles_data\)\]\)/);
+    assert.match(scene, /anomalyRenderSources = getAnomalyLightSources\(currentLocationData\?\.tiles_data\)/);
+    assert.match(scene, /Math\.min\(MAX_ANOMALY_RENDER_LIGHTS, anomalyRenderSources\.length\)/);
+    assert.match(scene, /light\.castShadow = false;\s*anomalyRenderPool\.push\(light\)/);
     assert.match(scene, /\.\.\.getLocationEmissiveSources\(\)\], daylight/);
 });

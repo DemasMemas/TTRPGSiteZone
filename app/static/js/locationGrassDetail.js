@@ -152,12 +152,12 @@ export function swampPlacements(tiles, isCovered = () => false) {
 
 function makeGrassGeometry(THREE) {
     const positions = [];
-    for (let blade = 0; blade < 4; blade++) {
-        const angle = blade * Math.PI / 2;
+    for (let blade = 0; blade < 3; blade++) {
+        const angle = blade * Math.PI * 2 / 3;
         const dx = Math.cos(angle);
         const dz = Math.sin(angle);
-        const sideX = -dz * 0.035;
-        const sideZ = dx * 0.035;
+        const sideX = -dz * 0.04;
+        const sideZ = dx * 0.04;
         const height = 0.19 + blade % 2 * 0.07;
         positions.push(-sideX, 0, -sideZ, sideX, 0, sideZ,
             dx * 0.075, height, dz * 0.075);
@@ -286,7 +286,7 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
     }
     if (reeds.length) {
         const mesh = new THREE.InstancedMesh(makeReedGeometry(THREE),
-            new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 }),
+            new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }),
             reeds.length);
         for (let index = 0; index < reeds.length; index++) {
             const reed = reeds[index];
@@ -308,7 +308,7 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
     }
     if (tufts.length) {
         const mesh = new THREE.InstancedMesh(makeGrassGeometry(THREE),
-            new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: 1 }),
+            new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
             tufts.length);
         for (let index = 0; index < tufts.length; index++) {
             const tuft = tufts[index];
@@ -330,7 +330,7 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
     }
     if (flowers.length) {
         const mesh = new THREE.InstancedMesh(makeFlowerGeometry(THREE),
-            new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 }),
+            new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }),
             flowers.length);
         for (let index = 0; index < flowers.length; index++) {
             const flower = flowers[index];

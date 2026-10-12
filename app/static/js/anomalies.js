@@ -46,27 +46,77 @@ function anomalyKeyMarker(key, color) {
     return marker;
 }
 
-function createLightningLine(color, seed) {
+function createLightningLines(color) {
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(7 * 3), 3));
-    const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }));
-    line.userData = { seed };
-    return line;
+    const positions = new THREE.BufferAttribute(new Float32Array(5 * 6 * 2 * 3), 3);
+    positions.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute('position', positions);
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1.5);
+    const lines = new THREE.LineSegments(geometry,
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }));
+    lines.userData.lightningSeeds = Array.from({ length: 5 }, () => Math.random() * 10);
+    lines.frustumCulled = true;
+    return lines;
 }
 
-function updateLightning(line, time, index) {
-    const angle = time * 1.8 + index * 2.1 + line.userData.seed;
-    const end = new THREE.Vector3(Math.cos(angle) * 0.5, 0.25 + Math.sin(time + index) * 0.25, Math.sin(angle) * 0.5);
-    const positions = line.geometry.attributes.position;
-    for (let step = 0; step <= 6; step++) {
-        const t = step / 6;
-        positions.setXYZ(step,
-            end.x * t + (step && step < 6 ? Math.sin(time * 12 + step * 9 + index) * 0.12 : 0),
-            end.y * t + (step && step < 6 ? Math.cos(time * 13 + step * 7 + index) * 0.1 : 0),
-            end.z * t + (step && step < 6 ? Math.cos(time * 11 + step * 5 + index) * 0.12 : 0)
-        );
-    }
+function updateLightning(lines, time) {
+    const positions = lines.geometry.attributes.position;
+    lines.userData.lightningSeeds.forEach((seed, index) => {
+        const angle = time * 1.8 + index * 2.1 + seed;
+        const endX = Math.cos(angle) * 0.5;
+        const endY = 0.25 + Math.sin(time + index) * 0.25;
+        const endZ = Math.sin(angle) * 0.5;
+        let previousX = 0;
+        let previousY = 0;
+        let previousZ = 0;
+        for (let step = 1; step <= 6; step++) {
+            const t = step / 6;
+            const x = endX * t + (step < 6 ? Math.sin(time * 12 + step * 9 + index) * 0.12 : 0);
+            const y = endY * t + (step < 6 ? Math.cos(time * 13 + step * 7 + index) * 0.1 : 0);
+            const z = endZ * t + (step < 6 ? Math.cos(time * 11 + step * 5 + index) * 0.12 : 0);
+            const vertex = (index * 6 + step - 1) * 2;
+            positions.setXYZ(vertex, previousX, previousY, previousZ);
+            positions.setXYZ(vertex + 1, x, y, z);
+            previousX = x;
+            previousY = y;
+            previousZ = z;
+        }
+    });
     positions.needsUpdate = true;
+}
+
+const particleDummy = new THREE.Object3D();
+
+function updateAcidParticles(mesh, time) {
+    const { phases, radii, vapor } = mesh.userData.acidParticles;
+    for (let index = 0; index < phases.length; index++) {
+        const rise = (time * (vapor ? 0.18 : 0.45) + phases[index]) % 1;
+        const angle = phases[index] + (vapor ? time : 0);
+        particleDummy.position.set(Math.cos(angle) * radii[index],
+            vapor ? 0.25 + rise * 0.7 : 0.08 + rise * 0.42,
+            Math.sin(angle) * radii[index]);
+        particleDummy.scale.setScalar(vapor ? 0.7 + rise * 1.4 : 1 - rise * 0.55);
+        particleDummy.updateMatrix();
+        mesh.setMatrixAt(index, particleDummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+}
+
+function createAcidParticles(count, radius, color, opacity, vapor = false) {
+    const geometry = new THREE.SphereGeometry(radius, vapor ? 8 : 6, vapor ? 6 : 5);
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1.5);
+    const mesh = new THREE.InstancedMesh(
+        geometry,
+        material(color, opacity), count);
+    mesh.userData.acidParticles = {
+        vapor,
+        phases: Array.from({ length: count }, () => Math.random()),
+        radii: Array.from({ length: count }, () => Math.random() * (vapor ? 0.25 : 0.35) + (vapor ? 0.15 : 0)),
+    };
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.frustumCulled = true;
+    updateAcidParticles(mesh, 0);
+    return mesh;
 }
 
 export function createAnomalyEffect(type = 'electric', color = '#00ffff', scale = 1, key = '', name = '') {
@@ -93,7 +143,7 @@ export function createAnomalyEffect(type = 'electric', color = '#00ffff', scale 
         });
     } else if (type === 'electric') {
         visual.position.y = 0.62;
-        for (let index = 0; index < 5; index++) visual.add(createLightningLine(0xd6f6ff, Math.random() * 10));
+        visual.add(createLightningLines(0xd6f6ff));
     } else if (type === 'acid') {
         [0.58, 0.43, 0.27].forEach((radius, index) => {
             const puddle = new THREE.Mesh(new THREE.CircleGeometry(radius, 28), material(index ? 0x8dff3d : tint, 0.34 + index * 0.12));
@@ -102,16 +152,8 @@ export function createAnomalyEffect(type = 'electric', color = '#00ffff', scale 
             puddle.userData.puddle = index;
             visual.add(puddle);
         });
-        for (let index = 0; index < 7; index++) {
-            const bubble = new THREE.Mesh(new THREE.SphereGeometry(0.035 + Math.random() * 0.05, 6, 5), material(0xb6ff8a, 0.7));
-            bubble.userData.bubble = { index, phase: Math.random() * Math.PI * 2, radius: Math.random() * 0.35 };
-            visual.add(bubble);
-        }
-        for (let index = 0; index < 4; index++) {
-            const vapor = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), material(0x8cff6a, 0.18));
-            vapor.userData.vapor = { index, phase: Math.random() * Math.PI * 2, radius: 0.15 + Math.random() * 0.25 };
-            visual.add(vapor);
-        }
+        visual.add(createAcidParticles(7, 0.06, 0xb6ff8a, 0.7));
+        visual.add(createAcidParticles(4, 0.12, 0x8cff6a, 0.18, true));
     } else if (type === 'radiation') {
         const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.3, 1), material(0xb8e336, 0.35));
         core.position.y = 0.65;
@@ -171,7 +213,7 @@ export function animateAnomalyEffects(roots, time) {
             });
         } else if (effect.type === 'electric') {
             visual.children.forEach((child, index) => {
-                if (child.isLine) updateLightning(child, t, index);
+                if (child.userData.lightningSeeds) updateLightning(child, t);
             });
             visual.rotation.y = t * 0.8;
         } else if (effect.type === 'acid') {
@@ -181,19 +223,7 @@ export function animateAnomalyEffects(roots, time) {
                     child.scale.set(pulse, 1, pulse);
                     child.rotation.z = t * 0.12 * (child.userData.puddle + 1);
                 }
-                if (child.userData.bubble) {
-                    const bubble = child.userData.bubble;
-                    const rise = (t * 0.45 + bubble.phase) % 1;
-                    child.position.set(Math.cos(bubble.phase) * bubble.radius, 0.08 + rise * 0.42, Math.sin(bubble.phase) * bubble.radius);
-                    child.scale.setScalar(1 - rise * 0.55);
-                }
-                if (child.userData.vapor) {
-                    const vapor = child.userData.vapor;
-                    const rise = (t * 0.18 + vapor.phase) % 1;
-                    child.position.set(Math.cos(vapor.phase + t) * vapor.radius, 0.25 + rise * 0.7, Math.sin(vapor.phase + t) * vapor.radius);
-                    child.scale.setScalar(0.7 + rise * 1.4);
-                    child.material.opacity = 0.18 * (1 - rise);
-                }
+                if (child.userData.acidParticles) updateAcidParticles(child, t);
             });
         } else if (effect.type === 'radiation') {
             visual.children.forEach(child => {

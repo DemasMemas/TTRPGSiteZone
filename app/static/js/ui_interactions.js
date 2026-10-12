@@ -72,6 +72,15 @@ export function expandMapToolsPanelOnToolChange(previousTool, nextTool) {
     savePanelState('panel-tools', { collapsed: false });
 }
 
+export function collapseMapToolsPanel() {
+    const panel = document.getElementById('panel-tools');
+    if (!panel || panel.classList.contains('collapsed')) return;
+    panel.classList.add('collapsed');
+    const toggleBtn = panel.querySelector('.panel-header .toggle-btn');
+    if (toggleBtn) toggleBtn.textContent = '▶';
+    savePanelState('panel-tools', { collapsed: true });
+}
+
 function makeDraggable(panel, handle, panelId) {
     let startMouseX, startMouseY, startLeft, startTop, startWidth, startHeight;
     let isDragging = false;
@@ -190,7 +199,7 @@ export function initDraggablePanels() {
 }
 
 // ---------- Часть 3: Горячие клавиши ----------
-import { setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput, setEditMode, getEditMode } from './mapEdit.js';
+import { setBrushRadiusFromInput, setTileHeightFromInput, setEraserModeFromInput } from './mapEdit.js';
 import { closeTileEditModal } from './mapEdit.js';
 import { closeVisibilityModal } from './ui.js';
 import { controls } from './lobby3d.js';
@@ -485,7 +494,7 @@ function handleKeyDown(e) {
 
     if (e.code === 'KeyE') {
         e.preventDefault();
-        if (AppState.isGM) setEditMode(!getEditMode());
+        if (AppState.isGM) window.toggleEditMode();
         return;
     }
 }

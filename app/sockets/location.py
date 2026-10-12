@@ -125,6 +125,7 @@ def handle_join_location(data):
             'is_mutant': CombatService._is_mutant_character(
                 character.data if isinstance(character.data, dict) else {}
             ),
+            'mutant_type': CombatService._mutant_profile_name(character.data),
             'is_npc': is_npc(character),
             'gm_hidden': bool(lc.gm_hidden),
         })

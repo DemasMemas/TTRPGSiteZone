@@ -59,6 +59,7 @@ test('remembered models stay at the observed position and cannot be picked', () 
     };
     const context = vm.createContext({
         createCharacterModel: () => root,
+        createMutantModel: () => null,
         setFogGhostAppearance: (model) => { child.raycast = disabledRaycast; return model; },
         applyFogGhostPosture() {},
     });

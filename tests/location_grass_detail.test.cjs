@@ -106,7 +106,8 @@ test('swamp water is upward-facing and skips steep ground', async () => {
         Group: class { constructor() { this.children = []; this.userData = {}; } add(mesh) { this.children.push(mesh); } },
         BufferGeometry: Geometry,
         Float32BufferAttribute: class { constructor(array) { this.array = array; } },
-        Color, Object3D, Mesh, InstancedMesh, MeshStandardMaterial: Material, DoubleSide: 2,
+        Color, Object3D, Mesh, InstancedMesh, MeshStandardMaterial: Material,
+        MeshLambertMaterial: Material, DoubleSide: 2,
     };
     const flat = createGrassDetailGroup(THREE, tiles, () => 1, () => false);
     const pool = flat.children.find(mesh => mesh.constructor === Mesh);

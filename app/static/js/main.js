@@ -16,7 +16,7 @@ import { hideGlobalCanvas, showGlobalCanvas, controls as globalControls } from '
 import { showNotification, getErrorMessage } from './utils.js';
 import { Server } from './api.js';
 import AppState, {
-    expandMapToolsPanelOnToolChange, initDraggablePanels, initHotkeys,
+    collapseMapToolsPanel, expandMapToolsPanelOnToolChange, initDraggablePanels, initHotkeys,
     syncMapEditorAutoExpandCheckbox,
 } from './ui_interactions.js';
 import { initMapEditorQuickMenu, closeMapEditorQuickMenu } from './mapEditorQuickMenu.js';
@@ -179,8 +179,10 @@ window.toggleEditMode = function() {
         setLocationEditMode(newMode);
         const btn = document.getElementById('edit-toggle');
         if (btn) btn.style.background = newMode ? '#4a6fa5' : '';
+        if (!newMode) collapseMapToolsPanel();
     } else {
         originalToggleEditMode();
+        if (!getEditMode()) collapseMapToolsPanel();
     }
 };
 
@@ -415,7 +417,7 @@ window.enterLocation = async function(locationId) {
                 sections.select.appendChild(autoExpandLabel);
                 const selectionShortcuts = document.createElement('p');
                 selectionShortcuts.className = 'map-editor-shortcuts';
-                selectionShortcuts.textContent = 'Shift + клик: выбрать несколько · G: переместить · T: повернуть (Ctrl: вокруг центра группы, Shift: шаг 15°) · + / = / −: масштаб всех осей · H: скрыть / показать · Delete: удалить · R: размер одного объекта · Esc: отменить действие';
+                selectionShortcuts.textContent = 'Shift + клик: выбрать несколько · ПКМ: снять выделение · G: переместить · T: повернуть (Ctrl: вокруг центра группы, Shift: шаг 15°) · + / = / −: масштаб всех осей · H: скрыть / показать · Delete: удалить · R: размер одного объекта · Esc: отменить действие';
                 sections.select.appendChild(selectionShortcuts);
                 syncMapEditorAutoExpandCheckbox();
                 const legacyControls = document.createElement('div');
@@ -486,7 +488,7 @@ window.enterLocation = async function(locationId) {
                     if (radCheck) radCheck.checked = tool === 'radiation';
                     hint.textContent = {
                         select: 'Выберите объект или персонажа без рисования.',
-                        assets: 'Выберите ассет в библиотеке, наведите на карту и кликните для размещения.',
+                        assets: 'Выберите ассет в библиотеке, наведите на карту и кликните для размещения. ПКМ отменяет выбор ассета.',
                         terrain: 'Кликните по клетке или проведите кистью, чтобы сменить покрытие.',
                         height: 'Кликните по клетке или проведите кистью, чтобы изменить высоту.',
                         radiation: 'Кликните по клетке или проведите кистью, чтобы задать радиацию.',
@@ -522,7 +524,7 @@ window.enterLocation = async function(locationId) {
                             <label>Ширина Z, м <input class="form-control" type="number" data-placement-dimension="depth" min="0.02" max="30" step="any"></label>
                             <label>Высота модели, м <input class="form-control" type="number" data-placement-dimension="height" min="0.05" max="20" step="any"></label>
                         </div>
-                        <span class="location-asset-placement-hint">Наведите на карту и кликните для размещения</span>
+                        <span class="location-asset-placement-hint">Наведите на карту и кликните для размещения · ПКМ: отмена</span>
                     </div>
                     <div class="location-asset-inspector"></div>
                 `;
@@ -616,6 +618,12 @@ window.enterLocation = async function(locationId) {
                         };
                         assetGrid.appendChild(card);
                     });
+                };
+                window.cancelLocationAssetPlacement = () => {
+                    activeAsset = null;
+                    clearLocationAssetPreset();
+                    renderAssetCards();
+                    renderPlacementSettings();
                 };
                 const renderAssetSelection = () => {
                     const selection = getSelectedLocationEditorAsset();
@@ -1068,6 +1076,7 @@ window.exitLocation = function() {
     window.isLocationActive = false;
     window.locationEditorTool = 'select';
     delete window.selectLocationEditorTool;
+    delete window.cancelLocationAssetPlacement;
     delete window.locationDarknessPaintAtTile;
     window.currentLocationId = null;
     window.currentLocationCharacterId = null;
@@ -1404,6 +1413,7 @@ if (socket) {
                     s.is_mutant,
                     s.is_npc,
                     s.gm_hidden,
+                    s.mutant_type,
                 );
             });
         });
@@ -1460,6 +1470,7 @@ if (socket) {
                 data.character.is_mutant,
                 data.character.is_npc,
                 data.character.gm_hidden,
+                data.character.mutant_type,
             );
         });
     });

@@ -68,9 +68,9 @@ def _tiles():
     )
     for kind, x, z in decor:
         tiles[z][x]['objects'].append({'type': kind})
-    tiles[6][4]['objects'].append({
-        'type': 'poster', 'x': 0.13, 'z': -0.36, 'elevation': 1.2,
-        'rotation': 90, 'color': '#d9b97b',
+    tiles[3][9]['objects'].append({
+        'type': 'poster', 'x': 0, 'z': 0.13, 'elevation': 1.6,
+        'rotation': -90, 'color': '#d9b97b',
         'dimensions': {'width': 0.8, 'depth': 0.035, 'height': 1.1},
     })
 
@@ -119,6 +119,12 @@ def _structures(location):
     add('Окно склада', 'window', 12, 3, 1.2, 0.14, 1.1, '#a9c4cf', elevation=1, is_open=False)
     add('Боковое окно', 'window', 16, 6, 1.2, 0.14, 1.1, '#a9c4cf',
         rotation=math.pi / 2, elevation=1, is_open=True)
+    add('Настенный факел', 'wall_torch', 5, 14, 0.28, 0.42, 0.75, '#6b4a30',
+        rotation=math.pi, offset_z=-0.2, elevation=1.25, is_lit=True)
+    add('Потолочная лампочка', 'ceiling_bulb', 10, 7, 0.32, 0.32, 0.7, '#ffe2aa',
+        elevation=2.4, is_on=True)
+    add('Настенная лампочка', 'wall_bulb', 12, 14, 0.38, 0.4, 0.36, '#ffe2aa',
+        rotation=math.pi, offset_z=-0.2, elevation=1.8, is_on=True)
     add('Барная стойка', 'table', 7, 6, 3, 0.8, 1, '#775139')
     for x, z in ((6, 10), (11, 10)):
         add('Стол', 'table', x, z, 1.2, 0.85, 0.8, '#806044')

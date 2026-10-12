@@ -12,6 +12,7 @@ import { getUserColor, getUserColorHex } from './colors.js';
 import { Server } from './api.js';
 import { createDeferredActionResumer } from './deferredCombatActions.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
+import { createMutantModel } from './mutantModels.js';
 import { anomalyCoversTile } from './locationAnomalyArea.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
@@ -41,6 +42,8 @@ import { createCrateModel, createFenceModel, createShelfModel, createTentModel }
 import { animateFireObjectModels, createFireObjectModel, fireLightSource, getFireLightSources, isFireObject } from './locationFire.js';
 import { createElectricFixtureModel, electricFixtureLightSource, isElectricFixture } from './locationFixtures.js';
 import { getAnomalyLightSources } from './locationAnomalyLight.js';
+import { MAX_ANOMALY_RENDER_LIGHTS, selectAnomalyRenderLights } from './locationAnomalyRenderLights.js';
+import { createSceneProfiler } from './sceneProfiler.js';
 import { isWorldDarkTime } from './darknessRules.js';
 import {
     assetDimensions, baseAssetDimensions, resizedAxis, resizedUniformDimensions, validAssetDimensions,
@@ -188,6 +191,10 @@ let currentLocationData = null;
 let locationAmbientLight = null;
 let locationDirectionalLight = null;
 let locationLightGroup = null;
+let anomalyRenderSources = [];
+let anomalyRenderPool = [];
+let lastAnomalyLightUpdateAt = -Infinity;
+let locationProfiler = null;
 let locationDarknessFactors = null;
 let locationDarknessTexture = null;
 let activeLightingProfile = null;
@@ -4706,9 +4713,10 @@ function updateCharacterTeamVisual(characterId, teamName, teamColor) {
     badge.style.borderColor = entry.teamColor || '#8b98a3';
 }
 
-export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1, isMutant = false, isNpc = false, gmHidden = false) {
+export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1, isMutant = false, isNpc = false, gmHidden = false, mutantType = '') {
     if (characterModels.has(characterId)) {
         const old = characterModels.get(characterId);
+        disposeObject(old.model);
         scene.remove(old.model);
         if (old.label) scene.remove(old.label);
         characterModels.delete(characterId);
@@ -4716,7 +4724,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     const resolvedControlledBy = Number.isFinite(Number(controlledBy)) ? Number(controlledBy) : null;
     const fallbackOwnerId = Number.isFinite(Number(ownerId)) ? Number(ownerId) : null;
     const colorUserId = resolvedControlledBy ?? fallbackOwnerId ?? 0;
-    const model = createCharacterModel(colorUserId);
+    const model = (isMutant && createMutantModel(mutantType)) || createCharacterModel(colorUserId);
     const tileHeight = getTileHeight(posX, posY);
     model.position.set(posX + 0.5, tileHeight, posY + 0.5);
     tintLocationMesh(model, darknessFactorAt(posX, posY));
@@ -4794,7 +4802,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     div.style.borderRadius = '10px';
     div.style.pointerEvents = 'none';
     const label = new CSS2DObject(div);
-    label.position.set(posX + 0.5, tileHeight + 1.55, posY + 0.5);
+    label.position.set(posX + 0.5, tileHeight + (model.userData.labelHeight || 1.55), posY + 0.5);
     scene.add(label);
 
     characterModels.set(characterId, {
@@ -4807,6 +4815,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         hpZones,
         effects,
         isMutant: Boolean(isMutant),
+        mutantType,
         isNpc: Boolean(isNpc),
         gmHidden: characterVisibilityOverrides.get(String(characterId)) ?? Boolean(gmHidden),
         camouflaged: false,
@@ -5056,6 +5065,7 @@ function rememberVisibleCharacters(sources) {
         if (!fogMemory.has(key)) rememberFogTile(x, y);
         const snapshot = {
             characterId: id, ownerId: Number(entry.ownerId) || 0,
+            mutantType: entry.mutantType || '',
             posX: x, posY: y, posture: entry.posture || 'standing',
             facingX: Number(entry.facingX) || 0, facingY: Number(entry.facingY ?? 1),
         };
@@ -5097,7 +5107,8 @@ function getFogGhost(key, createGhost) {
 }
 
 function createCharacterFogGhost(snapshot) {
-    const ghost = setFogGhostAppearance(createCharacterModel(snapshot.ownerId));
+    const ghost = setFogGhostAppearance(createMutantModel(snapshot.mutantType)
+        || createCharacterModel(snapshot.ownerId));
     ghost.position.set(snapshot.posX + 0.5, Number(snapshot.height) || 1, snapshot.posY + 0.5);
     ghost.rotation.y = Math.atan2(Number(snapshot.facingX) || 0, Number(snapshot.facingY) || 1);
     applyFogGhostPosture(ghost, snapshot.posture);
@@ -5635,7 +5646,9 @@ export function applyCharacterPostureVisual(characterId, posture = 'standing') {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
     const normalized = COMBAT_POSTURES[posture] ? posture : 'standing';
-    const labelOffset = normalized === 'prone' ? 0.95 : normalized === 'sitting' ? 1.25 : 1.55;
+    const labelOffset = entry.model.userData.labelHeight && normalized === 'standing'
+        ? entry.model.userData.labelHeight
+        : normalized === 'prone' ? 0.95 : normalized === 'sitting' ? 1.25 : 1.55;
     const tileHeight = getTileHeight(entry.posX, entry.posY);
     const body = entry.model.children.find((child) => child.userData?.posturePart === 'body');
     const head = entry.model.children.find((child) => child.userData?.posturePart === 'head');
@@ -5761,7 +5774,9 @@ export function updateCharacterPosition(characterId, posX, posY, options = {}) {
     const tileHeight = getTileHeight(posX, posY);
     entry.model.position.set(posX + 0.5, tileHeight, posY + 0.5);
     tintLocationMesh(entry.model, darknessFactorAt(posX, posY));
-    const labelOffset = entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55;
+    const labelOffset = entry.model.userData.labelHeight && entry.posture === 'standing'
+        ? entry.model.userData.labelHeight
+        : entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55;
     entry.label.position.set(posX + 0.5, tileHeight + labelOffset, posY + 0.5);
     entry.posX = posX;
     entry.posY = posY;
@@ -6731,6 +6746,101 @@ export function getCombatState() {
 }
 
 // ========== Инициализация сцены ==========
+function createLocationProfileControl(container) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'scene-profile-button';
+    button.textContent = 'Профиль сцены';
+    const panel = document.createElement('pre');
+    panel.className = 'scene-profile-results';
+    panel.hidden = true;
+    container.append(button, panel);
+
+    let skipLabels = false;
+    let grass = null;
+    let grassWasVisible = false;
+    let anomalyVisibility = [];
+    let anomalyLightVisibility = [];
+    let lights = null;
+    let lightsWereVisible = false;
+    let shadowsWereEnabled = false;
+    const phases = [
+        { name: 'Полная сцена', apply() {}, restore() {} },
+        { name: 'Без травы и декора почвы', apply() {
+            grass = grassDetailGroup;
+            grassWasVisible = grass?.visible;
+            if (grass) grass.visible = false;
+        }, restore() { if (grass) grass.visible = grassWasVisible; } },
+        { name: 'Без визуалов аномалий', apply() {
+            anomalyVisibility = anomalyEffectMeshes.map(mesh => [mesh, mesh.visible]);
+            anomalyVisibility.forEach(([mesh]) => { mesh.visible = false; });
+        }, restore() { anomalyVisibility.forEach(([mesh, visible]) => { mesh.visible = visible; }); } },
+        { name: 'Без света аномалий', apply() {
+            anomalyLightVisibility = anomalyRenderPool.map(light => [light, light.visible]);
+            anomalyLightVisibility.forEach(([light]) => { light.visible = false; });
+        }, restore() { anomalyLightVisibility.forEach(([light, visible]) => { light.visible = visible; }); } },
+        { name: 'Без локальных источников света', apply() {
+            lights = locationLightGroup;
+            lightsWereVisible = lights?.visible;
+            if (lights) lights.visible = false;
+        }, restore() { if (lights) lights.visible = lightsWereVisible; } },
+        { name: 'Без теней', apply() {
+            shadowsWereEnabled = renderer.shadowMap.enabled;
+            renderer.shadowMap.enabled = false;
+        }, restore() {
+            renderer.shadowMap.enabled = shadowsWereEnabled;
+            renderer.shadowMap.needsUpdate = true;
+        } },
+        { name: 'Без HTML-подписей', apply() { skipLabels = true; }, restore() { skipLabels = false; } },
+    ];
+    const profiler = createSceneProfiler({ phases,
+        onProgress(name, index, total) {
+            panel.hidden = false;
+            panel.textContent = `Замер ${index}/${total}: ${name}\nДержите камеру неподвижно; каждый режим прогревается.`;
+        },
+        onComplete(results) {
+            button.textContent = 'Профиль сцены';
+            panel.textContent = [
+                'Реальная подлокация (FPS / p95 кадра / CPU / draw calls)',
+                ...results.map(result => {
+                    const pause = result.longFrames
+                        ? `; долгих пауз ${result.longFrames} (макс ${Math.round(result.longestFrameMs)}мс)` : '';
+                    if (!result.valid) return `${result.name}: нет устойчивого замера${pause}`;
+                    return `${result.name}: ${result.fps.toFixed(1)} / ${result.frameP95Ms.toFixed(1)}мс / ${result.cpuMs.toFixed(1)}мс / ${Math.round(result.calls)}${pause}`;
+                }),
+                `Травинки: ${grassDetailGroup?.userData.detailCounts?.tufts || 0}; эффекты аномалий: ${anomalyEffectMeshes.length}`,
+                `Огни аномалий: ${anomalyRenderSources.length} (рендерятся до ${anomalyRenderPool.length}); DPR: ${renderer.getPixelRatio().toFixed(2)}`,
+                'Сравнивайте режимы с полной сценой; абсолютный FPS ограничен экраном.',
+            ].join('\n');
+            console.table(results);
+        },
+    });
+    button.disabled = Boolean(renderer.isUnavailableRenderer);
+    panel.title = 'Нажмите, чтобы закрыть результат';
+    panel.addEventListener('click', () => { if (!profiler.running) panel.hidden = true; });
+    button.addEventListener('click', () => {
+        if (profiler.running) {
+            profiler.stop();
+            button.textContent = 'Профиль сцены';
+            panel.textContent = 'Замер остановлен, настройки сцены восстановлены.';
+            return;
+        }
+        button.textContent = 'Остановить замер';
+        profiler.start(performance.now());
+    });
+    return {
+        get skipLabels() { return skipLabels; },
+        frame(now, metrics) { profiler.frame(now, metrics); },
+        stop() {
+            if (!profiler.running) return;
+            profiler.stop();
+            button.textContent = 'Профиль сцены';
+            panel.textContent = 'Замер прерван изменением сцены; настройки восстановлены.';
+        },
+        destroy() { profiler.stop(); button.remove(); panel.remove(); },
+    };
+}
+
 export function initLocationScene(containerId) {
     // Сначала полностью уничтожаем старую сцену
     destroyLocationScene();
@@ -6750,6 +6860,7 @@ export function initLocationScene(containerId) {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
     locationFpsCounter = createFpsCounter(container, 'Подлокация');
+    locationProfiler = createLocationProfileControl(container);
     if (renderer.isUnavailableRenderer) {
         window.webGLUnavailable = true;
         showWebGLUnavailable(container);
@@ -6799,16 +6910,25 @@ export function initLocationScene(containerId) {
 
     // Анимация
     let previousFrameTime = performance.now();
+    let locationFrameWorkMs = 0;
+    let locationSampleFrames = 0;
+    let locationSampleAt = previousFrameTime;
     function animate(frameTime = performance.now()) {
         animationFrameId = requestAnimationFrame(animate);
         const deltaSeconds = Math.min(0.1, Math.max(0, (frameTime - previousFrameTime) / 1000));
         previousFrameTime = frameTime;
         if (document.hidden) {
             locationFpsCounter.pause();
+            locationProfiler?.stop();
+            locationFrameWorkMs = 0;
+            locationSampleFrames = 0;
+            locationSampleAt = frameTime;
             return;
         }
+        const frameWorkStartedAt = performance.now();
         updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
+        updateAnomalyRenderLights(frameTime);
         updateRoofVisibility();
         animateAnomalyEffects(anomalyEffectMeshes, performance.now());
         animateFireObjectModels(locationObjectMeshes, frameTime);
@@ -6819,7 +6939,25 @@ export function initLocationScene(containerId) {
             if (!renderer.isUnavailableRenderer) locationFpsCounter.frame(frameTime);
             else locationFpsCounter.pause();
         }
-        if (labelRenderer) labelRenderer.render(scene, camera);
+        if (labelRenderer && !locationProfiler?.skipLabels) labelRenderer.render(scene, camera);
+        if (renderer && !renderer.isUnavailableRenderer) {
+            const finishedAt = performance.now();
+            const cpuMs = finishedAt - frameWorkStartedAt;
+            locationFrameWorkMs += cpuMs;
+            locationSampleFrames += 1;
+            const info = renderer.info?.render;
+            locationProfiler?.frame(finishedAt, {
+                cpuMs, calls: info?.calls || 0, triangles: info?.triangles || 0,
+            });
+            if (frameTime - locationSampleAt >= 1000) {
+                if (info) locationFpsCounter.setDetails(
+                    `calls ${info.calls} | tris ${Math.round(info.triangles / 1000)}k | CPU ${(locationFrameWorkMs / locationSampleFrames).toFixed(1)}ms`
+                );
+                locationFrameWorkMs = 0;
+                locationSampleFrames = 0;
+                locationSampleAt = frameTime;
+            }
+        }
     }
     animate();
 
@@ -9392,6 +9530,31 @@ function getLocationEmissiveSources() {
     return [...getLocationFireSources(), ...getAnomalyLightSources(currentLocationData?.tiles_data)];
 }
 
+const anomalyLightFrustum = new THREE.Frustum();
+const anomalyLightViewMatrix = new THREE.Matrix4();
+const anomalyLightSphere = new THREE.Sphere();
+
+function updateAnomalyRenderLights(now = performance.now(), force = false) {
+    if (!camera || !controls || !anomalyRenderPool.length || (!force && now - lastAnomalyLightUpdateAt < 150)) return;
+    lastAnomalyLightUpdateAt = now;
+    camera.updateMatrixWorld();
+    anomalyLightViewMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    anomalyLightFrustum.setFromProjectionMatrix(anomalyLightViewMatrix);
+    const selected = selectAnomalyRenderLights(anomalyRenderSources, controls.target, source => {
+        anomalyLightSphere.center.set(source.x, source.y, source.z);
+        anomalyLightSphere.radius = source.distance;
+        return anomalyLightFrustum.intersectsSphere(anomalyLightSphere);
+    }, anomalyRenderPool.length);
+    anomalyRenderPool.forEach((light, index) => {
+        const source = selected[index];
+        light.intensity = source?.intensity || 0;
+        if (!source) return;
+        light.color.set(source.color);
+        light.distance = source.distance;
+        light.position.set(source.x, source.y, source.z);
+    });
+}
+
 export function isLocationCharacterInDarkness(characterId) {
     if (!currentLocationData) return null;
     const entry = getCharacterModelEntry(characterId);
@@ -9978,7 +10141,7 @@ function updateBuildPreview() {
         scene.add(fadeEditorPreview(buildPreviewMesh));
         return;
     }
-    if (buildMode !== 'structure') return;
+    if (buildMode !== 'structure' || window.locationEditorTool === 'assets') return;
     const dimensions = getStructureDimensions();
     const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(dimensions.width, dimensions.height, dimensions.depth),
@@ -10159,6 +10322,7 @@ window.updateLocationObject = updateLocationObject;
 export function applyLocationLighting(settings, persist = true) {
     if (settings && persist && currentLocationData) currentLocationData.lighting = settings;
     if (!scene || !currentLocationData || !locationAmbientLight || !locationDirectionalLight) return;
+    locationProfiler?.stop();
     const cloudSetting = window.weatherSettings?.sun;
     const clarity = cloudSetting?.enabled ? Number(cloudSetting.intensity) : 1;
     const profile = resolveLocationLighting(
@@ -10255,8 +10419,7 @@ export function applyLocationLighting(settings, persist = true) {
     for (; fireLightCount < fireLightCapacity; fireLightCount++) {
         locationLightGroup.add(createFirePointLight(null));
     }
-    for (const source of [...getLocationDecorFireSources(),
-        ...getAnomalyLightSources(currentLocationData?.tiles_data)]) {
+    for (const source of getLocationDecorFireSources()) {
         const light = new THREE.PointLight(source.color, source.intensity, source.distance, 2);
         light.position.set(source.x,
             getTileHeight(source.tileX, source.tileZ) + source.height, source.z);
@@ -10265,7 +10428,20 @@ export function applyLocationLighting(settings, persist = true) {
         light.shadow.radius = 2;
         locationLightGroup.add(light);
     }
+    anomalyRenderSources = getAnomalyLightSources(currentLocationData?.tiles_data).map(source => ({
+        ...source,
+        y: getTileHeight(source.tileX, source.tileZ) + source.height,
+    }));
+    anomalyRenderPool = [];
+    for (let index = 0; index < Math.min(MAX_ANOMALY_RENDER_LIGHTS, anomalyRenderSources.length); index++) {
+        const light = new THREE.PointLight('#ffffff', 0, 3, 2);
+        light.castShadow = false;
+        anomalyRenderPool.push(light);
+        locationLightGroup.add(light);
+    }
+    lastAnomalyLightUpdateAt = -Infinity;
     scene.add(locationLightGroup);
+    updateAnomalyRenderLights(performance.now(), true);
     refreshLocationDarkness(profile);
     updateEditorSelectionVisual(settings && !persist ? settings : null);
 }
@@ -10400,6 +10576,21 @@ function clearEditorSelection() {
     notifyEditorResize();
     updateEditorSelectionVisual();
     notifyEditorSelection();
+}
+
+function cancelLocationEditorContextAction() {
+    if (!window.isGM || !window.locationEditMode) return false;
+    if (window.locationEditorTool === 'assets' && selectedLocationAsset) {
+        if (window.cancelLocationAssetPlacement) window.cancelLocationAssetPlacement();
+        else clearLocationAssetPreset();
+        return true;
+    }
+    if (window.locationEditorTool === 'select' && editorSelections.length) {
+        clearEditorSelection();
+        updateBuildPreview();
+        return true;
+    }
+    return false;
 }
 
 function updateEditorSelectionVisual(lightingOverride = null) {
@@ -10582,6 +10773,8 @@ export function setLocationAssetDimensions(dimensions) {
 
 export function clearLocationAssetPreset() {
     selectedLocationAsset = null;
+    buildMode = 'terrain';
+    brushObjectMode = false;
     clearBuildPreview();
 }
 
@@ -11139,6 +11332,7 @@ async function placeSelectedLocationAsset(x, z) {
 
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
+    locationProfiler?.stop();
     clearFogOverlay();
     clearFogMemoryGhosts();
     tileCubes = [];
@@ -12273,6 +12467,7 @@ function setupCharacterDragging() {
         e.preventDefault();
         e.stopImmediatePropagation();
         if (cameraDragMenuGuard.shouldSuppressMenu()) return;
+        if (cancelLocationEditorContextAction()) return;
         if (pendingCombatAction) {
             showNotification('Выберите цель левой кнопкой мыши или нажмите Esc для отмены', 'system');
             return;
@@ -13255,6 +13450,8 @@ export function addLocationRoofButton() {
 }
 
 export function destroyLocationScene() {
+    locationProfiler?.destroy();
+    locationProfiler = null;
     locationFpsCounter?.destroy();
     locationFpsCounter = null;
     closeNarrativeActionModal();
@@ -13396,6 +13593,9 @@ export function destroyLocationScene() {
     locationAmbientLight = null;
     locationDirectionalLight = null;
     locationLightGroup = null;
+    anomalyRenderSources = [];
+    anomalyRenderPool = [];
+    lastAnomalyLightUpdateAt = -Infinity;
     locationDarknessTexture?.dispose();
     locationDarknessTexture = null;
     locationDarknessFactors = null;

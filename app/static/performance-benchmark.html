@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Бенчмарк графики | Периметр</title>
+    <script type="importmap">
+        {"imports":{"three":"https://unpkg.com/three@0.128.0/build/three.module.js"}}
+    </script>
+    <style>
+        :root { color-scheme: dark; font-family: Georgia, serif; background: #141914; color: #e9e3cf; }
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        #view { position: fixed; inset: 0; }
+        #view canvas { display: block; width: 100%; height: 100%; }
+        aside { position: absolute; top: 18px; left: 18px; width: min(380px, calc(100vw - 36px)); max-height: calc(100vh - 36px); overflow: auto; padding: 18px; border: 1px solid #a39a73; border-radius: 12px; background: #17201de8; box-shadow: 0 14px 50px #0009; }
+        h1 { margin: 0 0 8px; font-size: 23px; }
+        p { margin: 0 0 15px; color: #c5c7b5; line-height: 1.35; font-size: 14px; }
+        label { display: block; margin: 11px 0 4px; color: #d6d4bd; font-size: 13px; }
+        select, button { width: 100%; padding: 9px; border: 1px solid #757f69; border-radius: 6px; background: #28362d; color: #f4ecd3; font: inherit; }
+        button { margin-top: 10px; cursor: pointer; background: #52694a; }
+        button:hover { background: #637c57; }
+        #readout { margin: 14px 0; padding: 12px; border: 1px solid #697765; background: #0d1514; font: 12px/1.5 Consolas, monospace; white-space: pre-wrap; }
+        #results { margin: 0; padding-left: 19px; font: 12px/1.5 Consolas, monospace; }
+        details { margin-top: 16px; font-size: 13px; }
+        details summary { cursor: pointer; }
+        #mutants { columns: 2; padding-left: 18px; line-height: 1.6; }
+        .fallback { color: #d3a881; }
+        @media (max-width: 600px) { aside { top: 8px; left: 8px; width: calc(100vw - 16px); max-height: 54vh; padding: 12px; } }
+    </style>
+</head>
+<body>
+    <div id="view"></div>
+    <aside>
+        <h1>Полевой бенчмарк</h1>
+        <p>Синтетическая сцена с игровыми аномалиями, травой и мутантами. Сравнивайте режимы на одном устройстве при одинаковом масштабе окна. Абсолютный FPS может отличаться от настоящей карты.</p>
+        <label for="scenario">Сцена</label>
+        <select id="scenario">
+            <option value="local-base">Подлокация: основа</option>
+            <option value="local-grass">Подлокация: трава</option>
+            <option value="local-anomalies">Подлокация: аномалии</option>
+            <option value="local-mutants">Подлокация: все мутанты</option>
+            <option value="local-all">Подлокация: всё вместе</option>
+            <option value="world-base">Глобальная: основа</option>
+            <option value="world-anomalies">Глобальная: аномалии</option>
+        </select>
+        <label for="resolution">Разрешение рендера</label>
+        <select id="resolution">
+            <option value="native">Родное (лимит игры: 2x / 1.5x)</option>
+            <option value="1">1x (проверка GPU)</option>
+        </select>
+        <button id="measure" type="button">Измерить 10 секунд</button>
+        <button id="sequence" type="button">Прогнать все режимы</button>
+        <p id="launch-warning" hidden>Откройте бенчмарк через запущенный сервер, а не как файл с диска: <a href="http://127.0.0.1:5000/static/performance-benchmark.html">http://127.0.0.1:5000/static/performance-benchmark.html</a>. Если игра работает на другом адресе или порту, используйте его с путём <code>/static/performance-benchmark.html</code>.</p>
+        <div id="readout">Подготовка сцены...</div>
+        <ol id="results"></ol>
+        <details>
+            <summary>Мутанты в тесте (по 5 каждого)</summary>
+            <ul id="mutants"></ul>
+        </details>
+    </aside>
+    <script>
+        if (location.protocol === 'file:') {
+            document.getElementById('launch-warning').hidden = false;
+            document.getElementById('readout').textContent = 'Бенчмарк не запущен: нужен HTTP-адрес.';
+            document.querySelectorAll('button, select').forEach(control => { control.disabled = true; });
+        } else {
+            const script = document.createElement('script');
+            script.type = 'module';
+            script.src = '/static/js/performanceBenchmark.js';
+            document.body.appendChild(script);
+        }
+    </script>
+</body>
+</html>

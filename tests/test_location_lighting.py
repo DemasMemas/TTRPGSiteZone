@@ -1,4 +1,7 @@
+import math
 import pytest
+from pathlib import Path
+import re
 from types import SimpleNamespace
 
 from app.models import Location
@@ -158,6 +161,29 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
     assert {obj.type for obj in location.objects} >= {
         'wall', 'floor', 'door', 'window', 'fence', 'table', 'chair',
         'box', 'military_crate', 'barrel', 'shelf',
+    }
+    catalog = (Path(__file__).resolve().parents[1] / 'app/static/js/locationAssetCatalog.js').read_text(encoding='utf-8')
+    assets = re.findall(
+        r"id: '([^']+)'[^\n]*kind: '(structure|decor|lamp)'[^\n]*color: '(#[0-9a-fA-F]{6})'",
+        catalog,
+    )
+    assert {obj.type for obj in location.objects} == {
+        asset_id for asset_id, kind, _ in assets if kind == 'structure'
+    }
+    assert {obj['type'] for row in location.tiles_data for tile in row for obj in tile['objects']} == {
+        'anomaly', *(asset_id for asset_id, kind, _ in assets if kind == 'decor')
+    }
+    poster = location.tiles_data[3][9]['objects'][0]
+    assert (poster['type'], poster['z'], poster['rotation'], poster['elevation']) == (
+        'poster', 0.13, -90, 1.6,
+    )
+    for kind in ('wall_torch', 'wall_bulb'):
+        fixture = next(obj for obj in location.objects if obj.type == kind)
+        assert (fixture.tile_y, fixture.properties['rotation'], fixture.properties['offset_z']) == (
+            14, math.pi, -0.2,
+        )
+    assert {light['color'] for light in location.lighting['local_lights']} == {
+        color for _, kind, color in assets if kind == 'lamp'
     }
     walls = [obj for obj in location.objects if obj.type == 'wall']
     assert len(walls) == 12

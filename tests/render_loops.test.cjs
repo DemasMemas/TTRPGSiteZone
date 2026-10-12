@@ -24,6 +24,7 @@ function frameHarness(local) {
         worldSkySphere: { position: { copy: mark('sky') } },
         stars: { position: { copy: mark('stars') } },
         updateLocationCameraMovement: mark('camera'), updateGlobalCameraMovement: mark('camera'),
+        updateAnomalyRenderLights: mark('anomalyLights'), locationProfiler: null,
         updateRoofVisibility: mark('roofs'),
         updateChunkVisibility: mark('chunks'), updateRain: mark('rain'),
         refreshWorldShadows: mark('shadows'),

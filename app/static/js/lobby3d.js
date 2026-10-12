@@ -827,7 +827,7 @@ function createAnomalyFieldLOD(tile, x, z) {
     return lod;
 }
 
-const FAR_ANOMALY_DISTANCE_SQ = 200 * 200;
+const FAR_ANOMALY_DISTANCE_SQ = 85 * 85;
 const farAnomalyGeo = new THREE.SphereGeometry(0.2, 4);
 const farAnomalyMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
 const visibleNearAnomalies = [];

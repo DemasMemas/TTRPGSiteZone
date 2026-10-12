@@ -2745,6 +2745,7 @@ def spawn_character_in_location(lobby_id, location_id):
             'pos_y': loc_char.pos_y,
             'gm_hidden': bool(loc_char.gm_hidden),
             'is_mutant': CombatService._is_mutant_character(character.data or {}),
+            'mutant_type': CombatService._mutant_profile_name(character.data),
             'is_npc': is_npc(character),
         }
     }, room=f"location_{location_id}")
@@ -4252,6 +4253,8 @@ def perform_location_combat_action(lobby_id, location_id, lobby, participant):
                     'pos_y': clone.get('y'),
                     'facing_x': clone.get('facing_x'),
                     'facing_y': clone.get('facing_y'),
+                    'is_mutant': clone.get('is_mutant'),
+                    'mutant_type': clone.get('mutant_type'),
                 },
             },
             room=f"location_{location_id}",

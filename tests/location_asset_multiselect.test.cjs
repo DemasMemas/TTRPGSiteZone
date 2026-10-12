@@ -31,6 +31,68 @@ test('shift-click adds and removes objects without discarding the rest', () => {
     assert.deepEqual(Array.from(context.editorSelections, item => item.id), [3]);
 });
 
+test('right click cancels a selected asset or placement before opening a context menu', () => {
+    const calls = [];
+    const window = {
+        isGM: true, locationEditMode: true, locationEditorTool: 'assets',
+        cancelLocationAssetPlacement() { calls.push('placement'); },
+    };
+    const context = vm.createContext({
+        window, selectedLocationAsset: { id: 'tree' },
+        editorSelections: [{ kind: 'structure', id: 1 }],
+        clearLocationAssetPreset() { calls.push('preset fallback'); },
+        clearEditorSelection() { calls.push('selection'); },
+        updateBuildPreview() { calls.push('preview'); },
+    });
+    vm.runInContext(section('function cancelLocationEditorContextAction(',
+        'function updateEditorSelectionVisual('), context);
+    assert.equal(context.cancelLocationEditorContextAction(), true);
+    assert.deepEqual(calls, ['placement']);
+    window.locationEditorTool = 'select';
+    assert.equal(context.cancelLocationEditorContextAction(), true);
+    assert.deepEqual(calls, ['placement', 'selection', 'preview']);
+    context.editorSelections = [];
+    assert.equal(context.cancelLocationEditorContextAction(), false);
+    window.locationEditMode = false;
+    context.editorSelections = [{ kind: 'structure', id: 1 }];
+    assert.equal(context.cancelLocationEditorContextAction(), false);
+    assert.match(scene, /if \(cancelLocationEditorContextAction\(\)\) return;/);
+    assert.match(main, /window\.cancelLocationAssetPlacement = \(\) => \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\);\s*renderAssetCards\(\);\s*renderPlacementSettings\(\);/);
+});
+
+test('canceling placement clears the structure ghost and does not recreate a cube on hover', () => {
+    let clears = 0;
+    let adds = 0;
+    const context = vm.createContext({
+        window: { locationEditMode: true, locationEditorTool: 'assets' },
+        selectedLocationAsset: { id: 'crate', kind: 'structure' },
+        buildMode: 'structure', brushObjectMode: true,
+        buildPreviewMesh: null, buildPreviewKey: null,
+        scene: { add() { adds++; } }, hoveredTileCoords: { x: 2, z: 3 },
+        editorRotateMode: false, editorMoveMode: false, editorResizeMode: false,
+        editorSelections: [], editorMovePreviewPoint: null,
+        editorRotateAngle: 0, editorResizeAxis: 'all', editorResizeDimensions: null,
+        structureWidth: 1, structureDepth: 1, structureHeight: 1,
+        structureColor: '#ffffff', structureRotation: 0,
+        getSelectedEditorSource: () => null,
+        clearBuildPreview() { clears++; },
+    });
+    vm.runInContext(section('export function clearLocationAssetPreset()',
+        'export function beginMoveSelectedLocationAsset()'), context);
+    context.clearLocationAssetPreset();
+    assert.equal(context.selectedLocationAsset, null);
+    assert.equal(context.buildMode, 'terrain');
+    assert.equal(context.brushObjectMode, false);
+    assert.equal(clears, 1);
+
+    // Even a stale build mode must not resurrect the generic structure preview.
+    context.buildMode = 'structure';
+    vm.runInContext(section('function updateBuildPreview()', 'async function placeStructureAtTile('), context);
+    context.updateBuildPreview();
+    assert.equal(adds, 0);
+    assert.equal(clears, 2);
+});
+
 test('group move preserves two decor objects originally sharing a tile', async () => {
     const tiles = Array.from({ length: 5 }, () => Array.from({ length: 5 }, () => ({ objects: [] })));
     const first = { type: 'anomaly', x: 0, z: 0, scale: 1.5 };

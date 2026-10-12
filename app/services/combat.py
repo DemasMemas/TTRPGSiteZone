@@ -10032,6 +10032,7 @@ class CombatService:
             'character_id': character.id if character else None,
             'name': character.name if character else None,
             'is_mutant': is_mutant,
+            'mutant_type': CombatService._mutant_profile_name(data) if is_mutant else '',
             'is_npc': is_npc(data),
             'gm_hidden': bool(loc_char.gm_hidden),
             'camouflaged': bool(is_mutant and combat_state and combat_state.status == 'active'

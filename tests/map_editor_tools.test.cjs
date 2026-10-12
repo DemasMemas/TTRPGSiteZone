@@ -57,6 +57,7 @@ test('editor panel expands only for a new tool when the preference is enabled', 
         classList: {
             collapsed: true,
             contains(name) { return name === 'collapsed' && this.collapsed; },
+            add(name) { if (name === 'collapsed') this.collapsed = true; },
             remove(name) { if (name === 'collapsed') this.collapsed = false; },
         },
         querySelector() { return toggle; },
@@ -88,8 +89,14 @@ test('editor panel expands only for a new tool when the preference is enabled', 
     assert.equal(panel.classList.collapsed, false);
     assert.equal(toggle.textContent, '▼');
     assert.equal(JSON.parse(values.get('panelStates'))['panel-tools'].collapsed, false);
+    context.collapseMapToolsPanel();
+    assert.equal(panel.classList.collapsed, true);
+    assert.equal(JSON.parse(values.get('panelStates'))['panel-tools'].collapsed, true);
 
     const main = read('main.js');
+    assert.match(main, /if \(!newMode\) collapseMapToolsPanel\(\)/);
+    assert.match(main, /if \(!getEditMode\(\)\) collapseMapToolsPanel\(\)/);
+    assert.match(source, /if \(AppState\.isGM\) window\.toggleEditMode\(\)/);
     assert.match(main, /select: createToolSection\('Выбор', \[\]\)/);
     assert.match(main, /expandMapToolsPanelOnToolChange\(previousTool, tool\)/);
     assert.match(main, /selectWorldEditorTool\('select', \{ autoExpand: false \}\)/);

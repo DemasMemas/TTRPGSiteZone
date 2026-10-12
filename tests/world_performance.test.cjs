@@ -121,17 +121,16 @@ test('distant anomalies share one per-chunk draw while nearby effects remain ind
     context.updateFarAnomalyInstances(chunk, false);
     assert.equal(chunk.farAnomalies.visible, false);
     assert.ok(chunk.anomalyLODs.every(anomaly => !anomaly.visible));
-    camera.position.x = 200;
+    camera.position.x = 250;
     visibleNearAnomalies.length = 0;
     context.updateFarAnomalyInstances(chunk, true);
-    assert.equal(chunk.farAnomalies.count, 0);
-    assert.equal(chunk.farAnomalies.visible, false);
-    assert.equal(chunk.anomalyLODs[0].visible, true);
+    assert.equal(chunk.farAnomalies.count, 1);
+    assert.equal(chunk.farAnomalies.visible, true);
+    assert.equal(chunk.anomalyLODs[0].visible, false);
     assert.equal(chunk.anomalyLODs[1].visible, true);
     assert.equal(chunk.anomalyLODs[2].visible, false);
-    assert.equal(visibleNearAnomalies.length, 2);
-    assert.equal(visibleNearAnomalies[0], chunk.anomalyLODs[0]);
-    assert.equal(visibleNearAnomalies[1], chunk.anomalyLODs[1]);
+    assert.equal(visibleNearAnomalies.length, 1);
+    assert.equal(visibleNearAnomalies[0], chunk.anomalyLODs[1]);
 });
 
 test('only the visible-near list is animated each frame', () => {
