@@ -151,7 +151,8 @@ test('GM can toggle the terrain grid without changing location data', () => {
 test('flat terrain and water tiles fill their cells without permanent grid gaps', () => {
     const scene = read('locationScene.js');
     assert.match(scene, /const geometry = new THREE\.BoxGeometry\(1, 1, 1\)/);
-    assert.match(scene, /new THREE\.InstancedMesh\(geometry\.clone\(\), createWaterMaterial\(\), tileCount\)/);
+    assert.match(scene, /const waterMaterial = createWaterMaterial\(\)/);
+    assert.match(scene, /new THREE\.InstancedMesh\(geometry\.clone\(\), waterMaterial, tileCount\)/);
     assert.doesNotMatch(scene, /new THREE\.BoxGeometry\(0\.98, 1, 0\.98\)/);
 });
 

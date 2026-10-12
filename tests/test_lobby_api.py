@@ -15,6 +15,7 @@ from app.models import (
     Location,
     LocationCharacter,
     LocationObject,
+    User,
     WorldGroup,
     WorldMapEvent,
     WorldTravelEvent,
@@ -180,6 +181,90 @@ def test_replacing_character_outside_combat_clears_old_anomaly(
     assert response.status_code == 200
     assert (placed.pos_x, placed.pos_y) == (3, 2)
     assert 'activeAnomaly' not in db.session.get(LobbyCharacter, character['id']).data['health']['combatMeta']
+
+
+def test_gm_can_hide_mutant_and_npc_models_but_not_player_character(
+    client, create_user, auth_headers,
+):
+    gm = create_user('hidden-model-gm')
+    player = create_user('hidden-model-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    location = Location(
+        lobby_id=lobby['id'], name='Hidden models', world_tile_x=0, world_tile_z=0,
+        grid_width=3, grid_height=3,
+        tiles_data=[[{'terrain': 'grass', 'height': 1, 'objects': []} for _ in range(3)] for _ in range(3)],
+    )
+    db.session.add(location)
+    db.session.flush()
+    characters = [
+        create_character(client, lobby, gm, auth_headers, data=data)
+        for data in ({'is_mutant': True}, {'is_npc': True}, {})
+    ]
+    placed = [
+        LocationCharacter(location_id=location.id, character_id=character['id'], pos_x=index, pos_y=1)
+        for index, character in enumerate(characters)
+    ]
+    db.session.add_all(placed)
+    db.session.commit()
+    endpoint = lambda character: (
+        f"/lobbies/{lobby['id']}/locations/{location.id}/characters/{character['id']}/gm-hidden"
+    )
+
+    assert client.patch(endpoint(characters[0]), headers=auth_headers(player),
+                        json={'gm_hidden': True}).status_code == 403
+    assert client.patch(endpoint(characters[2]), headers=auth_headers(gm),
+                        json={'gm_hidden': True}).status_code == 400
+    assert client.patch(endpoint(characters[0]), headers=auth_headers(gm),
+                        json={'gm_hidden': 'true'}).status_code == 400
+    for character in characters[:2]:
+        assert client.patch(endpoint(character), headers=auth_headers(gm),
+                            json={'gm_hidden': True}).status_code == 200
+    assert all(model.gm_hidden for model in placed[:2])
+    assert not placed[2].gm_hidden
+    assert CombatService.get_state(location.id, gm['id'])['characters'][0]['gm_hidden'] is True
+    assert client.patch(endpoint(characters[0]), headers=auth_headers(gm),
+                        json={'gm_hidden': False}).status_code == 200
+    assert not placed[0].gm_hidden
+
+
+def test_mutant_camouflage_visibility_follows_combat_round_without_changing_gm_hide(app):
+    gm = User(username='camouflage-gm', email='camouflage-gm@example.com', password_hash='x')
+    db.session.add(gm)
+    db.session.flush()
+    lobby = Lobby(name='Camouflage', gm_id=gm.id, invite_code='CAMOUFLAGE')
+    db.session.add(lobby)
+    db.session.flush()
+    location = Location(
+        lobby_id=lobby.id, name='Clearing', world_tile_x=0, world_tile_z=0,
+        grid_width=2, grid_height=2,
+        tiles_data=[[{'terrain': 'grass', 'height': 1, 'objects': []} for _ in range(2)] for _ in range(2)],
+    )
+    mutant = LobbyCharacter(
+        lobby_id=lobby.id, owner_id=gm.id, name='Bloodsucker',
+        data={'is_mutant': True, 'health': {'combatMeta': {
+            'mutantCamouflageActive': True, 'mutantCamouflageUntilRound': 2,
+        }}},
+    )
+    db.session.add_all([location, mutant])
+    db.session.flush()
+    placed = LocationCharacter(
+        location_id=location.id, character_id=mutant.id, pos_x=0, pos_y=0, gm_hidden=True,
+    )
+    state = LocationCombatState(
+        location_id=location.id, status='active', round_number=1,
+        turn_index=0, turn_order=[],
+    )
+    db.session.add_all([placed, state])
+    db.session.commit()
+
+    snapshot = CombatService._serialize_character(placed, combat_state=state)
+    assert snapshot['camouflaged'] is True
+    assert snapshot['gm_hidden'] is True
+    state.round_number = 3
+    snapshot = CombatService._serialize_character(placed, combat_state=state)
+    assert snapshot['camouflaged'] is False
+    assert snapshot['gm_hidden'] is True
 
 
 def test_addiction_exposure_and_global_time_start_withdrawal(

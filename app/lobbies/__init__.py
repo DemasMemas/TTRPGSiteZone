@@ -16,7 +16,7 @@ from app.services.lobby import LobbyService
 from app.services.participant import ParticipantService
 from app.services.map import MapService
 from app.services.character import CharacterService
-from app.services.character_roles import can_join_world_group, follows_world_time
+from app.services.character_roles import can_join_world_group, follows_world_time, is_npc
 from app.services.container_transfer import ContainerTransferService
 from app.services.treatment import TreatmentService
 from app.services.medical_procedure import MedicalProcedureService
@@ -2528,6 +2528,11 @@ def update_location_object(lobby_id, object_id, lobby, participant):
         return jsonify({'error': 'Access denied'}), 403
 
     data = request.get_json() or {}
+    if 'gm_hidden' in (data.get('properties') or {}):
+        if participant.user_id != lobby.gm_id:
+            raise PermissionDenied('Only GM can hide location objects')
+        if type(data['properties']['gm_hidden']) is not bool:
+            raise ValidationError('gm_hidden must be a boolean')
     if 'contents' in (data.get('properties') or {}):
         if participant.user_id != lobby.gm_id:
             raise PermissionDenied('Use the item transfer action')
@@ -2701,9 +2706,26 @@ def spawn_character_in_location(lobby_id, location_id):
             'hp_zones': loc_char.hp_zones,
             'effects': loc_char.effects,
             'pos_x': loc_char.pos_x,
-            'pos_y': loc_char.pos_y
+            'pos_y': loc_char.pos_y,
+            'gm_hidden': bool(loc_char.gm_hidden),
+            'is_mutant': CombatService._is_mutant_character(character.data or {}),
+            'is_npc': is_npc(character),
         }
     }, room=f"location_{location_id}")
+    revealed = getattr(loc_char, '_revealed_anomaly', None)
+    if revealed:
+        if revealed['object_id']:
+            obj = db.session.get(LocationObject, revealed['object_id'])
+            if obj:
+                socketio.emit('location_object_updated', {
+                    'location_id': location_id, 'object': LocationObjectSchema().dump(obj),
+                }, room=f'location_{location_id}')
+        else:
+            x, y = revealed['tile_x'], revealed['tile_y']
+            socketio.emit('location_tiles_updated', {
+                'location_id': location_id,
+                'updates': [{'x': x, 'z': y, 'objects': location.tiles_data[y][x].get('objects', [])}],
+            }, room=f'location_{location_id}')
     if existing and anomaly_changed:
         socketio.emit(
             'combat_state_updated', CombatService.get_state(location_id, user_id),
@@ -2711,6 +2733,30 @@ def spawn_character_in_location(lobby_id, location_id):
         )
 
     return jsonify({'message': f'Character {action} successfully', 'location_character_id': loc_char.id}), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/gm-hidden',
+    methods=['PATCH'],
+)
+@jwt_required()
+@requires_gm
+def set_location_character_hidden(lobby_id, location_id, character_id, lobby):
+    location = Location.query.filter_by(id=location_id, lobby_id=lobby_id).first_or_404()
+    placed = LocationCharacter.query.filter_by(
+        location_id=location.id, character_id=character_id,
+    ).first_or_404()
+    character = placed.character
+    if not character or not (CombatService._is_mutant_character(character.data) or is_npc(character)):
+        return jsonify({'error': 'Only mutants and NPCs can be hidden'}), 400
+    hidden = (request.get_json(silent=True) or {}).get('gm_hidden')
+    if type(hidden) is not bool:
+        return jsonify({'error': 'gm_hidden must be a boolean'}), 400
+    placed.gm_hidden = hidden
+    db.session.commit()
+    payload = {'location_id': location_id, 'character_id': character_id, 'gm_hidden': hidden}
+    socketio.emit('location_character_visibility_updated', payload, room=f'location_{location_id}')
+    return jsonify(payload), 200
 
 
 @lobbies_bp.route(

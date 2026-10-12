@@ -18,3 +18,15 @@ export function bearingToObjectRotation(bearing) {
 export function objectRotationToBearing(rotation) {
     return -Number(rotation) * 180 / Math.PI;
 }
+
+export function rotatePointAround(x, z, centerX, centerZ, bearing) {
+    const radians = Number(bearing) * Math.PI / 180;
+    const cosine = Math.cos(radians);
+    const sine = Math.sin(radians);
+    const dx = Number(x) - centerX;
+    const dz = Number(z) - centerZ;
+    return {
+        x: centerX + dx * cosine - dz * sine,
+        z: centerZ + dx * sine + dz * cosine,
+    };
+}

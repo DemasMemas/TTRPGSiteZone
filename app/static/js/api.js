@@ -500,6 +500,14 @@ export const Server = {
         );
     },
 
+    async setLocationCharacterHidden(lobbyId, locationId, characterId, gmHidden) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/gm-hidden`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gm_hidden: gmHidden }),
+        });
+    },
+
     async lootLocationCharacter(lobbyId, locationId, characterId, payload) {
         return apiFetch(
             `/lobbies/${lobbyId}/locations/${locationId}/characters/${characterId}/loot`,

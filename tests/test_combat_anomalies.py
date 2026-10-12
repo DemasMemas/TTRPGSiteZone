@@ -1,7 +1,11 @@
-import pytest
+from copy import deepcopy
 
-from app.extensions import db
-from app.models import Lobby, LobbyCharacter, Location, LocationCharacter, LocationCombatState, User
+import pytest
+from flask_jwt_extended import create_access_token
+
+from app.extensions import db, socketio
+from app.models import Lobby, LobbyCharacter, LobbyParticipant, Location, LocationCharacter, LocationCombatState, LocationObject, User
+from app.services.anomaly_area import anomaly_covers_tile
 from app.services.anomaly_profiles import ANOMALY_PROFILES, anomaly_profile
 from app.services.combat import CombatService
 
@@ -75,6 +79,178 @@ def test_anomaly_is_passable_and_stops_route_on_first_anomaly(app):
     assert (moved.pos_x, moved.pos_y) == (2, 2)
     active = actor.data["health"]["combatMeta"]["activeAnomaly"]
     assert active["key"] == "otboynik"
+
+
+def test_anomaly_trigger_uses_at_least_three_quarters_of_cell():
+    anomaly = {'type': 'anomaly', 'dimensions': {'width': 2.5, 'depth': 1}}
+    assert anomaly_covers_tile(anomaly, 2, 2, 3, 2)
+    assert not anomaly_covers_tile(anomaly, 2, 2, 4, 2)
+    anomaly['dimensions']['width'] = 2.48
+    assert not anomaly_covers_tile(anomaly, 2, 2, 3, 2)
+    anomaly['dimensions']['width'] = 2.5
+    anomaly['rotation'] = 90
+    assert anomaly_covers_tile(anomaly, 2, 2, 2, 3)
+    assert not anomaly_covers_tile(anomaly, 2, 2, 3, 2)
+    anomaly['rotation'] = 0
+    anomaly['x'] = -0.25
+    assert not anomaly_covers_tile(anomaly, 2, 2, 3, 2)
+
+
+def test_legacy_anomaly_scale_expands_trigger():
+    anomaly = {'type': 'anomaly', 'scale': 2.5}
+    assert anomaly_covers_tile(anomaly, 2, 2, 3, 2)
+    assert not anomaly_covers_tile(anomaly, 2, 2, 4, 2)
+
+
+def test_resized_anomaly_stops_route_before_original_tile(app):
+    user, location, actor, placed, _ = _combat_with_anomaly()
+    tiles = deepcopy(location.tiles_data)
+    tiles[2][2]['objects'][0]['dimensions'] = {'width': 2.5, 'depth': 1, 'height': 1}
+    location.tiles_data = tiles
+    placed.pos_x = 4
+    db.session.commit()
+
+    moved, _, _ = CombatService.move_character(
+        location.id, user.id, actor.id, 2, 2, movement_mode='walk',
+    )
+
+    assert (moved.pos_x, moved.pos_y) == (3, 2)
+    assert actor.data['health']['combatMeta']['activeAnomaly']['key'] == 'otboynik'
+
+
+def test_triggered_hidden_tile_anomaly_reveals_itself(app):
+    user, location, actor, _, _ = _combat_with_anomaly()
+    tiles = deepcopy(location.tiles_data)
+    tiles[2][2]['objects'][0]['gm_hidden'] = True
+    location.tiles_data = tiles
+    db.session.commit()
+
+    moved, _, _ = CombatService.move_character(
+        location.id, user.id, actor.id, 2, 2, movement_mode='walk',
+    )
+
+    assert location.tiles_data[2][2]['objects'][0]['gm_hidden'] is False
+    assert moved._revealed_anomaly == {'object_id': None, 'tile_x': 2, 'tile_y': 2}
+
+
+def test_triggered_hidden_database_anomaly_reveals_itself(app):
+    user, location, actor, _, _ = _combat_with_anomaly()
+    tiles = deepcopy(location.tiles_data)
+    tiles[2][2]['objects'] = []
+    location.tiles_data = tiles
+    anomaly = LocationObject(
+        location_id=location.id, type='anomaly', tile_x=2, tile_y=2,
+        properties={'anomaly_key': 'otboynik', 'gm_hidden': True},
+    )
+    db.session.add(anomaly)
+    db.session.commit()
+
+    moved, _, _ = CombatService.move_character(
+        location.id, user.id, actor.id, 2, 2, movement_mode='walk',
+    )
+
+    assert anomaly.properties['gm_hidden'] is False
+    assert moved._revealed_anomaly['object_id'] == anomaly.id
+
+
+def test_triggered_hidden_anomaly_broadcasts_tile_update(app):
+    from app.sockets.location import handle_join_location, handle_move_in_location
+
+    socketio.on_event('join_location', handle_join_location)
+    socketio.on_event('move_in_location', handle_move_in_location)
+    user, location, actor, _, _ = _combat_with_anomaly()
+    db.session.add(LobbyParticipant(lobby_id=location.lobby_id, user_id=user.id))
+    tiles = deepcopy(location.tiles_data)
+    tiles[2][2]['objects'][0]['gm_hidden'] = True
+    location.tiles_data = tiles
+    db.session.commit()
+    token = create_access_token(identity=str(user.id))
+    connection = socketio.test_client(app)
+    try:
+        connection.emit('join_location', {
+            'token': token, 'location_id': location.id, 'character_id': actor.id,
+        })
+        connection.get_received()
+        connection.emit('move_in_location', {
+            'token': token, 'location_id': location.id, 'character_id': actor.id,
+            'x': 2, 'y': 2, 'movement_mode': 'walk',
+        })
+        updates = [event for event in connection.get_received()
+                   if event['name'] == 'location_tiles_updated']
+        assert len(updates) == 1
+        assert updates[0]['args'][0]['updates'][0]['objects'][0]['gm_hidden'] is False
+    finally:
+        connection.disconnect()
+
+
+def test_mutant_camouflage_action_hides_model_in_combat_snapshot(app):
+    user, location, actor, _, _ = _combat_with_anomaly()
+    data = deepcopy(actor.data)
+    data['is_mutant'] = True
+    data['mutant'] = {'traits': ['Маскировка']}
+    actor.data = data
+    db.session.commit()
+
+    result = CombatService.perform_action(
+        location.id, user.id,
+        location_character_id=LocationCharacter.query.filter_by(
+            location_id=location.id, character_id=actor.id,
+        ).first().id,
+        action_key='mutant_camouflage',
+    )
+
+    snapshot = next(char for char in result['state']['characters'] if char['character_id'] == actor.id)
+    assert snapshot['camouflaged'] is True
+
+
+def test_database_anomaly_uses_dimensions_and_offset(app):
+    _, location, _, _, _ = _combat_with_anomaly()
+    anomaly = LocationObject(
+        location_id=location.id, type='anomaly', tile_x=1, tile_y=3,
+        properties={
+            'anomaly_key': 'otboynik',
+            'dimensions': {'width': 2.5, 'depth': 1, 'height': 1},
+            'offset_x': 0.25,
+        },
+    )
+    db.session.add(anomaly)
+    db.session.commit()
+
+    assert CombatService._anomalies_at_tile(location, 2, 3)[0]['object_id'] == anomaly.id
+    assert not CombatService._anomalies_at_tile(location, 3, 3)
+
+
+def test_anomaly_on_target_tile_takes_priority_over_expanded_neighbor(app):
+    _, location, _, _, _ = _combat_with_anomaly()
+    tiles = deepcopy(location.tiles_data)
+    tiles[2][1]['objects'] = [{
+        'type': 'anomaly', 'anomalyKey': 'banya',
+        'dimensions': {'width': 2.5, 'depth': 1},
+    }]
+    location.tiles_data = tiles
+    db.session.commit()
+
+    anomalies = CombatService._anomalies_at_tile(location, 2, 2)
+    assert [anomaly['key'] for anomaly in anomalies] == ['otboynik', 'banya']
+
+
+def test_relocation_within_expanded_anomaly_keeps_active_exposure(app):
+    _, location, actor, placed, _ = _combat_with_anomaly()
+    tiles = deepcopy(location.tiles_data)
+    tiles[2][2]['objects'][0]['dimensions'] = {'width': 2.5, 'depth': 1}
+    location.tiles_data = tiles
+    db.session.commit()
+    active = CombatService._enter_anomaly(
+        placed, CombatService._anomalies_at_tile(location, 2, 2)[0], 1,
+    )
+    active['rounds'] = 2
+    placed.pos_x = 3
+
+    assert not CombatService._sync_anomaly_after_relocation(location, placed, (2, 2))
+    assert actor.data['health']['combatMeta']['activeAnomaly']['rounds'] == 2
+    placed.pos_x = 4
+    assert CombatService._sync_anomaly_after_relocation(location, placed, (3, 2))
+    assert 'activeAnomaly' not in actor.data['health']['combatMeta']
 
 
 @pytest.mark.parametrize('has_idle_state', [True, False])

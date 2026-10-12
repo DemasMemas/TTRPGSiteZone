@@ -46,7 +46,7 @@ test('location tools keep light, asset library and selection inspector in separa
 test('asset tool selects existing objects only when placement is inactive', () => {
     const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
-    assert.match(scene, /if \(window\.locationEditorTool === 'assets' && !e\.altKey && !e\.shiftKey\) \{\s*if \(!selectedLocationAsset\) \{\s*if \(selectEditorAsset\(e\.clientX, e\.clientY\)\)/);
+    assert.match(scene, /if \(window\.locationEditorTool === 'assets' && !e\.altKey && \(!e\.shiftKey \|\| !selectedLocationAsset\)\) \{\s*if \(!selectedLocationAsset\) \{\s*if \(selectEditorAsset\(e\.clientX, e\.clientY, e\.shiftKey\)\)/);
     assert.match(scene, /window\.selectLocationEditorTool\?\.\('select'\);\s*\}\s*return;\s*\}\s*e\.preventDefault\(\);\s*e\.stopImmediatePropagation\(\);\s*placeSelectedLocationAsset/);
     assert.match(main, /if \(activeAsset\?\.id === asset\.id\) \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\)/);
     assert.match(main, /if \(previousTool === 'assets' && tool !== 'assets'\) \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\)/);
@@ -116,9 +116,9 @@ test('map rotation previews the cursor angle and commits only on click', async (
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
     const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
     assert.match(main, /beginRotateSelectedLocationAsset\(\)/);
-    assert.match(scene, /updateEditorRotatePreview\(e\.clientX, e\.clientY, e\.shiftKey\)/);
+    assert.match(scene, /updateEditorRotatePreview\(e\.clientX, e\.clientY, e\.shiftKey, e\.ctrlKey\)/);
     assert.match(scene, /commitEditorAssetRotation\(\)/);
-    const start = scene.indexOf('function updateEditorRotatePreview(clientX, clientY, snap = false)');
+    const start = scene.indexOf('function updateEditorRotatePreview(clientX, clientY, snap = false, aroundGroup = false)');
     const end = scene.indexOf('async function commitEditorAssetMove(x, z)', start);
     assert.ok(start >= 0 && end > start);
     const previews = [];
@@ -131,6 +131,7 @@ test('map rotation previews the cursor angle and commits only on click', async (
         editorRotateMode: true,
         editorSelection: { kind: 'lamp', index: 0 },
         editorRotateAngle: 0,
+        editorGroupRotatePivot: null,
         getSelectedLocationEditorAsset: () => selected,
         getPointerWorldPoint: () => ({ x: 4.5, z: 5.5 }),
         getTileHeight: () => 0,
@@ -160,6 +161,7 @@ test('poster offset and elevation survive moving it to another tile', async () =
     const sent = [];
     const context = vm.createContext({
         editorSelection: { kind: 'decor', x: 1, z: 1, index: 0 },
+        editorSelections: [{ kind: 'decor', x: 1, z: 1, index: 0 }],
         currentLocationData: { grid_width: 5, grid_height: 5, tiles_data: tiles },
         getSelectedEditorSource: () => source,
         clampAssetElevation: value => Math.max(0, Math.min(10, Number(value) || 0)),

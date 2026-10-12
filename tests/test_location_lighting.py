@@ -47,6 +47,16 @@ def test_location_lighting_keeps_fixture_dimensions():
         normalize_location_lighting({'local_lights': [light]}, 20, 20)
 
 
+def test_location_lighting_preserves_gm_hidden_flag():
+    light = {'x': 2, 'z': 2, 'height': 2, 'color': '#ffffff', 'intensity': 1, 'distance': 5}
+    assert normalize_location_lighting({'local_lights': [light]}, 20, 20)['local_lights'][0]['gm_hidden'] is False
+    light['gm_hidden'] = True
+    assert normalize_location_lighting({'local_lights': [light]}, 20, 20)['local_lights'][0]['gm_hidden'] is True
+    light['gm_hidden'] = 1
+    with pytest.raises(ValidationError):
+        normalize_location_lighting({'local_lights': [light]}, 20, 20)
+
+
 def test_location_lighting_accepts_many_sources_and_validates_dark_cells():
     lamp = {'x': 2, 'z': 2, 'height': 2, 'color': '#ffffff', 'intensity': 2, 'distance': 5}
     result = normalize_location_lighting({

@@ -9,6 +9,9 @@ from app.models import LobbyParticipant, LobbyCharacter
 from app.models.location import Location
 from app.models.location_character import LocationCharacter
 from app.services.combat import CombatService
+from app.services.character_roles import is_npc
+from app.schemas.location import LocationObjectSchema
+from app.models.location_object import LocationObject
 from app.services.exceptions import ServiceError
 from app.services.effects import normalize_effect_list, sync_health_derived_statuses
 from app.sockets.utils import get_user_from_token
@@ -122,6 +125,8 @@ def handle_join_location(data):
             'is_mutant': CombatService._is_mutant_character(
                 character.data if isinstance(character.data, dict) else {}
             ),
+            'is_npc': is_npc(character),
+            'gm_hidden': bool(lc.gm_hidden),
         })
     emit('location_state', state, room=request.sid)
 
@@ -207,6 +212,22 @@ def handle_move_in_location(data):
         },
         room=f"location_{location_id}",
     )
+    revealed = getattr(moved_character, '_revealed_anomaly', None)
+    if revealed:
+        if revealed['object_id']:
+            obj = db.session.get(LocationObject, revealed['object_id'])
+            if obj:
+                emit('location_object_updated', {
+                    'location_id': location_id, 'object': LocationObjectSchema().dump(obj),
+                }, room=f'location_{location_id}')
+        else:
+            location = db.session.get(Location, location_id)
+            x, y = revealed['tile_x'], revealed['tile_y']
+            tile = location.tiles_data[y][x]
+            emit('location_tiles_updated', {
+                'location_id': location_id,
+                'updates': [{'x': x, 'z': y, 'objects': tile.get('objects', [])}],
+            }, room=f'location_{location_id}')
     if moved_character.grapple_target_id:
         captive = db.session.get(
             LocationCharacter,

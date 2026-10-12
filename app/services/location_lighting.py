@@ -48,7 +48,7 @@ def normalize_location_lighting(value, width, height):
     normalized_lights = []
     for light in lights:
         required = {'x', 'z', 'height', 'color', 'intensity', 'distance'}
-        if not isinstance(light, dict) or set(light) - required - {'kind', 'azimuth', 'dimensions'}:
+        if not isinstance(light, dict) or set(light) - required - {'kind', 'azimuth', 'dimensions', 'gm_hidden'}:
             raise ValidationError('Некорректный локальный источник света')
         if not required.issubset(light):
             raise ValidationError('У локального источника света не хватает параметров')
@@ -65,6 +65,9 @@ def normalize_location_lighting(value, width, height):
             'kind': kind,
             'azimuth': _number(light.get('azimuth', 0), 'Направление светильника', -180, 180),
         }
+        if type(light.get('gm_hidden', False)) is not bool:
+            raise ValidationError('gm_hidden must be a boolean')
+        normalized['gm_hidden'] = light.get('gm_hidden', False)
         if 'dimensions' in light:
             dimensions = light['dimensions']
             if not isinstance(dimensions, dict) or set(dimensions) != {'width', 'depth', 'height'}:

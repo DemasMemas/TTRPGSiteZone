@@ -1192,7 +1192,10 @@ body.light-theme .lobby-time-field input[type="time"] {
   margin: 8px 0;
 }
 .location-asset-dimensions[hidden],
-.location-asset-resize-tools[hidden] {
+.location-asset-resize-tools[hidden],
+.location-asset-height-control[hidden],
+.location-asset-precise[hidden],
+.location-asset-actions button[hidden] {
   display: none;
 }
 .location-asset-dimensions label {

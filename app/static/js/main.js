@@ -45,7 +45,8 @@ import {
     setLocationAssetDimensions, getSelectedLocationEditorAsset, beginMoveSelectedLocationAsset,
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
     setLocationAssetResizeAxis, getLocationAssetResizeState,
-    deleteSelectedLocationAsset, updateSelectedLocationAssetDetails, previewSelectedLocationLamp,
+    deleteSelectedLocationAsset, toggleSelectedLocationAssetsHidden,
+    updateSelectedLocationAssetDetails, previewSelectedLocationLamp,
     previewLocationDarkTiles, setLocationDarknessOverlayVisible,
 } from './locationScene.js';
 import { paintDarkTiles } from './locationDarkness.js';
@@ -411,6 +412,10 @@ window.enterLocation = async function(locationId) {
                 const autoExpandLabel = document.createElement('label');
                 autoExpandLabel.innerHTML = '<input type="checkbox" data-map-editor-auto-expand> Раскрывать панель при смене инструмента';
                 sections.select.appendChild(autoExpandLabel);
+                const selectionShortcuts = document.createElement('p');
+                selectionShortcuts.className = 'map-editor-shortcuts';
+                selectionShortcuts.textContent = 'Shift + клик: выбрать несколько · G: переместить · T: повернуть (Ctrl: вокруг центра группы, Shift: шаг 15°) · + / = / −: масштаб всех осей · H: скрыть / показать · Delete: удалить · R: размер одного объекта · Esc: отменить действие';
+                sections.select.appendChild(selectionShortcuts);
                 syncMapEditorAutoExpandCheckbox();
                 const legacyControls = document.createElement('div');
                 legacyControls.hidden = true;
@@ -634,6 +639,7 @@ window.enterLocation = async function(locationId) {
                             <button type="button" data-asset-action="move" title="G">Переместить</button>
                             <button type="button" data-asset-action="rotate" title="T">Повернуть на карте</button>
                             <button type="button" data-asset-action="resize" title="R">Изменить размер</button>
+                            <button type="button" data-asset-action="hide" title="H">Скрыть</button>
                             <button type="button" data-asset-action="delete">Удалить</button>
                         </div>
                         <div class="location-asset-dimensions" data-selected-size>
@@ -663,6 +669,14 @@ window.enterLocation = async function(locationId) {
                         </details>
                     `;
                     assetInspector.querySelector('[data-asset-name]').textContent = selection.label;
+                    if (selection.selectedCount > 1) {
+                        assetInspector.querySelector('[data-asset-name]').textContent = `Выбрано объектов: ${selection.selectedCount}`;
+                        assetInspector.querySelector('.location-asset-height-control').hidden = true;
+                        assetInspector.querySelector('[data-asset-action="resize"]').hidden = true;
+                        assetInspector.querySelector('[data-selected-size]').hidden = true;
+                        assetInspector.querySelector('.location-asset-precise').hidden = true;
+                    }
+                    assetInspector.querySelector('[data-asset-action="hide"]').textContent = selection.hidden && selection.selectedCount === 1 ? 'Показать' : 'Скрыть / показать';
                     if (keepPreciseOpen) assetInspector.querySelector('.location-asset-precise').open = true;
                     assetInspector.querySelector('[data-asset-position]').textContent = `Клетка ${Math.floor(selection.x)}, ${Math.floor(selection.z)}`;
                     const heightInput = assetInspector.querySelector('[data-asset-elevation]');
@@ -671,8 +685,8 @@ window.enterLocation = async function(locationId) {
                         field.hidden = selection.kind !== 'lamp';
                     });
                     assetInspector.querySelector('[data-angle-label]').hidden = selection.kind === 'lamp' && selection.lightKind !== 'spot';
-                    assetInspector.querySelector('[data-asset-action="resize"]').hidden = !selection.resizable;
-                    assetInspector.querySelector('[data-selected-size]').hidden = !selection.resizable;
+                    assetInspector.querySelector('[data-asset-action="resize"]').hidden = selection.selectedCount > 1 || !selection.resizable;
+                    assetInspector.querySelector('[data-selected-size]').hidden = selection.selectedCount > 1 || !selection.resizable;
                     if (selection.resizable) assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
                         input.value = selection.dimensions[input.dataset.selectedDimension];
                     });
@@ -699,6 +713,7 @@ window.enterLocation = async function(locationId) {
                     assetInspector.querySelector('[data-asset-action="move"]').onclick = () => beginMoveSelectedLocationAsset();
                     assetInspector.querySelector('[data-asset-action="rotate"]').onclick = () => beginRotateSelectedLocationAsset();
                     assetInspector.querySelector('[data-asset-action="resize"]').onclick = () => beginResizeSelectedLocationAsset();
+                    assetInspector.querySelector('[data-asset-action="hide"]').onclick = () => toggleSelectedLocationAssetsHidden();
                     assetInspector.querySelector('[data-asset-action="delete"]').onclick = () => deleteSelectedLocationAsset();
                     assetInspector.querySelectorAll('[data-resize-axis]').forEach(button => {
                         button.onclick = () => setLocationAssetResizeAxis(button.dataset.resizeAxis);
@@ -719,7 +734,8 @@ window.enterLocation = async function(locationId) {
                             ...readFields(), dimensions,
                         });
                     });
-                    assetInspector.querySelector('[data-asset-action="rotate"]').disabled = selection.kind === 'lamp' && selection.lightKind !== 'spot';
+                    assetInspector.querySelector('[data-asset-action="rotate"]').disabled = selection.selectedCount === 1
+                        && selection.kind === 'lamp' && selection.lightKind !== 'spot';
                     let savingHeight = false;
                     const saveHeight = async value => {
                         if (savingHeight) return;
@@ -1377,6 +1393,8 @@ if (socket) {
                     s.facing_x,
                     s.facing_y,
                     s.is_mutant,
+                    s.is_npc,
+                    s.gm_hidden,
                 );
             });
         });
@@ -1431,6 +1449,8 @@ if (socket) {
                 data.character.facing_x,
                 data.character.facing_y,
                 data.character.is_mutant,
+                data.character.is_npc,
+                data.character.gm_hidden,
             );
         });
     });
@@ -1438,6 +1458,12 @@ if (socket) {
         if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
         import('./locationScene.js').then(module => {
             module.removeCharacterFromLocation(data.character_id);
+        });
+    });
+    socket.on('location_character_visibility_updated', (data) => {
+        if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
+        import('./locationScene.js').then(module => {
+            module.applyCharacterVisibilityUpdate(data.character_id, data.gm_hidden);
         });
     });
     socket.on('location_character_posture_updated', (data) => {

@@ -16,6 +16,7 @@ class LocationCharacter(db.Model):
     controller = db.relationship('User', foreign_keys=[controlled_by])
     team_name = db.Column(db.String(80), nullable=True)
     team_color = db.Column(db.String(16), nullable=True)
+    gm_hidden = db.Column(db.Boolean, nullable=False, default=False, server_default='0')
 
     initiative_bonus = db.Column(db.Integer, nullable=False, default=0)
     initiative_roll = db.Column(db.Integer, nullable=True)

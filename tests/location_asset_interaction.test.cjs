@@ -134,7 +134,8 @@ test('asset color is editable beyond lamps and is persisted on structures and de
 test('local water shares the world material and surface grid fits both map dimensions', async () => {
     const local = read('locationScene.js');
     const world = read('lobby3d.js');
-    assert.match(local, /new THREE\.InstancedMesh\(geometry\.clone\(\), createWaterMaterial\(\), tileCount\)/);
+    assert.match(local, /const waterMaterial = createWaterMaterial\(\)/);
+    assert.match(local, /new THREE\.InstancedMesh\(geometry\.clone\(\), waterMaterial, tileCount\)/);
     assert.match(world, /const waterMat = createWaterMaterial\(\)/);
     assert.match(local, /buildTerrainGridData\(currentLocationData\.tiles_data, uncovered\)/);
     const terrain = read('locationTerrain.js');
@@ -156,4 +157,37 @@ test('anomaly label stays outside the pulsing visual group', () => {
     assert.match(source, /if \(label\) group\.add\(label\)/);
     assert.match(source, /visual\.scale\.setScalar\(pulse\)/);
     assert.doesNotMatch(source, /node\.scale\.setScalar\(pulse\)/);
+});
+
+test('rebuilding anomaly tile retains its effect model instead of replacing it with an empty mesh', () => {
+    const source = read('locationScene.js');
+    const start = source.indexOf('function rebuildTileObjects(tileX, tileZ)');
+    const end = source.indexOf('// ========== Обновления из сокета ==========', start);
+    assert.ok(start >= 0 && end > start);
+    const anomaly = { type: 'anomaly', anomalyType: 'electric', anomalyKey: 'tesla', scale: 1.5 };
+    const effect = {
+        userData: { anomalyEffect: {} },
+        position: { set(x, y, z) { Object.assign(this, { x, y, z }); } },
+        rotation: { y: 0 },
+        scale: { y: 1 },
+    };
+    const added = [];
+    const context = vm.createContext({
+        currentLocationData: { tiles_data: [[{ height: 1, objects: [anomaly] }]] },
+        objectMeshes: [], anomalyEffectMeshes: [],
+        scene: { add(mesh) { added.push(mesh); }, remove() {} },
+        THREE: {
+            Mesh: class { constructor() { throw new Error('anomaly effect was replaced'); } },
+            MathUtils: { degToRad: value => value * Math.PI / 180 },
+        },
+        createAnomalyEffect: () => effect,
+        applyDecorSize(mesh, obj, type) { assert.equal(mesh, effect); assert.equal(type, 'anomaly'); },
+        clampAssetElevation: value => Number(value) || 0,
+        window: { isGM: true },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    context.rebuildTileObjects(0, 0);
+    assert.equal(added[0], effect);
+    assert.equal(context.objectMeshes[0], effect);
+    assert.equal(context.anomalyEffectMeshes[0], effect);
 });

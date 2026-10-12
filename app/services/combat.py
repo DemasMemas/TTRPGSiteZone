@@ -21,6 +21,8 @@ from app.services.deferred_action import (
     ensure_no_deferred_action,
 )
 from app.services.anomaly_profiles import anomaly_profile
+from app.services.anomaly_area import anomaly_covers_tile
+from app.services.character_roles import is_npc
 from app.services.health import BASE_ORGAN_MAXIMUMS, apply_health_maximums
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -9248,26 +9250,46 @@ class CombatService:
         return raw if anomaly_profile(raw) else legacy.get(raw)
 
     @staticmethod
-    def _anomalies_at_tile(location, tile_x, tile_y):
-        found = []
+    def _anomaly_candidates(location):
         tiles = location.tiles_data if isinstance(location.tiles_data, list) else []
-        if 0 <= tile_y < len(tiles) and isinstance(tiles[tile_y], list) and 0 <= tile_x < len(tiles[tile_y]):
-            tile = tiles[tile_y][tile_x]
-            if isinstance(tile, dict):
+        candidates = []
+        for origin_y, row in enumerate(tiles):
+            if not isinstance(row, list):
+                continue
+            for origin_x, tile in enumerate(row):
+                if not isinstance(tile, dict):
+                    continue
                 for index, obj in enumerate(tile.get('objects') or []):
-                    if isinstance(obj, dict) and (obj.get('type') or obj.get('object_type')) == 'anomaly':
-                        key = CombatService._anomaly_key_from_object(obj)
-                        profile = anomaly_profile(key)
-                        if profile:
-                            found.append({'key': key, 'profile': profile, 'object_id': None, 'tile_object_index': index})
-        for obj in LocationObject.query.filter_by(
-            location_id=location.id, tile_x=tile_x, tile_y=tile_y, type='anomaly',
-        ).all():
+                    if not isinstance(obj, dict) or (obj.get('type') or obj.get('object_type')) != 'anomaly':
+                        continue
+                    key = CombatService._anomaly_key_from_object(obj)
+                    profile = anomaly_profile(key)
+                    if profile:
+                        candidates.append((obj, origin_x, origin_y, {
+                            'key': key, 'profile': profile, 'object_id': None,
+                            'tile_object_index': index, 'origin_x': origin_x, 'origin_y': origin_y,
+                        }))
+        for obj in LocationObject.query.filter_by(location_id=location.id, type='anomaly').all():
             key = CombatService._anomaly_key_from_object(obj)
             profile = anomaly_profile(key)
             if profile:
-                found.append({'key': key, 'profile': profile, 'object_id': obj.id})
-        return found
+                candidates.append((obj, obj.tile_x, obj.tile_y, {
+                    'key': key, 'profile': profile, 'object_id': obj.id,
+                    'origin_x': obj.tile_x, 'origin_y': obj.tile_y,
+                }))
+        return candidates
+
+    @staticmethod
+    def _anomalies_at_tile(location, tile_x, tile_y, candidates=None):
+        if candidates is None:
+            candidates = CombatService._anomaly_candidates(location)
+        matches = [
+            (origin_x != tile_x or origin_y != tile_y, entry)
+            for obj, origin_x, origin_y, entry in candidates
+            if anomaly_covers_tile(obj, origin_x, origin_y, tile_x, tile_y)
+        ]
+        matches.sort(key=lambda match: match[0])
+        return [entry for _, entry in matches]
 
     @staticmethod
     def _active_anomaly(loc_char):
@@ -9281,10 +9303,33 @@ class CombatService:
     def _enter_anomaly(loc_char, anomaly, round_number, previous_position=None):
         data, _, meta, _ = CombatService._active_anomaly(loc_char)
         profile = anomaly['profile']
+        revealed = False
+        if anomaly.get('object_id'):
+            obj = db.session.get(LocationObject, anomaly['object_id'])
+            if obj and (obj.properties or {}).get('gm_hidden'):
+                obj.properties = {**obj.properties, 'gm_hidden': False}
+                revealed = True
+        else:
+            location = loc_char.location
+            x, y, index = anomaly.get('origin_x'), anomaly.get('origin_y'), anomaly.get('tile_object_index')
+            tiles = location.tiles_data if isinstance(location.tiles_data, list) else []
+            if x is not None and y is not None and index is not None and 0 <= y < len(tiles) and 0 <= x < len(tiles[y]):
+                tile = tiles[y][x]
+                objects = tile.get('objects') if isinstance(tile, dict) else None
+                if isinstance(objects, list) and index < len(objects) and isinstance(objects[index], dict) and objects[index].get('gm_hidden'):
+                    objects[index] = {**objects[index], 'gm_hidden': False}
+                    flag_modified(location, 'tiles_data')
+                    revealed = True
+        if revealed:
+            loc_char._revealed_anomaly = {
+                'object_id': anomaly.get('object_id'),
+                'tile_x': anomaly.get('origin_x'), 'tile_y': anomaly.get('origin_y'),
+            }
         active = {
             'key': anomaly['key'], 'name': profile['name'], 'category': profile['category'],
             'dc': profile['dc'], 'tile_x': loc_char.pos_x, 'tile_y': loc_char.pos_y,
             'object_id': anomaly.get('object_id'), 'entered_round': max(1, round_number or 1),
+            'origin_x': anomaly.get('origin_x'), 'origin_y': anomaly.get('origin_y'),
             'rounds': 0,
         }
         if previous_position:
@@ -9322,8 +9367,16 @@ class CombatService:
         _, _, _, active = CombatService._active_anomaly(loc_char)
         if not active:
             return False
-        CombatService._leave_anomaly(loc_char)
         anomalies = CombatService._anomalies_at_tile(location, loc_char.pos_x, loc_char.pos_y)
+        if any(
+            anomaly['key'] == active.get('key')
+            and anomaly.get('object_id') == active.get('object_id')
+            and anomaly.get('origin_x') == active.get('origin_x')
+            and anomaly.get('origin_y') == active.get('origin_y')
+            for anomaly in anomalies
+        ):
+            return False
+        CombatService._leave_anomaly(loc_char)
         if anomalies:
             CombatService._enter_anomaly(
                 loc_char, anomalies[0], 1, previous_position=previous_position,
@@ -9977,6 +10030,10 @@ class CombatService:
             'character_id': character.id if character else None,
             'name': character.name if character else None,
             'is_mutant': is_mutant,
+            'is_npc': is_npc(data),
+            'gm_hidden': bool(loc_char.gm_hidden),
+            'camouflaged': bool(is_mutant and combat_state and combat_state.status == 'active'
+                               and CombatService._mutant_camouflage_active(data, combat_state.round_number)),
             'owner_id': character.owner_id if character else None,
             'owner_username': character.owner.username if character and character.owner else None,
             'controlled_by': loc_char.controlled_by,
@@ -15678,8 +15735,11 @@ class CombatService:
 
         entered_anomaly = None
         if state and state.status == 'active':
+            anomaly_candidates = CombatService._anomaly_candidates(location)
             for step_x, step_y in (path.get('path') or [])[1:]:
-                anomalies = CombatService._anomalies_at_tile(location, step_x, step_y)
+                anomalies = CombatService._anomalies_at_tile(
+                    location, step_x, step_y, anomaly_candidates,
+                )
                 if not anomalies:
                     continue
                 entered_anomaly = anomalies[0]
