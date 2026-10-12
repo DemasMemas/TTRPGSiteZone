@@ -14,9 +14,12 @@ import { createDeferredActionResumer } from './deferredCombatActions.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { anomalyCoversTile } from './locationAnomalyArea.js';
 import { createFpsCounter } from './fpsCounter.js';
+import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { createWaterMaterial } from './waterSurface.js';
 import {
-    buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData, isSmoothTerrainTile,
+    buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData,
+    createTerrainSurfaceHeightSampler, isSmoothTerrainTile,
+    waterSurfaceAdjustments,
 } from './locationTerrain.js';
 import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting } from './locationLighting.js';
 import { findLocationAsset } from './locationAssetCatalog.js';
@@ -26,8 +29,18 @@ import {
 } from './locationAssetTransforms.js';
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
 import { doorOnWall, doorFrameStyle, floorVisualPose, wallVisualPlan } from './locationArchitecture.js';
+import { applyInteriorFloorShade, createRoofGeometry, createRoofGableGeometry, roofPlans, roofVisibleForCamera } from './locationRoof.js';
+import { createLocationTerrainPixels, updateLocationTerrainPixels } from './locationTerrainTexture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
 import { applySurfaceDarkness, writeDarknessPixels } from './locationDarknessSurface.js';
+import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
+import { createGrassDetailGroup } from './locationGrassDetail.js';
+import { buildRoundedWaterData, classifyWaterRegions, waterLevelForTile } from './locationWaterEdge.js';
+import { createWaterDetailGroup } from './locationWaterDetail.js';
+import { createCrateModel, createFenceModel, createShelfModel, createTentModel } from './locationSimpleModels.js';
+import { animateFireObjectModels, createFireObjectModel, fireLightSource, getFireLightSources, isFireObject } from './locationFire.js';
+import { createElectricFixtureModel, electricFixtureLightSource, isElectricFixture } from './locationFixtures.js';
+import { getAnomalyLightSources } from './locationAnomalyLight.js';
 import { isWorldDarkTime } from './darknessRules.js';
 import {
     assetDimensions, baseAssetDimensions, resizedAxis, resizedUniformDimensions, validAssetDimensions,
@@ -199,8 +212,17 @@ let lampEditPending = false;
 let tileCubes = [];
 let locationTileMesh = null;
 let waterTileMesh = null;
+let waterSurfaceMesh = null;
+let waterBankMesh = null;
+let sandBankMesh = null;
+let waterDetailGroup = null;
+let waterRegions = new Map();
+const WATER_SIDE_COLORS = { grass: 0x183c4a, swamp: 0x244c3b, sand: 0x76603a, rock: 0x5b5b50 };
 let smoothTerrainMesh = null;
+let terrainSurfaceMesh = null;
+let terrainSurfaceTexture = null;
 let locationGridMesh = null;
+let grassDetailGroup = null;
 let locationGridVisible = false;
 let darknessEditorOverlay = null;
 let darknessOverlayRequested = false;
@@ -217,6 +239,8 @@ let objectMeshes = [];
 let anomalyEffectMeshes = [];
 let combatAreaMeshes = [];
 let locationObjectMeshes = [];
+let roofMeshes = [];
+let locationRoofsVisible = true;
 let groundPlaneMesh;
 let characterModels = new Map();
 const characterVisibilityOverrides = new Map();
@@ -412,25 +436,33 @@ const objectInteractions = {
     corpse: ['open_container'],
     table: ['move', 'climb'],
     chair: ['move', 'climb'],
-    box: ['move', 'climb'],
+    box: ['open_container', 'move', 'climb'],
+    military_crate: ['open_container', 'move', 'climb'],
     barrel: ['move'],
-    fence: ['climb']
+    fence: ['climb'],
+    campfire: ['toggle_fire'],
+    torch: ['toggle_fire'],
+    wall_torch: ['toggle_fire'],
+    fire_barrel: ['toggle_fire'],
 };
 
 const interactionRequirements = {
     toggle_door: { requires_actor: true, max_distance: 1, checks: ['locked'] },
     open_container: { requires_actor: true, max_distance: 1, checks: ['locked', 'search'] },
     move: { requires_actor: true, max_distance: 1, checks: ['strength', 'weight'] },
-    climb: { requires_actor: true, max_distance: 1, checks: ['athletics'] }
+    climb: { requires_actor: true, max_distance: 1, checks: ['athletics'] },
+    toggle_fire: { requires_actor: true, max_distance: 1, checks: [] },
 };
 
-const LOW_CLIMB_OBJECT_TYPES = new Set(['table', 'chair', 'chest', 'box', 'barrier']);
+const LOW_CLIMB_OBJECT_TYPES = new Set(['table', 'chair', 'chest', 'box', 'military_crate', 'barrier']);
 const HIGH_CLIMB_OBJECT_TYPES = new Set(['fence']);
 const TOO_HIGH_OBJECT_TYPES = new Set(['tree', 'rock', 'house', 'tent', 'wall', 'shelf']);
-const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'ground_item', 'anomaly', 'poster', 'floor']);
+const PASSABLE_OBJECT_TYPES = new Set(['campfire', 'torch', 'wall_torch', 'fire_barrel',
+    'ceiling_bulb', 'wall_bulb', 'ground_item', 'anomaly', 'poster', 'floor']);
 const THROWABLE_OBJECT_WEIGHTS = {
     chair: 5,
     box: 10,
+    military_crate: 18,
     chest: 15,
     table: 25,
     barrel: 40,
@@ -478,17 +510,12 @@ const floorGridColor = new THREE.Color(0xc5c0b3);
 
 // ========== Вспомогательные функции ==========
 function isKeyboardInputTarget(target) {
-    return Boolean(target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+    return isTypingTarget(target);
 }
 
 function updateLocationCameraMovement(deltaSeconds) {
     if (!locationActive || !camera || !controls || locationCameraKeys.size === 0) return;
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    forward.y = 0;
-    if (forward.lengthSq() < 0.0001) return;
-    forward.normalize();
-    const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+    const { forward, right } = horizontalCameraAxes(THREE, camera);
     const movement = new THREE.Vector3();
     if (locationCameraKeys.has('KeyW')) movement.add(forward);
     if (locationCameraKeys.has('KeyS')) movement.sub(forward);
@@ -5142,7 +5169,7 @@ function blocksVision(object) {
     const properties = object?.properties || {};
     if (properties.blocks_vision === false) return false;
     return properties.blocks_vision === true || [
-        'wall', 'cover', 'crate', 'chest', 'fence', 'rock', 'house', 'shelf', 'table', 'chair',
+        'wall', 'cover', 'crate', 'box', 'military_crate', 'chest', 'fence', 'rock', 'house', 'shelf', 'table', 'chair',
     ].includes(String(object?.type || '').toLowerCase());
 }
 
@@ -6759,7 +6786,11 @@ export function initLocationScene(containerId) {
     locationAmbientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(locationAmbientLight);
     locationDirectionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    locationDirectionalLight.castShadow = false;
+    locationDirectionalLight.castShadow = true;
+    locationDirectionalLight.shadow.mapSize.set(2048, 2048);
+    locationDirectionalLight.shadow.bias = -0.0001;
+    locationDirectionalLight.shadow.normalBias = 0.02;
+    locationDirectionalLight.shadow.radius = 2;
     scene.add(locationDirectionalLight);
     scene.add(locationDirectionalLight.target);
 
@@ -6778,8 +6809,11 @@ export function initLocationScene(containerId) {
         }
         updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
+        updateRoofVisibility();
         animateAnomalyEffects(anomalyEffectMeshes, performance.now());
-        waterTileMesh?.material.map?.offset.set((frameTime * 0.000002) % 1, (frameTime * 0.000001) % 1);
+        animateFireObjectModels(locationObjectMeshes, frameTime);
+        animateFireObjectModels(objectMeshes, frameTime);
+        waterSurfaceMesh?.material.map?.offset.set((frameTime * 0.000002) % 1, (frameTime * 0.000001) % 1);
         if (renderer && scene && camera) {
             renderer.render(scene, camera);
             if (!renderer.isUnavailableRenderer) locationFpsCounter.frame(frameTime);
@@ -6857,6 +6891,10 @@ function getLocationObjectAtScreen(clientX, clientY) {
 
 function getObjectActions(object) {
     const actions = [...(object.properties?.interactions || objectInteractions[object.type] || [])];
+    if (isFireObject(object) && !actions.includes('toggle_fire')) actions.push('toggle_fire');
+    if (['box', 'military_crate'].includes(object.type) && !actions.includes('open_container')) {
+        actions.push('open_container');
+    }
     const hasContainerContents = Array.isArray(object?.properties?.contents) && object.properties.contents.length >= 0;
     if ((object?.type === 'corpse' || object?.type === 'body' || object?.properties?.is_corpse || hasContainerContents) && !actions.includes('open_container')) {
         actions.push('open_container');
@@ -6893,7 +6931,8 @@ function isStructureCoverObject(object) {
     const properties = object?.properties || {};
     const type = String(object?.type || '').toLowerCase();
     if (properties.cover_enabled === false) return false;
-    if (['floor', 'ground_item', 'campfire', 'anomaly', 'poster'].includes(type)) return false;
+    if (['floor', 'ground_item', 'campfire', 'torch', 'wall_torch', 'fire_barrel',
+        'ceiling_bulb', 'wall_bulb', 'anomaly', 'poster'].includes(type)) return false;
     if (['door', 'window'].includes(type) && properties.is_open) return false;
     return getObjectTraversalHeight(object) >= 0.3;
 }
@@ -6904,6 +6943,7 @@ function getActionRequirement(object, actionKey) {
 
 function getStructureActionLabel(object, actionKey) {
     if (actionKey === 'toggle_door') return object?.properties?.is_open ? 'Закрыть' : 'Открыть';
+    if (actionKey === 'toggle_fire') return object?.properties?.is_lit ? 'Потушить' : 'Зажечь';
     if (actionKey === 'open_container') return (object?.type === 'ground_item' || object?.properties?.is_ground_item) ? 'Поднять' : (object?.type === 'chest' ? 'Открыть сундук' : 'Открыть');
     if (actionKey === 'move') return 'Переставить';
     if (actionKey === 'rotate') return 'Повернуть';
@@ -6916,6 +6956,7 @@ function getStructureActionLabel(object, actionKey) {
 
 function getStructureActionIcon(actionKey) {
     if (actionKey === 'toggle_door') return '🚪';
+    if (actionKey === 'toggle_fire') return '♨';
     if (actionKey === 'open_container') return '↑';
     if (actionKey === 'move') return '↔';
     if (actionKey === 'rotate') return '↻';
@@ -7291,8 +7332,10 @@ async function updateInteractiveObject(objectId, updates) {
     try {
         const object = await Server.updateLocationObject(window.currentLobbyId, objectId, updates);
         updateLocationObject(object);
+        return object;
     } catch (error) {
         showNotification(error.message || 'Не удалось обновить объект');
+        return null;
     }
 }
 
@@ -8290,6 +8333,15 @@ async function executeStructureAction(object, actionKey, actorCharacterId = pend
         return true;
     }
 
+    if (actionKey === 'toggle_fire') {
+        const changed = await updateInteractiveObject(object.id, {
+            actor_character_id: Number(actorCharacterId),
+            properties: { is_lit: object.properties?.is_lit !== true },
+        });
+        if (changed) hideStructureInteraction();
+        return Boolean(changed);
+    }
+
     if (actionKey === 'rotate') {
         if (object?.type === 'fence') {
             showNotification('Забор нельзя поворачивать', 'system');
@@ -8389,7 +8441,7 @@ function showStructureActionMenu(clientX, clientY, object) {
         actions: entries,
     };
 
-    const title = object.name || object.type || 'Объект';
+    const title = findLocationAsset(object.type)?.label || object.name || object.type || 'Объект';
     structureActionMenu.innerHTML = `
         <div style="
             padding: 10px 12px 8px;
@@ -8986,6 +9038,16 @@ function showObjectContextMenu(clientX, clientY, object) {
                 action: () => updateInteractiveObject(object.id, { properties: { is_open: !isOpen } })
             });
         }
+        if (action === 'toggle_fire') {
+            actions.push({
+                label: object.properties?.is_lit ? 'Потушить' : 'Зажечь',
+                action: () => updateInteractiveObject(object.id, {
+                    actor_character_id: pendingStructureAction?.actorCharacterId
+                        || window.currentLocationCharacterId || window.currentCharacterId,
+                    properties: { is_lit: object.properties?.is_lit !== true },
+                }),
+            });
+        }
         if (action === 'open_container') {
             actions.push({
                 label: (object?.type === 'ground_item' || object?.properties?.is_ground_item) ? 'Поднять' : 'Открыть содержимое',
@@ -9045,6 +9107,7 @@ function showObjectContextMenu(clientX, clientY, object) {
 
 function disposeLocationObject(mesh) {
     mesh.traverse(child => {
+        if (child.isLight && child.shadow?.map) child.shadow.map.dispose();
         if (child.geometry) child.geometry.dispose();
         if (child.material) child.material.dispose();
     });
@@ -9064,18 +9127,29 @@ function getStructureDimensions(preset = structurePreset) {
     return { width: structureWidth, depth: Math.max(0.1, structureDepth), height: structureHeight };
 }
 
+const FLOOR_SURFACE_OFFSET = 0.035;
+
 function createLocationObjectMesh(obj) {
     const properties = obj.properties || {};
     const floorPose = obj.type === 'floor' ? floorVisualPose(obj, currentLocationData?.objects) : null;
-    const dimensions = properties.dimensions || floorPose || getStructureDimensions(obj.type);
+    const dimensions = properties.dimensions || floorPose
+        || (isFireObject(obj) ? baseAssetDimensions(obj.type, 'structure') : getStructureDimensions(obj.type));
     const width = floorPose?.width || dimensions.width || 1;
     const depth = floorPose?.depth || dimensions.depth || 1;
     const height = dimensions.height || 1;
-    const material = new THREE.MeshStandardMaterial({ color: properties.color || '#aa8866' });
+    const material = new THREE.MeshStandardMaterial({ color: properties.color || '#aa8866', roughness: 0.93 });
+    if (['wall', 'floor'].includes(obj.type)) {
+        applySurfacePattern(material, getSurfaceTexture(THREE, obj.type),
+            obj.type === 'floor' ? 0.32 : 0.25, obj.type === 'floor' ? 'top' : 'sides');
+    }
+    if (obj.type === 'floor') applyInteriorFloorShade(material, width, depth);
     const group = new THREE.Group();
     let main;
 
-    if (obj.type === 'wall') {
+    if (obj.type === 'fence') {
+        const fenceColor = properties.color === '#67745d' ? '#8b7458' : (properties.color || '#8b7458');
+        group.add(createFenceModel(THREE, width, height, depth, fenceColor));
+    } else if (obj.type === 'wall') {
         const plan = wallVisualPlan(obj, currentLocationData?.objects || []);
         for (const span of plan.spans) {
             const piece = new THREE.Mesh(
@@ -9123,6 +9197,17 @@ function createLocationObjectMesh(obj) {
         const panel = new THREE.Mesh(new THREE.BoxGeometry(width, panelHeight, depth), material);
         panel.position.set(width / 2, panelHeight / 2, 0);
         pivot.add(panel);
+        const hardware = new THREE.MeshStandardMaterial({ color: '#b7b5a7', metalness: 0.65, roughness: 0.4 });
+        for (const side of [-1, 1]) {
+            const plate = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.16, 0.018), hardware);
+            plate.position.set(width * 0.77, Math.min(1.02, panelHeight * 0.55),
+                side * (depth / 2 + 0.012));
+            pivot.add(plate);
+            const lever = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.026, 0.034), hardware);
+            lever.position.set(width * 0.7, plate.position.y,
+                side * (depth / 2 + 0.045));
+            pivot.add(lever);
+        }
         pivot.rotation.y = properties.is_open ? -Math.PI / 2 : 0;
         group.add(pivot);
         if (!frame.inWall) {
@@ -9132,6 +9217,12 @@ function createLocationObjectMesh(obj) {
                 group.add(wing);
             }
         }
+    } else if (isFireObject(obj)) {
+        const fire = createFireObjectModel(THREE, obj, { width, depth, height });
+        group.add(fire);
+        group.userData.fireFlames = fire.userData.fireFlames || [];
+    } else if (isElectricFixture(obj)) {
+        group.add(createElectricFixtureModel(THREE, obj, { width, depth, height }));
     } else if (obj.type === 'ground_item' || properties.is_ground_item) {
         const itemColor = properties.color || '#c9b27a';
         const itemMaterial = new THREE.MeshStandardMaterial({
@@ -9171,6 +9262,12 @@ function createLocationObjectMesh(obj) {
             leg.position.set(x * (width / 2 - 0.12), (height - 0.12) / 2, z * (depth / 2 - 0.12));
             group.add(leg);
         }));
+    } else if (obj.type === 'box' || obj.type === 'military_crate') {
+        group.add(createCrateModel(THREE, width, height, depth,
+            properties.color || (obj.type === 'military_crate' ? '#45543a' : '#8b6b4f'),
+            obj.type === 'military_crate'));
+    } else if (obj.type === 'shelf') {
+        group.add(createShelfModel(THREE, width, height, depth, properties.color || '#78634c'));
     } else if (obj.type === 'barrel') {
         main = new THREE.Mesh(
             new THREE.CylinderGeometry(width / 2, width / 2, height, 20),
@@ -9189,7 +9286,7 @@ function createLocationObjectMesh(obj) {
     const tileY = objectPosition.y ?? 0;
     group.position.set(floorPose?.x ?? tileX + 0.5 + Number(properties.offset_x || 0),
         getTileHeight(tileX, tileY) + clampAssetElevation(properties.elevation)
-            - (obj.type === 'floor' ? height - 0.005 : 0),
+            - (obj.type === 'floor' ? height - FLOOR_SURFACE_OFFSET : 0),
         floorPose?.z ?? tileY + 0.5 + Number(properties.offset_z || 0));
     if (obj.type === 'ground_item' || properties.is_ground_item) {
         group.position.y += 0.04;
@@ -9197,10 +9294,10 @@ function createLocationObjectMesh(obj) {
     group.rotation.y = properties.rotation || 0;
     group.traverse(child => {
         if (!child.isMesh) return;
-        child.castShadow = obj.type !== 'floor';
+        child.castShadow = obj.type !== 'floor' && !child.userData.fireFlame;
         child.receiveShadow = true;
     });
-    group.userData = { locationObjectId: obj.id, locationObject: obj };
+    group.userData = { ...group.userData, locationObjectId: obj.id, locationObject: obj };
     if (properties.gm_hidden && window.isGM) makeGmHiddenGhost(group);
     return group;
 }
@@ -9212,6 +9309,87 @@ function darknessFactorAt(x, z) {
     if (tileX < 0 || tileZ < 0 || tileX >= currentLocationData.grid_width
         || tileZ >= currentLocationData.grid_height) return 1;
     return locationDarknessFactors[tileZ * currentLocationData.grid_width + tileX] ?? 1;
+}
+
+function getLocationFireSources() {
+    const sources = getFireLightSources(currentLocationData?.objects);
+    sources.push(...(currentLocationData?.objects || []).map(object => electricFixtureLightSource(object)).filter(Boolean));
+    sources.push(...getLocationDecorFireSources());
+    return sources;
+}
+
+function isObjectLightSource(object) {
+    return isFireObject(object) || isElectricFixture(object);
+}
+
+const MIN_FIRE_LIGHT_POOL = 4;
+
+function createFirePointLight(source, objectId = null) {
+    const light = new THREE.PointLight(source?.color || '#ffb064', source?.intensity || 0,
+        source?.distance || 6, 2);
+    light.userData.fireObjectId = objectId;
+    light.userData.firePoolLight = true;
+    if (source) light.position.set(source.x,
+        getTileHeight(source.tileX, source.tileZ) + source.height, source.z);
+    // Point-light shadows render the entire scene six times per flame.
+    light.castShadow = false;
+    light.shadow.mapSize.set(256, 256);
+    light.shadow.radius = 2;
+    return light;
+}
+
+function syncFireObjectLight(object, objectId = object?.id, refreshDarkness = true) {
+    if (!locationLightGroup || objectId == null) return;
+    const existing = locationLightGroup.children.find(child => child.userData.firePoolLight
+        && child.userData.fireObjectId != null
+        && String(child.userData.fireObjectId) === String(objectId));
+    const source = fireLightSource(object, true) || electricFixtureLightSource(object, true);
+    if (!source) {
+        if (existing) {
+            existing.intensity = 0;
+            existing.userData.fireObjectId = null;
+            if (refreshDarkness && activeLightingProfile?.dark_tiles?.length) {
+                refreshLocationDarkness(activeLightingProfile, true);
+            }
+        }
+        return;
+    }
+    const light = existing || locationLightGroup.children.find(child => child.userData.firePoolLight
+        && child.userData.fireObjectId == null) || createFirePointLight(null);
+    if (!light.parent) locationLightGroup.add(light);
+    light.userData.fireObjectId = objectId;
+    light.position.set(source.x, getTileHeight(source.tileX, source.tileZ) + source.height, source.z);
+    light.intensity = source.intensity;
+    light.distance = source.distance;
+    light.color.set(source.color);
+    if (refreshDarkness && activeLightingProfile?.dark_tiles?.length) {
+        refreshLocationDarkness(activeLightingProfile, true);
+    }
+}
+
+function getLocationDecorFireSources() {
+    const sources = [];
+    for (const [z, row] of (currentLocationData?.tiles_data || []).entries()) {
+        for (const [x, tile] of row.entries()) {
+            for (const decor of tile.objects || []) {
+                if (decor.type !== 'campfire' || decor.is_lit === false) continue;
+                const source = fireLightSource({
+                    type: 'campfire', tile_x: x, tile_y: z,
+                    properties: {
+                        is_lit: true, offset_x: decor.x, offset_z: decor.z,
+                        elevation: decor.elevation,
+                        dimensions: assetDimensions(decor, 'decor', 'campfire'),
+                    },
+                });
+                if (source) sources.push(source);
+            }
+        }
+    }
+    return sources;
+}
+
+function getLocationEmissiveSources() {
+    return [...getLocationFireSources(), ...getAnomalyLightSources(currentLocationData?.tiles_data)];
 }
 
 export function isLocationCharacterInDarkness(characterId) {
@@ -9230,7 +9408,8 @@ export function isLocationCharacterInDarkness(characterId) {
     const daylight = profile.mode === 'world' && night ? 0 : Math.min(1, ambient);
     const factor = computeDarknessFactors(
         currentLocationData.grid_width, currentLocationData.grid_height,
-        [{ x, z }], currentLocationData.objects || [], profile.local_lights || [], daylight,
+        [{ x, z }], currentLocationData.objects || [],
+        [...(profile.local_lights || []), ...getLocationEmissiveSources()], daylight,
     )[z * currentLocationData.grid_width + x];
     return factor < 0.12;
 }
@@ -9284,48 +9463,70 @@ export function previewLocationDarkTiles(darkTiles) {
     refreshLocationDarkness({ ...activeLightingProfile, dark_tiles: darkTiles });
 }
 
-function refreshLocationDarkness(profile = activeLightingProfile) {
+function refreshLocationDarkness(profile = activeLightingProfile, lightOnly = false) {
     if (!currentLocationData || !profile) return;
     activeLightingProfile = profile;
     const daylight = profile.mode === 'world' && isWorldDarkTime(window.lobbyGameTimeMinutes ?? 480)
         ? 0 : Math.min(1, Number(profile.ambient_intensity) + Number(profile.directional_intensity));
-    locationDarknessFactors = computeDarknessFactors(
+    const previousFactors = locationDarknessFactors;
+    const nextFactors = computeDarknessFactors(
         currentLocationData.grid_width, currentLocationData.grid_height,
-        profile.dark_tiles || [], currentLocationData.objects || [], profile.local_lights || [], daylight,
+        profile.dark_tiles || [], currentLocationData.objects || [],
+        [...(profile.local_lights || []), ...getLocationEmissiveSources()], daylight,
     );
+    const changedTiles = lightOnly && previousFactors ? new Set() : null;
+    if (changedTiles) {
+        for (const tile of profile.dark_tiles || []) {
+            const index = tile.z * currentLocationData.grid_width + tile.x;
+            if (Math.abs(nextFactors[index] - previousFactors[index]) > 0.001) changedTiles.add(index);
+        }
+    }
+    locationDarknessFactors = nextFactors;
+    if (changedTiles && !changedTiles.size) {
+        if (fogIsActive()) applyFogOfWar();
+        return;
+    }
     if (locationDarknessTexture) {
         writeDarknessPixels(locationDarknessFactors, locationDarknessTexture.image.data);
         locationDarknessTexture.needsUpdate = true;
     }
-    refreshDarknessEditorOverlay(profile.dark_tiles || []);
+    if (!lightOnly) refreshDarknessEditorOverlay(profile.dark_tiles || []);
     if (locationTileMesh) {
-        for (let z = 0; z < currentLocationData.grid_height; z++) {
-            for (let x = 0; x < currentLocationData.grid_width; x++) {
-                const tile = currentLocationData.tiles_data[z][x];
-                const index = z * currentLocationData.grid_width + x;
-                if (tile.terrain === 'water') {
-                    waterTileMesh?.setColorAt(index, new THREE.Color(0xffffff));
-                } else {
-                    locationTileMesh.setColorAt(index,
-                        new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b));
-                }
+        const tileIndices = changedTiles || Array.from(
+            { length: currentLocationData.grid_width * currentLocationData.grid_height }, (_, index) => index);
+        for (const index of tileIndices) {
+            const x = index % currentLocationData.grid_width;
+            const z = Math.floor(index / currentLocationData.grid_width);
+            const tile = currentLocationData.tiles_data[z][x];
+            if (tile.terrain === 'water') {
+                waterTileMesh?.setColorAt(index, new THREE.Color(0xffffff));
+            } else {
+                locationTileMesh.setColorAt(index,
+                    new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b)
+                        .multiplyScalar(darknessFactorAt(x, z)));
             }
         }
         locationTileMesh.instanceColor.needsUpdate = true;
         if (waterTileMesh?.instanceColor) waterTileMesh.instanceColor.needsUpdate = true;
     }
-    updateSmoothTerrainColors();
-    updateLocationGridColors();
+    updateSmoothTerrainColors(changedTiles);
+    updateLocationGridColors(changedTiles);
     for (const mesh of locationObjectMeshes) {
+        if (changedTiles && !changedTiles.has(Math.floor(mesh.position.z) * currentLocationData.grid_width
+            + Math.floor(mesh.position.x))) continue;
         tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
     }
     for (const mesh of objectMeshes) {
+        if (changedTiles && !changedTiles.has(Math.floor(mesh.position.z) * currentLocationData.grid_width
+            + Math.floor(mesh.position.x))) continue;
         if (!anomalyEffectMeshes.includes(mesh)) tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
     }
     for (const entry of characterModels.values()) {
+        if (changedTiles && !changedTiles.has(Math.floor(entry.model.position.z) * currentLocationData.grid_width
+            + Math.floor(entry.model.position.x))) continue;
         tintLocationMesh(entry.model, darknessFactorAt(entry.model.position.x, entry.model.position.z));
     }
-    applyFogOfWar();
+    if (!lightOnly || fogIsActive()) applyFogOfWar();
 }
 
 function addLocationObjectMesh(obj, refreshFog = true) {
@@ -9337,18 +9538,81 @@ function addLocationObjectMesh(obj, refreshFog = true) {
     if (refreshFog) applyFogOfWar();
 }
 
-function removeLocationObjectMesh(objectId) {
+function removeLocationObjectMesh(objectId, refreshFog = true) {
     const mesh = locationObjectMeshes.find(item => Number(item.userData.locationObjectId) === Number(objectId));
     if (!mesh) return;
     scene.remove(mesh);
     disposeLocationObject(mesh);
     locationObjectMeshes = locationObjectMeshes.filter(item => item !== mesh);
-    applyFogOfWar();
+    if (refreshFog) applyFogOfWar();
 }
 
-function replaceLocationObjectMesh(object) {
-    removeLocationObjectMesh(object.id);
-    addLocationObjectMesh(object);
+function replaceLocationObjectMesh(object, refreshFog = true) {
+    removeLocationObjectMesh(object.id, false);
+    addLocationObjectMesh(object, refreshFog);
+}
+
+function updateRoofVisibility() {
+    if (!camera || !controls || !roofMeshes.length) return;
+    const distance = camera.position.distanceTo(controls.target);
+    for (const roof of roofMeshes) {
+        const visible = roofVisibleForCamera(roof.userData.roofPlan, controls.target,
+            distance, locationRoofsVisible, editMode, camera.position);
+        for (const child of roof.userData.visualMeshes) child.visible = visible;
+    }
+}
+
+function rebuildLocationRoofs() {
+    for (const roof of roofMeshes) {
+        scene?.remove(roof);
+        disposeLocationObject(roof);
+    }
+    roofMeshes = [];
+    if (!scene || !currentLocationData) return;
+    const plans = roofPlans(currentLocationData.objects, (x, z) => getTileHeight(x, z));
+    const enclosedFloors = new Set(plans.map(plan => plan.floorId));
+    for (const object of locationObjectMeshes) {
+        const enclosed = enclosedFloors.has(object.userData.locationObjectId);
+        object.traverse(child => {
+            if (child.isMesh && child.material?.userData.interiorShade) {
+                child.material.userData.interiorShade.value = enclosed ? 1 : 0;
+            }
+        });
+    }
+    const texture = getSurfaceTexture(THREE, 'roof');
+    for (const plan of plans) {
+        const material = new THREE.MeshStandardMaterial({
+            color: plan.color, roughness: 0.94, side: THREE.DoubleSide,
+        });
+        applySurfacePattern(material, texture, 0.22, 'top');
+        const roof = new THREE.Group();
+        const roofGeometry = createRoofGeometry(THREE, plan);
+        const roofFace = new THREE.Mesh(roofGeometry, material);
+        roof.add(roofFace);
+        const gableMaterial = new THREE.MeshStandardMaterial({
+            color: plan.gableColor, roughness: 1, side: THREE.DoubleSide,
+        });
+        applySurfacePattern(gableMaterial, getSurfaceTexture(THREE, 'wall'), 0.25, 'sides');
+        const gable = new THREE.Mesh(createRoofGableGeometry(THREE, plan), gableMaterial);
+        roof.add(gable);
+        const shadowCaster = new THREE.Mesh(roofGeometry,
+            new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, side: THREE.DoubleSide }));
+        shadowCaster.castShadow = true;
+        shadowCaster.raycast = () => {};
+        roof.add(shadowCaster);
+        roof.position.set(plan.x, plan.eaveY, plan.z);
+        roof.rotation.y = plan.angle;
+        roof.traverse(child => {
+            if (!child.isMesh) return;
+            child.receiveShadow = true;
+        });
+        roof.raycast = () => {};
+        roof.userData.roofPlan = plan;
+        roof.userData.visualMeshes = [roofFace, gable];
+        scene.add(roof);
+        roofMeshes.push(roof);
+    }
+    updateRoofVisibility();
 }
 
 function refreshArchitecturalMeshes() {
@@ -9364,6 +9628,7 @@ function refreshArchitecturalMeshes() {
         scene.add(newMesh);
         locationObjectMeshes[index] = newMesh;
     }
+    rebuildLocationRoofs();
     rebuildLocationGrid();
     applyFogOfWar();
     refreshLocationDarkness();
@@ -9377,7 +9642,8 @@ function updateLocationObjectHeight(tileX, tileZ) {
         const position = getObjectGridPosition(object);
         if (position.x === tileX && position.y === tileZ) {
             mesh.position.y = height + clampAssetElevation(object.properties?.elevation)
-                - (object.type === 'floor' ? Number(object.properties?.dimensions?.height || 0.12) - 0.005 : 0);
+                - (object.type === 'floor'
+                    ? Number(object.properties?.dimensions?.height || 0.12) - FLOOR_SURFACE_OFFSET : 0);
         }
     });
 }
@@ -9415,6 +9681,7 @@ function createEditorDecorPreview(type, color) {
         return createAnomalyEffect(profile?.visual || 'void', color || '#79d7dd', 1, key, '');
     }
     if (type === 'poster') return createPosterMesh(color);
+    if (type === 'tent') return createTentModel(THREE, color || '#9b9778');
     const group = new THREE.Group();
     const material = new THREE.MeshStandardMaterial({ color: color || '#7f9674' });
     if (type === 'tree') {
@@ -9427,10 +9694,9 @@ function createEditorDecorPreview(type, color) {
         group.add(crown);
     } else {
         const geometry = type === 'rock' ? new THREE.DodecahedronGeometry(0.35)
-            : type === 'tent' ? new THREE.CylinderGeometry(0.5, 0.7, 0.6, 4)
-                : new THREE.CylinderGeometry(0.23, 0.3, 0.16, 8);
+            : new THREE.CylinderGeometry(0.23, 0.3, 0.16, 8);
         const mesh = new THREE.Mesh(geometry, material);
-        mesh.position.y = type === 'rock' ? 0.2 : type === 'tent' ? 0.3 : 0.08;
+        mesh.position.y = type === 'rock' ? 0.2 : 0.08;
         group.add(mesh);
     }
     return group;
@@ -9610,7 +9876,12 @@ function updateBuildPreview() {
     const editingSelection = editorMoveMode || editorRotateMode || editorResizeMode;
     const source = editingSelection ? getSelectedEditorSource() : selectedLocationAsset;
     const placingAsset = window.locationEditorTool === 'assets' && selectedLocationAsset;
-    const previewKey = [window.locationEditorTool, x, z, editorMoveMode, editorRotateMode, editorRotateAngle,
+    const movableFirePreview = placingAsset && !editingSelection && source?.kind === 'structure'
+        && isObjectLightSource({ type: source.id });
+    const mountOffsetX = !editingSelection ? Math.sin(structureRotation) * Number(source?.offsetZ || 0) : 0;
+    const mountOffsetZ = !editingSelection ? Math.cos(structureRotation) * Number(source?.offsetZ || 0) : 0;
+    const previewKey = [window.locationEditorTool, movableFirePreview ? 'fire' : x,
+        movableFirePreview ? 'preview' : z, editorMoveMode, editorRotateMode, editorRotateAngle,
         editorResizeMode, editorResizeAxis, JSON.stringify(editorResizeDimensions),
         editorMovePreviewPoint?.x?.toFixed(2), editorMovePreviewPoint?.z?.toFixed(2),
         source?.id || source?.type || source?.kind,
@@ -9618,8 +9889,12 @@ function updateBuildPreview() {
         source?.properties?.elevation ?? source?.elevation ?? source?.height,
         source?.x ?? source?.offsetX, source?.z ?? source?.offsetZ,
         JSON.stringify(source?.dimensions || source?.properties?.dimensions || null),
-        structureWidth, structureDepth, structureHeight, structureColor].join(':');
-    if (buildPreviewMesh && buildPreviewKey === previewKey) return;
+        structureWidth, structureDepth, structureHeight, structureColor, structureRotation].join(':');
+    if (buildPreviewMesh && buildPreviewKey === previewKey) {
+        if (movableFirePreview) buildPreviewMesh.position.set(x + 0.5 + mountOffsetX,
+            getTileHeight(x, z) + clampAssetElevation(source.elevation), z + 0.5 + mountOffsetZ);
+        return;
+    }
     clearBuildPreview();
     buildPreviewKey = previewKey;
     if (editingSelection || placingAsset) {
@@ -9638,7 +9913,12 @@ function updateBuildPreview() {
                 properties: {
                     dimensions: { width: structureWidth, depth: structureDepth, height: structureHeight },
                     color: structureColor,
+                    rotation: structureRotation,
+                    offset_x: mountOffsetX,
+                    offset_z: mountOffsetZ,
                     elevation: clampAssetElevation(source.elevation),
+                    ...(isFireObject({ type: source.id }) ? { is_lit: true } : {}),
+                    ...(isElectricFixture({ type: source.id }) ? { is_on: true } : {}),
                 },
             };
             buildPreviewMesh = createLocationObjectMesh(object);
@@ -9668,9 +9948,9 @@ function updateBuildPreview() {
             );
         }
         if (kind === 'structure') buildPreviewMesh.position.set(
-            editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.properties?.offset_x || 0),
+            editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.properties?.offset_x || 0) + mountOffsetX,
             getTileHeight(x, z),
-            editorMovePreviewPoint?.z ?? z + 0.5 + Number(source.properties?.offset_z || 0),
+            editorMovePreviewPoint?.z ?? z + 0.5 + Number(source.properties?.offset_z || 0) + mountOffsetZ,
         );
         if (kind === 'structure') buildPreviewMesh.position.y += clampAssetElevation(source.properties?.elevation ?? source.elevation);
         if (editorRotateMode) {
@@ -9725,6 +10005,8 @@ async function placeStructureAtTile(x, z) {
                 dimensions,
                 color: structureColor,
                 rotation: structureRotation,
+                offset_x: Math.sin(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
+                offset_z: Math.cos(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
                 elevation: window.locationEditorTool === 'assets'
                     ? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
                 cover_class: selectedCoverClass,
@@ -9738,51 +10020,66 @@ async function placeStructureAtTile(x, z) {
                     rules[action] = interactionRequirements[action];
                     return rules;
                 }, {}),
-                contents: ['shelf', 'chest'].includes(structurePreset) ? [] : undefined,
-                is_open: false
+                contents: ['shelf', 'box', 'military_crate', 'chest'].includes(structurePreset) ? [] : undefined,
+                is_open: false,
+                ...(isFireObject({ type: structurePreset }) ? { is_lit: true } : {}),
+                ...(isElectricFixture({ type: structurePreset }) ? { is_on: true } : {}),
+                passable: isObjectLightSource({ type: structurePreset }),
+                cover_enabled: !isObjectLightSource({ type: structurePreset }),
             }
         });
-        currentLocationData.objects = currentLocationData.objects || [];
-        if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
-        addLocationObjectMesh(object);
-        if (object.type === 'floor') rebuildLocationGrid();
-        if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
+        addLocationObject(object);
         return object;
     } catch (error) {
         showNotification(error.message || 'Не удалось построить объект');
     }
 }
 
-async function removeStructuresAtTile(x, z) {
-    if (!window.currentLobbyId) return;
-    const meshes = locationObjectMeshes.filter(item => {
-        const object = item.userData.locationObject;
-        if (!object) return false;
+async function removeStructuresAtTile(x, z, radius = 0) {
+    if (!window.currentLobbyId || !currentLocationData) return;
+    const locationData = currentLocationData;
+    const objects = (locationData.objects || []).filter(object => {
         const position = getObjectGridPosition(object);
-        return position.x === x && position.y === z;
+        return Math.abs(position.x - x) <= radius && Math.abs(position.y - z) <= radius
+            && !structureDeletionInFlight.has(object.id);
     });
-    const objectIds = meshes
-        .map(mesh => mesh.userData.locationObjectId)
-        .filter(id => !structureDeletionInFlight.has(id));
-    if (!objectIds.length) return;
+    if (!objects.length) return;
 
-    objectIds.forEach(id => structureDeletionInFlight.add(id));
+    objects.forEach(object => structureDeletionInFlight.add(object.id));
     const results = await Promise.allSettled(
-        objectIds.map(id => Server.deleteLocationObject(window.currentLobbyId, id))
+        objects.map(object => Server.deleteLocationObject(window.currentLobbyId, object.id))
     );
+    let removedFloor = false;
+    let removedArchitecture = false;
+    let removedFire = false;
+    let removedAny = false;
     results.forEach((result, index) => {
-        const objectId = objectIds[index];
+        const object = objects[index];
+        const objectId = object.id;
         structureDeletionInFlight.delete(objectId);
         if (result.status === 'fulfilled') {
-            const removed = (currentLocationData.objects || []).find(object => object.id === objectId);
-            removeLocationObjectMesh(objectId);
-            currentLocationData.objects = currentLocationData.objects.filter(object => object.id !== objectId);
-            if (removed?.type === 'floor') rebuildLocationGrid();
-            refreshArchitecturalMeshes();
+            if (currentLocationData !== locationData) return;
+            removeLocationObjectMesh(objectId, false);
+            locationData.objects = locationData.objects.filter(item => item.id !== objectId);
+            removedAny = true;
+            removedFloor ||= object.type === 'floor';
+            removedArchitecture ||= ['wall', 'door', 'window', 'floor'].includes(object.type);
+            removedFire ||= isObjectLightSource(object);
+            if (isObjectLightSource(object)) syncFireObjectLight(null, objectId, false);
         } else {
             showNotification(result.reason?.message || 'Не удалось удалить объект');
         }
     });
+    if (!removedAny) return;
+    if (removedFloor) rebuildGrassDetailMesh();
+    if (removedArchitecture) {
+        refreshArchitecturalMeshes();
+    } else if (removedFire && activeLightingProfile?.dark_tiles?.length) {
+        refreshLocationDarkness(activeLightingProfile, true);
+    } else if (fogIsActive()) {
+        applyFogOfWar();
+    }
+    invalidateMovementMapCache();
 }
 
 export function setLocationBuildMode(mode) { buildMode = mode; updateBuildPreview(); }
@@ -9796,10 +10093,16 @@ export function setLocationStructureRotation(value) { structureRotation = Number
 export function addLocationObject(object) {
     if (!currentLocationData) return;
     currentLocationData.objects = currentLocationData.objects || [];
-    if (!currentLocationData.objects.some(item => item.id === object.id)) currentLocationData.objects.push(object);
-    addLocationObjectMesh(object);
-    if (object.type === 'floor') rebuildLocationGrid();
+    if (currentLocationData.objects.some(item => String(item.id) === String(object.id))) return;
+    currentLocationData.objects.push(object);
+    const fire = isObjectLightSource(object);
+    addLocationObjectMesh(object, !fire);
+    if (object.type === 'floor') { rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
     if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
+    if (fire) {
+        syncFireObjectLight(object);
+        if ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive()) applyFogOfWar();
+    }
     invalidateMovementMapCache();
 }
 
@@ -9809,12 +10112,14 @@ export function removeLocationObject(objectId) {
     if (!currentLocationData) return;
     const removed = (currentLocationData.objects || []).find(object => Number(object.id) === Number(objectId));
     if (Number(containerInteractionState?.objectId) === Number(objectId)) closeContainerInteractionMenu();
-    removeLocationObjectMesh(objectId);
+    removeLocationObjectMesh(objectId, false);
     currentLocationData.objects = (currentLocationData.objects || []).filter(object => Number(object.id) !== Number(objectId));
-    if (removed?.type === 'floor') rebuildLocationGrid();
+    if (removed?.type === 'floor') { rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
     if (['wall', 'door', 'window'].includes(removed?.type)) refreshArchitecturalMeshes();
+    const fire = isObjectLightSource(removed);
+    if (fire) syncFireObjectLight(null, objectId);
     invalidateMovementMapCache();
-    applyFogOfWar();
+    if (!fire || ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive())) applyFogOfWar();
 }
 
 window.removeLocationObject = removeLocationObject;
@@ -9822,13 +10127,22 @@ window.removeLocationObject = removeLocationObject;
 export function updateLocationObject(object) {
     if (!currentLocationData) return;
     currentLocationData.objects = currentLocationData.objects || [];
-    const index = currentLocationData.objects.findIndex(item => item.id === object.id);
+    const index = currentLocationData.objects.findIndex(item => String(item.id) === String(object.id));
     const previous = index === -1 ? null : currentLocationData.objects[index];
     if (index === -1) currentLocationData.objects.push(object);
     else currentLocationData.objects[index] = object;
-    replaceLocationObjectMesh(object);
-    if (object.type === 'floor' || previous?.type === 'floor') rebuildLocationGrid();
+    const fire = isObjectLightSource(object) || isObjectLightSource(previous);
+    replaceLocationObjectMesh(object, !fire);
+    if (object.type === 'floor' || previous?.type === 'floor') {
+        rebuildLocationGrid();
+        rebuildGrassDetailMesh();
+        rebuildLocationRoofs();
+    }
     if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
+    if (fire) {
+        syncFireObjectLight(object);
+        if ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive()) applyFogOfWar();
+    }
     invalidateMovementMapCache();
     if (typeof editorSelection !== 'undefined' && editorSelection?.kind === 'structure' && editorSelection.id === object.id) {
         updateEditorSelectionVisual();
@@ -9868,6 +10182,15 @@ export function applyLocationLighting(settings, persist = true) {
         centerZ + Math.sin(azimuth) * Math.cos(elevation) * distance,
     );
     locationDirectionalLight.target.updateMatrixWorld();
+    const shadowExtent = distance * 0.9 + 6;
+    const shadowCamera = locationDirectionalLight.shadow.camera;
+    shadowCamera.left = -shadowExtent;
+    shadowCamera.right = shadowExtent;
+    shadowCamera.top = shadowExtent;
+    shadowCamera.bottom = -shadowExtent;
+    shadowCamera.near = 0.1;
+    shadowCamera.far = distance * 3 + 20;
+    shadowCamera.updateProjectionMatrix();
     scene.background.set(profile.background_color);
 
     if (locationLightGroup) {
@@ -9889,7 +10212,8 @@ export function applyLocationLighting(settings, persist = true) {
             ? new THREE.SpotLight(source.color, Number(source.intensity), Number(source.distance), Math.PI / 5, 0.55, 2)
             : new THREE.PointLight(source.color, Number(source.intensity), Number(source.distance), 2);
         light.castShadow = true;
-        light.shadow.mapSize.set(isSpot ? 512 : 256, isSpot ? 512 : 256);
+        light.shadow.mapSize.set(512, 512);
+        light.shadow.radius = 2;
         fixture.add(light);
         if (isSpot) {
             const azimuth = Number(source.azimuth || 0) * Math.PI / 180;
@@ -9918,6 +10242,28 @@ export function applyLocationLighting(settings, persist = true) {
         picker.visible = Boolean(window.isGM && editMode);
         fixture.add(picker);
         locationLightGroup.add(fixture);
+    }
+    let fireLightCount = 0;
+    for (const object of currentLocationData.objects || []) {
+        const source = fireLightSource(object, true) || electricFixtureLightSource(object, true);
+        if (source) {
+            locationLightGroup.add(createFirePointLight(source, object.id));
+            fireLightCount++;
+        }
+    }
+    const fireLightCapacity = Math.max(MIN_FIRE_LIGHT_POOL, Math.ceil((fireLightCount + 1) / 4) * 4);
+    for (; fireLightCount < fireLightCapacity; fireLightCount++) {
+        locationLightGroup.add(createFirePointLight(null));
+    }
+    for (const source of [...getLocationDecorFireSources(),
+        ...getAnomalyLightSources(currentLocationData?.tiles_data)]) {
+        const light = new THREE.PointLight(source.color, source.intensity, source.distance, 2);
+        light.position.set(source.x,
+            getTileHeight(source.tileX, source.tileZ) + source.height, source.z);
+        light.castShadow = source.castsShadow !== false;
+        light.shadow.mapSize.set(256, 256);
+        light.shadow.radius = 2;
+        locationLightGroup.add(light);
     }
     scene.add(locationLightGroup);
     refreshLocationDarkness(profile);
@@ -9974,6 +10320,9 @@ function getPrimaryLocationEditorAsset() {
         color: source.properties?.color || '#aa8866',
         dimensions: assetDimensions(source, 'structure', source.type),
         resizable: true,
+        fire: isObjectLightSource(source),
+        electric: isElectricFixture(source),
+        isLit: isElectricFixture(source) ? source.properties?.is_on !== false : source.properties?.is_lit === true,
     };
     if (kind === 'lamp') return {
         kind, label: source.kind === 'spot' ? 'Прожектор' : 'Лампа',
@@ -10166,6 +10515,10 @@ async function persistLocationLights(lights) {
 }
 
 function sendDecorTileUpdates(positions) {
+    const lightChanged = positions.some(({ x, z }) =>
+        currentLocationData.tiles_data[z][x].objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
+        || objectMeshes.some(mesh => mesh.userData?.tileX === x && mesh.userData?.tileZ === z
+            && ['campfire', 'anomaly'].includes(mesh.userData?.objType)));
     const updates = positions.map(({ x, z }) => ({
         x, z, objects: currentLocationData.tiles_data[z][x].objects,
     }));
@@ -10175,6 +10528,7 @@ function sendDecorTileUpdates(positions) {
         updates,
     });
     positions.forEach(({ x, z }) => rebuildTileObjects(x, z));
+    if (lightChanged) applyLocationLighting();
     applyFogOfWar();
     updateEditorSelectionVisual();
     notifyEditorSelection();
@@ -10370,6 +10724,24 @@ export async function deleteSelectedLocationAsset() {
         sendDecorTileUpdates([{ x: editorSelection.x, z: editorSelection.z }]);
     }
     clearEditorSelection();
+}
+
+export async function toggleSelectedLocationFire() {
+    if (!window.isGM || editorSelections.length !== 1 || editorSelection?.kind !== 'structure') return false;
+    const source = getSelectedEditorSource();
+    if (!isObjectLightSource(source)) return false;
+    try {
+        const electric = isElectricFixture(source);
+        const property = electric ? 'is_on' : 'is_lit';
+        const updated = await Server.updateLocationObject(window.currentLobbyId, source.id, {
+            properties: { [property]: electric ? source.properties?.is_on === false : source.properties?.is_lit !== true },
+        });
+        updateLocationObject(updated);
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось изменить огонь', 'system');
+        return false;
+    }
 }
 
 export async function toggleSelectedLocationAssetsHidden() {
@@ -10795,9 +11167,17 @@ export function loadLocation(data) {
     if (!scene) return;
 
     // Очистка старых объектов (кроме света и highlight)
-    if (waterTileMesh?.material.map) waterTileMesh.material.map.dispose();
     waterTileMesh = null;
+    if (waterSurfaceMesh?.material.map) waterSurfaceMesh.material.map.dispose();
+    waterSurfaceMesh = null;
+    waterBankMesh = null;
+    sandBankMesh = null;
+    waterDetailGroup = null;
+    waterRegions = classifyWaterRegions(data.tiles_data);
     smoothTerrainMesh = null;
+    terrainSurfaceMesh = null;
+    terrainSurfaceTexture?.dispose();
+    terrainSurfaceTexture = null;
     locationGridMesh = null;
     const toRemove = [];
     scene.children.forEach(child => {
@@ -10808,6 +11188,7 @@ export function loadLocation(data) {
         disposeObject(child);
         scene.remove(child);
     });
+    grassDetailGroup = null;
     clearAllCharacters();
 
     const gridWidth = data.grid_width;
@@ -10838,12 +11219,14 @@ export function loadLocation(data) {
     const tileCount = gridWidth * gridHeight;
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material = new THREE.MeshStandardMaterial();
-    applySurfaceDarkness(material, locationDarknessTexture, darknessSize);
     locationTileMesh = new THREE.InstancedMesh(geometry, material, tileCount);
     locationTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
-    const waterMaterial = createWaterMaterial();
-    applySurfaceDarkness(waterMaterial, locationDarknessTexture, darknessSize);
-    waterTileMesh = new THREE.InstancedMesh(geometry.clone(), waterMaterial, tileCount);
+    const waterMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const waterTopMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+    waterTileMesh = new THREE.InstancedMesh(geometry.clone(), [
+        waterMaterial, waterMaterial, waterTopMaterial,
+        waterMaterial, waterMaterial, waterMaterial,
+    ], tileCount);
     waterTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
     waterTileMesh.castShadow = false;
     waterTileMesh.receiveShadow = false;
@@ -10865,7 +11248,10 @@ export function loadLocation(data) {
     tileCubes = [locationTileMesh, waterTileMesh];
     scene.add(locationTileMesh, waterTileMesh);
     rebuildSmoothTerrainMesh();
+    rebuildLocationTerrainSurface();
+    rebuildWaterSurfaceMesh();
     rebuildLocationGrid();
+    rebuildGrassDetailMesh();
 
     // Объекты на тайлах
     for (let y = 0; y < data.tiles_data.length; y++) {
@@ -10878,6 +11264,7 @@ export function loadLocation(data) {
     if (data.objects && data.objects.length) {
         data.objects.forEach(object => addLocationObjectMesh(object, false));
     }
+    rebuildLocationRoofs();
     applyLocationLighting();
     applyFogOfWar();
 
@@ -10893,7 +11280,10 @@ export function loadLocation(data) {
 // ========== Обновление тайлов ==========
 function updateTileCube(x, z, tile, rebuildTerrain = true) {
     if (!locationTileMesh || !currentLocationData) return false;
-    const neighbors = [[x, z], [x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]];
+    const neighbors = [];
+    for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) neighbors.push([x + dx, z + dz]);
+    }
     for (const [nx, nz] of neighbors) {
         const next = currentLocationData.tiles_data[nz]?.[nx];
         if (next) updateTileInstance(nz * currentLocationData.grid_width + nx, nx, nz, next);
@@ -10908,21 +11298,24 @@ function updateTileCube(x, z, tile, rebuildTerrain = true) {
     return needsRebuild;
 }
 
-function updateSmoothTerrainColors() {
+function updateSmoothTerrainColors(changedTiles = null) {
     if (!smoothTerrainMesh || !currentLocationData) return;
     const colors = smoothTerrainMesh.geometry.getAttribute('color');
     smoothTerrainMesh.userData.tileByVertex.forEach(({ x, z }, index) => {
+        if (changedTiles && !changedTiles.has(z * currentLocationData.grid_width + x)) return;
         const terrain = currentLocationData.tiles_data[z][x].terrain;
-        const color = new THREE.Color(terrainColors[terrain] || 0x3a5f0b);
+        const color = new THREE.Color(terrainColors[terrain] || 0x3a5f0b)
+            .multiplyScalar(darknessFactorAt(x, z));
         colors.setXYZ(index, color.r, color.g, color.b);
     });
     colors.needsUpdate = true;
 }
 
-function updateLocationGridColors() {
+function updateLocationGridColors(changedTiles = null) {
     if (!locationGridMesh || !currentLocationData) return;
     const colors = locationGridMesh.geometry.getAttribute('color');
     locationGridMesh.userData.tileByVertex.forEach(({ x, z, floor }, index) => {
+        if (changedTiles && !changedTiles.has(z * currentLocationData.grid_width + x)) return;
         const terrain = floor ? null : currentLocationData.tiles_data[z][x].terrain;
         const color = floor ? floorGridColor : terrainGridColors[terrain] || terrainGridColors.grass;
         const shade = darknessFactorAt(x, z);
@@ -10979,10 +11372,23 @@ function rebuildSmoothTerrainMesh() {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(data.positions.length), 3));
-    geometry.computeVertexNormals();
-    const material = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide });
-    applySurfaceDarkness(material, locationDarknessTexture,
-        new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
+    const terrainTileCoords = new Float32Array(data.tileByVertex.length * 2);
+    data.tileByVertex.forEach(({ x, z }, index) => {
+        terrainTileCoords[index * 2] = x;
+        terrainTileCoords[index * 2 + 1] = z;
+    });
+    geometry.setAttribute('terrainTileCoord', new THREE.Float32BufferAttribute(terrainTileCoords, 2));
+    geometry.setAttribute('terrainTop', new THREE.Float32BufferAttribute(data.topByVertex, 1));
+    const terrainUvs = new Float32Array(data.positions.length / 3 * 2);
+    for (let index = 0; index < data.positions.length / 3; index++) {
+        terrainUvs[index * 2] = data.positions[index * 3] * 0.125;
+        terrainUvs[index * 2 + 1] = data.positions[index * 3 + 2] * 0.125;
+    }
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(terrainUvs, 2));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3));
+    const material = new THREE.MeshStandardMaterial({
+        vertexColors: true, side: THREE.DoubleSide,
+    });
     smoothTerrainMesh = new THREE.Mesh(geometry, material);
     smoothTerrainMesh.userData.tileByFace = data.tileByFace;
     smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
@@ -10992,17 +11398,241 @@ function rebuildSmoothTerrainMesh() {
     tileCubes.push(smoothTerrainMesh);
 }
 
+function updateLocationTerrainSurfaceTexture(changedTiles) {
+    if (!terrainSurfaceTexture || !currentLocationData || !changedTiles.length) return;
+    updateLocationTerrainPixels(currentLocationData.tiles_data, terrainSurfaceTexture.image, changedTiles);
+    terrainSurfaceTexture.needsUpdate = true;
+}
+
+function rebuildLocationTerrainSurface(preserveTexture = false) {
+    if (terrainSurfaceMesh) {
+        scene.remove(terrainSurfaceMesh);
+        disposeObject(terrainSurfaceMesh);
+        terrainSurfaceMesh = null;
+    }
+    if (!preserveTexture) {
+        terrainSurfaceTexture?.dispose();
+        terrainSurfaceTexture = null;
+    }
+    if (!scene || !currentLocationData) return;
+    const tiles = currentLocationData.tiles_data;
+    const width = currentLocationData.grid_width;
+    const height = currentLocationData.grid_height;
+    if (!terrainSurfaceTexture) {
+        const image = createLocationTerrainPixels(tiles);
+        terrainSurfaceTexture = new THREE.DataTexture(image.data, image.width, image.height,
+            THREE.RGBAFormat, THREE.UnsignedByteType);
+        terrainSurfaceTexture.magFilter = THREE.LinearFilter;
+        terrainSurfaceTexture.minFilter = THREE.LinearFilter;
+        terrainSurfaceTexture.generateMipmaps = false;
+        terrainSurfaceTexture.encoding = THREE.sRGBEncoding;
+        terrainSurfaceTexture.needsUpdate = true;
+    }
+
+    const sampleHeight = createTerrainSurfaceHeightSampler(tiles);
+    const positions = [];
+    const normals = [];
+    const uvs = [];
+    const indices = [];
+    const subdivisions = 4;
+    for (let z = 0; z < height; z++) {
+        for (let x = 0; x < width; x++) {
+            if (tiles[z][x].terrain === 'water' || isSmoothTerrainTile(tiles, x, z)) continue;
+            const first = positions.length / 3;
+            const landHeightAt = (px, pz) => sampleHeight(
+                Math.max(x + 0.00001, Math.min(x + 0.99999, px)),
+                Math.max(z + 0.00001, Math.min(z + 0.99999, pz)),
+            );
+            for (let row = 0; row <= subdivisions; row++) {
+                for (let column = 0; column <= subdivisions; column++) {
+                    const px = x + column / subdivisions;
+                    const pz = z + row / subdivisions;
+                    const py = landHeightAt(px, pz);
+                    positions.push(px, py + 0.002, pz);
+                    uvs.push(px / width, pz / height);
+                    const left = landHeightAt(px - 0.04, pz);
+                    const right = landHeightAt(px + 0.04, pz);
+                    const near = landHeightAt(px, pz - 0.04);
+                    const far = landHeightAt(px, pz + 0.04);
+                    const normal = new THREE.Vector3(left - right, 0.08, near - far).normalize();
+                    normals.push(normal.x, normal.y, normal.z);
+                }
+            }
+            for (let row = 0; row < subdivisions; row++) {
+                for (let column = 0; column < subdivisions; column++) {
+                    const a = first + row * (subdivisions + 1) + column;
+                    const b = a + 1;
+                    const d = a + subdivisions + 1;
+                    const c = d + 1;
+                    indices.push(a, d, b, b, d, c);
+                }
+            }
+        }
+    }
+    if (smoothTerrainMesh) {
+        const smoothGeometry = smoothTerrainMesh.geometry;
+        const sourcePositions = smoothGeometry.getAttribute('position');
+        const sourceNormals = smoothGeometry.getAttribute('normal');
+        const topFlags = smoothGeometry.getAttribute('terrainTop');
+        for (let face = 0; face < smoothTerrainMesh.userData.tileByFace.length; face++) {
+            if (topFlags.getX(face * 3) < 0.5) continue;
+            const { x, z } = smoothTerrainMesh.userData.tileByFace[face];
+            const first = positions.length / 3;
+            for (let corner = 0; corner < 3; corner++) {
+                const source = face * 3 + corner;
+                const px = sourcePositions.getX(source);
+                const pz = sourcePositions.getZ(source);
+                positions.push(px, sourcePositions.getY(source) + 0.002, pz);
+                normals.push(sourceNormals.getX(source), sourceNormals.getY(source), sourceNormals.getZ(source));
+                uvs.push(px / width, pz / height);
+            }
+            indices.push(first, first + 1, first + 2);
+        }
+    }
+    if (!positions.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    const material = new THREE.MeshStandardMaterial({
+        map: terrainSurfaceTexture, side: THREE.DoubleSide, roughness: 0.97,
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+    applySurfaceDarkness(material, locationDarknessTexture, new THREE.Vector2(width, height));
+    terrainSurfaceMesh = new THREE.Mesh(geometry, material);
+    terrainSurfaceMesh.raycast = () => {};
+    terrainSurfaceMesh.receiveShadow = true;
+    scene.add(terrainSurfaceMesh);
+}
+
+function rebuildWaterSurfaceMesh() {
+    if (waterSurfaceMesh) {
+        scene.remove(waterSurfaceMesh);
+        waterSurfaceMesh.material.map?.dispose();
+        disposeObject(waterSurfaceMesh);
+        waterSurfaceMesh = null;
+    }
+    if (waterBankMesh) {
+        scene.remove(waterBankMesh);
+        disposeObject(waterBankMesh);
+        waterBankMesh = null;
+    }
+    if (sandBankMesh) {
+        scene.remove(sandBankMesh);
+        disposeObject(sandBankMesh);
+        sandBankMesh = null;
+    }
+    if (waterDetailGroup) {
+        scene.remove(waterDetailGroup);
+        disposeObject(waterDetailGroup);
+        waterDetailGroup = null;
+    }
+    if (!scene || !currentLocationData) return;
+    const data = buildRoundedWaterData(currentLocationData.tiles_data);
+    const previousRegions = waterRegions;
+    waterRegions = data.regions;
+    if (waterTileMesh) {
+        let changed = false;
+        for (const [key, kind] of waterRegions) {
+            if (previousRegions.get(key) === kind) continue;
+            const [x, z] = key.split(',').map(Number);
+            updateTileInstance(z * currentLocationData.grid_width + x, x, z,
+                currentLocationData.tiles_data[z][x]);
+            changed = true;
+        }
+        if (changed) {
+            waterTileMesh.instanceMatrix.needsUpdate = true;
+            waterTileMesh.instanceColor.needsUpdate = true;
+        }
+    }
+    if (!data.water.length) return;
+    const waterGeometry = new THREE.BufferGeometry();
+    waterGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.water, 3));
+    waterGeometry.setAttribute('color', new THREE.Float32BufferAttribute(data.waterColors, 3));
+    waterGeometry.computeVertexNormals();
+    const waterMaterial = createWaterMaterial();
+    waterMaterial.vertexColors = true;
+    applySurfaceDarkness(waterMaterial, locationDarknessTexture,
+        new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
+    waterSurfaceMesh = new THREE.Mesh(waterGeometry, waterMaterial);
+    waterSurfaceMesh.raycast = () => {};
+    waterSurfaceMesh.castShadow = false;
+    waterSurfaceMesh.receiveShadow = false;
+    scene.add(waterSurfaceMesh);
+    if (data.bank.length) {
+        const bankGeometry = new THREE.BufferGeometry();
+        bankGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.bank, 3));
+        bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(data.bankColors, 3));
+        bankGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(data.bankUvs, 2));
+        bankGeometry.computeVertexNormals();
+        const bankMaterial = new THREE.MeshStandardMaterial({
+            map: terrainSurfaceTexture, vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
+        });
+        applySurfaceDarkness(bankMaterial, locationDarknessTexture,
+            new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
+        waterBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
+        waterBankMesh.raycast = () => {};
+        waterBankMesh.receiveShadow = true;
+        scene.add(waterBankMesh);
+    }
+    if (data.sandBank.length) {
+        const bankGeometry = new THREE.BufferGeometry();
+        bankGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.sandBank, 3));
+        bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(data.sandBankColors, 3));
+        bankGeometry.computeVertexNormals();
+        const bankMaterial = new THREE.MeshStandardMaterial({
+            vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
+        });
+        applySurfaceDarkness(bankMaterial, locationDarknessTexture,
+            new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
+        sandBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
+        sandBankMesh.raycast = () => {};
+        sandBankMesh.receiveShadow = true;
+        scene.add(sandBankMesh);
+    }
+    waterDetailGroup = createWaterDetailGroup(THREE, currentLocationData.tiles_data, waterRegions);
+    scene.add(waterDetailGroup);
+}
+
+function rebuildGrassDetailMesh() {
+    if (grassDetailGroup) {
+        scene.remove(grassDetailGroup);
+        disposeObject(grassDetailGroup);
+        grassDetailGroup = null;
+    }
+    if (!scene || !currentLocationData) return;
+    const objects = currentLocationData.objects || [];
+    const floors = objects.filter(object => object.type === 'floor')
+        .map(object => floorVisualPose(object, objects));
+    const isCovered = (x, z) => floors.some(floor => {
+        const dx = x - floor.x;
+        const dz = z - floor.z;
+        return Math.abs(dx * floor.axis.x + dz * floor.axis.z) < floor.width / 2
+            && Math.abs(dx * floor.normal.x + dz * floor.normal.z) < floor.depth / 2;
+    });
+    grassDetailGroup = createGrassDetailGroup(THREE, currentLocationData.tiles_data,
+        createTerrainSurfaceHeightSampler(currentLocationData.tiles_data), isCovered);
+    scene.add(grassDetailGroup);
+}
+
 function updateTileInstance(instanceId, x, z, tile) {
     const height = tile.height || 1.0;
     const isWater = tile.terrain === 'water';
     const isSmooth = isSmoothTerrainTile(currentLocationData.tiles_data, x, z);
-    tileInstanceTransform.position.set(x + 0.5, height / 2, z + 0.5);
-    tileInstanceTransform.scale.set(1, height, 1);
+    const waterKind = waterRegions.get(`${x},${z}`) || 'grass';
+    const renderedHeight = isWater
+        ? Math.max(0.05, waterLevelForTile(tile, waterKind) - 0.01) : height;
+    tileInstanceTransform.position.set(x + 0.5, renderedHeight / 2, z + 0.5);
+    tileInstanceTransform.scale.set(1, renderedHeight, 1);
     tileInstanceTransform.updateMatrix();
     const activeMesh = isWater ? waterTileMesh : locationTileMesh;
     const inactiveMesh = isWater ? locationTileMesh : waterTileMesh;
     if (!isSmooth) activeMesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
-    activeMesh.setColorAt(instanceId, new THREE.Color(isWater ? 0xffffff : terrainColors[tile.terrain] || 0x3a5f0b));
+    const color = new THREE.Color(isWater ? WATER_SIDE_COLORS[waterKind]
+        : terrainColors[tile.terrain] || 0x3a5f0b);
+    if (!isWater) color.multiplyScalar(darknessFactorAt(x, z));
+    activeMesh.setColorAt(instanceId, color);
     tileInstanceTransform.scale.set(0, 0, 0);
     tileInstanceTransform.updateMatrix();
     inactiveMesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
@@ -11047,14 +11677,16 @@ function rebuildTileObjects(tileX, tileZ) {
                 yOffset = 0.35;
                 break;
             case 'tent':
-                geometry = new THREE.CylinderGeometry(0.5, 0.7, 0.5, 4);
-                material = new THREE.MeshStandardMaterial({ color: 0xd2b48c });
-                yOffset = 0.25;
+                mesh = createTentModel(THREE, obj.color === '#d2b48c'
+                    ? '#9b9778' : (obj.color || '#9b9778'));
+                yOffset = 0;
                 break;
             case 'campfire':
-                geometry = new THREE.CylinderGeometry(0.2, 0.3, 0.1, 6);
-                material = new THREE.MeshStandardMaterial({ color: 0xff6600 });
-                yOffset = 0.05;
+                mesh = createFireObjectModel(THREE, {
+                    type: 'campfire', tile_x: tileX, tile_y: tileZ,
+                    properties: { color: obj.color, is_lit: obj.is_lit !== false },
+                }, baseAssetDimensions('campfire', 'decor'));
+                yOffset = 0;
                 break;
             case 'poster':
                 mesh = createPosterMesh(obj.color);
@@ -11116,7 +11748,7 @@ function rebuildTileObjects(tileX, tileZ) {
         else {
             mesh.traverse(child => {
                 if (child.isMesh) {
-                    child.castShadow = true;
+                    child.castShadow = !child.userData.fireFlame;
                     child.receiveShadow = true;
                 }
             });
@@ -11131,8 +11763,14 @@ export function applyLocationTilesUpdate(locationId, updates) {
     if (!currentLocationData) return;
     let terrainNeedsRebuild = false;
     let gridNeedsRebuild = false;
+    let lightChanged = false;
     for (const upd of updates) {
         const tile = currentLocationData.tiles_data[upd.z][upd.x];
+        if (upd.objects !== undefined && (
+            tile.objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
+            || upd.objects.some(obj => ['campfire', 'anomaly'].includes(obj.type))
+        )) lightChanged = true;
+        if (upd.height !== undefined) lightChanged = true;
         if (upd.terrain !== undefined || upd.height !== undefined) gridNeedsRebuild = true;
         if (upd.terrain !== undefined) tile.terrain = upd.terrain;
         if (upd.height !== undefined) tile.height = upd.height;
@@ -11143,8 +11781,16 @@ export function applyLocationTilesUpdate(locationId, updates) {
         updateLocationObjectHeight(upd.x, upd.z);
     }
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
-    if (gridNeedsRebuild) rebuildLocationGrid();
+    if (gridNeedsRebuild) {
+        if (updates.some(update => update.terrain !== undefined)) updateLocationTerrainSurfaceTexture(updates);
+        rebuildLocationTerrainSurface(true);
+        rebuildWaterSurfaceMesh();
+        rebuildLocationGrid();
+        rebuildGrassDetailMesh();
+    }
+    if (updates.some(update => update.height !== undefined)) rebuildLocationRoofs();
     if (gridNeedsRebuild) clearFogOverlay();
+    if (lightChanged) applyLocationLighting();
     invalidateMovementMapCache();
     applyFogOfWar();
     if (editorSelection) updateEditorSelectionVisual();
@@ -11161,6 +11807,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     const tiles = currentLocationData.tiles_data;
     const changed = [];
     let terrainNeedsRebuild = false;
+    let lightChanged = false;
     for (let dz = -radius; dz <= radius; dz++) {
         for (let dx = -radius; dx <= radius; dx++) {
             const x = centerX + dx;
@@ -11218,6 +11865,12 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 needUpdate = true;
             }
             if (needUpdate) {
+                if (updates.objects !== undefined || updates.addObject) {
+                    lightChanged ||= tile.objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
+                        || objectMeshes.some(mesh => mesh.userData?.tileX === x
+                            && mesh.userData?.tileZ === z
+                            && ['campfire', 'anomaly'].includes(mesh.userData?.objType));
+                }
                 terrainNeedsRebuild = updateTileCube(x, z, tile, false) || terrainNeedsRebuild;
                 if (updates.height !== undefined) updateLocationObjectHeight(x, z);
                 if (updates.objects !== undefined || updates.addObject) {
@@ -11227,10 +11880,35 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             }
         }
     }
+    if (updates.terrain !== undefined) {
+        const changedByTile = new Map(changed.map(item => [`${item.x},${item.z}`, item]));
+        for (const { x, z, height } of waterSurfaceAdjustments(tiles, new Set(changedByTile.keys()))) {
+            tiles[z][x].height = height;
+            lightChanged = true;
+            terrainNeedsRebuild = updateTileCube(x, z, tiles[z][x], false) || terrainNeedsRebuild;
+            updateLocationObjectHeight(x, z);
+            const cell = changedByTile.get(`${x},${z}`);
+            if (cell) cell.height = height;
+            else {
+                const added = { x, z, terrain: tiles[z][x].terrain, height,
+                    objects: tiles[z][x].objects, radiation: tiles[z][x].radiation };
+                changed.push(added);
+                changedByTile.set(`${x},${z}`, added);
+            }
+        }
+    }
     if (changed.length === 0) return;
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
-    if (updates.terrain !== undefined || updates.height !== undefined) rebuildLocationGrid();
+    if (updates.terrain !== undefined || updates.height !== undefined) {
+        if (updates.terrain !== undefined) updateLocationTerrainSurfaceTexture(changed);
+        rebuildLocationTerrainSurface(true);
+        rebuildWaterSurfaceMesh();
+        rebuildLocationGrid();
+        rebuildGrassDetailMesh();
+    }
+    if (updates.height !== undefined) rebuildLocationRoofs();
     if (updates.terrain !== undefined || updates.height !== undefined) clearFogOverlay();
+    if (lightChanged || updates.height !== undefined) applyLocationLighting();
     if (updates.height !== undefined && editorSelection) updateEditorSelectionVisual();
     if (window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
@@ -11763,11 +12441,9 @@ function setupCharacterDragging() {
 }
 
 // ========== Настройка обработчиков редактирования и Drag&Drop спавна ==========
-function getEditBrushUpdates(e) {
+function getEditBrushUpdates() {
     const tool = window.locationEditorTool;
     if (eraserMode || tool === 'erase') return { objects: [] };
-    if (e.altKey) return { terrain: currentBrushTerrain };
-    if (e.shiftKey) return { height: currentBrushHeight };
     if (tool === 'radiation') return { radiation: brushRadiation };
     if (tool === 'decor') return { addObject: true };
     if (tool === 'terrain') return { terrain: currentBrushTerrain };
@@ -11905,7 +12581,7 @@ export function setupLocationEditing() {
                 point?.z ?? hoveredTileCoords.z + 0.5);
             return;
         }
-        if (window.locationEditorTool === 'select' && !e.altKey) {
+        if (window.locationEditorTool === 'select') {
             if (selectEditorAsset(e.clientX, e.clientY, e.shiftKey)) {
                 e.preventDefault();
                 e.stopImmediatePropagation();
@@ -11938,15 +12614,15 @@ export function setupLocationEditing() {
         canvas.setPointerCapture(e.pointerId);
         const { x, z } = hoveredTileCoords;
         if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
-            if (eraserMode) removeStructuresAtTile(x, z);
+            if (eraserMode) removeStructuresAtTile(x, z, brushRadius);
             else placeStructureAtTile(x, z);
             return;
         }
-        const updates = getEditBrushUpdates(e);
+        const updates = getEditBrushUpdates();
         if (Object.keys(updates).length) {
             applyLocationBrush(x, z, updates, brushRadius);
         }
-        if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z);
+        if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z, brushRadius);
         processedTilesForObjects.clear();
     };
     canvas.addEventListener('pointerdown', onPointerDown);
@@ -11965,14 +12641,14 @@ export function setupLocationEditing() {
             return;
         }
         if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
-            if (eraserMode) removeStructuresAtTile(x, z);
+            if (eraserMode) removeStructuresAtTile(x, z, brushRadius);
             return;
         }
-        const updates = getEditBrushUpdates(e);
+        const updates = getEditBrushUpdates();
         if (Object.keys(updates).length) {
             applyLocationBrush(x, z, updates, brushRadius);
         }
-        if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z);
+        if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z, brushRadius);
     };
     window.addEventListener('pointermove', onPointerMoveWithDrag);
     handlers.window.pointerMoveWithDrag = onPointerMoveWithDrag;
@@ -12313,13 +12989,14 @@ export function beginCharacterPlacement(characterOrCharacters) {
 export function setLocationEditMode(enabled) {
     editMode = enabled;
     window.locationEditMode = enabled;
+    updateRoofVisibility();
     if (locationLightGroup) locationLightGroup.children.forEach(fixture => {
         fixture.children.forEach(child => {
             if (child.isMesh) child.visible = Boolean(window.isGM
                 && (enabled || (child.userData.locationLampBulb && child.userData.gmHiddenGhost)));
         });
     });
-    applyFogOfWar();
+    if (fogIsActive()) applyFogOfWar();
     if (darknessEditorOverlay) darknessEditorOverlay.visible = darknessOverlayRequested && enabled;
     if (!enabled) {
         hideHighlight();
@@ -12503,16 +13180,28 @@ export function setEditButtonVisible(visible) {
     if (btn) btn.style.display = visible ? 'block' : 'none';
 }
 
+function getLocationViewToggleGroup() {
+    let group = document.getElementById('location-view-toggle-group');
+    if (group) return group;
+    group = document.createElement('div');
+    group.id = 'location-view-toggle-group';
+    group.style.position = 'absolute';
+    group.style.top = '20px';
+    group.style.right = '271px';
+    group.style.zIndex = '20';
+    group.style.display = 'flex';
+    group.style.alignItems = 'center';
+    group.style.gap = '8px';
+    document.getElementById('location-container').appendChild(group);
+    return group;
+}
+
 export function addLocationGridButton() {
     document.getElementById('location-grid-btn')?.remove();
     const btn = document.createElement('button');
     btn.id = 'location-grid-btn';
     btn.type = 'button';
     btn.textContent = '▦';
-    btn.style.position = 'absolute';
-    btn.style.top = '20px';
-    btn.style.right = '271px';
-    btn.style.zIndex = '20';
     btn.style.color = 'white';
     btn.style.border = 'none';
     btn.style.padding = '8px 12px';
@@ -12532,7 +13221,36 @@ export function addLocationGridButton() {
         sync();
     };
     sync();
-    document.getElementById('location-container').appendChild(btn);
+    getLocationViewToggleGroup().appendChild(btn);
+    return btn;
+}
+
+export function addLocationRoofButton() {
+    document.getElementById('location-roof-btn')?.remove();
+    const btn = document.createElement('button');
+    btn.id = 'location-roof-btn';
+    btn.type = 'button';
+    btn.textContent = '⌂';
+    btn.style.color = 'white';
+    btn.style.border = 'none';
+    btn.style.padding = '8px 12px';
+    btn.style.borderRadius = '8px';
+    btn.style.cursor = 'pointer';
+    btn.style.fontSize = '18px';
+    btn.style.lineHeight = '1';
+    const sync = () => {
+        btn.style.background = locationRoofsVisible ? '#3d7959' : '#465261';
+        btn.title = locationRoofsVisible ? 'Скрыть крыши' : 'Показать крыши';
+        btn.setAttribute('aria-label', btn.title);
+        btn.setAttribute('aria-pressed', String(locationRoofsVisible));
+    };
+    btn.onclick = () => {
+        locationRoofsVisible = !locationRoofsVisible;
+        updateRoofVisibility();
+        sync();
+    };
+    sync();
+    getLocationViewToggleGroup().prepend(btn);
     return btn;
 }
 
@@ -12634,7 +13352,9 @@ export function destroyLocationScene() {
     clearFogOverlay();
     // Очищаем сцену
     if (scene) {
-        if (waterTileMesh?.material.map) waterTileMesh.material.map.dispose();
+        if (waterSurfaceMesh?.material.map) waterSurfaceMesh.material.map.dispose();
+        terrainSurfaceTexture?.dispose();
+        terrainSurfaceTexture = null;
         const objectsToRemove = [];
         scene.traverse((child) => {
             if (child.isLight || child.type === 'Camera') return;
@@ -12648,12 +13368,20 @@ export function destroyLocationScene() {
         tileCubes = [];
         locationTileMesh = null;
         waterTileMesh = null;
+        waterSurfaceMesh = null;
+        waterBankMesh = null;
+        sandBankMesh = null;
+        waterDetailGroup = null;
+        waterRegions = new Map();
+        grassDetailGroup = null;
         smoothTerrainMesh = null;
+        terrainSurfaceMesh = null;
         locationGridMesh = null;
         objectMeshes = [];
         anomalyEffectMeshes = [];
         combatAreaMeshes = [];
         locationObjectMeshes = [];
+        roofMeshes = [];
         darknessEditorOverlay = null;
         darknessOverlayRequested = false;
         clearAllCharacters();

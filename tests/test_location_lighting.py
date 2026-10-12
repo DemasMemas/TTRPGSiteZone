@@ -157,16 +157,16 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
                for obj in tile['objects']) == 48
     assert {obj.type for obj in location.objects} >= {
         'wall', 'floor', 'door', 'window', 'fence', 'table', 'chair',
-        'box', 'barrel', 'shelf', 'chest',
+        'box', 'military_crate', 'barrel', 'shelf',
     }
     walls = [obj for obj in location.objects if obj.type == 'wall']
-    assert len(walls) == 8
+    assert len(walls) == 12
     floors = [obj for obj in location.objects if obj.type == 'floor']
     assert {(obj.properties['dimensions']['width'], obj.properties['dimensions']['depth'])
-            for obj in floors} == {(13, 11), (8, 6)}
-    assert all(obj.properties['dimensions']['width'] >= 6 for obj in walls)
+            for obj in floors} == {(13, 11), (8, 6), (4, 4)}
+    assert all(obj.properties['dimensions']['width'] >= 4 for obj in walls)
     doors = [obj for obj in location.objects if obj.type == 'door']
-    assert len(doors) == 3
+    assert len(doors) == 4
     for door in doors:
         door_x = door.tile_x + 0.5 + door.properties.get('offset_x', 0)
         door_z = door.tile_y + 0.5 + door.properties.get('offset_z', 0)
@@ -176,7 +176,9 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
             abs((wall.tile_y + 0.5 + wall.properties.get('offset_z', 0)) - door_z) < 0.01
             for wall in walls
         )
-    assert {(obj.tile_x, obj.tile_y) for obj in location.objects if obj.type == 'chest'} == {(12, 11)}
+    assert {(obj.tile_x, obj.tile_y) for obj in location.objects if obj.type == 'military_crate'} == {(12, 11)}
+    assert all(obj.properties.get('contents') == [] for obj in location.objects
+               if obj.type in {'box', 'military_crate'})
     assert (17, 20) in {(obj.tile_x, obj.tile_y) for obj in location.objects if obj.type == 'barrel'}
     main_door = next(obj for obj in doors if obj.tile_x == 9 and obj.tile_y == 14)
     main_door.properties = {**main_door.properties, 'is_open': True}
@@ -185,7 +187,8 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
     assert (9, 13) not in blocked
     assert (9, 13) not in climb
     assert {obj.get('type') for row in location.tiles_data for tile in row
-            for obj in tile['objects']} >= {'tree', 'rock', 'tent', 'campfire', 'poster'}
+            for obj in tile['objects']} >= {'tree', 'rock', 'tent', 'poster'}
+    assert any(obj.type == 'campfire' for obj in location.objects)
     participant_ids = {entry.character_id for entry in location.location_participants}
     assert len(participant_ids) == 5
     repeated, created = create_visual_test_location(lobby_id)

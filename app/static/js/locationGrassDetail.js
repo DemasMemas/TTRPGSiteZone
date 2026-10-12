@@ -1,0 +1,377 @@
+function hash(x, z, salt = 0) {
+    let value = Math.imul(x + 137 + salt, 374761393) ^ Math.imul(z + 211, 668265263);
+    value = Math.imul(value ^ (value >>> 13), 1274126177);
+    return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
+}
+
+function detailTerrainWeight(tiles, kind, px, pz) {
+    const cx = px - 0.5;
+    const cz = pz - 0.5;
+    const ix = Math.floor(cx);
+    const iz = Math.floor(cz);
+    const smooth = value => {
+        const t = Math.max(0, Math.min(1, (value - 0.28) / 0.44));
+        return t * t * (3 - 2 * t);
+    };
+    const wx = smooth(cx - ix);
+    const wz = smooth(cz - iz);
+    const at = (x, z) => Number(tiles[z]?.[x]?.terrain === kind);
+    return at(ix, iz) * (1 - wx) * (1 - wz)
+        + at(ix + 1, iz) * wx * (1 - wz)
+        + at(ix, iz + 1) * (1 - wx) * wz
+        + at(ix + 1, iz + 1) * wx * wz;
+}
+
+function acceptsDetail(tiles, kind, px, pz, salt) {
+    const surface = tiles[Math.floor(pz)]?.[Math.floor(px)]?.terrain;
+    if (!surface || surface === 'water') return false;
+    return hash(Math.floor(px * 1024), Math.floor(pz * 1024), salt)
+        < detailTerrainWeight(tiles, kind, px, pz);
+}
+
+function edgePosition(tile, local, salt) {
+    const fringe = 0.04 + 0.24 * hash(Math.floor(tile * 17), Math.floor(local * 997), salt);
+    if (local < 0.25) return tile + local - fringe * (1 - local / 0.25);
+    if (local > 0.75) return tile + local + fringe * (local - 0.75) / 0.25;
+    return tile + local;
+}
+
+export function grassPlacements(tiles, isCovered = () => false) {
+    const tufts = [];
+    const flowers = [];
+    for (let z = 0; z < tiles.length; z++) {
+        for (let x = 0; x < tiles[z].length; x++) {
+            if (tiles[z][x].terrain === 'rock') {
+                if (hash(x, z, 170) < 0.24) {
+                    const px = x + 0.15 + hash(x, z, 171) * 0.7;
+                    const pz = z + 0.15 + hash(x, z, 172) * 0.7;
+                    if (!isCovered(px, pz) && acceptsDetail(tiles, 'rock', px, pz, 174)) tufts.push({ x: px, z: pz,
+                        size: 0.4 + hash(x, z, 173) * 0.22,
+                        turn: hash(x, z, 174) * Math.PI * 2,
+                        color: hash(x, z, 175), rock: true });
+                }
+                continue;
+            }
+            if (tiles[z][x].terrain !== 'grass') continue;
+            for (let cell = 0; cell < 25; cell++) {
+                const gx = cell % 5;
+                const gz = Math.floor(cell / 5);
+                if (hash(x, z, 20 + cell) < 0.14) continue;
+                const localX = (gx + 0.08 + hash(x, z, 40 + cell) * 0.84) / 5;
+                const localZ = (gz + 0.08 + hash(x, z, 60 + cell) * 0.84) / 5;
+                const px = edgePosition(x, localX, 610 + z * 25 + cell);
+                const pz = edgePosition(z, localZ, 710 + x * 25 + cell);
+                if (!isCovered(px, pz) && acceptsDetail(tiles, 'grass', px, pz, 180 + cell)) tufts.push({ x: px, z: pz,
+                    size: 0.6 + hash(x, z, 80 + cell) * 0.3,
+                    turn: hash(x, z, 100 + cell) * Math.PI * 2,
+                    color: hash(x, z, 120 + cell) });
+            }
+            if (hash(x, z, 7) < 0.07) {
+                const centerX = x + 0.25 + hash(x, z, 8) * 0.5;
+                const centerZ = z + 0.25 + hash(x, z, 9) * 0.5;
+                for (let flower = 0; flower < 3; flower++) {
+                    const px = centerX + (hash(x, z, 130 + flower) - 0.5) * 0.22;
+                    const pz = centerZ + (hash(x, z, 140 + flower) - 0.5) * 0.22;
+                    if (!isCovered(px, pz) && acceptsDetail(tiles, 'grass', px, pz, 190 + flower)) flowers.push({ x: px, z: pz,
+                        size: 0.55 + hash(x, z, 150 + flower) * 0.28,
+                        turn: hash(x, z, 160 + flower) * Math.PI * 2 });
+                }
+            }
+        }
+    }
+    return { tufts, flowers };
+}
+
+export function groundPlacements(tiles, isCovered = () => false) {
+    const pebbles = [];
+    for (let z = 0; z < tiles.length; z++) {
+        for (let x = 0; x < tiles[z].length; x++) {
+            if (tiles[z][x].terrain !== 'sand') continue;
+            const density = hash(x, z, 190);
+            const count = density < 0.48 ? 0 : density < 0.85 ? 1 : 2;
+            for (let index = 0; index < count; index++) {
+                const localX = 0.1 + hash(x, z, 210 + index) * 0.8;
+                const localZ = 0.1 + hash(x, z, 230 + index) * 0.8;
+                const px = edgePosition(x, localX, 810 + z * 2 + index);
+                const pz = edgePosition(z, localZ, 910 + x * 2 + index);
+                if (!isCovered(px, pz) && acceptsDetail(tiles, 'sand', px, pz, 300 + index)) pebbles.push({ x: px, z: pz,
+                    size: hash(x, z, 250 + index),
+                    turn: hash(x, z, 270 + index) * Math.PI * 2 });
+            }
+        }
+    }
+    return { pebbles };
+}
+
+export function settlePebbles(pebbles, getHeight) {
+    return pebbles.flatMap(item => {
+        const radius = 0.07 + item.size * 0.09;
+        const heights = [getHeight(item.x, item.z),
+            getHeight(item.x - radius, item.z), getHeight(item.x + radius, item.z),
+            getHeight(item.x, item.z - radius), getHeight(item.x, item.z + radius)];
+        const groundHeight = Math.min(...heights);
+        return Math.max(...heights) - groundHeight < 0.08 ? [{ ...item, groundHeight }] : [];
+    });
+}
+
+export function swampPlacements(tiles, isCovered = () => false) {
+    const pools = [];
+    const reeds = [];
+    for (let z = 0; z < tiles.length; z++) {
+        for (let x = 0; x < tiles[z].length; x++) {
+            if (tiles[z][x].terrain !== 'swamp') continue;
+            let pool = null;
+            if (hash(x, z, 310) < 0.23) {
+                const px = x + 0.32 + hash(x, z, 320) * 0.36;
+                const pz = z + 0.32 + hash(x, z, 330) * 0.36;
+                if (!isCovered(px, pz)) {
+                    pool = { x: px, z: pz,
+                        radius: 0.18 + hash(x, z, 340) * 0.08,
+                        turn: hash(x, z, 350) * Math.PI * 2,
+                        seed: hash(x, z, 360) };
+                    pools.push(pool);
+                }
+            }
+            for (let index = 0; index < 5; index++) {
+                const localX = 0.08 + hash(x, z, 380 + index) * 0.84;
+                const localZ = 0.08 + hash(x, z, 400 + index) * 0.84;
+                const px = edgePosition(x, localX, 1010 + z * 5 + index);
+                const pz = edgePosition(z, localZ, 1110 + x * 5 + index);
+                if (!isCovered(px, pz) && acceptsDetail(tiles, 'swamp', px, pz, 470 + index)
+                    && (!pool || Math.hypot(px - pool.x, pz - pool.z) > pool.radius + 0.04)) {
+                    reeds.push({ x: px, z: pz,
+                        size: 0.55 + hash(x, z, 420 + index) * 0.4,
+                        turn: hash(x, z, 440 + index) * Math.PI * 2,
+                        color: hash(x, z, 460 + index) });
+                }
+            }
+        }
+    }
+    return { pools, reeds };
+}
+
+function makeGrassGeometry(THREE) {
+    const positions = [];
+    for (let blade = 0; blade < 4; blade++) {
+        const angle = blade * Math.PI / 2;
+        const dx = Math.cos(angle);
+        const dz = Math.sin(angle);
+        const sideX = -dz * 0.035;
+        const sideZ = dx * 0.035;
+        const height = 0.19 + blade % 2 * 0.07;
+        positions.push(-sideX, 0, -sideZ, sideX, 0, sideZ,
+            dx * 0.075, height, dz * 0.075);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeVertexNormals();
+    return geometry;
+}
+
+export function makeReedGeometry(THREE) {
+    const positions = [];
+    const colors = [];
+    const stemColor = [0.48, 0.52, 0.27];
+    const leafColor = [0.38, 0.47, 0.22];
+    const headColor = [0.43, 0.28, 0.14];
+    const triangle = (a, b, c, tint) => {
+        positions.push(...a, ...b, ...c);
+        colors.push(...tint, ...tint, ...tint);
+    };
+    const bases = [[-0.075, -0.055], [0.07, 0.025], [-0.005, 0.085]];
+    for (let stem = 0; stem < bases.length; stem++) {
+        const [x, z] = bases[stem];
+        const height = [0.49, 0.56, 0.39][stem];
+        const tip = [x + (stem - 1) * 0.035, height, z + (stem === 1 ? 0.04 : -0.015)];
+        for (let axis = 0; axis < 2; axis++) {
+            const across = axis ? [0, 0.011] : [0.011, 0];
+            triangle([x - across[0], 0, z - across[1]],
+                [x + across[0], 0, z + across[1]], tip, stemColor);
+        }
+        for (let leaf = -1; leaf <= 1; leaf += 2) {
+            triangle([x - 0.017, 0.025, z], [x + 0.017, 0.025, z],
+                [x + leaf * 0.12, 0.23 + stem * 0.025, z + leaf * 0.06], leafColor);
+        }
+        if (stem === 2) continue;
+        const headBottom = height - 0.17;
+        const headMiddle = height - 0.09;
+        for (let side = 0; side < 6; side++) {
+            const angle = side * Math.PI / 3;
+            const next = (side + 1) * Math.PI / 3;
+            const a = [tip[0] + Math.cos(angle) * 0.023, headMiddle,
+                tip[2] + Math.sin(angle) * 0.023];
+            const b = [tip[0] + Math.cos(next) * 0.023, headMiddle,
+                tip[2] + Math.sin(next) * 0.023];
+            triangle([tip[0], headBottom, tip[2]], b, a, headColor);
+            triangle(tip, a, b, headColor);
+        }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+    return geometry;
+}
+
+function makeFlowerGeometry(THREE) {
+    const positions = [-0.008, 0, 0, 0.008, 0, 0, 0, 0.23, 0];
+    const colors = [0.22, 0.4, 0.12, 0.22, 0.4, 0.12, 0.22, 0.4, 0.12];
+    for (let petal = 0; petal < 5; petal++) {
+        const angle = petal * Math.PI * 2 / 5;
+        const hue = petal % 2 ? [0.95, 0.87, 0.49] : [0.98, 0.94, 0.72];
+        positions.push(0, 0.23, 0,
+            Math.cos(angle - 0.35) * 0.052, 0.225, Math.sin(angle - 0.35) * 0.052,
+            Math.cos(angle + 0.35) * 0.052, 0.225, Math.sin(angle + 0.35) * 0.052);
+        colors.push(...hue, ...hue, ...hue);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+    return geometry;
+}
+
+export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
+    const group = new THREE.Group();
+    const { tufts, flowers } = grassPlacements(tiles, isCovered);
+    const { pebbles } = groundPlacements(tiles, isCovered);
+    const { pools, reeds } = swampPlacements(tiles, isCovered);
+    const dummy = new THREE.Object3D();
+    let visiblePools = 0;
+    if (pools.length) {
+        const positions = [];
+        const colors = [];
+        const color = new THREE.Color();
+        const shoreColor = new THREE.Color(0x34473a);
+        for (const pool of pools) {
+            color.setHSL(0.49 + pool.seed * 0.035, 0.37, 0.25 + pool.seed * 0.04);
+            const edge = side => {
+                const angle = pool.turn + side * Math.PI / 6;
+                const wobble = 0.78 + hash(Math.floor(pool.x * 100), Math.floor(pool.z * 100), side) * 0.38;
+                const x = pool.x + Math.cos(angle) * pool.radius * wobble;
+                const z = pool.z + Math.sin(angle) * pool.radius * 0.72 * wobble;
+                return [x, z];
+            };
+            const rim = Array.from({ length: 12 }, (_, side) => edge(side));
+            const heights = [getHeight(pool.x, pool.z),
+                ...rim.map(([x, z]) => getHeight(x, z))];
+            if (Math.max(...heights) - Math.min(...heights) > 0.06) continue;
+            const level = Math.max(...heights) + 0.018;
+            const center = [pool.x, level, pool.z];
+            for (let side = 0; side < rim.length; side++) {
+                const [ax, az] = rim[side];
+                const [bx, bz] = rim[(side + 1) % rim.length];
+                positions.push(...center, bx, level, bz, ax, level, az);
+                colors.push(color.r, color.g, color.b,
+                    shoreColor.r, shoreColor.g, shoreColor.b,
+                    shoreColor.r, shoreColor.g, shoreColor.b);
+            }
+            visiblePools++;
+        }
+        if (visiblePools) {
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.computeVertexNormals();
+            const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+                vertexColors: true, side: THREE.DoubleSide, roughness: 0.27,
+                metalness: 0.06, polygonOffset: true, polygonOffsetFactor: -1,
+                polygonOffsetUnits: -1,
+            }));
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
+            mesh.raycast = () => {};
+            group.add(mesh);
+        }
+    }
+    if (reeds.length) {
+        const mesh = new THREE.InstancedMesh(makeReedGeometry(THREE),
+            new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 }),
+            reeds.length);
+        for (let index = 0; index < reeds.length; index++) {
+            const reed = reeds[index];
+            dummy.position.set(reed.x, getHeight(reed.x, reed.z) + 0.004, reed.z);
+            dummy.rotation.set(0, reed.turn, 0);
+            dummy.scale.setScalar(reed.size);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(index, dummy.matrix);
+            mesh.setColorAt(index, new THREE.Color().setHSL(0.12 + reed.color * 0.04,
+                0.08, 0.78 + reed.color * 0.18));
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.raycast = () => {};
+        group.add(mesh);
+    }
+    if (tufts.length) {
+        const mesh = new THREE.InstancedMesh(makeGrassGeometry(THREE),
+            new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: 1 }),
+            tufts.length);
+        for (let index = 0; index < tufts.length; index++) {
+            const tuft = tufts[index];
+            dummy.position.set(tuft.x, getHeight(tuft.x, tuft.z) + 0.004, tuft.z);
+            dummy.rotation.set(0, tuft.turn, 0);
+            dummy.scale.setScalar(tuft.size);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(index, dummy.matrix);
+            mesh.setColorAt(index, new THREE.Color().setHSL(0.25 + tuft.color * 0.035,
+                tuft.rock ? 0.38 : 0.52, (tuft.rock ? 0.3 : 0.36) + tuft.color * 0.12));
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.raycast = () => {};
+        group.add(mesh);
+    }
+    if (flowers.length) {
+        const mesh = new THREE.InstancedMesh(makeFlowerGeometry(THREE),
+            new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 }),
+            flowers.length);
+        for (let index = 0; index < flowers.length; index++) {
+            const flower = flowers[index];
+            dummy.position.set(flower.x, getHeight(flower.x, flower.z) + 0.004, flower.z);
+            dummy.rotation.set(0, flower.turn, 0);
+            dummy.scale.setScalar(flower.size);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(index, dummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.raycast = () => {};
+        group.add(mesh);
+    }
+    const settledPebbles = settlePebbles(pebbles, getHeight);
+    if (settledPebbles.length) {
+        const mesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.5, 0),
+            new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, flatShading: true }),
+            settledPebbles.length);
+        for (let index = 0; index < settledPebbles.length; index++) {
+            const item = settledPebbles[index];
+            const width = 0.07 + item.size * 0.09;
+            const pebbleHeight = 0.045 + item.size * 0.04;
+            dummy.position.set(item.x, item.groundHeight + pebbleHeight * 0.2, item.z);
+            dummy.rotation.set(0, item.turn, 0);
+            dummy.scale.set(width, pebbleHeight, width * (0.62 + item.size * 0.35));
+            dummy.updateMatrix();
+            mesh.setMatrixAt(index, dummy.matrix);
+            mesh.setColorAt(index, new THREE.Color().setHSL(0.11, 0.08, 0.43 + item.size * 0.12));
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.raycast = () => {};
+        group.add(mesh);
+    }
+    group.userData.detailCounts = { tufts: tufts.length, flowers: flowers.length,
+        pebbles: settledPebbles.length, pools: visiblePools, reeds: reeds.length };
+    return group;
+}

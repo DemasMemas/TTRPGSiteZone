@@ -50,6 +50,8 @@ def _tiles():
                 terrain, height = 'water', 0.65
             if 10 <= x <= 18 and 24 <= z <= 31:
                 terrain, height = 'rock', 1
+            if 30 <= x <= 36 and 19 <= z <= 24:
+                terrain, height = 'rock', 1
             hill_distance = math.hypot(x - 5, z - 20)
             if 2 <= x <= 9 and 17 <= z <= 23 and hill_distance < 4.5:
                 height = round(1 + 1.4 * max(0, 1 - (hill_distance / 4.5) ** 2) ** 2, 2)
@@ -62,7 +64,7 @@ def _tiles():
         ('tree', 1, 2), ('tree', 1, 12), ('tree', 2, 25), ('tree', 7, 31),
         ('tree', 19, 22), ('tree', 22, 30), ('tree', 36, 23), ('tree', 36, 30),
         ('rock', 20, 25), ('rock', 23, 27), ('rock', 25, 22),
-        ('tent', 4, 24), ('tent', 6, 25), ('campfire', 6, 27),
+        ('tent', 4, 24), ('tent', 6, 25),
     )
     for kind, x, z in decor:
         tiles[z][x]['objects'].append({'type': kind})
@@ -122,19 +124,29 @@ def _structures(location):
         add('Стол', 'table', x, z, 1.2, 0.85, 0.8, '#806044')
         add('Стул', 'chair', x + 1, z, 0.55, 0.55, 1, '#74563d')
     add('Стеллаж', 'shelf', 14, 6, 1.2, 0.4, 2, '#78634c')
-    add('Сундук', 'chest', 12, 11, 0.9, 0.6, 0.7, '#785238')
+    add('Военный ящик', 'military_crate', 12, 11, 1.1, 0.8, 0.65, '#45543a', contents=[])
     for x, z in ((5, 5), (13, 5), (17, 20)):
         add('Бочка', 'barrel', x, z, 0.65, 0.65, 1, '#8a6444', weight_kg=40)
     for x, z in ((17, 8), (18, 8), (23, 24)):
-        add('Ящик', 'box', x, z, 0.8, 0.8, 0.7, '#8b6b4f', weight_kg=25)
+        add('Ящик', 'box', x, z, 0.8, 0.8, 0.7, '#8b6b4f', weight_kg=25, contents=[])
     for z in range(5, 18, 3):
-        add('Ограждение аномалий', 'fence', 18, z, 0.15, 2.2, 1.2, '#67745d')
+        add('Ограждение аномалий', 'fence', 18, z, 2.2, 0.15, 1.2, '#8b7458', rotation=math.pi / 2)
     add('Северная стена туннеля', 'wall', 14, 24, 8, 0.2, 2.5, '#575c5b')
     add('Южная стена туннеля', 'wall', 14, 30, 8, 0.2, 2.5, '#575c5b')
     add('Западная стена туннеля', 'wall', 10, 27, 6, 0.2, 2.5, '#575c5b', rotation=math.pi / 2)
     add('Восточная стена туннеля', 'wall', 18, 27, 6, 0.2, 2.5, '#575c5b', rotation=math.pi / 2)
     add('Дверь туннеля', 'door', 14, 24, 0.9, 0.18, 2.1, '#646861', is_open=True)
     add('Пол туннеля', 'floor', 14, 27, 8, 6, 0.12, '#555958')
+    add('Пол малого дома', 'floor', 33, 21, 4, 4, 0.12, '#756b5d')
+    add('Северная стена малого дома', 'wall', 33, 19, 4, 0.2, 2.3, '#867e70')
+    add('Южная стена малого дома', 'wall', 33, 23, 4, 0.2, 2.3, '#867e70')
+    add('Западная стена малого дома', 'wall', 31, 21, 4, 0.2, 2.3, '#867e70', rotation=math.pi / 2)
+    add('Восточная стена малого дома', 'wall', 35, 21, 4, 0.2, 2.3, '#867e70', rotation=math.pi / 2)
+    add('Дверь малого дома', 'door', 33, 23, 0.9, 0.18, 2.1, '#75583e', is_open=True)
+    add('Окно малого дома', 'window', 33, 19, 1.2, 0.14, 1.1, '#a9c4cf', elevation=1)
+    add('Костёр', 'campfire', 6, 27, 0.9, 0.9, 0.7, '#74604b', is_lit=True)
+    add('Факел', 'torch', 32, 21, 0.25, 0.25, 1.7, '#6b4a30', is_lit=True)
+    add('Бочка с огнём', 'fire_barrel', 23, 19, 0.72, 0.72, 0.78, '#5f625c', is_lit=True)
     return structures
 
 
@@ -175,7 +187,7 @@ def _test_participants(location, gm_id):
     existing = {
         character.data.get('_visual_test_role'): character
         for character in LobbyCharacter.query.filter_by(lobby_id=location.lobby_id).all()
-        if (character.data or {}).get('_visual_test_scene') == SCENE_NAME
+        if (character.data or {}).get('_visual_test_scene') == location.name
     }
     for role, name, mutant_type, x, z, team, color in roster:
         character = existing.get(role)
@@ -186,7 +198,7 @@ def _test_participants(location, gm_id):
                 data = {'basic': {'species': 'Человек', 'is_npc': True},
                         'is_npc': True, 'inventory': {'pockets': [], 'backpack': []}}
                 apply_health_maximums(data)
-            data['_visual_test_scene'] = SCENE_NAME
+            data['_visual_test_scene'] = location.name
             data['_visual_test_role'] = role
             character = LobbyCharacter(
                 lobby_id=location.lobby_id, owner_id=gm_id, name=name,
@@ -201,12 +213,12 @@ def _test_participants(location, gm_id):
         ))
 
 
-def _populate(location, lobby):
+def _populate(location, lobby, *, commit=True):
     combat = LocationCombatState.query.filter_by(location_id=location.id).first()
     if combat and combat.status != 'idle':
         raise ValueError('Stop combat in the visual sandbox before rebuilding it')
     participants = LocationCharacter.query.filter_by(location_id=location.id).all()
-    if any((entry.character.data or {}).get('_visual_test_scene') != SCENE_NAME for entry in participants):
+    if any((entry.character.data or {}).get('_visual_test_scene') != location.name for entry in participants):
         raise ValueError('The visual sandbox contains non-test characters; move them out first')
     for entry in participants:
         db.session.delete(entry)
@@ -224,7 +236,8 @@ def _populate(location, lobby):
     db.session.add_all(_structures(location))
     db.session.flush()
     _test_participants(location, lobby.gm_id)
-    db.session.commit()
+    if commit:
+        db.session.commit()
 
 
 def create_visual_test_location(lobby_id):

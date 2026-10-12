@@ -131,11 +131,13 @@ test('asset color is editable beyond lamps and is persisted on structures and de
     assert.match(scene, /if \(color !== undefined\) source\.color = color/);
 });
 
-test('local water shares the world material and surface grid fits both map dimensions', async () => {
+test('local water has a solid backing and surface grid fits both map dimensions', async () => {
     const local = read('locationScene.js');
     const world = read('lobby3d.js');
-    assert.match(local, /const waterMaterial = createWaterMaterial\(\)/);
-    assert.match(local, /new THREE\.InstancedMesh\(geometry\.clone\(\), waterMaterial, tileCount\)/);
+    assert.match(local, /const waterMaterial = new THREE\.MeshStandardMaterial\(\{ color: 0xffffff \}\)/);
+    assert.match(local, /WATER_SIDE_COLORS = \{ grass: 0x183c4a/);
+    assert.match(local, /new THREE\.InstancedMesh\(geometry\.clone\(\), \[/);
+    assert.match(local, /waterMaterial, waterMaterial, waterTopMaterial/);
     assert.match(world, /const waterMat = createWaterMaterial\(\)/);
     assert.match(local, /buildTerrainGridData\(currentLocationData\.tiles_data, uncovered\)/);
     const terrain = read('locationTerrain.js');

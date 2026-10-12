@@ -46,11 +46,12 @@ function applyWorldLighting() {
     const starlight = starlightAtMinutes(worldTimeMinutes);
     const clarity = currentClouds.enabled
         ? Math.max(0, Math.min(1, Number(currentClouds.intensity) || 0)) : 1;
-    const directNight = 0.03 + 0.04 * clarity;
-    const ambientNight = 0.04 + 0.025 * clarity;
-    directionalLight.intensity = directNight + (0.27 + 0.98 * clarity - directNight) * daylight;
-    ambientLight.intensity = ambientNight + (0.29 + 0.05 * clarity - ambientNight) * daylight;
-    fillLight.intensity = 0.025 + 0.02 * clarity + (0.12 + 0.13 * clarity - 0.025 - 0.02 * clarity) * daylight;
+    const directNight = 0.07 + 0.06 * clarity;
+    const ambientNight = 0.08 + 0.035 * clarity;
+    const fillNight = 0.035 + 0.035 * clarity;
+    directionalLight.intensity = directNight + (0.43 + 0.92 * clarity - directNight) * daylight;
+    ambientLight.intensity = ambientNight + (0.36 + 0.08 * clarity - ambientNight) * daylight;
+    fillLight.intensity = fillNight + (0.17 + 0.15 * clarity - fillNight) * daylight;
     directionalLight.color.lerpColors(
         new THREE.Color(0xaec6e4),
         new THREE.Color(0xffe8c2),

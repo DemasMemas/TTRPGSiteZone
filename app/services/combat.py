@@ -272,6 +272,7 @@ class CombatService:
     THROWABLE_OBJECT_WEIGHTS = {
         'chair': 5.0,
         'box': 10.0,
+        'military_crate': 18.0,
         'chest': 15.0,
         'table': 25.0,
         'barrel': 40.0,
@@ -506,7 +507,7 @@ class CombatService:
         obj_type = str(getattr(obj, 'type', '') or '').lower()
         if properties.get('cover_enabled') is False:
             return False
-        if obj_type in {'floor', 'ground_item', 'campfire', 'anomaly', 'poster'}:
+        if obj_type in {'floor', 'ground_item', 'campfire', 'torch', 'fire_barrel', 'anomaly', 'poster'}:
             return False
         if obj_type in {'door', 'window'} and properties.get('is_open'):
             return False
@@ -9053,6 +9054,7 @@ class CombatService:
             'chair': {'width': 0.55, 'depth': 0.55},
             'shelf': {'width': 1.0, 'depth': 0.35},
             'chest': {'width': 0.9, 'depth': 0.6},
+            'military_crate': {'width': 1.1, 'depth': 0.8},
             'fence': {'width': 2.0, 'depth': 0.15},
             'wall': {'width': 1.5, 'depth': 0.2},
         }
@@ -9185,7 +9187,7 @@ class CombatService:
             obj_type = getattr(obj, 'type', '') or ''
             properties = getattr(obj, 'properties', {}) or {}
 
-        low_climb_types = {'table', 'chair', 'chest', 'box', 'barrier'}
+        low_climb_types = {'table', 'chair', 'chest', 'box', 'military_crate', 'barrier'}
         high_climb_types = {'fence'}
         too_high_types = {'tree', 'rock', 'house', 'tent', 'wall', 'shelf'}
         height = CombatService._object_height(obj)
@@ -9194,7 +9196,7 @@ class CombatService:
         if obj_type == 'anomaly':
             return {'blocked': False, 'climb_cost': 0}
 
-        if properties.get('passable') is True or obj_type in {'campfire', 'poster', 'floor'}:
+        if properties.get('passable') is True or obj_type in {'campfire', 'torch', 'fire_barrel', 'poster', 'floor'}:
             return {'blocked': False, 'climb_cost': 0}
 
         if obj_type == 'door':

@@ -34,7 +34,7 @@ import {
     initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
     loadCombatStartRequests, handleCombatStartRequest, handleCombatStartRequestResolved,
     addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible,
-    addLocationGridButton, destroyLocationScene,
+    addLocationGridButton, addLocationRoofButton, destroyLocationScene,
     setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationEraserMode, setLocationEditMode,
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
@@ -45,7 +45,7 @@ import {
     setLocationAssetDimensions, getSelectedLocationEditorAsset, beginMoveSelectedLocationAsset,
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
     setLocationAssetResizeAxis, getLocationAssetResizeState,
-    deleteSelectedLocationAsset, toggleSelectedLocationAssetsHidden,
+    deleteSelectedLocationAsset, toggleSelectedLocationAssetsHidden, toggleSelectedLocationFire,
     updateSelectedLocationAssetDetails, previewSelectedLocationLamp,
     previewLocationDarkTiles, setLocationDarknessOverlayVisible,
 } from './locationScene.js';
@@ -244,6 +244,7 @@ window.enterLocation = async function(locationId) {
         destroyLocationScene();
         initLocationScene('location-canvas');
         loadLocation(data);
+        addLocationRoofButton();
 
         setLocationBrushRadius(window.brushRadius);
         setLocationBrushHeight(window.tileHeight);
@@ -321,9 +322,9 @@ window.enterLocation = async function(locationId) {
                                 <option value="table">Стол</option>
                                 <option value="chair">Стул</option>
                                 <option value="box">Ящик</option>
+                                <option value="military_crate">Военный ящик</option>
                                 <option value="barrel">Бочка</option>
                                 <option value="shelf">Стеллаж</option>
-                                <option value="chest">Сундук</option>
                                 <option value="fence">Забор</option>
                             </select>
                             <label id="loc-structure-width-field">Ширина <input id="loc-structure-width" type="number" min="0.2" max="30" step="0.1" value="3" style="width:58px;"></label>
@@ -640,6 +641,7 @@ window.enterLocation = async function(locationId) {
                             <button type="button" data-asset-action="rotate" title="T">Повернуть на карте</button>
                             <button type="button" data-asset-action="resize" title="R">Изменить размер</button>
                             <button type="button" data-asset-action="hide" title="H">Скрыть</button>
+                            <button type="button" data-asset-action="fire" hidden>Зажечь</button>
                             <button type="button" data-asset-action="delete">Удалить</button>
                         </div>
                         <div class="location-asset-dimensions" data-selected-size>
@@ -677,6 +679,11 @@ window.enterLocation = async function(locationId) {
                         assetInspector.querySelector('.location-asset-precise').hidden = true;
                     }
                     assetInspector.querySelector('[data-asset-action="hide"]').textContent = selection.hidden && selection.selectedCount === 1 ? 'Показать' : 'Скрыть / показать';
+                    const fireButton = assetInspector.querySelector('[data-asset-action="fire"]');
+                    fireButton.hidden = !selection.fire || selection.selectedCount !== 1;
+                    fireButton.textContent = selection.electric
+                        ? (selection.isLit ? 'Выключить' : 'Включить')
+                        : (selection.isLit ? 'Потушить' : 'Зажечь');
                     if (keepPreciseOpen) assetInspector.querySelector('.location-asset-precise').open = true;
                     assetInspector.querySelector('[data-asset-position]').textContent = `Клетка ${Math.floor(selection.x)}, ${Math.floor(selection.z)}`;
                     const heightInput = assetInspector.querySelector('[data-asset-elevation]');
@@ -714,6 +721,7 @@ window.enterLocation = async function(locationId) {
                     assetInspector.querySelector('[data-asset-action="rotate"]').onclick = () => beginRotateSelectedLocationAsset();
                     assetInspector.querySelector('[data-asset-action="resize"]').onclick = () => beginResizeSelectedLocationAsset();
                     assetInspector.querySelector('[data-asset-action="hide"]').onclick = () => toggleSelectedLocationAssetsHidden();
+                    fireButton.onclick = () => toggleSelectedLocationFire();
                     assetInspector.querySelector('[data-asset-action="delete"]').onclick = () => deleteSelectedLocationAsset();
                     assetInspector.querySelectorAll('[data-resize-axis]').forEach(button => {
                         button.onclick = () => setLocationAssetResizeAxis(button.dataset.resizeAxis);
@@ -954,9 +962,9 @@ window.enterLocation = async function(locationId) {
                     table: { width: 1.4, depth: 0.8, height: 1 },
                     chair: { width: 0.55, depth: 0.55, height: 1 },
                     box: { width: 0.8, depth: 0.8, height: 0.7 },
+                    military_crate: { width: 1.1, depth: 0.8, height: 0.65 },
                     barrel: { width: 0.65, depth: 0.65, height: 1 },
                     shelf: { width: 1.2, depth: 0.4, height: 2 },
-                    chest: { width: 0.9, depth: 0.6, height: 0.7 },
                     fence: { width: 2, depth: 0.15, height: 1.2 }
                 };
                 const applyStructurePreset = (preset) => {
@@ -1078,6 +1086,8 @@ window.exitLocation = function() {
     const editBtn = document.getElementById('edit-location-btn');
     if (editBtn) editBtn.remove();
     document.getElementById('location-grid-btn')?.remove();
+    document.getElementById('location-roof-btn')?.remove();
+    document.getElementById('location-view-toggle-group')?.remove();
 
     // Восстанавливаем оригинальную панель инструментов (для глобальной карты)
     if (window.isGM && window._originalToolsContent) {
@@ -1134,7 +1144,6 @@ window.generateLocationTiles = function(terrainType, width, height, generateObje
                     tile.objects.push({ type: 'house' });
                 } else if (terrainType === 'camp') {
                     if (Math.random() < 0.2) tile.objects.push({ type: 'tent' });
-                    else if (Math.random() < 0.1) tile.objects.push({ type: 'campfire' });
                 }
             }
             row.push(tile);

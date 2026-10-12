@@ -96,7 +96,7 @@ test('editor panel expands only for a new tool when the preference is enabled', 
     assert.match(fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8'), /data-world-settings="select"[\s\S]*?data-map-editor-auto-expand/);
 });
 
-test('location brush uses one active tool, while Alt and Shift still override it', () => {
+test('location brush uses only the active tool, regardless of Alt and Shift', () => {
     const source = read('locationScene.js');
     const start = source.indexOf('function getEditBrushUpdates(');
     const end = source.indexOf('\nexport function setupLocationEditing()', start);
@@ -110,8 +110,10 @@ test('location brush uses one active tool, while Alt and Shift still override it
     assert.deepEqual(updates({}), {});
     context.window.locationEditorTool = 'terrain';
     assert.deepEqual(updates({}), { terrain: 'sand' });
+    assert.deepEqual(updates({ shiftKey: true }), { terrain: 'sand' });
     context.window.locationEditorTool = 'height';
     assert.deepEqual(updates({}), { height: 2 });
+    assert.deepEqual(updates({ altKey: true }), { height: 2 });
     context.window.locationEditorTool = 'radiation';
     assert.deepEqual(updates({}), { radiation: 4 });
     context.window.locationEditorTool = 'decor';
@@ -119,8 +121,8 @@ test('location brush uses one active tool, while Alt and Shift still override it
     context.window.locationEditorTool = 'erase';
     assert.deepEqual(updates({}), { objects: [] });
     context.window.locationEditorTool = 'select';
-    assert.deepEqual(updates({ altKey: true }), { terrain: 'sand' });
-    assert.deepEqual(updates({ shiftKey: true }), { height: 2 });
+    assert.deepEqual(updates({ altKey: true }), {});
+    assert.deepEqual(updates({ shiftKey: true }), {});
 });
 
 test('world brush paints on pointer press without waiting for the window click', () => {
@@ -156,10 +158,20 @@ test('world brush paints on pointer press without waiting for the window click',
     context.canvasMouseDownHandler(event);
     assert.equal(painted.length, 1);
     context.canvasMouseDownHandler({ ...event, altKey: true });
-    assert.equal(painted.length, 2);
+    context.canvasMouseDownHandler({ ...event, shiftKey: true });
+    assert.equal(painted.length, 1);
     context.window.isWorldTravelSelectionActive = () => true;
     context.canvasMouseDownHandler({ ...event, altKey: true });
-    assert.equal(painted.length, 2);
+    assert.equal(painted.length, 1);
+
+    const dragStart = source.indexOf("window.addEventListener('pointermove', (event) => {", end);
+    const dragEnd = source.indexOf("window.addEventListener('pointerup'", dragStart);
+    assert.doesNotMatch(source.slice(dragStart, dragEnd), /if \(event\.(?:altKey|shiftKey)\)\s*\{\s*updates\./);
+    const clickCallback = read('lobbyData.js');
+    const callbackStart = clickCallback.indexOf('setTileClickCallback((options) => {');
+    const callbackEnd = clickCallback.indexOf('\n            });', callbackStart);
+    assert.ok(callbackStart >= 0 && callbackEnd > callbackStart);
+    assert.doesNotMatch(clickCallback.slice(callbackStart, callbackEnd), /event\.(?:altKey|shiftKey)/);
 
     const clickStart = source.indexOf("window.addEventListener('click', (event) => {", end);
     const clickEnd = source.indexOf("\nwindow.addEventListener('dblclick'", clickStart);
@@ -188,6 +200,38 @@ test('world radiation brush updates every tile in its radius', () => {
     context.applyBrush({ chunkX: 0, chunkY: 0, tileX: 8, tileY: 8 }, { radiation: 4.5 }, 1);
     assert.equal(painted.length, 9);
     assert.equal(painted.every(call => call[4].radiation === 4.5), true);
+});
+
+test('world brush batch sends each tile once with its latest fields', () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('function scheduleBatchUpdate()');
+    const end = source.indexOf('\nexport function applyBrush(', start);
+    assert.ok(start >= 0 && end > start);
+    const sent = [];
+    const context = vm.createContext({
+        pendingTileUpdates: [
+            { chunk_x: 0, chunk_y: 0, tile_x: 2, tile_y: 3, updates: { terrain: 'sand', height: 2 } },
+            { chunk_x: 0, chunk_y: 0, tile_x: 4, tile_y: 3, updates: { height: 3 } },
+            { chunk_x: 0, chunk_y: 0, tile_x: 2, tile_y: 3, updates: { height: 5 } },
+        ],
+        batchUpdateTimeout: null,
+        currentLobbyId: 7,
+        setTimeout(callback) { callback(); return 1; },
+        clearTimeout() {},
+        Server: { batchUpdateTiles(lobbyId, updates) {
+            sent.push({ lobbyId, updates });
+            return Promise.resolve();
+        } },
+        showNotification(message) { throw new Error(message); },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    context.scheduleBatchUpdate();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].lobbyId, 7);
+    assert.equal(sent[0].updates.length, 2);
+    assert.equal(sent[0].updates[0].updates.terrain, 'sand');
+    assert.equal(sent[0].updates[0].updates.height, 5);
+    assert.equal(context.pendingTileUpdates.length, 0);
 });
 
 test('world object tool places once at the pointer without replacing other tile objects', async () => {
@@ -344,10 +388,81 @@ test('location eraser removes structures only when its option is enabled', () =>
     assert.equal(context.shouldEraseLocationStructures(), true);
     context.window.locationEditorTool = 'terrain';
     assert.equal(context.shouldEraseLocationStructures(), false);
+    assert.equal((source.match(/removeStructuresAtTile\(x, z, brushRadius\)/g) || []).length, 4);
 });
 
-test('held Q selects the highlighted full-ring sector on release', () => {
-    const source = read('mapEditorQuickMenu.js').replaceAll('export ', '');
+test('location eraser deletes each structure in its radius and refreshes once', async () => {
+    const source = read('locationScene.js');
+    const start = source.indexOf('async function removeStructuresAtTile(');
+    const end = source.indexOf('\nexport function setLocationBuildMode(', start);
+    assert.ok(start >= 0 && end > start);
+    const objects = [
+        { id: 1, type: 'campfire', tile_x: 3, tile_y: 3 },
+        { id: 2, type: 'wall', tile_x: 4, tile_y: 4 },
+        { id: 3, type: 'floor', tile_x: 2, tile_y: 3 },
+        { id: 4, type: 'crate', tile_x: 5, tile_y: 3 },
+    ];
+    const calls = { deleted: [], removed: [], lights: [], fog: 0, architecture: 0, floor: 0 };
+    const context = vm.createContext({
+        window: { currentLobbyId: 1 }, currentLocationData: { objects },
+        getObjectGridPosition: object => ({ x: object.tile_x, y: object.tile_y }),
+        structureDeletionInFlight: new Set(),
+        Server: { deleteLocationObject: async (_lobby, id) => { calls.deleted.push(id); } },
+        removeLocationObjectMesh: (id, refreshFog) => calls.removed.push([id, refreshFog]),
+        isFireObject: object => object?.type === 'campfire',
+        isObjectLightSource: object => object?.type === 'campfire',
+        syncFireObjectLight: (_object, id, refresh) => calls.lights.push([id, refresh]),
+        activeLightingProfile: { dark_tiles: [] },
+        rebuildGrassDetailMesh: () => { calls.floor++; },
+        refreshArchitecturalMeshes: () => { calls.architecture++; calls.fog++; },
+        applyFogOfWar: () => { calls.fog++; },
+        fogIsActive: () => true,
+        invalidateMovementMapCache() {}, showNotification() {},
+    });
+    vm.runInContext(source.slice(start, end), context);
+    await context.removeStructuresAtTile(3, 3, 1);
+    assert.deepEqual(calls.deleted.sort(), [1, 2, 3]);
+    assert.deepEqual(calls.removed.map(([id]) => id).sort(), [1, 2, 3]);
+    assert.ok(calls.removed.every(([, refresh]) => refresh === false));
+    assert.deepEqual(calls.lights, [[1, false]]);
+    assert.equal(calls.fog, 1);
+    assert.equal(calls.architecture, 1);
+    assert.equal(calls.floor, 1);
+    assert.deepEqual(context.currentLocationData.objects.map(object => object.id), [4]);
+});
+
+test('erasing several fire objects batches the darkness refresh', async () => {
+    const source = read('locationScene.js');
+    const start = source.indexOf('async function removeStructuresAtTile(');
+    const end = source.indexOf('\nexport function setLocationBuildMode(', start);
+    const objects = [{ id: 1, type: 'campfire', tile_x: 1, tile_y: 1 },
+        { id: 2, type: 'torch', tile_x: 2, tile_y: 1 }];
+    const calls = { lights: 0, darkness: 0, fog: 0 };
+    const context = vm.createContext({
+        window: { currentLobbyId: 1 }, currentLocationData: { objects },
+        getObjectGridPosition: object => ({ x: object.tile_x, y: object.tile_y }),
+        structureDeletionInFlight: new Set(),
+        Server: { deleteLocationObject: async () => {} },
+        removeLocationObjectMesh() {}, isFireObject: () => true,
+        isObjectLightSource: () => true,
+        syncFireObjectLight: () => { calls.lights++; },
+        activeLightingProfile: { dark_tiles: [{ x: 1, z: 1 }] },
+        refreshLocationDarkness: () => { calls.darkness++; },
+        applyFogOfWar: () => { calls.fog++; },
+        invalidateMovementMapCache() {}, showNotification() {},
+    });
+    vm.runInContext(source.slice(start, end), context);
+    await context.removeStructuresAtTile(1, 1, 1);
+    assert.deepEqual(calls, { lights: 2, darkness: 1, fog: 0 });
+    assert.equal(context.currentLocationData.objects.length, 0);
+});
+
+test('held Q selects the highlighted full-ring sector on release', async () => {
+    const source = read('mapEditorQuickMenu.js')
+        .replace(/^import \{ isTypingTarget \} from '\.\/cameraPan\.js';\r?\n/, '')
+        .replaceAll('export ', '');
+    const cameraPanUrl = `data:text/javascript;base64,${Buffer.from(read('cameraPan.js')).toString('base64')}`;
+    const { isTypingTarget } = await import(cameraPanUrl);
     const listeners = {};
     const appended = [];
     const selected = [];
@@ -370,6 +485,7 @@ test('held Q selects the highlighted full-ring sector on release', () => {
         contains(target) { return this === target || this.children.includes(target); },
     });
     const context = vm.createContext({
+        isTypingTarget,
         window: { innerWidth: 800, innerHeight: 600, worldEditorTool: 'select', locationEditorTool: 'select' },
         document: {
             createElement,
@@ -387,11 +503,11 @@ test('held Q selects the highlighted full-ring sector on release', () => {
         locationAction(action) { actions.push(action); return action === 'resize' && selectedObject; },
     });
     listeners.pointermove({ clientX: 400, clientY: 300 });
-    const press = code => {
+    const press = (code, inputType = null) => {
         let prevented = false;
         listeners.keydown({
         code, repeat: false, altKey: false, ctrlKey: false, metaKey: false,
-        target: { closest() { return null; } },
+        target: { closest(selector) { return selector === 'input' && inputType ? { type: inputType } : null; } },
         preventDefault() { prevented = true; }, stopImmediatePropagation() {},
         });
         return prevented;
@@ -464,6 +580,10 @@ test('held Q selects the highlighted full-ring sector on release', () => {
     selectedObject = true;
     assert.equal(press('KeyR'), true);
     assert.deepEqual(actions, ['move', 'rotate', 'resize', 'resize']);
+    assert.equal(press('KeyV', 'range'), true);
+    assert.equal(selected.at(-1), 'select');
+    assert.equal(press('KeyB', 'text'), false);
+    assert.equal(selected.at(-1), 'select');
 });
 
 test('right drag while painting remains available to world and location cameras', () => {

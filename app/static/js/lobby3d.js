@@ -3,8 +3,13 @@ import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/cont
 import { updateRain } from './weather.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createFpsCounter } from './fpsCounter.js';
+import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { roadNode, roadConnectsAt } from './worldRoadTopology.js';
 import { createWaterMaterial } from './waterSurface.js';
+import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
+import { createTerrainPixelsRegion, updateTerrainPixelsRegion } from './locationTerrainTexture.js';
+import { buildSmoothTerrainData } from './locationTerrain.js';
+import { buildRoundedWaterData } from './locationWaterEdge.js';
 import {
     createCompatibleWebGLRenderer,
     createUnavailableRenderer,
@@ -51,7 +56,16 @@ const terrainColors = {
 
 const treeGeo = new THREE.ConeGeometry(0.3, 1, 8);
 const houseGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
-const fenceGeo = new THREE.BoxGeometry(0.2, 0.5, 0.8);
+const fenceGeo = landmarkGeometry([
+    [new THREE.BoxGeometry(0.11, 0.52, 0.11), 0, 0, -0.34],
+    [new THREE.BoxGeometry(0.11, 0.52, 0.11), 0, 0, 0.34],
+    [new THREE.BoxGeometry(0.07, 0.06, 0.74), -0.035, -0.09, 0],
+    [new THREE.BoxGeometry(0.07, 0.06, 0.74), -0.035, 0.12, 0],
+    ...[-0.24, -0.12, 0, 0.12, 0.24].map((z, index) => [
+        new THREE.BoxGeometry(0.07, 0.39 + index % 3 * 0.025, 0.075),
+        0.035, -0.04 + index % 3 * 0.012, z,
+    ]),
+]);
 function landmarkGeometry(parts) {
     const vertices = [];
     const normals = [];
@@ -119,12 +133,14 @@ const WORLD_LANDMARKS = {
 const WORLD_LANDMARK_TYPES = Object.keys(WORLD_LANDMARKS).filter(type => type !== 'road');
 const landmarkMat = new THREE.MeshStandardMaterial();
 const roadMaterial = new THREE.MeshStandardMaterial({ roughness: 1 });
+applySurfacePattern(roadMaterial, getSurfaceTexture(THREE, 'road'), 0.12, 'top');
 const roadPadGeometry = new THREE.BoxGeometry(0.32, 0.028, 0.32);
 const roadLinkGeometry = new THREE.BoxGeometry(1, 0.028, 0.24);
 
 const treeMat = new THREE.MeshStandardMaterial();
 const houseMat = new THREE.MeshStandardMaterial();
 const fenceMat = new THREE.MeshStandardMaterial();
+applySurfacePattern(fenceMat, getSurfaceTexture(THREE, 'fence'), 0.4);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050510);
@@ -890,8 +906,109 @@ function animateChunkAnomalies(time) {
 
 const waterMat = createWaterMaterial();
 const waterTexture = waterMat.map;
+const waterHiddenTopMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+const waterInstanceMaterials = [waterMat, waterMat, waterHiddenTopMat,
+    waterMat, waterMat, waterMat];
+const worldWaterBankMat = new THREE.MeshStandardMaterial({
+    map: getSurfaceTexture(THREE, 'local_terrain'), vertexColors: true,
+    side: THREE.DoubleSide, roughness: 0.97,
+});
 const groundGeo = new THREE.BoxGeometry(1, 1, 1);
-const groundMat = new THREE.MeshStandardMaterial();
+const groundMat = new THREE.MeshStandardMaterial({ map: getSurfaceTexture(THREE, 'local_terrain') });
+const smoothGroundMat = new THREE.MeshStandardMaterial({
+    map: getSurfaceTexture(THREE, 'local_terrain'), vertexColors: true, side: THREE.DoubleSide,
+});
+
+function refreshWorldTerrainSurface(entry, smoothData) {
+    if (entry.terrainSurface) {
+        scene.remove(entry.terrainSurface);
+        entry.terrainSurface.geometry.dispose();
+        entry.terrainSurface.material.dispose();
+        entry.terrainSurface = null;
+    }
+    const baseX = entry.chunkX * CHUNK_SIZE;
+    const baseZ = entry.chunkY * CHUNK_SIZE;
+    const textureOriginX = baseX - 2;
+    const textureOriginZ = baseZ - 2;
+    const pixelsPerTile = 12;
+    const textureSize = 512;
+    const sampleTerrain = (x, z) => {
+        const chunk = chunksMap.get(`${Math.floor(x / CHUNK_SIZE)},${Math.floor(z / CHUNK_SIZE)}`);
+        const tile = chunk?.tilesData[z - chunk.chunkY * CHUNK_SIZE]?.[x - chunk.chunkX * CHUNK_SIZE];
+        if (tile) return tile.terrain;
+        const localX = Math.max(0, Math.min(CHUNK_SIZE - 1, x - baseX));
+        const localZ = Math.max(0, Math.min(CHUNK_SIZE - 1, z - baseZ));
+        return entry.tilesData[localZ]?.[localX]?.terrain || 'grass';
+    };
+    if (!entry.terrainTexture) {
+        const image = createTerrainPixelsRegion(sampleTerrain, textureOriginX, textureOriginZ,
+            textureSize, pixelsPerTile);
+        const texture = new THREE.DataTexture(image.data, image.width, image.height,
+            THREE.RGBAFormat, THREE.UnsignedByteType);
+        texture.magFilter = THREE.LinearFilter;
+        texture.minFilter = THREE.LinearMipmapLinearFilter;
+        texture.generateMipmaps = true;
+        texture.encoding = THREE.sRGBEncoding;
+        texture.needsUpdate = true;
+        entry.terrainTexture = texture;
+    } else if (entry.terrainTextureRegion && updateTerrainPixelsRegion(entry.terrainTexture.image,
+        sampleTerrain, textureOriginX, textureOriginZ, entry.terrainTextureRegion, pixelsPerTile)) {
+        entry.terrainTexture.needsUpdate = true;
+    }
+    entry.terrainTextureRegion = null;
+
+    const positions = [];
+    const normals = [];
+    const uvs = [];
+    const addVertex = (x, y, z, nx, ny, nz) => {
+        positions.push(x, y, z);
+        normals.push(nx, ny, nz);
+        uvs.push((x - textureOriginX) * pixelsPerTile / textureSize,
+            (z - textureOriginZ) * pixelsPerTile / textureSize);
+    };
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+        for (let x = 0; x < CHUNK_SIZE; x++) {
+            const index = z * CHUNK_SIZE + x;
+            const tile = entry.tilesData[z][x];
+            if (tile.terrain === 'water' || entry.smoothTileIndices.has(index)) continue;
+            const left = baseX + x;
+            const near = baseZ + z;
+            const y = (Number(tile.height) || 1) + 0.002;
+            addVertex(left, y, near, 0, 1, 0);
+            addVertex(left, y, near + 1, 0, 1, 0);
+            addVertex(left + 1, y, near, 0, 1, 0);
+            addVertex(left + 1, y, near, 0, 1, 0);
+            addVertex(left, y, near + 1, 0, 1, 0);
+            addVertex(left + 1, y, near + 1, 0, 1, 0);
+        }
+    }
+    for (let index = 0; index < smoothData.topByVertex.length; index += 3) {
+        if (smoothData.topByVertex[index] < 0.5) continue;
+        for (let corner = 0; corner < 3; corner++) {
+            const offset = (index + corner) * 3;
+            addVertex(smoothData.positions[offset] + baseX - 1,
+                smoothData.positions[offset + 1] + 0.002,
+                smoothData.positions[offset + 2] + baseZ - 1,
+                smoothData.normals[offset], smoothData.normals[offset + 1], smoothData.normals[offset + 2]);
+        }
+    }
+    if (!positions.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    const material = new THREE.MeshStandardMaterial({
+        map: entry.terrainTexture, side: THREE.DoubleSide, roughness: 0.97,
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    mesh.visible = entry.terrainVisible;
+    mesh.receiveShadow = true;
+    mesh.raycast = () => {};
+    scene.add(mesh);
+    entry.terrainSurface = mesh;
+}
 
 function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, visible = true) {
     const size = tilesData.length;
@@ -932,6 +1049,222 @@ function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, vis
     ground.instanceColor.needsUpdate = landCount > 0;
     water.instanceMatrix.needsUpdate = waterCount > 0;
     return { groundIndices, waterIndices };
+}
+
+function refreshWorldTerrainChunk(entry) {
+    if (entry.smoothTerrain) {
+        scene.remove(entry.smoothTerrain);
+        entry.smoothTerrain.geometry.dispose();
+        entry.smoothTerrain = null;
+    }
+    if (entry.smoothTerrainBounds) {
+        const index = chunkBounds.indexOf(entry.smoothTerrainBounds);
+        if (index >= 0) chunkBounds.splice(index, 1);
+        entry.smoothTerrainBounds = null;
+    }
+    const { chunkX, chunkY, tilesData } = entry;
+    const padded = Array.from({ length: CHUNK_SIZE + 2 }, (_, z) => (
+        Array.from({ length: CHUNK_SIZE + 2 }, (_, x) => {
+            const worldX = chunkX * CHUNK_SIZE + x - 1;
+            const worldZ = chunkY * CHUNK_SIZE + z - 1;
+            const neighbor = chunksMap.get(`${Math.floor(worldX / CHUNK_SIZE)},${Math.floor(worldZ / CHUNK_SIZE)}`);
+            return neighbor?.tilesData[worldZ - neighbor.chunkY * CHUNK_SIZE]?.[worldX - neighbor.chunkX * CHUNK_SIZE]
+                || null;
+        })
+    ));
+    for (const row of padded) {
+        for (const tile of row) {
+            if (tile) entry.bounds.max.y = Math.max(entry.bounds.max.y, (Number(tile.height) || 1) + 0.5);
+        }
+    }
+    const data = buildSmoothTerrainData(padded,
+        (x, z) => x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE);
+    const smoothTiles = new Set(data.tileByFace.map(({ x, z }) => (z - 1) * CHUNK_SIZE + x - 1));
+    entry.smoothTileIndices = smoothTiles;
+    entry.smoothTileFoundation = new Map();
+    const dummy = new THREE.Object3D();
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+        for (let x = 0; x < CHUNK_SIZE; x++) {
+            const index = entry.groundIndices[z * CHUNK_SIZE + x];
+            if (index < 0) continue;
+            const height = Number(tilesData[z][x].height) || 1;
+            const tileIndex = z * CHUNK_SIZE + x;
+            if (smoothTiles.has(tileIndex)) {
+                const foundation = data.foundationByTile.get(`${x + 1},${z + 1}`);
+                entry.smoothTileFoundation.set(tileIndex, Math.max(0.05, foundation - 0.085));
+            }
+            const foundationHeight = entry.smoothTileFoundation.get(tileIndex) ?? height;
+            dummy.position.set(chunkX * CHUNK_SIZE + x + 0.5, foundationHeight / 2,
+                chunkY * CHUNK_SIZE + z + 0.5);
+            dummy.scale.set(1, foundationHeight, 1);
+            dummy.updateMatrix();
+            entry.ground.setMatrixAt(index, dummy.matrix);
+        }
+    }
+    entry.ground.instanceMatrix.needsUpdate = true;
+    if (entry.waterShoreDirty) refreshWorldWaterChunk(entry, padded);
+    refreshWorldTerrainSurface(entry, data);
+    if (!data.positions.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
+    geometry.setAttribute('terrainTop', new THREE.Float32BufferAttribute(data.topByVertex, 1));
+    const colors = new Float32Array(data.positions.length);
+    const coords = new Float32Array(data.tileByVertex.length * 2);
+    const uvs = new Float32Array(data.tileByVertex.length * 2);
+    const color = new THREE.Color();
+    data.tileByVertex.forEach(({ x, z }, index) => {
+        color.setHex(terrainColors[padded[z][x].terrain] || terrainColors.grass);
+        colors.set([color.r, color.g, color.b], index * 3);
+        coords.set([chunkX * CHUNK_SIZE + x - 1, chunkY * CHUNK_SIZE + z - 1], index * 2);
+        uvs.set([data.positions[index * 3] - x,
+            data.positions[index * 3 + 2] - z], index * 2);
+    });
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.setAttribute('terrainTileCoord', new THREE.Float32BufferAttribute(coords, 2));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3));
+    const mesh = new THREE.Mesh(geometry, smoothGroundMat);
+    mesh.position.set(chunkX * CHUNK_SIZE - 1, 0, chunkY * CHUNK_SIZE - 1);
+    mesh.frustumCulled = false;
+    mesh.receiveShadow = true;
+    mesh.visible = entry.terrainVisible;
+    scene.add(mesh);
+    entry.smoothTerrain = mesh;
+    entry.smoothTerrainBounds = { box: entry.bounds, mesh, key: `${chunkX},${chunkY}` };
+    chunkBounds.push(entry.smoothTerrainBounds);
+}
+
+function refreshWorldWaterChunk(entry, padded) {
+    if (entry.waterSurface) {
+        scene.remove(entry.waterSurface);
+        entry.waterSurface.geometry.dispose();
+        entry.waterSurface = null;
+    }
+    if (entry.waterBank) {
+        scene.remove(entry.waterBank);
+        entry.waterBank.geometry.dispose();
+        entry.waterBank = null;
+    }
+    entry.waterShoreDirty = false;
+    if (!entry.water.count) return;
+    const { chunkX, chunkY, tilesData } = entry;
+    const data = buildRoundedWaterData(padded, 0.24,
+        (x, z) => x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE,
+        [0, 0.075, 0.23, 0.5, 0.77, 0.925, 1], tile => Number(tile.height) || 1);
+    const dummy = new THREE.Object3D();
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+        for (let x = 0; x < CHUNK_SIZE; x++) {
+            const index = entry.waterIndices[z * CHUNK_SIZE + x];
+            if (index < 0) continue;
+            const level = Number(tilesData[z][x].height) || 1;
+            dummy.position.set(chunkX * CHUNK_SIZE + x + 0.5, (level - 0.01) / 2,
+                chunkY * CHUNK_SIZE + z + 0.5);
+            dummy.scale.set(1, Math.max(0.05, level - 0.01), 1);
+            dummy.updateMatrix();
+            entry.water.setMatrixAt(index, dummy.matrix);
+        }
+    }
+    entry.water.instanceMatrix.needsUpdate = true;
+    const originX = chunkX * CHUNK_SIZE - 1;
+    const originZ = chunkY * CHUNK_SIZE - 1;
+    if (data.water.length) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.water, 3));
+        geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(geometry, waterMat);
+        mesh.position.set(originX, 0, originZ);
+        mesh.frustumCulled = false;
+        mesh.visible = entry.terrainVisible;
+        mesh.raycast = () => {};
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        scene.add(mesh);
+        entry.waterSurface = mesh;
+    }
+    const bankPositions = [...data.bank, ...data.sandBank];
+    if (bankPositions.length) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(bankPositions, 3));
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(
+            [...data.bankBaseColors, ...data.sandBankColors], 3));
+        const uvs = [];
+        for (let index = 0; index < bankPositions.length; index += 3) {
+            uvs.push((bankPositions[index] + originX) * 0.25,
+                (bankPositions[index + 2] + originZ) * 0.25);
+        }
+        geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(geometry, worldWaterBankMat);
+        mesh.position.set(originX, -0.018, originZ);
+        mesh.frustumCulled = false;
+        mesh.visible = entry.terrainVisible;
+        mesh.raycast = () => {};
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+        entry.waterBank = mesh;
+    }
+}
+
+const pendingWorldTerrainChunks = new Set();
+const pendingWorldRoadChunks = new Set();
+let worldTerrainRefreshTimer = null;
+
+function flushWorldTerrainRefresh() {
+    worldTerrainRefreshTimer = null;
+    if (brushActive) {
+        worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 100);
+        return;
+    }
+    for (const key of pendingWorldTerrainChunks) {
+        const entry = chunksMap.get(key);
+        if (entry) refreshWorldTerrainChunk(entry);
+    }
+    for (const key of pendingWorldRoadChunks) {
+        const entry = chunksMap.get(key);
+        if (entry?.hasRoadNodes) rebuildRoadMeshes(entry);
+    }
+    pendingWorldTerrainChunks.clear();
+    pendingWorldRoadChunks.clear();
+    lastHoverRaycastAt = -Infinity;
+}
+
+function refreshWorldTerrainNeighborhood(cx, cy, tileX = null, tileZ = null,
+    deferred = false, refreshRoads = false, refreshWater = false, refreshTexture = false) {
+    const offsetsX = tileX === null ? [-1, 0, 1]
+        : tileX === 0 ? [-1, 0] : tileX === CHUNK_SIZE - 1 ? [0, 1] : [0];
+    const offsetsZ = tileZ === null ? [-1, 0, 1]
+        : tileZ === 0 ? [-1, 0] : tileZ === CHUNK_SIZE - 1 ? [0, 1] : [0];
+    for (const dz of offsetsZ) {
+        for (const dx of offsetsX) {
+            const entry = chunksMap.get(`${cx + dx},${cy + dz}`);
+            if (!entry) continue;
+            if (refreshWater) entry.waterShoreDirty = true;
+            if (refreshTexture) {
+                const minX = cx * CHUNK_SIZE + (tileX ?? 0);
+                const maxX = cx * CHUNK_SIZE + (tileX ?? CHUNK_SIZE - 1);
+                const minZ = cy * CHUNK_SIZE + (tileZ ?? 0);
+                const maxZ = cy * CHUNK_SIZE + (tileZ ?? CHUNK_SIZE - 1);
+                const region = entry.terrainTextureRegion;
+                entry.terrainTextureRegion = region ? {
+                    minX: Math.min(region.minX, minX), maxX: Math.max(region.maxX, maxX),
+                    minZ: Math.min(region.minZ, minZ), maxZ: Math.max(region.maxZ, maxZ),
+                } : { minX, maxX, minZ, maxZ };
+            }
+            if (deferred) {
+                const key = `${entry.chunkX},${entry.chunkY}`;
+                pendingWorldTerrainChunks.add(key);
+                if (refreshRoads && entry.hasRoadNodes) pendingWorldRoadChunks.add(key);
+            } else {
+                pendingWorldTerrainChunks.delete(`${entry.chunkX},${entry.chunkY}`);
+                pendingWorldRoadChunks.delete(`${entry.chunkX},${entry.chunkY}`);
+                refreshWorldTerrainChunk(entry);
+            }
+        }
+    }
+    if (deferred) {
+        clearTimeout(worldTerrainRefreshTimer);
+        worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 100);
+    }
 }
 
 // --- Функции для чанков ---
@@ -1015,7 +1348,7 @@ function rebuildRoadMeshes(entry) {
     const directions = [[1, 0], [0, 1], [1, 1], [-1, 1]];
     const point = (x, z, tile, node) => new THREE.Vector3(
         x + 0.5 + Number(node.road?.x || 0),
-        Number(tile.height || 1) + 0.035,
+        Number(tile.height || 1) + 0.06,
         z + 0.5 + Number(node.road?.z || 0),
     );
     const roadNodeCache = new Map();
@@ -1115,14 +1448,13 @@ export function addChunk(cx, cy, tilesData) {
 
     const key = `${cx},${cy}`;
     if (chunksMap.has(key)) return;
-
     const size = tilesData.length;
     const totalTiles = size * size;
 
     const groundInstances = new THREE.InstancedMesh(groundGeo, groundMat, totalTiles);
     groundInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalTiles * 3), 3);
 
-    const waterInstances = new THREE.InstancedMesh(groundGeo, waterMat, totalTiles);
+    const waterInstances = new THREE.InstancedMesh(groundGeo, waterInstanceMaterials, totalTiles);
 
     groundInstances.castShadow = false;
     groundInstances.receiveShadow = true;
@@ -1281,12 +1613,14 @@ export function addChunk(cx, cy, tilesData) {
         chunkX: cx,
         chunkY: cy,
         terrainVisible: true,
+        waterShoreDirty: true,
         ...terrainIndices,
         bounds: box,
         objectIndices: objectIndices,
         pendingRebuild: null,
         roadBoundaryDirty: false
     });
+    refreshWorldTerrainNeighborhood(cx, cy, null, null, false, false, true, true);
     refreshRoadNeighborhood(cx, cy);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
@@ -1308,6 +1642,24 @@ export function removeChunk(cx, cy) {
 
     scene.remove(entry.ground);
     scene.remove(entry.water);
+    if (entry.waterSurface) {
+        scene.remove(entry.waterSurface);
+        entry.waterSurface.geometry.dispose();
+    }
+    if (entry.waterBank) {
+        scene.remove(entry.waterBank);
+        entry.waterBank.geometry.dispose();
+    }
+    if (entry.smoothTerrain) {
+        scene.remove(entry.smoothTerrain);
+        entry.smoothTerrain.geometry.dispose();
+    }
+    if (entry.terrainSurface) {
+        scene.remove(entry.terrainSurface);
+        entry.terrainSurface.geometry.dispose();
+        entry.terrainSurface.material.dispose();
+    }
+    entry.terrainTexture?.dispose();
     if (entry.trees) scene.remove(entry.trees);
     if (entry.houses) scene.remove(entry.houses);
     if (entry.fences) scene.remove(entry.fences);
@@ -1330,6 +1682,7 @@ export function removeChunk(cx, cy) {
     }
 
     chunksMap.delete(key);
+    refreshWorldTerrainNeighborhood(cx, cy, null, null, false, false, true, true);
     refreshRoadNeighborhood(cx, cy);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
@@ -1554,18 +1907,22 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     if (!entry) return;
 
     const tile = entry.tilesData[tileY][tileX];
+    const changedTerrain = updates.terrain !== undefined && updates.terrain !== tile.terrain;
+    const changedHeight = updates.height !== undefined && Number(updates.height) !== Number(tile.height);
+    if (!changedTerrain && !changedHeight
+        && Object.keys(updates).every(key => key === 'terrain' || key === 'height')) return;
     Object.assign(tile, updates);
     if (updates.objects !== undefined) {
         entry.hasRoadNodes = entry.tilesData.some(row => row.some(item => Boolean(roadNode(item))));
     }
     const touchesChunkEdge = tileX === 0 || tileX === CHUNK_SIZE - 1
         || tileY === 0 || tileY === CHUNK_SIZE - 1;
-    if (touchesChunkEdge && (updates.objects !== undefined || updates.height !== undefined)) {
+    if (touchesChunkEdge && (updates.objects !== undefined || changedHeight)) {
         entry.roadBoundaryDirty = true;
     }
     lastHoverRaycastAt = -Infinity;
 
-    if (updates.terrain !== undefined || updates.height !== undefined) {
+    if (changedTerrain || changedHeight) {
         if (entry.bounds) {
             entry.bounds.max.y = Math.max(entry.bounds.max.y, (tile.height || 1) + 0.5);
         }
@@ -1587,7 +1944,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
                 entry.water.setMatrixAt(waterIndex, dummy.matrix);
                 entry.water.instanceMatrix.needsUpdate = true;
             } else {
-                dummy.scale.set(1, height, 1);
+                dummy.scale.set(1, entry.smoothTileFoundation?.get(tileIndex) ?? height, 1);
                 dummy.updateMatrix();
                 entry.ground.setMatrixAt(groundIndex, dummy.matrix);
                 entry.ground.setColorAt(groundIndex, new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b));
@@ -1595,13 +1952,27 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
                 entry.ground.instanceColor.needsUpdate = true;
             }
         }
+        const worldX = chunkX * CHUNK_SIZE + tileX;
+        const worldZ = chunkY * CHUNK_SIZE + tileY;
+        const waterNearby = changedTerrain || [[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0]]
+            .some(([dx, dz]) => {
+                const nx = worldX + dx;
+                const nz = worldZ + dz;
+                const neighbor = chunksMap.get(`${Math.floor(nx / CHUNK_SIZE)},${Math.floor(nz / CHUNK_SIZE)}`);
+                return neighbor?.tilesData[nz - neighbor.chunkY * CHUNK_SIZE]?.[nx - neighbor.chunkX * CHUNK_SIZE]
+                    ?.terrain === 'water';
+            });
+        refreshWorldTerrainNeighborhood(chunkX, chunkY, tileX, tileY,
+            !changedTerrain, changedHeight && updates.objects === undefined, waterNearby, changedTerrain);
     }
 
-    if (updates.height !== undefined) {
+    if (changedHeight) {
         updateTileObjectsPositions(entry, tileX, tileY, tile.height);
-        rebuildRoadMeshes(entry);
+        if (changedTerrain && updates.objects === undefined) {
+            if (touchesChunkEdge) refreshRoadNeighborhood(chunkX, chunkY);
+            else if (entry.hasRoadNodes) rebuildRoadMeshes(entry);
+        }
         if (entry.roadBoundaryDirty && updates.objects === undefined && !entry.pendingRebuild) {
-            refreshRoadNeighborhood(chunkX, chunkY);
             entry.roadBoundaryDirty = false;
         }
         lastChunkVisibilityAt = -Infinity;
@@ -1609,7 +1980,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     }
 
     if (updates.objects !== undefined || updates.anomaly_field !== undefined
-        || (updates.height !== undefined && tile.anomaly_field)) {
+        || (changedHeight && tile.anomaly_field)) {
         if (entry.pendingRebuild) {
             cancelAnimationFrame(entry.pendingRebuild);
         }
@@ -1673,6 +2044,10 @@ function setVisible(chunk, visible, naturalVisible = false, structureVisible = f
     const groundVisible = visible && chunk.ground?.count !== 0;
     const waterVisible = visible && chunk.water?.count !== 0;
     const visibilityChanged = (chunk.ground && chunk.ground.visible !== groundVisible)
+        || (chunk.terrainSurface && chunk.terrainSurface.visible !== groundVisible)
+        || (chunk.smoothTerrain && chunk.smoothTerrain.visible !== groundVisible)
+        || (chunk.waterSurface && chunk.waterSurface.visible !== waterVisible)
+        || (chunk.waterBank && chunk.waterBank.visible !== waterVisible)
         || (chunk.trees && chunk.trees.visible !== naturalVisible)
         || (chunk.houses && chunk.houses.visible !== structureVisible)
         || (chunk.fences && chunk.fences.visible !== naturalVisible)
@@ -1681,7 +2056,11 @@ function setVisible(chunk, visible, naturalVisible = false, structureVisible = f
         ));
     chunk.terrainVisible = visible;
     if (chunk.ground) chunk.ground.visible = groundVisible;
+    if (chunk.terrainSurface) chunk.terrainSurface.visible = groundVisible;
+    if (chunk.smoothTerrain) chunk.smoothTerrain.visible = groundVisible;
     if (chunk.water) chunk.water.visible = waterVisible;
+    if (chunk.waterSurface) chunk.waterSurface.visible = waterVisible;
+    if (chunk.waterBank) chunk.waterBank.visible = waterVisible;
     if (chunk.trees) chunk.trees.visible = naturalVisible;
     if (chunk.houses) chunk.houses.visible = structureVisible;
     if (chunk.fences) chunk.fences.visible = naturalVisible;
@@ -1768,6 +2147,25 @@ function performRaycast(clientX, clientY) {
     if (editMode && window.worldEditorTool === 'objects') window.updateWorldObjectPreview?.(hoveredTile);
 }
 
+function finishWorldBrushStroke() {
+    if (!brushActive && !globalMouseUpHandler) return;
+    isMouseDown = false;
+    lastProcessedTileKey = null;
+    if (controlsDisabled) {
+        controls.enabled = true;
+        controlsDisabled = false;
+    }
+    brushActive = false;
+    if (globalMouseUpHandler) {
+        document.removeEventListener('mouseup', globalMouseUpHandler, { capture: true });
+        globalMouseUpHandler = null;
+    }
+    if (pendingWorldTerrainChunks.size) {
+        clearTimeout(worldTerrainRefreshTimer);
+        worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 0);
+    }
+}
+
 function canvasMouseDownHandler(event) {
     if (window.isLocationActive) return;
     if (event.button === 2 && editMode) {
@@ -1786,7 +2184,7 @@ function canvasMouseDownHandler(event) {
     lastProcessedTileKey = null;
 
     const isEditing = editMode && !window.isWorldTravelSelectionActive?.()
-        && (event.altKey || event.shiftKey || ['terrain', 'height', 'radiation', 'erase', 'objects'].includes(window.worldEditorTool));
+        && ['terrain', 'height', 'radiation', 'erase', 'objects'].includes(window.worldEditorTool);
 
     if (isEditing) {
         event.preventDefault();
@@ -1817,15 +2215,7 @@ function canvasMouseDownHandler(event) {
         if (!globalMouseUpHandler) {
             globalMouseUpHandler = (e) => {
                 if (e.button !== 0) return;
-                isMouseDown = false;
-                lastProcessedTileKey = null;
-                if (controlsDisabled) {
-                    controls.enabled = true;
-                    controlsDisabled = false;
-                }
-                brushActive = false;
-                document.removeEventListener('mouseup', globalMouseUpHandler);
-                globalMouseUpHandler = null;
+                finishWorldBrushStroke();
             };
             document.addEventListener('mouseup', globalMouseUpHandler, { capture: true });
         }
@@ -1833,6 +2223,11 @@ function canvasMouseDownHandler(event) {
 }
 
 renderer.domElement.addEventListener('pointerdown', canvasMouseDownHandler, { capture: true });
+window.addEventListener('pointerup', event => {
+    if (event.button === 0) finishWorldBrushStroke();
+}, { capture: true });
+window.addEventListener('pointercancel', finishWorldBrushStroke, { capture: true });
+window.addEventListener('blur', finishWorldBrushStroke);
 renderer.domElement.addEventListener('contextmenu', event => event.preventDefault());
 renderer.domElement.addEventListener('dragstart', event => event.preventDefault());
 
@@ -1876,12 +2271,7 @@ window.addEventListener('dblclick', (event) => {
 let lastTime = performance.now();
 function updateGlobalCameraMovement(deltaSeconds) {
     if (window.isLocationActive || globalCameraKeys.size === 0) return;
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    forward.y = 0;
-    if (forward.lengthSq() < 0.0001) return;
-    forward.normalize();
-    const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+    const { forward, right } = horizontalCameraAxes(THREE, camera);
     const movement = new THREE.Vector3();
     if (globalCameraKeys.has('KeyW')) movement.add(forward);
     if (globalCameraKeys.has('KeyS')) movement.sub(forward);
@@ -2019,10 +2409,6 @@ window.addEventListener('pointermove', (event) => {
         const updates = {};
         if (window.eraserMode) {
             updates.objects = [];
-        } else if (event.altKey) {
-            updates.terrain = window.currentTileType;
-        } else if (event.shiftKey) {
-            updates.height = window.tileHeight;
         } else if (window.worldEditorTool === 'terrain') {
             updates.terrain = window.currentTileType;
         } else if (window.worldEditorTool === 'height') {
@@ -2043,7 +2429,7 @@ window.addEventListener('pointerup', () => {
 });
 
 window.addEventListener('keydown', (e) => {
-    const isTyping = Boolean(e.target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+    const isTyping = isTypingTarget(e.target);
     if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && !isTyping && !window.isLocationActive) {
         globalCameraKeys.add(e.code);
         e.preventDefault();

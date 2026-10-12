@@ -2528,6 +2528,42 @@ def update_location_object(lobby_id, object_id, lobby, participant):
         return jsonify({'error': 'Access denied'}), 403
 
     data = request.get_json() or {}
+    if not isinstance(data, dict):
+        raise ValidationError('Object update must be an object')
+    properties = data.get('properties') if isinstance(data.get('properties'), dict) else {}
+    if obj.type in {'ceiling_bulb', 'wall_bulb'} and participant.user_id != lobby.gm_id:
+        raise PermissionDenied('Only GM can edit electric fixtures')
+    if 'is_lit' in properties:
+        if obj.type not in {'campfire', 'torch', 'wall_torch', 'fire_barrel'}:
+            raise ValidationError('Only fire objects can be lit')
+        if type(properties['is_lit']) is not bool:
+            raise ValidationError('is_lit must be a boolean')
+        if participant.user_id != lobby.gm_id:
+            if (obj.properties or {}).get('gm_hidden'):
+                raise PermissionDenied('Hidden fire object cannot be used')
+            if set(properties) != {'is_lit'} or 'tile_x' in data or 'tile_y' in data:
+                raise PermissionDenied('Players can only toggle fire')
+            actor_id = data.get('actor_character_id')
+            if type(actor_id) is not int:
+                raise ValidationError('actor_character_id is required')
+            actor = LocationCharacter.query.filter_by(
+                location_id=location.id, character_id=actor_id,
+            ).first()
+            if not actor or not actor.character or not (
+                actor.character.owner_id == participant.user_id
+                or actor.controlled_by == participant.user_id
+            ):
+                raise PermissionDenied('Character is not controlled by this player')
+            footprint = CombatService._object_footprint_tiles(obj) or {(obj.tile_x, obj.tile_y)}
+            if min(max(abs(actor.pos_x - x), abs(actor.pos_y - y)) for x, y in footprint) > 1:
+                raise ValidationError('Too far from fire object')
+    if 'is_on' in properties:
+        if obj.type not in {'ceiling_bulb', 'wall_bulb'}:
+            raise ValidationError('Only electric fixtures can be switched')
+        if type(properties['is_on']) is not bool:
+            raise ValidationError('is_on must be a boolean')
+        if participant.user_id != lobby.gm_id:
+            raise PermissionDenied('Only GM can switch electric fixtures')
     if 'gm_hidden' in (data.get('properties') or {}):
         if participant.user_id != lobby.gm_id:
             raise PermissionDenied('Only GM can hide location objects')

@@ -36,6 +36,8 @@ test('ground shader samples interpolated darkness at world positions', async () 
     assert.match(shader.fragmentShader, /diffuseColor\.rgb \*= texture2D/);
     assert.match(scene, /locationDarknessTexture\.magFilter = THREE\.LinearFilter/);
     assert.match(scene, /locationDarknessTexture\.minFilter = THREE\.LinearFilter/);
-    assert.match(scene, /applySurfaceDarkness\(waterMaterial, locationDarknessTexture, darknessSize\)/);
-    assert.match(scene, /applySurfaceDarkness\(material, locationDarknessTexture,/);
+    assert.match(scene, /applySurfaceDarkness\(waterMaterial, locationDarknessTexture,/);
+    assert.match(scene, /applySurfaceDarkness\(material, locationDarknessTexture, new THREE\.Vector2\(width, height\)\)/);
+    assert.match(scene, /new THREE\.Color\(terrainColors\[tile\.terrain\] \|\| 0x3a5f0b\)\s*\.multiplyScalar\(darknessFactorAt\(x, z\)\)/);
+    assert.match(scene, /new THREE\.Color\(terrainColors\[terrain\] \|\| 0x3a5f0b\)\s*\.multiplyScalar\(darknessFactorAt\(x, z\)\)/);
 });

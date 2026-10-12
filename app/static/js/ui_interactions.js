@@ -1,5 +1,6 @@
 // static/js/ui_interactions.js
 // Объединённый модуль: глобальное состояние, горячие клавиши и перетаскивание панелей
+import { isTypingTarget } from './cameraPan.js';
 
 // ---------- Часть 1: Глобальное состояние (бывший state.js) ----------
 const AppState = {
@@ -269,7 +270,7 @@ function handleKeyDown(e) {
         // Enter в чате
         if (e.key === 'Enter') {
             const target = e.target;
-            const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+            const isInput = isTypingTarget(target);
             if (isInput && target.id === 'message-input') {
                 e.preventDefault();
                 window.sendMessage();
@@ -277,10 +278,7 @@ function handleKeyDown(e) {
             return;
         }
         const target = e.target;
-        const isInput = target.tagName === 'INPUT'
-            || target.tagName === 'TEXTAREA'
-            || target.tagName === 'SELECT'
-            || target.isContentEditable;
+        const isInput = isTypingTarget(target);
         if (isInput) return;
         // Alt
         if (e.key === 'Alt') {
@@ -408,7 +406,7 @@ function handleKeyDown(e) {
     }
 
     const target = e.target;
-    const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+    const isInput = isTypingTarget(target);
 
     if (e.key === 'Enter' && isInput && target.id === 'message-input') {
         e.preventDefault();

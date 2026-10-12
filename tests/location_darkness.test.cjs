@@ -59,9 +59,11 @@ test('darkness brush paints and erases square areas without leaving the map', as
     assert.equal(paintDarkTiles(erased, 5, 4, 1, 1, 0, true), erased);
 });
 
-test('roofless rooms keep local shadows without projected daylight wall shadows', () => {
+test('sunlight and local lights cast shadows while a cutaway roof remains a caster', () => {
     const scene = read('locationScene.js');
-    assert.match(scene, /locationDirectionalLight\.castShadow = false/);
+    assert.match(scene, /locationDirectionalLight\.castShadow = true/);
+    assert.match(scene, /shadowCaster\.castShadow = true/);
+    assert.match(scene, /roof\.userData\.visualMeshes = \[roofFace, gable\]/);
     assert.match(scene, /child\.castShadow = obj\.type !== 'floor'/);
     assert.match(scene, /child\.receiveShadow = true/);
     assert.match(scene, /light\.castShadow = true/);

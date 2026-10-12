@@ -1,37 +1,14 @@
 import * as THREE from 'three';
+import { createSurfaceTexture } from './locationTerrainDetail.js';
 
 export function createWaterTexture() {
-    const size = 128;
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = size;
-    const context = canvas.getContext('2d');
-    const image = context.createImageData(size, size);
-    for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-            const u = x / size * Math.PI * 2;
-            const v = y / size * Math.PI * 2;
-            const waves = Math.sin(u * 4 + Math.sin(v * 2) * 0.7)
-                + 0.55 * Math.sin(v * 7 - u * 2)
-                + 0.25 * Math.sin((u + v) * 11);
-            const shade = Math.round(waves * 8);
-            const index = (y * size + x) * 4;
-            image.data[index] = 36 + shade;
-            image.data[index + 1] = 92 + shade;
-            image.data[index + 2] = 110 + shade;
-            image.data[index + 3] = 255;
-        }
-    }
-    context.putImageData(image, 0, 0);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.encoding = THREE.sRGBEncoding;
-    return texture;
+    return createSurfaceTexture(THREE, 'water');
 }
 
 export function createWaterMaterial() {
-    return new THREE.MeshStandardMaterial({
-        map: createWaterTexture(),
+    const waterTexture = createWaterTexture();
+    const material = new THREE.MeshStandardMaterial({
+        map: waterTexture,
         color: 0xc9e1e3,
         roughness: 0.38,
         metalness: 0.08,
@@ -39,4 +16,30 @@ export function createWaterMaterial() {
         transparent: false,
         opacity: 1,
     });
+    material.customProgramCacheKey = () => 'world-aligned-water-v1';
+    material.onBeforeCompile = shader => {
+        shader.uniforms.waterPatternOffset = { value: waterTexture.offset };
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nvarying vec2 vWaterWorldXZ;')
+            .replace('#include <project_vertex>', `
+                vec4 waterWorld = vec4(transformed, 1.0);
+                #ifdef USE_INSTANCING
+                    waterWorld = instanceMatrix * waterWorld;
+                #endif
+                vWaterWorldXZ = (modelMatrix * waterWorld).xz;
+                #include <project_vertex>
+            `);
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', `#include <common>
+                varying vec2 vWaterWorldXZ;
+                uniform vec2 waterPatternOffset;
+            `)
+            .replace('#include <map_fragment>', `
+                #ifdef USE_MAP
+                    vec4 waterSample = texture2D(map, vWaterWorldXZ * 0.16 + waterPatternOffset);
+                    diffuseColor *= mapTexelToLinear(waterSample);
+                #endif
+            `);
+    };
+    return material;
 }

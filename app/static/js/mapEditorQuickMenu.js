@@ -1,3 +1,5 @@
+import { isTypingTarget } from './cameraPan.js';
+
 const WORLD_TOOLS = [
     ['select', 'Выбор'],
     ['terrain', 'Ландшафт'],
@@ -189,7 +191,7 @@ export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool, loca
         }
         if (['KeyE', 'KeyR'].includes(event.code) && quickMenu) closeMapEditorQuickMenu();
         if (!isEnabled() || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-        if (event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+        if (isTypingTarget(event.target)) return;
         if (Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
 
         if (event.code === 'KeyQ') {

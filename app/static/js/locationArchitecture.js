@@ -23,6 +23,7 @@ export function structurePose(object) {
 
 export function floorVisualPose(object, objects) {
     const pose = structurePose(object);
+    const wallGap = 0.01;
     let minAlong = -pose.width / 2;
     let maxAlong = pose.width / 2;
     let minAcross = -pose.depth / 2;
@@ -37,12 +38,12 @@ export function floorVisualPose(object, objects) {
         const parallel = Math.abs(edge.axis.x * pose.axis.x + edge.axis.z * pose.axis.z);
         if (parallel >= 0.98 && edge.width >= pose.width * 0.5
             && Math.abs(Math.abs(across) - pose.depth / 2) <= 0.2) {
-            if (across < 0) minAcross = Math.min(minAcross, across - edge.depth / 2);
-            else maxAcross = Math.max(maxAcross, across + edge.depth / 2);
+            if (across < 0) minAcross = Math.max(minAcross, across + edge.depth / 2 + wallGap);
+            else maxAcross = Math.min(maxAcross, across - edge.depth / 2 - wallGap);
         } else if (parallel <= 0.02 && edge.width >= pose.depth * 0.5
             && Math.abs(Math.abs(along) - pose.width / 2) <= 0.2) {
-            if (along < 0) minAlong = Math.min(minAlong, along - edge.depth / 2);
-            else maxAlong = Math.max(maxAlong, along + edge.depth / 2);
+            if (along < 0) minAlong = Math.max(minAlong, along + edge.depth / 2 + wallGap);
+            else maxAlong = Math.min(maxAlong, along - edge.depth / 2 - wallGap);
         }
     }
     const shiftAlong = (minAlong + maxAlong) / 2;

@@ -102,7 +102,7 @@ test('the visual sandbox has joined outer corners and three wall-mounted doors',
     assert.ok(wallVisualPlan(walls[2], walls).spans[0].end <= 5.5);
 });
 
-test('a floor reaches the outer faces of matching room walls without growing beside unrelated walls', async () => {
+test('a floor ends before the inner faces of matching walls without shrinking beside unrelated walls', async () => {
     const { floorVisualPose } = await load('locationArchitecture.js');
     const floor = { type: 'floor', tile_x: 9, tile_y: 8,
         properties: { offset_x: 0.5, offset_z: 0.5,
@@ -117,10 +117,14 @@ test('a floor reaches the outer faces of matching room walls without growing bes
         wall(3, 8, 11, Math.PI / 2, 0, 0.5), wall(16, 8, 11, Math.PI / 2, 0, 0.5),
     ];
     const pose = floorVisualPose(floor, [floor, ...walls]);
-    assert.ok(Math.abs(pose.width - 13.2) < 1e-8);
-    assert.ok(Math.abs(pose.depth - 11.2) < 1e-8);
+    assert.ok(Math.abs(pose.width - 12.78) < 1e-8);
+    assert.ok(Math.abs(pose.depth - 10.78) < 1e-8);
     assert.equal(pose.x, 10);
     assert.equal(pose.z, 9);
+    assert.ok(pose.x - pose.width / 2 > 3.6);
+    assert.ok(pose.x + pose.width / 2 < 16.4);
+    assert.ok(pose.z - pose.depth / 2 > 3.6);
+    assert.ok(pose.z + pose.depth / 2 < 14.4);
     assert.equal(floorVisualPose(floor, [floor, wall(25, 25, 13)]).width, 13);
     assert.equal(floorVisualPose(floor, [floor]).depth, 11);
 });

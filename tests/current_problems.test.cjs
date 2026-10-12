@@ -91,7 +91,7 @@ test('lobby clock blends twilight and cloud clarity changes lighting', () => {
     assert.equal(conditions.at(-1).starlight, 0);
     assert.ok(ambientLight.intensity > nightAmbient * 4);
     const overcastDaylight = directionalLight.intensity + ambientLight.intensity + fillLight.intensity;
-    assert.ok(overcastDaylight >= 0.65 && overcastDaylight <= 0.75);
+    assert.ok(overcastDaylight >= 0.9 && overcastDaylight <= 1.0);
     context.applyWorldTime(8 * 60);
     assert.equal(conditions.at(-1).daylight, 1);
     assert.ok(ambientLight.intensity > nightAmbient);
@@ -103,7 +103,15 @@ test('lobby clock blends twilight and cloud clarity changes lighting', () => {
     assert.ok(directionalLight.intensity > overcastDirect * 2);
     context.applyWorldTime(14 * 60);
     const clearDaylight = directionalLight.intensity + ambientLight.intensity + fillLight.intensity;
-    assert.ok(clearDaylight >= 1.75 && clearDaylight <= 1.9);
+    assert.ok(clearDaylight >= 2.0 && clearDaylight <= 2.2);
+    context.applyWorldTime(10 * 60);
+    assert.equal(conditions.at(-1).daylight, 1);
+    assert.ok(directionalLight.intensity + ambientLight.intensity + fillLight.intensity >= 2.0);
+    context.applyWorldTime(3 * 60);
+    assert.equal(conditions.at(-1).daylight, 0);
+    const clearNight = directionalLight.intensity + ambientLight.intensity + fillLight.intensity;
+    assert.ok(clearNight >= 0.3 && clearNight <= 0.34);
+    assert.ok(clearNight < clearDaylight / 5);
     assert.match(lobby, /applyWorldTime\(minutes\)/);
     assert.match(sky, /sunDisc\.position\.copy\(sunDirection\)/);
     assert.match(sky, /moonDisc\.position\.copy\(moonDirection\)/);
@@ -248,6 +256,9 @@ test('deleting ground container closes the open exchange and removes its model',
         replaceLocationObjectMesh: () => {},
         invalidateMovementMapCache: () => {},
         applyFogOfWar: () => {},
+        isFireObject: () => false,
+        isObjectLightSource: () => false,
+        applyLocationLighting: () => {},
     });
     vm.runInContext(source.slice(start, end).replaceAll('export function ', 'function '), context);
     context.removeLocationObject('17');

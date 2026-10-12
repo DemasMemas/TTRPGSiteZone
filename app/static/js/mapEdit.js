@@ -349,9 +349,16 @@ function scheduleBatchUpdate() {
     if (batchUpdateTimeout) clearTimeout(batchUpdateTimeout);
     batchUpdateTimeout = setTimeout(() => {
         if (pendingTileUpdates.length > 0) {
-            const updatesCopy = pendingTileUpdates.slice();
+            const merged = new Map();
+            for (const item of pendingTileUpdates) {
+                const key = `${item.chunk_x},${item.chunk_y},${item.tile_x},${item.tile_y}`;
+                const previous = merged.get(key);
+                merged.set(key, previous
+                    ? { ...item, updates: { ...previous.updates, ...item.updates } }
+                    : item);
+            }
             pendingTileUpdates = [];
-            Server.batchUpdateTiles(currentLobbyId, updatesCopy).catch(err => {
+            Server.batchUpdateTiles(currentLobbyId, [...merged.values()]).catch(err => {
                 showNotification(err.message);
             });
         }
