@@ -27,16 +27,20 @@ test('grass placements are patchy, batched, stable, and exclude floors and non-g
     assert.ok([...perTile.values()].filter(count => count < 5).length > 30);
     assert.ok([...perTile.values()].filter(count => count > 18).length > 30);
     assert.ok(new Set(a.tufts.map(tuft => `${tuft.width.toFixed(2)},${tuft.height.toFixed(2)}`)).size > 100);
-    assert.match(source, /useNaturalGrass \? makeLowCoverGeometry\(THREE\) : makeGrassGeometry\(THREE\)/);
+    assert.match(source, /useNaturalGrass \? false : true/);
     assert.match(source, /mesh\.castShadow = false/);
     assert.match(source, /mesh\.raycast = \(\) => \{\}/);
 });
 
-test('natural grass retains low muted understory without replacing flowers', async () => {
+test('natural grass removes procedural grass without replacing flowers', async () => {
     const { grassPlacements } = await import(moduleUrl);
     const tiles = Array.from({ length: 20 }, () => Array.from({ length: 20 },
         () => ({ terrain: 'grass' })));
     const full = grassPlacements(tiles);
+    const natural = grassPlacements(tiles, () => false, false);
+    assert.equal(natural.tufts.length, 0);
+    assert.deepEqual(natural.flowers, full.flowers);
+    assert.equal(grassPlacements(tiles, () => false, false, false).flowers.length, 0);
     const plain = grassPlacements(tiles, () => false, 'understory');
     assert.ok(plain.tufts.length > 0 && plain.tufts.length < full.tufts.length);
     assert.deepEqual(plain.flowers, full.flowers);

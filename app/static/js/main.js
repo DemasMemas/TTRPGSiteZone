@@ -41,7 +41,8 @@ import {
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
-    setLocationStructureRotation, applyLocationLighting, setLocationAssetPreset, clearLocationAssetPreset,
+    setLocationStructureRotation, applyLocationLighting, setLocationLightingPreset,
+    getLocationLightingPreset, setLocationAssetPreset, clearLocationAssetPreset,
     setLocationAssetElevation,
     setLocationAssetDimensions, getSelectedLocationEditorAsset, beginMoveSelectedLocationAsset,
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
@@ -58,6 +59,7 @@ import {
     beginWorldMapEventCreation,
     closeWorldTravelModal,
     initWorldTravel,
+    refreshWorldTravel,
     openWorldTravelModal,
 } from './worldTravel.js';
 
@@ -90,6 +92,9 @@ initWeather();
 const token = localStorage.getItem('access_token');
 const pathParts = window.location.pathname.split('/').filter(p => p !== '');
 let currentLobbyId = null;
+const locationParam = Number(new URLSearchParams(window.location.search).get('location'));
+const directLocationId = Number.isSafeInteger(locationParam) && locationParam > 0 ? locationParam : null;
+window.locationDirectOpenPending = Boolean(directLocationId);
 
 if (pathParts.length >= 2 && pathParts[0] === 'lobbies') {
     currentLobbyId = pathParts[1];
@@ -214,6 +219,13 @@ initMapEditorQuickMenu({
 
 // ========== Функции для работы с локацией ==========
 let currentLocationData = null;
+
+function resumeWorldMapLoad() {
+    loadAllChunks().then(() => {
+        if (!window.isLocationActive) return refreshWorldTravel();
+        return null;
+    }).catch(error => console.error('World map load failed', error));
+}
 
 window.enterLocation = async function(locationId) {
     closeMapEditorQuickMenu();
@@ -870,6 +882,8 @@ window.enterLocation = async function(locationId) {
                         },
                         () => currentLocationData.lighting?.local_lights || [],
                         () => darkTilesDraft,
+                        getLocationLightingPreset,
+                        setLocationLightingPreset,
                     );
                 };
                 mountEnvironmentEditor();
@@ -1128,7 +1142,7 @@ window.exitLocation = function() {
     }
 
     // Принудительно обновляем глобальную карту
-    if (typeof loadAllChunks === 'function') loadAllChunks();
+    resumeWorldMapLoad();
 };
 
 // Вспомогательная функция – генерация локации
@@ -1732,9 +1746,18 @@ function escapeHtml(unsafe) {
 (async function init() {
     await loadLobbyInfo();
     await loadLobbyCharacters();
-    await loadAllChunks();
-    await initWorldTravel(currentLobbyId, socket);
     initHotkeys();
+    if (directLocationId) {
+        await window.enterLocation(directLocationId);
+        window.locationDirectOpenPending = false;
+        if (!getCurrentLocationId()) {
+            window.isLocationActive = false;
+            resumeWorldMapLoad();
+        }
+    } else {
+        resumeWorldMapLoad();
+    }
+    initWorldTravel(currentLobbyId, socket).catch(error => console.error('World travel load failed', error));
 
     // ===== Настройка кнопки выбора цвета =====
     const colorPickerContainer = document.getElementById('color-picker-container');

@@ -1208,6 +1208,14 @@ function refreshWorldWaterChunk(entry, padded) {
 const pendingWorldTerrainChunks = new Set();
 const pendingWorldRoadChunks = new Set();
 let worldTerrainRefreshTimer = null;
+const worldTerrainRefreshWaiters = [];
+
+function waitForWorldTerrainRefresh() {
+    if (!worldTerrainRefreshTimer && !pendingWorldTerrainChunks.size && !pendingWorldRoadChunks.size) {
+        return Promise.resolve();
+    }
+    return new Promise(resolve => worldTerrainRefreshWaiters.push(resolve));
+}
 
 function flushWorldTerrainRefresh() {
     worldTerrainRefreshTimer = null;
@@ -1215,6 +1223,8 @@ function flushWorldTerrainRefresh() {
         worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 100);
         return;
     }
+    const startedAt = typeof performance !== 'undefined' ? performance.now() : 0;
+    const refreshed = pendingWorldTerrainChunks.size;
     for (const key of pendingWorldTerrainChunks) {
         const entry = chunksMap.get(key);
         if (entry) refreshWorldTerrainChunk(entry);
@@ -1226,10 +1236,17 @@ function flushWorldTerrainRefresh() {
     pendingWorldTerrainChunks.clear();
     pendingWorldRoadChunks.clear();
     lastHoverRaycastAt = -Infinity;
+    const metrics = typeof window !== 'undefined' ? window.worldLoadMetrics : null;
+    if (metrics && metrics.fullLoadMs === null) {
+        metrics.terrainRefreshMs += performance.now() - startedAt;
+        metrics.terrainRefreshes += refreshed;
+    }
+    worldTerrainRefreshWaiters.splice(0).forEach(resolve => resolve());
 }
 
 function refreshWorldTerrainNeighborhood(cx, cy, tileX = null, tileZ = null,
-    deferred = false, refreshRoads = false, refreshWater = false, refreshTexture = false) {
+    deferred = false, refreshRoads = false, refreshWater = false, refreshTexture = false,
+    loadRefresh = false) {
     const offsetsX = tileX === null ? [-1, 0, 1]
         : tileX === 0 ? [-1, 0] : tileX === CHUNK_SIZE - 1 ? [0, 1] : [0];
     const offsetsZ = tileZ === null ? [-1, 0, 1]
@@ -1262,8 +1279,14 @@ function refreshWorldTerrainNeighborhood(cx, cy, tileX = null, tileZ = null,
         }
     }
     if (deferred) {
-        clearTimeout(worldTerrainRefreshTimer);
-        worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 100);
+        if (loadRefresh) {
+            if (!worldTerrainRefreshTimer) {
+                worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 16);
+            }
+        } else {
+            clearTimeout(worldTerrainRefreshTimer);
+            worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 100);
+        }
     }
 }
 
@@ -1431,15 +1454,6 @@ function rebuildRoadMeshes(entry) {
         mesh.visible = entry.terrainVisible;
         scene.add(mesh);
         entry.roads.push(mesh);
-    }
-}
-
-function refreshRoadNeighborhood(cx, cy) {
-    for (let offsetY = -1; offsetY <= 1; offsetY++) {
-        for (let offsetX = -1; offsetX <= 1; offsetX++) {
-            const entry = chunksMap.get(`${cx + offsetX},${cy + offsetY}`);
-            if (entry?.hasRoadNodes) rebuildRoadMeshes(entry);
-        }
     }
 }
 
@@ -1620,8 +1634,7 @@ export function addChunk(cx, cy, tilesData) {
         pendingRebuild: null,
         roadBoundaryDirty: false
     });
-    refreshWorldTerrainNeighborhood(cx, cy, null, null, false, false, true, true);
-    refreshRoadNeighborhood(cx, cy);
+    refreshWorldTerrainNeighborhood(cx, cy, null, null, true, true, true, true, true);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
     markWorldShadowsDirty();
@@ -2332,6 +2345,13 @@ function animate() {
 
     if (!renderer.isUnavailableRenderer) {
         renderer.render(scene, camera);
+        const metrics = window.worldLoadMetrics;
+        if (metrics && metrics.firstFrameMs === null && chunksMap.size) {
+            metrics.firstFrameMs = now - metrics.startedAt;
+            metrics.pageToFirstFrameMs = now;
+            performance.mark('world-map-first-frame');
+            performance.measure('world-map-to-first-frame', 'world-map-load-start', 'world-map-first-frame');
+        }
         worldFpsCounter.frame(now);
         worldFrameWorkMs += performance.now() - frameWorkStartedAt;
         worldSampleFrames += 1;
@@ -2466,7 +2486,8 @@ export function getTileHeightAt(globalX, globalZ) {
     return chunk.tilesData[tileY][tileX].height || 1.0;
 }
 
-export { scene, camera, renderer, controls, directionalLight, ambientLight, fillLight, waterMat };
+export { scene, camera, renderer, controls, directionalLight, ambientLight, fillLight, waterMat,
+    waitForWorldTerrainRefresh };
 
 // ========== ВРЕМЕННОЕ СКРЫТИЕ ГЛОБАЛЬНОЙ КАРТЫ (ДЛЯ ЛОКАЦИЙ) ==========
 let globalCanvasParent = null;

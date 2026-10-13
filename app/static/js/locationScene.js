@@ -22,7 +22,8 @@ import {
     createTerrainSurfaceHeightSampler, isSmoothTerrainTile,
     waterSurfaceAdjustments,
 } from './locationTerrain.js';
-import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting } from './locationLighting.js';
+import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting,
+    resolveLocationVisualPreset } from './locationLighting.js';
 import { findLocationAsset } from './locationAssetCatalog.js';
 import { placementForLocationAsset, visualAssetForLocationObject } from './locationAssetVariants.js';
 import {
@@ -36,7 +37,7 @@ import {
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
 import { doorOnWall, doorFrameStyle, floorVisualPose, wallVisualPlan } from './locationArchitecture.js';
 import { applyInteriorFloorShade, createRoofGeometry, createRoofGableGeometry, roofPlans, roofVisibleForCamera } from './locationRoof.js';
-import { createLocationTerrainPixels, loadGrassGroundPixels,
+import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
     updateLocationTerrainPixels } from './locationTerrainTexture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
 import { applySurfaceDarkness, writeDarknessPixels } from './locationDarknessSurface.js';
@@ -201,6 +202,8 @@ let currentLocationId = null;
 let currentLocationData = null;
 let locationAmbientLight = null;
 let locationDirectionalLight = null;
+let locationLightingPreset = 'current';
+let resolvedLightingProfile = null;
 let locationLightGroup = null;
 let anomalyRenderSources = [];
 let anomalyRenderPool = [];
@@ -239,6 +242,8 @@ const WATER_SIDE_COLORS = { grass: 0x183c4a, swamp: 0x244c3b, sand: 0x76603a, ro
 let smoothTerrainMesh = null;
 let terrainSurfaceMesh = null;
 let terrainSurfaceTexture = null;
+let terrainGrassBlendTexture = null;
+let terrainGrassDetail = null;
 let locationGridMesh = null;
 let grassDetailGroup = null;
 let naturalGrassAssets = null;
@@ -6900,6 +6905,8 @@ export function initLocationScene(containerId) {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x111122);
     window.getLocationGrassDiagnostics = getLocationGrassDiagnostics;
+    window.setLocationLightingPreset = setLocationLightingPreset;
+    window.getLocationLightingPreset = getLocationLightingPreset;
 
     // Камера
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -10389,6 +10396,29 @@ export function updateLocationObject(object) {
 
 window.updateLocationObject = updateLocationObject;
 
+function applyVisualLocationLights() {
+    if (!resolvedLightingProfile || !locationAmbientLight || !locationDirectionalLight) return;
+    const visual = resolveLocationVisualPreset(resolvedLightingProfile, locationLightingPreset,
+        window.lobbyGameTimeMinutes ?? 480);
+    locationAmbientLight.color.set(visual.ambient_color);
+    locationAmbientLight.intensity = Number(visual.ambient_intensity);
+    locationDirectionalLight.color.set(visual.directional_color);
+    locationDirectionalLight.intensity = Number(visual.directional_intensity);
+}
+
+export function setLocationLightingPreset(preset) {
+    if (preset !== 'current' && preset !== 'natural_daylight') {
+        throw new RangeError(`Unknown location lighting preset: ${preset}`);
+    }
+    locationLightingPreset = preset;
+    applyVisualLocationLights();
+    return locationLightingPreset;
+}
+
+export function getLocationLightingPreset() {
+    return locationLightingPreset;
+}
+
 export function applyLocationLighting(settings, persist = true) {
     if (settings && persist && currentLocationData) currentLocationData.lighting = settings;
     if (!scene || !currentLocationData || !locationAmbientLight || !locationDirectionalLight) return;
@@ -10400,10 +10430,8 @@ export function applyLocationLighting(settings, persist = true) {
         window.lobbyGameTimeMinutes ?? 480,
         clarity,
     );
-    locationAmbientLight.color.set(profile.ambient_color);
-    locationAmbientLight.intensity = Number(profile.ambient_intensity);
-    locationDirectionalLight.color.set(profile.directional_color);
-    locationDirectionalLight.intensity = Number(profile.directional_intensity);
+    resolvedLightingProfile = profile;
+    applyVisualLocationLights();
     const azimuth = Number(profile.directional_azimuth) * Math.PI / 180;
     const elevation = Number(profile.directional_elevation) * Math.PI / 180;
     const distance = Math.max(currentLocationData.grid_width, currentLocationData.grid_height);
@@ -11443,6 +11471,8 @@ export function loadLocation(data) {
     terrainSurfaceMesh = null;
     terrainSurfaceTexture?.dispose();
     terrainSurfaceTexture = null;
+    terrainGrassBlendTexture?.dispose();
+    terrainGrassBlendTexture = null;
     locationGridMesh = null;
     const toRemove = [];
     scene.children.forEach(child => {
@@ -11668,6 +11698,32 @@ function updateLocationTerrainSurfaceTexture(changedTiles) {
     if (!terrainSurfaceTexture || !currentLocationData || !changedTiles.length) return;
     updateLocationTerrainPixels(currentLocationData.tiles_data, terrainSurfaceTexture.image, changedTiles);
     terrainSurfaceTexture.needsUpdate = true;
+    if (terrainGrassBlendTexture) terrainGrassBlendTexture.needsUpdate = true;
+}
+
+function ensureTerrainGrassDetail() {
+    if (!terrainGrassDetail) {
+        const createPhotoTexture = () => {
+            const texture = new THREE.Texture();
+            texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+            texture.minFilter = THREE.LinearMipmapLinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            texture.encoding = THREE.sRGBEncoding;
+            return texture;
+        };
+        terrainGrassDetail = { earth: createPhotoTexture(), forest: createPhotoTexture(),
+            blend: null, ready: { value: 0 } };
+    }
+    const images = getGrassGroundImages();
+    if (images && !terrainGrassDetail.ready.value) {
+        terrainGrassDetail.earth.image = images.plain;
+        terrainGrassDetail.forest.image = images.forest;
+        terrainGrassDetail.earth.needsUpdate = true;
+        terrainGrassDetail.forest.needsUpdate = true;
+        terrainGrassDetail.ready.value = 1;
+    }
+    terrainGrassDetail.blend = terrainGrassBlendTexture;
+    return terrainGrassDetail;
 }
 
 function rebuildLocationTerrainSurface(preserveTexture = false) {
@@ -11679,20 +11735,29 @@ function rebuildLocationTerrainSurface(preserveTexture = false) {
     if (!preserveTexture) {
         terrainSurfaceTexture?.dispose();
         terrainSurfaceTexture = null;
+        terrainGrassBlendTexture?.dispose();
+        terrainGrassBlendTexture = null;
     }
     if (!scene || !currentLocationData) return;
     const tiles = currentLocationData.tiles_data;
     const width = currentLocationData.grid_width;
     const height = currentLocationData.grid_height;
     if (!terrainSurfaceTexture) {
-        const image = createLocationTerrainPixels(tiles);
+        const image = createLocationTerrainPixels(tiles, 32, true);
         terrainSurfaceTexture = new THREE.DataTexture(image.data, image.width, image.height,
             THREE.RGBAFormat, THREE.UnsignedByteType);
+        terrainSurfaceTexture.image.grassBlendData = image.grassBlendData;
         terrainSurfaceTexture.magFilter = THREE.LinearFilter;
         terrainSurfaceTexture.minFilter = THREE.LinearFilter;
         terrainSurfaceTexture.generateMipmaps = false;
         terrainSurfaceTexture.encoding = THREE.sRGBEncoding;
         terrainSurfaceTexture.needsUpdate = true;
+        terrainGrassBlendTexture = new THREE.DataTexture(image.grassBlendData,
+            image.width, image.height, THREE.RGBAFormat, THREE.UnsignedByteType);
+        terrainGrassBlendTexture.magFilter = THREE.LinearFilter;
+        terrainGrassBlendTexture.minFilter = THREE.LinearFilter;
+        terrainGrassBlendTexture.generateMipmaps = false;
+        terrainGrassBlendTexture.needsUpdate = true;
     }
 
     const sampleHeight = createTerrainSurfaceHeightSampler(tiles);
@@ -11765,7 +11830,8 @@ function rebuildLocationTerrainSurface(preserveTexture = false) {
         map: terrainSurfaceTexture, side: THREE.DoubleSide, roughness: 0.97,
         polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
     });
-    applySurfaceDarkness(material, locationDarknessTexture, new THREE.Vector2(width, height));
+    applySurfaceDarkness(material, locationDarknessTexture,
+        new THREE.Vector2(width, height), null, ensureTerrainGrassDetail());
     terrainSurfaceMesh = new THREE.Mesh(geometry, material);
     terrainSurfaceMesh.raycast = () => {};
     terrainSurfaceMesh.receiveShadow = true;
@@ -11913,7 +11979,7 @@ export function getLocationGrassDiagnostics() {
     }));
     return {
         locationId: currentLocationId,
-        model: 'grass_medium_01_game_d7.glb',
+        model: 'grass_medium_01_game_d8.glb',
         rendererOutputEncoding: renderer?.outputEncoding === THREE.sRGBEncoding
             ? 'sRGB' : 'linear',
         lighting: { ambient: locationAmbientLight?.intensity,
@@ -11921,6 +11987,8 @@ export function getLocationGrassDiagnostics() {
         grassTiles: naturalGrassBuild?.stats.grassTiles || 0,
         subtypes: { plain: naturalGrassBuild?.stats.plainTiles || 0,
             forest: naturalGrassBuild?.stats.forestTiles || 0 },
+        groundTextures: grassGroundReady ? 'loaded'
+            : grassGroundLoading ? 'loading' : 'not loaded',
         assets: naturalGrassError ? 'error' : naturalGrassAssets ? 'loaded'
             : naturalGrassLoading ? 'loading' : 'not requested',
         error: naturalGrassError,
@@ -11928,6 +11996,7 @@ export function getLocationGrassDiagnostics() {
         groupVisible: grassDetailGroup?.visible || false,
         skipped: {
             density: naturalGrassBuild?.stats.densityRejected || 0,
+            blend: naturalGrassBuild?.stats.blendRejected || 0,
             floor: naturalGrassBuild?.stats.floorRejected || 0,
             slope: naturalGrassBuild?.slopeRejected || { medium01: 0 },
         },
@@ -11957,7 +12026,7 @@ function rebuildGrassDetailMesh() {
         }).catch(error => {
             naturalGrassLoading = false;
             naturalGrassError = String(error);
-            console.warn('Natural grass unavailable; using procedural fallback', error);
+            console.warn('Natural grass unavailable; grass ground remains visible', error);
         });
     }
     if (!grassGroundReady && !grassGroundLoading
@@ -11967,9 +12036,13 @@ function rebuildGrassDetailMesh() {
             grassGroundReady = true;
             grassGroundLoading = false;
             if (terrainSurfaceTexture && currentLocationData) {
-                const image = createLocationTerrainPixels(currentLocationData.tiles_data);
+                const image = createLocationTerrainPixels(currentLocationData.tiles_data,
+                    terrainSurfaceTexture.image.width / currentLocationData.grid_width, true);
                 terrainSurfaceTexture.image.data.set(image.data);
+                terrainSurfaceTexture.image.grassBlendData.set(image.grassBlendData);
                 terrainSurfaceTexture.needsUpdate = true;
+                terrainGrassBlendTexture.needsUpdate = true;
+                ensureTerrainGrassDetail();
             }
         }).catch(error => {
             grassGroundLoading = false;
@@ -11986,8 +12059,7 @@ function rebuildGrassDetailMesh() {
             && Math.abs(dx * floor.normal.x + dz * floor.normal.z) < floor.depth / 2;
     });
     const getHeight = createTerrainSurfaceHeightSampler(tiles);
-    grassDetailGroup = createGrassDetailGroup(THREE, tiles, getHeight, isCovered,
-        Boolean(naturalGrassAssets));
+    grassDetailGroup = createGrassDetailGroup(THREE, tiles, getHeight, isCovered, true);
     const placements = naturalGrassPlacements(tiles, isCovered);
     naturalGrassBuild = { stats: placements.stats,
         created: { medium01: placements.medium01.length } };
@@ -12001,7 +12073,7 @@ function rebuildGrassDetailMesh() {
     }
     scene.add(grassDetailGroup);
     if (naturalGrassAssets && !naturalGrassReported) {
-        console.info('[D.6.1 grass] game scene:', {
+        console.info('[game grass] scene:', {
             grassTiles: naturalGrassBuild.stats.grassTiles,
             subtypes: { plain: naturalGrassBuild.stats.plainTiles,
                 forest: naturalGrassBuild.stats.forestTiles },
@@ -12009,9 +12081,11 @@ function rebuildGrassDetailMesh() {
             added: naturalGrassBuild.added,
             understory: grassDetailGroup.userData.detailCounts.understory,
             skipped: { density: naturalGrassBuild.stats.densityRejected,
+                blend: naturalGrassBuild.stats.blendRejected,
                 floor: naturalGrassBuild.stats.floorRejected,
                 slope: naturalGrassBuild.slopeRejected },
             triangles: naturalGrassBuild.triangles,
+            groundTextures: grassGroundReady ? 'loaded' : 'loading',
             details: 'window.getLocationGrassDiagnostics()',
         });
         naturalGrassReported = true;
@@ -13792,6 +13866,11 @@ export function destroyLocationScene() {
         if (waterSurfaceMesh?.material.map) waterSurfaceMesh.material.map.dispose();
         terrainSurfaceTexture?.dispose();
         terrainSurfaceTexture = null;
+        terrainGrassBlendTexture?.dispose();
+        terrainGrassBlendTexture = null;
+        terrainGrassDetail?.earth.dispose();
+        terrainGrassDetail?.forest.dispose();
+        terrainGrassDetail = null;
         const objectsToRemove = [];
         scene.traverse((child) => {
             if (child.isLight || child.type === 'Camera') return;
@@ -13833,6 +13912,8 @@ export function destroyLocationScene() {
     }
     locationAmbientLight = null;
     locationDirectionalLight = null;
+    locationLightingPreset = 'current';
+    resolvedLightingProfile = null;
     locationLightGroup = null;
     anomalyRenderSources = [];
     anomalyRenderPool = [];

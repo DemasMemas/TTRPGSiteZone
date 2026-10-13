@@ -40,3 +40,17 @@ export function resolveLocationLighting(settings, minutes = 480, clarity = 1) {
         background_color: mixColor('#101b2b', '#8ba3ae', day),
     };
 }
+
+export function resolveLocationVisualPreset(profile, preset = 'current', minutes = 480) {
+    if (preset !== 'natural_daylight' || profile.mode !== 'world') return profile;
+    const time = ((Number(minutes) || 0) % 1440 + 1440) % 1440;
+    const day = smoothstep(300, 480, time) * (1 - smoothstep(1080, 1260, time));
+    if (!day) return profile;
+    return {
+        ...profile,
+        ambient_color: mixColor(profile.ambient_color, '#cbd5d0', day * 0.55),
+        ambient_intensity: Number(profile.ambient_intensity) + day * 0.15,
+        directional_color: mixColor(profile.directional_color, '#f5e7d3', day * 0.35),
+        directional_intensity: Math.max(0, Number(profile.directional_intensity) - day * 0.12),
+    };
+}

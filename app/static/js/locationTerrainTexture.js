@@ -10,8 +10,10 @@ const COLORS = {
 
 let forestGroundPixels = null;
 let plainGroundPixels = null;
+let forestGroundImage = null;
+let plainGroundImage = null;
 let grassGroundLoading = null;
-const FOREST_TEXTURE_SIZE = 256;
+const FOREST_TEXTURE_SIZE = 512;
 const FOREST_TEXELS_PER_TILE = 64;
 
 function loadGroundPixels(url) {
@@ -23,8 +25,8 @@ function loadGroundPixels(url) {
             const context = canvas.getContext('2d', { willReadFrequently: true });
             if (!context) { reject(new Error('Forest ground canvas unavailable')); return; }
             context.drawImage(image, 0, 0, FOREST_TEXTURE_SIZE, FOREST_TEXTURE_SIZE);
-            resolve(context.getImageData(0, 0,
-                FOREST_TEXTURE_SIZE, FOREST_TEXTURE_SIZE).data);
+            resolve({ image, pixels: context.getImageData(0, 0,
+                FOREST_TEXTURE_SIZE, FOREST_TEXTURE_SIZE).data });
         };
         image.onerror = reject;
         image.src = url;
@@ -38,13 +40,20 @@ export function loadGrassGroundPixels() {
         loadGroundPixels('/static/materials/art/dirty_earth/color.jpg'),
         loadGroundPixels('/static/textures/vegetation/forrest_ground_01_diff_1k.jpg'),
     ]).then(([plain, forest]) => {
-        plainGroundPixels = plain;
-        forestGroundPixels = forest;
+        plainGroundPixels = plain.pixels;
+        forestGroundPixels = forest.pixels;
+        plainGroundImage = plain.image;
+        forestGroundImage = forest.image;
     }).catch(error => {
         grassGroundLoading = null;
         throw error;
     });
     return grassGroundLoading;
+}
+
+export function getGrassGroundImages() {
+    return plainGroundImage && forestGroundImage
+        ? { plain: plainGroundImage, forest: forestGroundImage } : null;
 }
 
 function hash(x, z, seed = 0) {
@@ -82,16 +91,32 @@ function terrainAt(tiles, x, z) {
 }
 
 function terrainColor(kind, detail, x, z) {
-    const groundPixels = kind === 'grass_forest' ? forestGroundPixels
-        : kind === 'grass' ? plainGroundPixels : null;
-    if (groundPixels) {
-        const px = ((Math.floor(x * FOREST_TEXELS_PER_TILE) % FOREST_TEXTURE_SIZE)
-            + FOREST_TEXTURE_SIZE) % FOREST_TEXTURE_SIZE;
-        const pz = ((Math.floor(z * FOREST_TEXELS_PER_TILE) % FOREST_TEXTURE_SIZE)
-            + FOREST_TEXTURE_SIZE) % FOREST_TEXTURE_SIZE;
-        const index = (pz * FOREST_TEXTURE_SIZE + px) * 4;
-        return [0, 1, 2].map(channel => groundPixels[index + channel] * 0.88
-            + COLORS.grass[channel] * 0.12 + detail.broad * 8);
+    if (forestGroundPixels && plainGroundPixels
+        && (kind === 'grass' || kind === 'grass_forest')) {
+        const sx = x * FOREST_TEXELS_PER_TILE;
+        const sz = z * FOREST_TEXELS_PER_TILE;
+        const x0 = ((Math.floor(sx) % FOREST_TEXTURE_SIZE) + FOREST_TEXTURE_SIZE) % FOREST_TEXTURE_SIZE;
+        const z0 = ((Math.floor(sz) % FOREST_TEXTURE_SIZE) + FOREST_TEXTURE_SIZE) % FOREST_TEXTURE_SIZE;
+        const x1 = (x0 + 1) % FOREST_TEXTURE_SIZE;
+        const z1 = (z0 + 1) % FOREST_TEXTURE_SIZE;
+        const fx = sx - Math.floor(sx);
+        const fz = sz - Math.floor(sz);
+        const sample = (pixels, channel) => {
+            const top = pixels[(z0 * FOREST_TEXTURE_SIZE + x0) * 4 + channel] * (1 - fx)
+                + pixels[(z0 * FOREST_TEXTURE_SIZE + x1) * 4 + channel] * fx;
+            const bottom = pixels[(z1 * FOREST_TEXTURE_SIZE + x0) * 4 + channel] * (1 - fx)
+                + pixels[(z1 * FOREST_TEXTURE_SIZE + x1) * 4 + channel] * fx;
+            return top * (1 - fz) + bottom * fz;
+        };
+        return [0, 1, 2].map(channel => {
+            const forest = sample(forestGroundPixels, channel);
+            if (kind === 'grass_forest') return forest * [0.88, 0.93, 0.84][channel]
+                + detail.broad * 6;
+            const cover = 0.82 - detail.dirt * 0.3;
+            const earth = sample(plainGroundPixels, channel);
+            return (forest * cover + earth * (1 - cover))
+                * [0.86, 1.06, 0.84][channel] + detail.broad * 7;
+        });
     }
     if (kind === 'grass_forest') kind = 'grass';
     const color = COLORS[kind] || COLORS.grass;
@@ -173,16 +198,31 @@ function paintPixels(tiles, image, pixelsPerTile, startX, startZ, endX, endZ,
                 data[index + channel] = Math.max(0, Math.min(255, Math.round(rgb[channel])));
             }
             data[index + 3] = 255;
+            if (image.grassBlendData) {
+                const plain = (k00 === 'grass' ? w00 : 0) + (k10 === 'grass' ? w10 : 0)
+                    + (k01 === 'grass' ? w01 : 0) + (k11 === 'grass' ? w11 : 0);
+                const forest = (k00 === 'grass_forest' ? w00 : 0)
+                    + (k10 === 'grass_forest' ? w10 : 0)
+                    + (k01 === 'grass_forest' ? w01 : 0)
+                    + (k11 === 'grass_forest' ? w11 : 0);
+                image.grassBlendData[index] = Math.round(plain * 255);
+                image.grassBlendData[index + 1] = Math.round(forest * 255);
+                image.grassBlendData[index + 2] = 0;
+                image.grassBlendData[index + 3] = 255;
+            }
         }
     }
 }
 
-export function createLocationTerrainPixels(tiles, pixelsPerTile = 20) {
+export function createLocationTerrainPixels(tiles, pixelsPerTile = 20,
+    includeGrassBlend = false) {
     const width = (tiles[0]?.length || 0) * pixelsPerTile;
     const height = tiles.length * pixelsPerTile;
     const data = new Uint8Array(width * height * 4);
-    paintPixels(tiles, { data, width }, pixelsPerTile, 0, 0, width, height);
-    return { data, width, height };
+    const image = { data, width, height };
+    if (includeGrassBlend) image.grassBlendData = new Uint8Array(data.length);
+    paintPixels(tiles, image, pixelsPerTile, 0, 0, width, height);
+    return image;
 }
 
 export function createTerrainPixelsRegion(sampleTerrain, originX, originZ,

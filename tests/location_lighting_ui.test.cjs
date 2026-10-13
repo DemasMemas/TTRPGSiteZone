@@ -17,6 +17,31 @@ test('world lighting follows time while manual lighting ignores it', async () =>
     assert.deepEqual(resolveLocationLighting(manual, 60), resolveLocationLighting(manual, 840));
 });
 
+test('natural daylight is a reversible visual-only adjustment to world lighting', async () => {
+    const { resolveLocationLighting, resolveLocationVisualPreset } = await import(moduleUrl);
+    const original = resolveLocationLighting({ mode: 'world' }, 600);
+    const daylight = resolveLocationVisualPreset(original, 'natural_daylight', 600);
+    assert.ok(daylight.ambient_intensity > original.ambient_intensity);
+    assert.ok(daylight.directional_intensity < original.directional_intensity);
+    assert.equal(daylight.background_color, original.background_color);
+    assert.equal(resolveLocationVisualPreset(original, 'current', 600), original);
+    assert.equal(original.ambient_intensity, resolveLocationLighting({ mode: 'world' }, 600).ambient_intensity);
+    const night = resolveLocationLighting({ mode: 'world' }, 120);
+    assert.equal(resolveLocationVisualPreset(night, 'natural_daylight', 120), night);
+    const manual = resolveLocationLighting({ mode: 'manual', ambient_intensity: 0.2 }, 600);
+    assert.equal(resolveLocationVisualPreset(manual, 'natural_daylight', 600), manual);
+});
+
+test('lighting tool exposes the visual preset without saving it as location settings', () => {
+    const editor = fs.readFileSync(path.join(__dirname, '../app/static/js/locationLightingEditor.js'), 'utf8');
+    const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
+    assert.match(editor, /<select class="form-control" data-lighting-preset>/);
+    assert.match(editor, /if \(event\.target === visualPreset\) return;/);
+    assert.match(editor, /visualPreset\.disabled = mode\.value === 'manual'/);
+    assert.match(main, /createLocationLightingEditor\([\s\S]*?getLocationLightingPreset,\s*setLocationLightingPreset,/);
+    assert.doesNotMatch(editor, /data-lighting="natural_daylight"/);
+});
+
 test('side inspector saves live lighting while location edits avoid resending unchanged tiles', () => {
     const source = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
     assert.match(source, /const settings = environmentEditor\.get\(\)/);

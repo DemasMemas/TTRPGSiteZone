@@ -107,20 +107,29 @@ test('socket marker refresh preserves location markers and releases obsolete rou
 test('chunk loading shares an in-flight request and limits parallel HTTP work', async () => {
     const source = read('lobbyData.js');
     const start = source.indexOf('let loadingAllChunks = null;');
-    const end = source.indexOf('\nasync function fetchChunk(', start);
+    const end = source.indexOf('\nasync function fetchChunkBatch(', start);
     assert.ok(start >= 0 && end > start);
     let active = 0;
     let maximum = 0;
     let loaded = 0;
+    let requests = 0;
+    const chunksMap = new Map();
     const context = vm.createContext({
-        window: { MAP_CHUNKS_WIDTH: 4, MAP_CHUNKS_HEIGHT: 3 },
-        console: { log() {} },
-        async fetchChunk() {
+        window: { MAP_CHUNKS_WIDTH: 4, MAP_CHUNKS_HEIGHT: 3, isLocationActive: false },
+        chunksMap,
+        performance: { now: () => 10, mark() {}, measure() {} },
+        waitForWorldTerrainRefresh: async () => {},
+        console: { info() {}, warn() {} },
+        async fetchChunkBatch(range) {
             active += 1;
             maximum = Math.max(maximum, active);
             await Promise.resolve();
             active -= 1;
-            loaded += 1;
+            loaded += (range[1] - range[0] + 1) * (range[3] - range[2] + 1);
+            for (let x = range[0]; x <= range[1]; x++) {
+                for (let y = range[2]; y <= range[3]; y++) chunksMap.set(`${x},${y}`, {});
+            }
+            requests += 1;
         },
     });
     vm.runInContext(source.slice(start, end).replace('export function', 'function'), context);
@@ -129,6 +138,40 @@ test('chunk loading shares an in-flight request and limits parallel HTTP work', 
     await first;
     assert.equal(loaded, 12);
     assert.equal(maximum, 4);
+    assert.equal(requests, 4);
+    context.window.locationDirectOpenPending = true;
+    await context.loadAllChunks();
+    assert.equal(requests, 4);
+});
+
+test('one chunk batch retains every returned tile chunk', async () => {
+    const source = read('lobbyData.js');
+    const start = source.indexOf('async function fetchChunkBatch(');
+    assert.ok(start >= 0);
+    const added = [];
+    const context = vm.createContext({
+        currentLobbyId: 7,
+        window: { isLocationActive: false },
+        chunksMap: new Map(),
+        performance: { now: () => 10 },
+        Server: { async getChunks(lobbyId, minX, maxX, minY, maxY) {
+            assert.deepEqual([lobbyId, minX, maxX, minY, maxY], [7, 2, 3, 4, 5]);
+            return [
+                { chunk_x: 2, chunk_y: 4, data: [] },
+                { chunk_x: 2, chunk_y: 5, data: [] },
+                { chunk_x: 3, chunk_y: 4, data: [] },
+                { chunk_x: 3, chunk_y: 5, data: [] },
+            ];
+        } },
+        addChunk(x, y) { added.push(`${x},${y}`); },
+        console: { error() {} },
+    });
+    vm.runInContext(source.slice(start), context);
+    const metrics = { requests: 0, requestAndParseMs: 0, addChunkMs: 0, chunks: 0 };
+    await context.fetchChunkBatch([2, 3, 4, 5], metrics);
+    assert.deepEqual(added, ['2,4', '2,5', '3,4', '3,5']);
+    assert.equal(metrics.requests, 1);
+    assert.equal(metrics.chunks, 4);
 });
 
 test('re-authentication rejoins an open sublocation for character and fog state', () => {

@@ -62,6 +62,57 @@ test('legacy grass stays plain and forest subtype changes only grass surface', a
         createLocationTerrainPixels(plain, 20).data);
 });
 
+test('loaded plain and forest ground images reach their matching game tiles', async () => {
+    const { loadGrassGroundPixels, createLocationTerrainPixels,
+        updateLocationTerrainPixels } = await import(moduleUrl);
+    const previousImage = global.Image;
+    const previousDocument = global.document;
+    const urls = [];
+    global.Image = class {
+        set src(url) {
+            this.url = url;
+            urls.push(url);
+            queueMicrotask(() => this.onload());
+        }
+    };
+    global.document = { createElement: () => ({ getContext: () => ({
+        drawImage(image) { this.source = image.url; },
+        getImageData() {
+            const data = new Uint8ClampedArray(512 * 512 * 4);
+            const color = this.source.includes('forrest_ground')
+                ? [55, 80, 52] : [155, 125, 98];
+            for (let index = 0; index < data.length; index += 4) data.set([...color, 255], index);
+            return { data };
+        },
+    }) }) };
+    try {
+        await loadGrassGroundPixels();
+        assert.equal(urls.length, 2);
+        assert.ok(urls.some(url => url.includes('dirty_earth')));
+        assert.ok(urls.some(url => url.includes('forrest_ground')));
+        const tiles = [[...Array.from({ length: 2 }, () => ({ terrain: 'grass' })),
+            ...Array.from({ length: 2 }, () => ({ terrain: 'grass', grass_subtype: 'forest' }))]];
+        const image = createLocationTerrainPixels(tiles, 20, true);
+        const red = x => image.data[(10 * image.width + x) * 4];
+        const green = x => image.data[(10 * image.width + x) * 4 + 1];
+        assert.ok(red(10) > red(70) + 10);
+        assert.ok(green(10) > red(10));
+        const mask = (x, channel) => image.grassBlendData[(10 * image.width + x) * 4 + channel];
+        assert.ok(mask(10, 0) > 240 && mask(10, 1) < 15);
+        assert.ok(mask(70, 1) > 240 && mask(70, 0) < 15);
+        assert.ok(mask(40, 0) > 0 && mask(40, 1) > 0);
+        tiles[0][0].grass_subtype = 'forest';
+        updateLocationTerrainPixels(tiles, image, [{ x: 0, z: 0 }]);
+        assert.ok(mask(10, 1) > 240 && mask(10, 0) < 15);
+        assert.match(scene, /loadGrassGroundPixels\(\)\.then/);
+        assert.match(scene, /createLocationTerrainPixels\(tiles, 32, true\)/);
+        assert.match(scene, /terrainGrassBlendTexture\.needsUpdate = true/);
+    } finally {
+        global.Image = previousImage;
+        global.document = previousDocument;
+    }
+});
+
 test('swamp soil has distinct moss and dark wet pockets instead of uniform blur', async () => {
     const { createLocationTerrainPixels } = await import(moduleUrl);
     const tiles = Array.from({ length: 6 }, () => Array.from({ length: 6 }, () => ({ terrain: 'swamp' })));
@@ -107,7 +158,7 @@ test('world texture updates only the edited neighborhood without changing distan
 });
 
 test('land overlay follows slope geometry and water has a solid backing', () => {
-    assert.match(scene, /createLocationTerrainPixels\(tiles\)/);
+    assert.match(scene, /createLocationTerrainPixels\(tiles, 32, true\)/);
     assert.match(scene, /if \(topFlags\.getX\(face \* 3\) < 0\.5\) continue/);
     assert.match(scene, /new THREE\.InstancedMesh\(geometry\.clone\(\), \[/);
     assert.match(scene, /waterTopMaterial = new THREE\.MeshBasicMaterial\(\{ colorWrite: false, depthWrite: false \}\)/);

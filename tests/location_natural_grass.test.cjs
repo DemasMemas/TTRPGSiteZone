@@ -5,19 +5,22 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '../app/static/js');
 const source = fs.readFileSync(path.join(root, 'locationNaturalGrass.js'), 'utf8');
-const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+const detailSource = fs.readFileSync(path.join(root, 'locationGrassDetail.js'), 'utf8');
+const detailUrl = `data:text/javascript;base64,${Buffer.from(detailSource).toString('base64')}`;
+const moduleUrl = `data:text/javascript;base64,${Buffer.from(source.replace(
+    "'./locationGrassDetail.js'", `'${detailUrl}'`)).toString('base64')}`;
 
 test('optimized game grass keeps a small UV-mapped Poly Haven mesh', () => {
     const binary = fs.readFileSync(path.join(__dirname,
-        '../app/static/models/vegetation/grass_medium_01_game_d7.glb'));
+        '../app/static/models/vegetation/grass_medium_01_game_d8.glb'));
     assert.equal(binary.toString('utf8', 0, 4), 'glTF');
     const jsonLength = binary.readUInt32LE(12);
     const gltf = JSON.parse(binary.toString('utf8', 20, 20 + jsonLength));
-    assert.equal(gltf.nodes[0].name, 'grass_medium_01_small_b_LOD0');
+    assert.equal(gltf.nodes[0].name, 'grass_medium_01_mid_a_LOD0');
     assert.equal(gltf.meshes.length, 1);
     const primitive = gltf.meshes[0].primitives[0];
     assert.ok(Number.isInteger(primitive.attributes.TEXCOORD_0));
-    assert.equal(gltf.accessors[primitive.indices].count / 3, 261);
+    assert.equal(gltf.accessors[primitive.indices].count / 3, 457);
     assert.equal(gltf.materials?.length || 0, 0);
 });
 
@@ -34,8 +37,23 @@ test('natural grass uses deterministic placements with forest more open than pla
     const forest = naturalGrassPlacements(tiles);
     assert.equal(forest.stats.forestTiles, 400);
     assert.ok(forest.medium01.length < plain.medium01.length);
-    assert.ok(plain.medium01.length <= 1500);
-    assert.ok(plain.medium01.length > 50);
+    assert.ok(plain.medium01.length > 600);
+    assert.ok(forest.medium01.length >= 400);
+});
+
+test('forest tiles stay populated and GLB grass feathers onto dry neighbors', async () => {
+    const { naturalGrassPlacements } = await import(moduleUrl);
+    const forest = Array.from({ length: 3 }, () => Array.from({ length: 7 },
+        () => ({ terrain: 'grass', grass_subtype: 'forest' })));
+    const placed = naturalGrassPlacements(forest);
+    assert.ok(placed.medium01.length >= 21);
+    const mixed = Array.from({ length: 12 }, () => Array.from({ length: 12 }, (_, x) =>
+        ({ terrain: x < 6 ? 'grass' : 'sand' })));
+    const fringe = naturalGrassPlacements(mixed).medium01;
+    assert.ok(fringe.some(plant => mixed[Math.floor(plant.z)]?.[Math.floor(plant.x)]?.terrain === 'sand'));
+    mixed.forEach(row => { row[6].terrain = 'water'; });
+    const withWater = naturalGrassPlacements(mixed).medium01;
+    assert.ok(withWater.every(plant => mixed[Math.floor(plant.z)]?.[Math.floor(plant.x)]?.terrain !== 'water'));
 });
 
 test('natural grass respects non-grass cells and floor coverage', async () => {
@@ -49,17 +67,19 @@ test('natural grass respects non-grass cells and floor coverage', async () => {
     assert.ok(covered.stats.floorRejected > 0);
 });
 
-test('full grass location stays visible within a laptop-sized triangle budget', async () => {
+test('full grass location uses instanced model without procedural grass blades', async () => {
     const { naturalGrassPlacements } = await import(moduleUrl);
-    const detailSource = fs.readFileSync(path.join(root, 'locationGrassDetail.js'), 'utf8');
-    const { grassPlacements } = await import(`data:text/javascript;base64,${Buffer.from(detailSource).toString('base64')}`);
+    const { grassPlacements } = await import(detailUrl);
     const tiles = Array.from({ length: 48 }, () => Array.from({ length: 48 },
         () => ({ terrain: 'grass' })));
     const model = naturalGrassPlacements(tiles).medium01.length;
-    const understory = grassPlacements(tiles, () => false, 'understory').tufts.length;
-    const triangles = model * 261 + understory * 15;
-    assert.ok(model > 300 && understory > 10000);
-    assert.ok(triangles > 200000 && triangles < 600000);
+    const details = grassPlacements(tiles, () => false, false);
+    const triangles = model * 457;
+    assert.equal(details.tufts.length, 0);
+    assert.ok(model > 5000 && model < 8000);
+    assert.ok(triangles < 3600000);
+    const scene = fs.readFileSync(path.join(root, 'locationScene.js'), 'utf8');
+    assert.match(scene, /createGrassDetailGroup\(THREE, tiles, getHeight, isCovered, true\)/);
 });
 
 test('optimized grass adds one shared instanced model at ground height', async () => {
@@ -92,7 +112,8 @@ test('optimized grass adds one shared instanced model at ground height', async (
         index: { count: triangles * 3 } });
     const material = () => ({ clone() { return { ...this }; } });
     const assets = {
-        medium01: { geometry: geometry(261), material: material(), bottom: 0, scale: 1 },
+        medium01: { geometry: geometry(457), material: material(), bottom: 0,
+            scale: 1, spread: 1 },
     };
     const group = { children: [], userData: { detailCounts: { tufts: 0 } },
         add(mesh) { this.children.push(mesh); } };
@@ -100,9 +121,9 @@ test('optimized grass adds one shared instanced model at ground height', async (
         width: 1, depth: 1, lean: 0, tone: 0.5, turn: 0 }] };
     const result = addNaturalGrassInstances(THREE, group, placements, assets, () => 1);
     assert.deepEqual(result.added, { medium01: 1 });
-    assert.deepEqual(result.triangles, { medium01: 261 });
+    assert.deepEqual(result.triangles, { medium01: 457 });
     assert.equal(group.children.length, 1);
     assert.equal(group.children[0].transforms[0].position[1], 1.012);
-    assert.deepEqual(group.children[0].color, [0.92, 1.16, 1]);
+    assert.deepEqual(group.children[0].color, [1, 1, 1]);
     assert.equal(group.children[0].instanceColor.needsUpdate, true);
 });

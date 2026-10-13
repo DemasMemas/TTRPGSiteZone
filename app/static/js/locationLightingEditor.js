@@ -3,7 +3,8 @@ import { DEFAULT_LOCATION_LIGHTING } from './locationLighting.js';
 const safeColor = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
 
 export function createLocationLightingEditor(container, initial, onPreview = () => {},
-    getLights = () => initial?.local_lights || [], getDarkTiles = () => initial?.dark_tiles || []) {
+    getLights = () => initial?.local_lights || [], getDarkTiles = () => initial?.dark_tiles || [],
+    getVisualPreset = () => 'current', onVisualPresetChange = () => {}) {
     const settings = { ...DEFAULT_LOCATION_LIGHTING, ...(initial || {}) };
     const input = (label, key, min, max, step = 0.1) => `
         <label class="location-lighting-field">
@@ -15,6 +16,12 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
             <select class="form-control" data-lighting="mode">
                 <option value="world">По времени мира</option>
                 <option value="manual">Ручной: помещение, подземелье</option>
+            </select>
+        </label>
+        <label class="location-lighting-field">Визуальный пресет (только для этой сцены)
+            <select class="form-control" data-lighting-preset>
+                <option value="current">Текущий свет</option>
+                <option value="natural_daylight">Естественный дневной</option>
             </select>
         </label>
         <div class="location-lighting-manual">
@@ -30,8 +37,14 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
     `;
     const mode = container.querySelector('[data-lighting="mode"]');
     mode.value = settings.mode === 'manual' ? 'manual' : 'world';
+    const visualPreset = container.querySelector('[data-lighting-preset]');
+    visualPreset.value = getVisualPreset();
+    visualPreset.addEventListener('change', () => onVisualPresetChange(visualPreset.value));
     const manual = container.querySelector('.location-lighting-manual');
-    const syncMode = () => { manual.style.display = mode.value === 'manual' ? 'grid' : 'none'; };
+    const syncMode = () => {
+        manual.style.display = mode.value === 'manual' ? 'grid' : 'none';
+        visualPreset.disabled = mode.value === 'manual';
+    };
     mode.addEventListener('change', syncMode);
     syncMode();
 
@@ -48,7 +61,11 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
             return value;
         },
     };
-    container.oninput = () => onPreview(editor.get());
-    container.onchange = () => onPreview(editor.get());
+    const preview = event => {
+        if (event.target === visualPreset) return;
+        onPreview(editor.get());
+    };
+    container.oninput = preview;
+    container.onchange = preview;
     return editor;
 }

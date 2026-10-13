@@ -1,6 +1,7 @@
 // static/js/lobbyData.js
 import { Server } from './api.js';
-import { setMapDimensions, setTileClickCallback } from './lobby3d.js';
+import { addChunk, chunksMap, setMapDimensions, setTileClickCallback,
+    waitForWorldTerrainRefresh } from './lobby3d.js';
 import { setLobbyData, updateParticipantsList } from './ui.js';
 import AppState from './ui_interactions.js';
 import { applyWeather, applyWorldTime } from './weather.js';
@@ -131,34 +132,94 @@ let loadingAllChunks = null;
 
 export function loadAllChunks() {
     if (loadingAllChunks) return loadingAllChunks;
+    if (window.locationDirectOpenPending || window.isLocationActive) return Promise.resolve();
+    if (!Number.isInteger(window.MAP_CHUNKS_WIDTH) || !Number.isInteger(window.MAP_CHUNKS_HEIGHT)) {
+        return Promise.resolve();
+    }
+    const startedAt = performance.now();
+    const metrics = {
+        startedAt, firstFrameMs: null, pageToFirstFrameMs: null,
+        fullLoadMs: null, pageToFullLoadMs: null,
+        expectedChunks: window.MAP_CHUNKS_WIDTH * window.MAP_CHUNKS_HEIGHT,
+        loadedChunks: 0, requests: 0, failedRequests: 0, chunks: 0,
+        requestAndParseMs: 0, addChunkMs: 0,
+        terrainRefreshMs: 0, terrainRefreshes: 0,
+    };
+    window.worldLoadMetrics = metrics;
+    window.getWorldLoadDiagnostics = () => ({ ...metrics });
+    performance.mark('world-map-load-start');
     loadingAllChunks = (async () => {
-        const positions = [];
-        for (let cx = 0; cx < window.MAP_CHUNKS_WIDTH; cx++) {
-            for (let cy = 0; cy < window.MAP_CHUNKS_HEIGHT; cy++) {
-                positions.push([cx, cy]);
+        const ranges = [];
+        for (let cx = 0; cx < window.MAP_CHUNKS_WIDTH; cx += 2) {
+            for (let cy = 0; cy < window.MAP_CHUNKS_HEIGHT; cy += 2) {
+                const maxX = Math.min(cx + 1, window.MAP_CHUNKS_WIDTH - 1);
+                const maxY = Math.min(cy + 1, window.MAP_CHUNKS_HEIGHT - 1);
+                let complete = true;
+                for (let x = cx; x <= maxX; x++) {
+                    for (let y = cy; y <= maxY; y++) {
+                        if (!chunksMap.has(`${x},${y}`)) complete = false;
+                    }
+                }
+                if (!complete) ranges.push([cx, maxX, cy, maxY]);
             }
         }
+        const centerX = window.MAP_CHUNKS_WIDTH / 2;
+        const centerY = window.MAP_CHUNKS_HEIGHT / 2;
+        ranges.sort((a, b) => {
+            const distance = range => ((range[0] + range[1] + 1) / 2 - centerX) ** 2
+                + ((range[2] + range[3] + 1) / 2 - centerY) ** 2;
+            return distance(a) - distance(b);
+        });
         let nextIndex = 0;
         const worker = async () => {
-            while (nextIndex < positions.length) {
-                const [cx, cy] = positions[nextIndex++];
-                await fetchChunk(cx, cy);
+            while (nextIndex < ranges.length) {
+                if (window.isLocationActive) return;
+                await fetchChunkBatch(ranges[nextIndex++], metrics);
             }
         };
-        await Promise.all(Array.from({ length: Math.min(4, positions.length) }, worker));
-        console.log('All chunks loaded');
+        await Promise.all(Array.from({ length: Math.min(4, ranges.length) }, worker));
+        if (window.isLocationActive) {
+            metrics.pausedForLocation = true;
+            return;
+        }
+        await waitForWorldTerrainRefresh();
+        metrics.loadedChunks = 0;
+        for (let x = 0; x < window.MAP_CHUNKS_WIDTH; x++) {
+            for (let y = 0; y < window.MAP_CHUNKS_HEIGHT; y++) {
+                if (chunksMap.has(`${x},${y}`)) metrics.loadedChunks++;
+            }
+        }
+        metrics.complete = metrics.loadedChunks === metrics.expectedChunks;
+        if (!metrics.complete) {
+            console.warn('[World load] incomplete', window.getWorldLoadDiagnostics());
+            return;
+        }
+        metrics.fullLoadMs = performance.now() - startedAt;
+        metrics.pageToFullLoadMs = performance.now();
+        performance.mark('world-map-load-complete');
+        performance.measure('world-map-load', 'world-map-load-start', 'world-map-load-complete');
+        console.info('[World load]', window.getWorldLoadDiagnostics());
     })().finally(() => { loadingAllChunks = null; });
     return loadingAllChunks;
 }
 
-async function fetchChunk(cx, cy) {
+async function fetchChunkBatch([minX, maxX, minY, maxY], metrics) {
     try {
-        const chunks = await Server.getChunks(currentLobbyId, cx, cx, cy, cy);
-        if (chunks.length > 0) {
-            const { addChunk } = await import('./lobby3d.js');
-            addChunk(chunks[0].chunk_x, chunks[0].chunk_y, chunks[0].data);
+        const requestedAt = performance.now();
+        const chunks = await Server.getChunks(currentLobbyId, minX, maxX, minY, maxY);
+        metrics.requests++;
+        metrics.requestAndParseMs += performance.now() - requestedAt;
+        if (window.isLocationActive) return;
+        for (const chunk of chunks) {
+            if (window.isLocationActive) return;
+            if (chunksMap.has(`${chunk.chunk_x},${chunk.chunk_y}`)) continue;
+            const buildStartedAt = performance.now();
+            addChunk(chunk.chunk_x, chunk.chunk_y, chunk.data);
+            metrics.addChunkMs += performance.now() - buildStartedAt;
+            metrics.chunks++;
         }
     } catch (error) {
-        console.error('Error fetching chunk', error);
+        metrics.failedRequests++;
+        console.error('Error fetching chunks', minX, maxX, minY, maxY, error);
     }
 }

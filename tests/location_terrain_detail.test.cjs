@@ -108,7 +108,7 @@ test('world and local surfaces reuse world-space textures without replacing cust
     assert.match(worldSource, /applySurfacePattern\(roadMaterial/);
     assert.match(worldSource, /applySurfacePattern\(fenceMat/);
     assert.doesNotMatch(worldSource, /applySurfacePattern\(groundMat/);
-    assert.match(sceneSource, /createLocationTerrainPixels\(tiles\)/);
+    assert.match(sceneSource, /createLocationTerrainPixels\(tiles, 32, true\)/);
 
     const top = {};
     applySurfacePattern(top, texture, 0.14, 'top');

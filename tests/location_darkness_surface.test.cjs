@@ -37,7 +37,25 @@ test('ground shader samples interpolated darkness at world positions', async () 
     assert.match(scene, /locationDarknessTexture\.magFilter = THREE\.LinearFilter/);
     assert.match(scene, /locationDarknessTexture\.minFilter = THREE\.LinearFilter/);
     assert.match(scene, /applySurfaceDarkness\(waterMaterial, locationDarknessTexture,/);
-    assert.match(scene, /applySurfaceDarkness\(material, locationDarknessTexture, new THREE\.Vector2\(width, height\)\)/);
+    assert.match(scene, /applySurfaceDarkness\(material, locationDarknessTexture,\s*new THREE\.Vector2\(width, height\), null, ensureTerrainGrassDetail\(\)\)/);
     assert.match(scene, /new THREE\.Color\(terrainColors\[tile\.terrain\] \|\| 0x3a5f0b\)\s*\.multiplyScalar\(darknessFactorAt\(x, z\)\)/);
     assert.match(scene, /new THREE\.Color\(terrainColors\[terrain\] \|\| 0x3a5f0b\)\s*\.multiplyScalar\(darknessFactorAt\(x, z\)\)/);
+});
+
+test('grass photo detail uses the editable blend mask without changing darkness', async () => {
+    const { applySurfaceDarkness } = await import(moduleUrl);
+    const photos = { earth: {}, forest: {}, blend: {}, ready: { value: 0 } };
+    const material = {};
+    applySurfaceDarkness(material, {}, { x: 8, y: 8 }, null, photos);
+    const shader = { uniforms: {},
+        vertexShader: '#include <common>\n#include <project_vertex>',
+        fragmentShader: '#include <common>\n#include <color_fragment>' };
+    material.onBeforeCompile(shader);
+    assert.equal(shader.uniforms.locationGrassEarth.value, photos.earth);
+    assert.equal(shader.uniforms.locationGrassForest.value, photos.forest);
+    assert.equal(shader.uniforms.locationGrassBlend.value, photos.blend);
+    assert.equal(shader.uniforms.locationGrassReady, photos.ready);
+    assert.match(shader.fragmentShader, /grassWeights\.r \+ grassWeights\.g/);
+    assert.match(shader.fragmentShader, /diffuseColor\.rgb \*= texture2D\(locationDarknessMap/);
+    assert.match(material.customProgramCacheKey(), /photo-grass/);
 });

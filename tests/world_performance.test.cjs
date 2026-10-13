@@ -6,6 +6,45 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/lobby3d.js'), 'utf8');
 
+test('initial neighboring chunks coalesce terrain and road rebuilds', () => {
+    const start = source.indexOf('const pendingWorldTerrainChunks = new Set();');
+    const end = source.indexOf('// ---', start);
+    assert.ok(start >= 0 && end > start);
+    const chunks = new Map();
+    for (let x = 0; x < 2; x++) {
+        for (let y = 0; y < 2; y++) {
+            chunks.set(`${x},${y}`, { chunkX: x, chunkY: y, hasRoadNodes: true });
+        }
+    }
+    const terrain = [];
+    const roads = [];
+    let scheduled = 0;
+    const context = vm.createContext({
+        chunksMap: chunks,
+        CHUNK_SIZE: 32,
+        brushActive: false,
+        lastHoverRaycastAt: 0,
+        performance: { now: () => 1 },
+        window: {},
+        setTimeout() { scheduled++; return scheduled; },
+        clearTimeout() {},
+        refreshWorldTerrainChunk(entry) { terrain.push(`${entry.chunkX},${entry.chunkY}`); },
+        rebuildRoadMeshes(entry) { roads.push(`${entry.chunkX},${entry.chunkY}`); },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    for (let x = 0; x < 2; x++) {
+        for (let y = 0; y < 2; y++) {
+            context.refreshWorldTerrainNeighborhood(x, y, null, null, true, true, true, true, true);
+        }
+    }
+    assert.equal(scheduled, 1);
+    assert.equal(terrain.length, 0);
+    context.flushWorldTerrainRefresh();
+    assert.equal(terrain.length, 4);
+    assert.equal(roads.length, 4);
+    assert.ok([...chunks.values()].every(chunk => chunk.waterShoreDirty && chunk.terrainTextureRegion));
+});
+
 test('anomaly LOD creates only one full effect; the distant marker is batched separately', () => {
     const start = source.indexOf('function createAnomalyLOD(');
     const end = source.indexOf('\nconst FAR_ANOMALY_DISTANCE_SQ', start);

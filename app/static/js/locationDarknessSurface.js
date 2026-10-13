@@ -9,15 +9,22 @@ export function writeDarknessPixels(factors, pixels) {
     }
 }
 
-export function applySurfaceDarkness(material, texture, size, terrainDetail = null) {
+export function applySurfaceDarkness(material, texture, size, terrainDetail = null,
+    grassDetail = null) {
     const previousCompile = material.onBeforeCompile;
     const previousKey = material.customProgramCacheKey?.bind(material);
-    material.customProgramCacheKey = () => `${previousKey ? previousKey() : ''}:${terrainDetail ? 'location-surface-detail' : 'location-surface-plain'}`;
+    material.customProgramCacheKey = () => `${previousKey ? previousKey() : ''}:${terrainDetail ? 'location-surface-detail' : 'location-surface-plain'}${grassDetail ? ':photo-grass' : ''}`;
     material.onBeforeCompile = shader => {
         previousCompile?.(shader);
         shader.uniforms.locationDarknessMap = { value: texture };
         shader.uniforms.locationDarknessSize = { value: size };
         if (terrainDetail) shader.uniforms.locationTerrainDetail = { value: terrainDetail };
+        if (grassDetail) {
+            shader.uniforms.locationGrassEarth = { value: grassDetail.earth };
+            shader.uniforms.locationGrassForest = { value: grassDetail.forest };
+            shader.uniforms.locationGrassBlend = { value: grassDetail.blend };
+            shader.uniforms.locationGrassReady = grassDetail.ready;
+        }
         shader.vertexShader = shader.vertexShader
             .replace('#include <common>', '#include <common>\nvarying vec2 vLocationDarkXZ;')
             .replace('#include <project_vertex>', `
@@ -29,6 +36,12 @@ export function applySurfaceDarkness(material, texture, size, terrainDetail = nu
                 #include <project_vertex>
             `);
         const detailUniform = terrainDetail ? 'uniform sampler2D locationTerrainDetail;' : '';
+        const grassUniforms = grassDetail ? `
+                uniform sampler2D locationGrassEarth;
+                uniform sampler2D locationGrassForest;
+                uniform sampler2D locationGrassBlend;
+                uniform float locationGrassReady;
+            ` : '';
         const detailColor = terrainDetail ? `
                 float terrainShade = texture2D(locationTerrainDetail, vLocationDarkXZ * 0.14).r;
                 float grassTintMask = smoothstep(0.045, 0.14, diffuseColor.g - diffuseColor.r);
@@ -54,15 +67,38 @@ export function applySurfaceDarkness(material, texture, size, terrainDetail = nu
                 diffuseColor.rgb *= mix(vec3(1.0), swampTint, swampMask * 0.63);
                 diffuseColor.rgb *= 0.61 + 0.44 * terrainShade;
             ` : '';
+        const grassColor = grassDetail ? `
+                if (locationGrassReady > 0.5) {
+                    vec2 grassWeights = texture2D(locationGrassBlend,
+                        clamp(vLocationDarkXZ / locationDarknessSize, vec2(0.0), vec2(1.0))).rg;
+                    float grassCoverage = min(1.0, grassWeights.r + grassWeights.g);
+                    if (grassCoverage > 0.005) {
+                        vec2 grassUv = vLocationDarkXZ * 0.125;
+                        vec3 earthPhoto = mapTexelToLinear(
+                            texture2D(locationGrassEarth, grassUv)).rgb;
+                        vec3 forestPhoto = mapTexelToLinear(
+                            texture2D(locationGrassForest, grassUv)).rgb;
+                        vec3 plainPhoto = mix(earthPhoto, forestPhoto, 0.82)
+                            * vec3(0.86, 1.06, 0.84);
+                        vec3 woodlandPhoto = forestPhoto * vec3(0.88, 0.93, 0.84);
+                        vec3 grassPhoto = (plainPhoto * grassWeights.r
+                            + woodlandPhoto * grassWeights.g) / grassCoverage;
+                        diffuseColor.rgb = mix(diffuseColor.rgb, grassPhoto,
+                            grassCoverage * 0.96);
+                    }
+                }
+            ` : '';
         shader.fragmentShader = shader.fragmentShader
             .replace('#include <common>', `#include <common>
                 uniform sampler2D locationDarknessMap;
                 uniform vec2 locationDarknessSize;
                 varying vec2 vLocationDarkXZ;
                 ${detailUniform}
+                ${grassUniforms}
             `)
             .replace('#include <color_fragment>', `#include <color_fragment>
                 ${detailColor}
+                ${grassColor}
                 diffuseColor.rgb *= texture2D(locationDarknessMap,
                     clamp(vLocationDarkXZ / locationDarknessSize, vec2(0.0), vec2(1.0))).r;
             `);

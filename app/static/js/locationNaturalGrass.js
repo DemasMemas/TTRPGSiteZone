@@ -1,5 +1,7 @@
+import { acceptsDetail, edgePosition } from './locationGrassDetail.js';
+
 const ROOT = '/static/models/vegetation/polyhaven-d51/grass_medium_01/';
-const MODEL = '/static/models/vegetation/grass_medium_01_game_d7.glb';
+const MODEL = '/static/models/vegetation/grass_medium_01_game_d8.glb';
 const CHUNK_SIZE = 12;
 let assetPromise = null;
 
@@ -25,33 +27,40 @@ export function naturalGrassPlacements(tiles, isCovered = () => false) {
     const medium01 = [];
     const grassTiles = tiles.reduce((sum, row) => sum + row.filter(tile => tile.terrain === 'grass').length, 0);
     const stats = { grassTiles, plainTiles: 0, forestTiles: 0,
-        densityRejected: 0, floorRejected: 0 };
+        densityRejected: 0, blendRejected: 0, floorRejected: 0 };
     for (let z = 0; z < tiles.length; z++) {
         for (let x = 0; x < tiles[z].length; x++) {
             const tile = tiles[z][x];
             if (tile.terrain !== 'grass') continue;
             const forest = tile.grass_subtype === 'forest';
             stats[forest ? 'forestTiles' : 'plainTiles']++;
-            const density = Math.max(0.08, Math.min(1, (patch(x + 0.5, z + 0.5) - 0.25) * 1.8));
-            const candidates = forest ? 3 : 5;
-            const anchorX = x + 0.2 + hash(x, z, 205) * 0.6;
-            const anchorZ = z + 0.2 + hash(x, z, 305) * 0.6;
+            const density = patch(x + 0.5, z + 0.5);
+            const candidates = forest ? 4 : 5;
+            const fringe = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx, dz]) => {
+                const neighbor = tiles[z + dz]?.[x + dx]?.terrain;
+                return neighbor && neighbor !== 'grass' && neighbor !== 'water';
+            });
             for (let index = 0; index < candidates; index++) {
-                const chance = density * (forest ? 0.08 : 0.12)
-                    * [1, 1, 0.9, 0.75, 0.55][index];
-                if (hash(x, z, 110 + index) >= chance) {
+                const chance = forest ? 0.36 + density * 0.28 : 0.38 + density * 0.3;
+                const edge = index === candidates - 1 && fringe.length
+                    ? fringe[Math.min(fringe.length - 1,
+                        Math.floor(hash(x, z, 105) * fringe.length))] : null;
+                if (index && !edge && hash(x, z, 110 + index) >= chance) {
                     stats.densityRejected++;
                     continue;
                 }
-                const clustered = index >= 2;
-                const px = clustered
-                    ? Math.max(x + 0.19, Math.min(x + 0.81,
-                        anchorX + (hash(x, z, 210 + index) - 0.5) * 0.42))
-                    : x + 0.19 + hash(x, z, 210 + index) * 0.62;
-                const pz = clustered
-                    ? Math.max(z + 0.19, Math.min(z + 0.81,
-                        anchorZ + (hash(x, z, 310 + index) - 0.5) * 0.42))
-                    : z + 0.19 + hash(x, z, 310 + index) * 0.62;
+                const px = edge ? x + (edge[0] > 0 ? 1.02 : edge[0] < 0 ? -0.02
+                    : 0.15 + hash(x, z, 210 + index) * 0.7)
+                    : index === 0 ? x + 0.32 + hash(x, z, 210) * 0.36
+                        : edgePosition(x, hash(x, z, 210 + index), 610 + z * 5 + index);
+                const pz = edge ? z + (edge[1] > 0 ? 1.02 : edge[1] < 0 ? -0.02
+                    : 0.15 + hash(x, z, 310 + index) * 0.7)
+                    : index === 0 ? z + 0.32 + hash(x, z, 310) * 0.36
+                        : edgePosition(z, hash(x, z, 310 + index), 710 + x * 5 + index);
+                if (!acceptsDetail(tiles, 'grass', px, pz, 990 + index)) {
+                    stats.blendRejected++;
+                    continue;
+                }
                 if (isCovered(px, pz) || isCovered(px - 0.14, pz)
                     || isCovered(px + 0.14, pz) || isCovered(px, pz - 0.14)
                     || isCovered(px, pz + 0.14)) {
@@ -92,7 +101,7 @@ export function loadNaturalGrassAssets(THREE, outputEncoding = THREE.LinearEncod
         }).then(([model, map, alphaMap, normalMap]) => {
             let mesh = null;
             model.scene.traverse(child => {
-                if (child.isMesh && child.name === 'grass_medium_01_small_b_LOD0') mesh = child;
+                if (child.isMesh && child.name === 'grass_medium_01_mid_a_LOD0') mesh = child;
             });
             if (!mesh) throw new Error('Missing optimized grass mesh');
             for (const texture of [map, alphaMap, normalMap]) {
@@ -106,13 +115,15 @@ export function loadNaturalGrassAssets(THREE, outputEncoding = THREE.LinearEncod
             const material = new THREE.MeshStandardMaterial({
                 map, alphaMap, normalMap,
                 normalScale: new THREE.Vector2(0.35, 0.35),
-                alphaTest: 0.35, transparent: false, depthWrite: true,
+                alphaTest: 0.45, transparent: false, depthWrite: true,
                 side: THREE.DoubleSide, roughness: 0.95, metalness: 0,
             });
             mesh.geometry.computeBoundingBox();
             const bounds = mesh.geometry.boundingBox;
             return { medium01: { geometry: mesh.geometry, material,
-                scale: 0.165 / (bounds.max.y - bounds.min.y), bottom: bounds.min.y } };
+                scale: 0.18 / (bounds.max.y - bounds.min.y),
+                spread: 0.34 / Math.max(bounds.max.x - bounds.min.x,
+                    bounds.max.z - bounds.min.z), bottom: bounds.min.y } };
         }).catch(error => {
             assetPromise = null;
             throw error;
@@ -133,7 +144,7 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
                 Math.abs(center - getHeight(plant.x + 0.14, plant.z)),
                 Math.abs(center - getHeight(plant.x, plant.z - 0.14)),
                 Math.abs(center - getHeight(plant.x, plant.z + 0.14)),
-            ) < 0.12;
+            ) < 0.18;
         });
         renderedCounts[kind] = plants.length;
         if (!plants.length) continue;
@@ -159,14 +170,14 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
                     getHeight(plant.x, plant.z) + 0.012 - source.bottom * source.scale * plant.size,
                     plant.z - mesh.position.z);
                 dummy.rotation.set(plant.lean, plant.turn, plant.lean * 0.55, 'YXZ');
-                dummy.scale.set(source.scale * plant.size * plant.width * 1.15,
+                dummy.scale.set(source.spread * plant.size * plant.width,
                     source.scale * plant.size,
-                    source.scale * plant.size * plant.depth * 1.15);
+                    source.spread * plant.size * plant.depth);
                 dummy.updateMatrix();
                 mesh.setMatrixAt(index, dummy.matrix);
-                color.setRGB(...(plant.tone < 0.16 ? [1.22, 1.13, 0.84]
-                    : plant.tone < 0.42 ? [0.98, 1.08, 0.91]
-                        : [0.92, 1.16, 1.0]));
+                color.setRGB(...(plant.tone < 0.16 ? [1.08, 1.03, 0.94]
+                    : plant.tone < 0.42 ? [0.98, 1.03, 0.98]
+                        : [1, 1, 1]));
                 mesh.setColorAt(index, color);
             }
             mesh.instanceMatrix.needsUpdate = true;
