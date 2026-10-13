@@ -25,14 +25,23 @@ export function applySurfaceDarkness(material, texture, size, terrainDetail = nu
             shader.uniforms.locationGrassBlend = { value: grassDetail.blend };
             shader.uniforms.locationGrassReady = grassDetail.ready;
         }
+        const grassVertexVaryings = grassDetail
+            ? 'varying vec4 vLocationGrassSide;' : '';
+        const grassVertexPosition = grassDetail ? `
+                vLocationGrassSide = vec4(normalize(mat3(modelMatrix) * normal),
+                    (modelMatrix * locationDarkWorld).y);
+            ` : '';
         shader.vertexShader = shader.vertexShader
-            .replace('#include <common>', '#include <common>\nvarying vec2 vLocationDarkXZ;')
+            .replace('#include <common>', `#include <common>
+                varying vec2 vLocationDarkXZ;
+                ${grassVertexVaryings}`)
             .replace('#include <project_vertex>', `
                 vec4 locationDarkWorld = vec4(transformed, 1.0);
                 #ifdef USE_INSTANCING
                     locationDarkWorld = instanceMatrix * locationDarkWorld;
                 #endif
                 vLocationDarkXZ = (modelMatrix * locationDarkWorld).xz;
+                ${grassVertexPosition}
                 #include <project_vertex>
             `);
         const detailUniform = terrainDetail ? 'uniform sampler2D locationTerrainDetail;' : '';
@@ -41,6 +50,7 @@ export function applySurfaceDarkness(material, texture, size, terrainDetail = nu
                 uniform sampler2D locationGrassForest;
                 uniform sampler2D locationGrassBlend;
                 uniform float locationGrassReady;
+                varying vec4 vLocationGrassSide;
             ` : '';
         const detailColor = terrainDetail ? `
                 float terrainShade = texture2D(locationTerrainDetail, vLocationDarkXZ * 0.14).r;
@@ -78,6 +88,24 @@ export function applySurfaceDarkness(material, texture, size, terrainDetail = nu
                             texture2D(locationGrassEarth, grassUv)).rgb;
                         vec3 forestPhoto = mapTexelToLinear(
                             texture2D(locationGrassForest, grassUv)).rgb;
+                        vec3 slopeNormal = abs(normalize(vLocationGrassSide.xyz));
+                        float slopeProjection = smoothstep(0.12, 0.55, 1.0 - slopeNormal.y);
+                        if (slopeProjection > 0.001) {
+                            vec2 sideXUv = vec2(vLocationDarkXZ.y, vLocationGrassSide.w) * 0.125;
+                            vec2 sideZUv = vec2(vLocationDarkXZ.x, vLocationGrassSide.w) * 0.125;
+                            float sideZWeight = slopeNormal.z
+                                / max(slopeNormal.x + slopeNormal.z, 0.0001);
+                            vec3 sideEarth = mix(
+                                mapTexelToLinear(texture2D(locationGrassEarth, sideXUv)).rgb,
+                                mapTexelToLinear(texture2D(locationGrassEarth, sideZUv)).rgb,
+                                sideZWeight);
+                            vec3 sideForest = mix(
+                                mapTexelToLinear(texture2D(locationGrassForest, sideXUv)).rgb,
+                                mapTexelToLinear(texture2D(locationGrassForest, sideZUv)).rgb,
+                                sideZWeight);
+                            earthPhoto = mix(earthPhoto, sideEarth, slopeProjection);
+                            forestPhoto = mix(forestPhoto, sideForest, slopeProjection);
+                        }
                         vec3 plainPhoto = mix(earthPhoto, forestPhoto, 0.82)
                             * vec3(0.86, 1.06, 0.84);
                         vec3 woodlandPhoto = forestPhoto * vec3(0.88, 0.93, 0.84);

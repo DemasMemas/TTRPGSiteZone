@@ -59,3 +59,26 @@ test('grass photo detail uses the editable blend mask without changing darkness'
     assert.match(shader.fragmentShader, /diffuseColor\.rgb \*= texture2D\(locationDarknessMap/);
     assert.match(material.customProgramCacheKey(), /photo-grass/);
 });
+
+test('grass photos keep planar ground UVs and gain slope-only side projection', async () => {
+    const { applySurfaceDarkness } = await import(moduleUrl);
+    const compile = grassDetail => {
+        const material = {};
+        applySurfaceDarkness(material, {}, { x: 8, y: 8 }, null, grassDetail);
+        const shader = { uniforms: {},
+            vertexShader: '#include <common>\n#include <project_vertex>',
+            fragmentShader: '#include <common>\n#include <color_fragment>' };
+        material.onBeforeCompile(shader);
+        return shader;
+    };
+    const ground = compile({ earth: {}, forest: {}, blend: {}, ready: { value: 1 } });
+    assert.match(ground.vertexShader, /vLocationGrassSide = vec4\(normalize\(mat3\(modelMatrix\) \* normal\)/);
+    assert.match(ground.vertexShader, /\(modelMatrix \* locationDarkWorld\)\.y/);
+    assert.match(ground.fragmentShader, /vec2 grassUv = vLocationDarkXZ \* 0\.125/);
+    assert.match(ground.fragmentShader, /smoothstep\(0\.12, 0\.55, 1\.0 - slopeNormal\.y\)/);
+    assert.match(ground.fragmentShader, /if \(slopeProjection > 0\.001\)/);
+    assert.match(ground.fragmentShader, /vec2\(vLocationDarkXZ\.y, vLocationGrassSide\.w\) \* 0\.125/);
+    assert.match(ground.fragmentShader, /vec2\(vLocationDarkXZ\.x, vLocationGrassSide\.w\) \* 0\.125/);
+    assert.match(ground.fragmentShader, /earthPhoto = mix\(earthPhoto, sideEarth, slopeProjection\)/);
+    assert.doesNotMatch(compile(null).fragmentShader, /vLocationGrassSide|slopeProjection/);
+});
