@@ -35,7 +35,8 @@ import {
     rotatePointAround,
 } from './locationAssetTransforms.js';
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
-import { doorOnWall, doorFrameStyle, floorVisualPose, wallVisualPlan } from './locationArchitecture.js';
+import { doorOnWall, doorFrameStyle, doorTrimLayout, floorEntrancePoint, floorVisualPose,
+    houseWallWear, wallVisualPlan } from './locationArchitecture.js';
 import { applyInteriorFloorShade, createRoofGeometry, createRoofGableGeometry, roofPlans, roofVisibleForCamera } from './locationRoof.js';
 import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
     updateLocationTerrainPixels } from './locationTerrainTexture.js';
@@ -9292,6 +9293,16 @@ function getStructureDimensions(preset = structurePreset) {
 
 const FLOOR_SURFACE_OFFSET = 0.035;
 
+function quietHouseColor(color, type) {
+    const result = new THREE.Color(color || (type === 'wall' ? '#80786c' : '#776d5d'));
+    const hsl = result.getHSL({ h: 0, s: 0, l: 0 });
+    if (hsl.s < 0.22) {
+        result.lerp(new THREE.Color(type === 'wall' ? '#d4d0c4' : '#7e766a'),
+            type === 'wall' ? 0.72 : 0.45);
+    }
+    return result;
+}
+
 function createLocationObjectMesh(obj, forPreview = false) {
     const properties = obj.properties || {};
     const asset = visualAssetForLocationObject(obj.type, properties);
@@ -9301,16 +9312,26 @@ function createLocationObjectMesh(obj, forPreview = false) {
     const width = floorPose?.width || dimensions.width || 1;
     const depth = floorPose?.depth || dimensions.depth || 1;
     const height = dimensions.height || 1;
+    const quietHouseFinish = ['wall', 'floor'].includes(obj.type)
+        && (asset?.visual?.renderMode !== 'pbr'
+            || asset.id === 'art_worn_plaster' || asset.id === 'art_aged_wood');
+    const usePbrMaterial = asset?.visual?.renderMode === 'pbr' && !quietHouseFinish;
     const hasSeparateMaterials = ['fence', 'window', 'box', 'military_crate', 'shelf', 'ground_item'].includes(obj.type)
         || properties.is_ground_item || isFireObject(obj) || isElectricFixture(obj);
     const material = hasSeparateMaterials ? null
-        : new THREE.MeshStandardMaterial({ color: properties.color || '#aa8866', roughness: 0.93 });
-    if (['wall', 'floor'].includes(obj.type) && asset?.visual?.renderMode !== 'pbr') {
+        : new THREE.MeshStandardMaterial({
+            color: quietHouseFinish ? quietHouseColor(properties.color, obj.type)
+                : properties.color || '#aa8866',
+            roughness: 0.93,
+            vertexColors: obj.type === 'wall' && quietHouseFinish,
+        });
+    if (quietHouseFinish) {
         applySurfacePattern(material, getSurfaceTexture(THREE, obj.type),
-            obj.type === 'floor' ? 0.32 : 0.25, obj.type === 'floor' ? 'top' : 'sides');
+            obj.type === 'floor' ? 0.5 : 0.25, obj.type === 'floor' ? 'top' : 'sides');
     }
-    if (obj.type === 'floor') applyInteriorFloorShade(material, width, depth);
-    if (asset?.visual?.renderMode === 'pbr' && material) {
+    if (obj.type === 'floor') applyInteriorFloorShade(material, width, depth,
+        floorEntrancePoint(floorPose, currentLocationData?.objects));
+    if (usePbrMaterial && material) {
         applyLocationPbrMaterial(material, asset.visual.maps);
     }
     const group = new THREE.Group();
@@ -9321,15 +9342,33 @@ function createLocationObjectMesh(obj, forPreview = false) {
         group.add(createFenceModel(THREE, width, height, depth, fenceColor));
     } else if (obj.type === 'wall') {
         const plan = wallVisualPlan(obj, currentLocationData?.objects || []);
+        const start = plan.spans[0]?.start ?? -width / 2;
+        const end = plan.spans[plan.spans.length - 1]?.end ?? width / 2;
         for (const span of plan.spans) {
-            const piece = new THREE.Mesh(
-                new THREE.BoxGeometry(span.end - span.start, span.top - span.bottom, depth),
-                material,
-            );
-            if (asset?.visual?.renderMode === 'pbr') {
-                tileLocationPbrBoxUvs(piece.geometry, span.end - span.start, span.top - span.bottom, depth);
+            const spanWidth = span.end - span.start;
+            const spanHeight = span.top - span.bottom;
+            const centerX = (span.start + span.end) / 2;
+            const centerY = (span.bottom + span.top) / 2;
+            const geometry = new THREE.BoxGeometry(spanWidth, spanHeight, depth,
+                quietHouseFinish ? Math.ceil(spanWidth / 0.6) : 1,
+                quietHouseFinish ? 3 : 1);
+            if (quietHouseFinish) {
+                const positions = geometry.getAttribute('position');
+                const colors = [];
+                for (let index = 0; index < positions.count; index++) {
+                    const wear = houseWallWear(positions.getX(index) + centerX,
+                        positions.getY(index) + centerY, start, end, plan.openings);
+                    colors.push(wear, wear, wear);
+                }
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
             }
-            piece.position.set((span.start + span.end) / 2, (span.bottom + span.top) / 2, 0);
+            const piece = new THREE.Mesh(
+                geometry, material,
+            );
+            if (usePbrMaterial) {
+                tileLocationPbrBoxUvs(piece.geometry, spanWidth, spanHeight, depth);
+            }
+            piece.position.set(centerX, centerY, 0);
             group.add(piece);
         }
     } else if (obj.type === 'window') {
@@ -9354,30 +9393,30 @@ function createLocationObjectMesh(obj, forPreview = false) {
     } else if (obj.type === 'door') {
         const jamb = 0.09;
         const frame = doorFrameStyle(obj, currentLocationData?.objects || []);
+        const trim = doorTrimLayout(width, height, frame, jamb);
         const frameMaterial = new THREE.MeshStandardMaterial({ color: frame.color });
         for (const sign of [-1, 1]) {
-            const post = new THREE.Mesh(new THREE.BoxGeometry(jamb, frame.height, frame.depth), frameMaterial);
-            post.position.set(sign * (width / 2 + jamb / 2), frame.bottom + frame.height / 2, 0);
+            const post = new THREE.Mesh(new THREE.BoxGeometry(jamb, trim.postHeight, frame.depth), frameMaterial);
+            post.position.set(sign * trim.postX, trim.postY, 0);
             group.add(post);
         }
-        const lintel = new THREE.Mesh(new THREE.BoxGeometry(width + 2 * jamb, 0.12, frame.depth), frameMaterial);
-        lintel.position.y = frame.bottom + frame.height - 0.06;
+        const lintel = new THREE.Mesh(new THREE.BoxGeometry(trim.lintelWidth, 0.12, frame.depth), frameMaterial);
+        lintel.position.y = trim.lintelY;
         group.add(lintel);
         const pivot = new THREE.Group();
-        pivot.position.x = -width / 2;
-        const panelHeight = frame.inWall
-            ? Math.max(0.05, Math.min(height, frame.bottom + frame.height - 0.12)) : height;
-        const panel = new THREE.Mesh(new THREE.BoxGeometry(width, panelHeight, depth), material);
-        panel.position.set(width / 2, panelHeight / 2, 0);
+        pivot.position.x = trim.pivotX;
+        pivot.position.y = trim.baseY;
+        const panel = new THREE.Mesh(new THREE.BoxGeometry(trim.panelWidth, trim.panelHeight, depth), material);
+        panel.position.set(trim.panelWidth / 2, trim.panelHeight / 2, 0);
         pivot.add(panel);
         const hardware = new THREE.MeshStandardMaterial({ color: '#b7b5a7', metalness: 0.65, roughness: 0.4 });
         for (const side of [-1, 1]) {
             const plate = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.16, 0.018), hardware);
-            plate.position.set(width * 0.77, Math.min(1.02, panelHeight * 0.55),
+            plate.position.set(trim.panelWidth * 0.77, Math.min(1.02, trim.panelHeight * 0.55),
                 side * (depth / 2 + 0.012));
             pivot.add(plate);
             const lever = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.026, 0.034), hardware);
-            lever.position.set(width * 0.7, plate.position.y,
+            lever.position.set(trim.panelWidth * 0.7, plate.position.y,
                 side * (depth / 2 + 0.045));
             pivot.add(lever);
         }
@@ -9453,7 +9492,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         main.position.y = height / 2;
         group.add(main);
     }
-    if (obj.type === 'floor' && asset?.visual?.renderMode === 'pbr') {
+    if (obj.type === 'floor' && usePbrMaterial) {
         group.traverse(child => {
             if (child.isMesh && child.geometry?.attributes?.uv) {
                 const size = child.geometry.parameters;
@@ -9473,7 +9512,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         group.position.y += 0.04;
     }
     group.rotation.y = properties.rotation || 0;
-    if (obj.type === 'floor' && asset?.visual?.renderMode === 'pbr') {
+    if (obj.type === 'floor' && usePbrMaterial) {
         group.updateMatrixWorld(true);
         group.traverse(child => {
             if (child.isMesh) alignLocationPbrFloorUvs(child.geometry, child);
@@ -9817,6 +9856,10 @@ function rebuildLocationRoofs() {
     }
     const texture = getSurfaceTexture(THREE, 'roof');
     for (const plan of plans) {
+        const floor = currentLocationData.objects.find(object => object.id === plan.floorId);
+        const floorAsset = visualAssetForLocationObject('floor', floor?.properties);
+        const quietGable = floorAsset?.visual?.renderMode !== 'pbr'
+            || floorAsset.id === 'art_aged_wood';
         const material = new THREE.MeshStandardMaterial({
             color: plan.color, roughness: 0.94, side: THREE.DoubleSide,
         });
@@ -9826,7 +9869,8 @@ function rebuildLocationRoofs() {
         const roofFace = new THREE.Mesh(roofGeometry, material);
         roof.add(roofFace);
         const gableMaterial = new THREE.MeshStandardMaterial({
-            color: plan.gableColor, roughness: 1, side: THREE.DoubleSide,
+            color: quietGable ? quietHouseColor(plan.gableColor, 'wall') : plan.gableColor,
+            roughness: 1, side: THREE.DoubleSide,
         });
         applySurfacePattern(gableMaterial, getSurfaceTexture(THREE, 'wall'), 0.25, 'sides');
         const gable = new THREE.Mesh(createRoofGableGeometry(THREE, plan), gableMaterial);

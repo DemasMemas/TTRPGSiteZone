@@ -24,13 +24,14 @@ function tileableNoise(x, y, period, seed) {
 }
 
 function paintDefects(pixels, kind, seed, size) {
-    const counts = { terrain: 72, local_terrain: 9, wall: 9, road: 80, floor: 10, fence: 13, water: 10, roof: 18 };
-    for (let index = 0; index < (counts[kind] || 12); index++) {
+    const counts = { terrain: 72, local_terrain: 9, wall: 2, road: 80, floor: 0, fence: 13, water: 10, roof: 18 };
+    for (let index = 0; index < (counts[kind] ?? 12); index++) {
         const x = Math.floor(hash(index, 11, seed) * size);
         const y = Math.floor(hash(index, 23, seed) * size);
         const width = 2 + Math.floor(hash(index, 37, seed) * (kind === 'road' ? 4 : 8));
         const height = Math.max(1, Math.round(width * (kind === 'water' ? 0.35 : 0.65)));
-        const strength = kind === 'water' ? 0.08 : kind === 'local_terrain' ? 0.12
+        const strength = kind === 'water' ? 0.08 : kind === 'wall' ? 0.025
+            : kind === 'local_terrain' ? 0.12
             : 0.12 + hash(index, 41, seed) * 0.18;
         for (let dy = -height; dy <= height; dy++) {
             for (let dx = -width; dx <= width; dx++) {
@@ -74,11 +75,12 @@ export function createSurfaceTexture(THREE, kind, canvas = document.createElemen
                     ? 0.88 + 0.08 * broad + 0.025 * fine + 0.008 * grain
                     : 0.68 + 0.26 * broad + 0.1 * fine + 0.04 * grain;
                 if (kind === 'wall') {
-                    const joint = y % 16 < 2 || (x + (Math.floor(y / 16) % 2) * 32) % 64 < 2;
-                    if (joint) tone *= 0.82;
+                    tone = 0.955 + 0.035 * broad + 0.008 * fine;
                 } else if (kind === 'floor') {
-                    if (y % 16 < 2) tone *= 0.74;
-                    tone += 0.035 * Math.sin(y * Math.PI / 4 + Math.sin(x * Math.PI / 32));
+                    tone = 0.86 + 0.08 * broad + 0.02 * fine;
+                    if (y % 32 < 1) tone *= 0.88;
+                    tone += 0.008 * Math.sin(x * Math.PI * 8 / size
+                        + Math.sin(y * Math.PI * 2 / size) * 0.5);
                 } else if (kind === 'fence') {
                     if (x % 16 < 2) tone *= 0.72;
                     tone += 0.025 * Math.sin(x * Math.PI * 7 / 32 + Math.sin(y * Math.PI / 32));

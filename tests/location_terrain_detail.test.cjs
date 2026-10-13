@@ -81,12 +81,21 @@ test('surface families have distinct base patterns and sparse defects', async ()
         assert.equal(texture.minFilter, 'mipmap');
         const sample = [];
         for (let index = 0; index < pixels.length; index += 4) sample.push(pixels[index]);
-        assert.ok(Math.max(...sample) - Math.min(...sample) >
-            (kind === 'local_terrain' || kind === 'water' ? 8 : 35), kind);
+        const contrast = Math.max(...sample) - Math.min(...sample);
+        if (kind === 'wall') assert.ok(contrast > 4 && contrast < 35, kind);
+        else if (kind === 'floor') {
+            assert.ok(contrast > 20 && contrast < 90, kind);
+            const boardFaces = sample.filter((_, index) => Math.floor(index / 128) % 32 !== 0);
+            assert.ok(Math.min(...boardFaces) >= 210, 'floor boards stay free of dark blotches');
+        }
+        else assert.ok(contrast > (kind === 'local_terrain' || kind === 'water' ? 8 : 35), kind);
         patterns.set(kind, sample.join(','));
     }
     assert.equal(new Set(patterns.values()).size, patterns.size);
     assert.match(waterSource, /createSurfaceTexture\(THREE, 'water'\)/);
+    assert.match(sceneSource, /asset\.id === 'art_worn_plaster' \|\| asset\.id === 'art_aged_wood'/);
+    assert.match(sceneSource, /const usePbrMaterial = asset\?\.visual\?\.renderMode === 'pbr' && !quietHouseFinish/);
+    assert.match(sceneSource, /quietGable \? quietHouseColor\(plan\.gableColor, 'wall'\)/);
 });
 
 test('world and local surfaces reuse world-space textures without replacing custom colors', async () => {

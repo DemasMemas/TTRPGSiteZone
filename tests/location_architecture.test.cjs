@@ -52,7 +52,7 @@ test('an elevated window cuts a wall between its sill and lintel', async () => {
 });
 
 test('door frame follows its wall height and color while its panel stays separate', async () => {
-    const { doorFrameStyle } = await load('locationArchitecture.js');
+    const { doorFrameStyle, doorTrimLayout } = await load('locationArchitecture.js');
     const wall = { type: 'wall', tile_x: 2, tile_y: 3,
         properties: { color: '#496d73', dimensions: { width: 3, depth: 0.3, height: 3.2 } } };
     const door = { type: 'door', tile_x: 2, tile_y: 3,
@@ -63,8 +63,21 @@ test('door frame follows its wall height and color while its panel stays separat
     assert.equal(frame.color, wall.properties.color);
     assert.notEqual(frame.color, door.properties.color);
     assert.ok(frame.depth > wall.properties.dimensions.depth);
+    const trim = doorTrimLayout(0.9, 2, frame);
+    assert.ok(trim.postX + 0.09 / 2 < 0.45);
+    assert.ok(trim.postX + 0.09 / 2 > 0.44);
+    assert.equal(trim.lintelWidth, 0.9);
+    assert.ok(trim.lintelY + 0.06 < 2);
+    assert.ok(trim.lintelY + 0.06 > 1.99);
+    assert.ok(trim.pivotX + trim.panelWidth < trim.postX - 0.09 / 2);
+    assert.ok(trim.panelHeight < trim.lintelY - 0.06);
     door.properties.elevation = 0.1;
     assert.ok(Math.abs(doorFrameStyle(door, [wall]).bottom + 0.1) < 1e-8);
+    door.properties.elevation = -0.1;
+    const raisedWallTrim = doorTrimLayout(0.9, 2, doorFrameStyle(door, [wall]));
+    assert.ok(Math.abs(raisedWallTrim.baseY - 0.1) < 1e-8);
+    assert.ok(Math.abs(raisedWallTrim.postY - raisedWallTrim.postHeight / 2 - 0.1) < 1e-8);
+    door.properties.elevation = 0;
     wall.properties.color = '#9c654f';
     assert.equal(doorFrameStyle(door, [wall]).color, '#9c654f');
     door.properties.offset_z = 1;
@@ -74,7 +87,30 @@ test('door frame follows its wall height and color while its panel stays separat
     const scene = read('locationScene.js');
     assert.match(scene, /const frame = doorFrameStyle\(obj, currentLocationData\?\.objects \|\| \[\]\)/);
     assert.match(scene, /new THREE\.MeshStandardMaterial\(\{ color: frame\.color \}\)/);
-    assert.match(scene, /new THREE\.BoxGeometry\(jamb, frame\.height, frame\.depth\)/);
+    assert.match(scene, /new THREE\.BoxGeometry\(jamb, trim\.postHeight, frame\.depth\)/);
+});
+
+test('house wall wear is slight and localized to the base, corners, and entrance', async () => {
+    const { houseWallWear } = await load('locationArchitecture.js');
+    const openings = [{ start: -0.45, end: 0.45, bottom: 0, top: 2 }];
+    const clean = houseWallWear(0, 1.5, -2, 2);
+    const base = houseWallWear(0, 0, -2, 2);
+    const corner = houseWallWear(-2, 1.5, -2, 2);
+    const entrance = houseWallWear(-0.45, 0.3, -2, 2, openings);
+    assert.equal(clean, 1);
+    assert.ok(base < clean && corner < clean && entrance < houseWallWear(-0.45, 0.3, -2, 2));
+    assert.ok(Math.min(base, corner, entrance) >= 0.85);
+});
+
+test('interior floor finds a nearby doorway without including distant doors', async () => {
+    const { floorEntrancePoint } = await load('locationArchitecture.js');
+    const pose = { x: 0, z: 0, width: 4, depth: 4,
+        axis: { x: 1, z: 0 }, normal: { x: 0, z: 1 } };
+    const door = { type: 'door', tile_x: 0, tile_y: 1,
+        properties: { offset_x: -0.5, offset_z: 0.6 } };
+    assert.deepEqual(floorEntrancePoint(pose, [door]), [0, 2]);
+    door.tile_y = 8;
+    assert.equal(floorEntrancePoint(pose, [door]), null);
 });
 
 test('the visual sandbox has joined outer corners and three wall-mounted doors', async () => {

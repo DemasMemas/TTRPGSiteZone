@@ -57,6 +57,25 @@ export function floorVisualPose(object, objects) {
     };
 }
 
+export function floorEntrancePoint(pose, objects) {
+    const halfWidth = pose.width / 2;
+    const halfDepth = pose.depth / 2;
+    for (const object of objects || []) {
+        if (object?.type !== 'door') continue;
+        const door = structurePose(object);
+        const dx = door.x - pose.x;
+        const dz = door.z - pose.z;
+        const along = dx * pose.axis.x + dz * pose.axis.z;
+        const across = dx * pose.normal.x + dz * pose.normal.z;
+        if (Math.abs(along) > halfWidth + 0.5 || Math.abs(across) > halfDepth + 0.5) continue;
+        if (Math.min(Math.abs(Math.abs(along) - halfWidth),
+            Math.abs(Math.abs(across) - halfDepth)) > 0.5) continue;
+        return [Math.max(-halfWidth, Math.min(halfWidth, along)),
+            Math.max(-halfDepth, Math.min(halfDepth, across))];
+    }
+    return null;
+}
+
 export function doorOnWall(door, wall) {
     const a = structurePose(wall);
     const b = structurePose(door);
@@ -89,6 +108,36 @@ export function doorFrameStyle(door, objects) {
         bottom: Number(wall.properties?.elevation || 0) - Number(door.properties?.elevation || 0),
         color: wall.properties?.color || '#aa8866',
     };
+}
+
+export function doorTrimLayout(width, height, frame, jamb = 0.09) {
+    const openingHeight = frame.inWall ? Math.min(height, frame.bottom + frame.height) : height;
+    const baseY = frame.inWall ? Math.max(0, frame.bottom) : 0;
+    const inset = frame.inWall ? 0.006 : 0;
+    return {
+        baseY,
+        postX: frame.inWall ? width / 2 - jamb / 2 - inset : width / 2 + jamb / 2,
+        postHeight: frame.inWall ? openingHeight - baseY : frame.height,
+        postY: frame.inWall ? (baseY + openingHeight) / 2 : frame.bottom + frame.height / 2,
+        lintelWidth: frame.inWall ? width : width + 2 * jamb,
+        lintelY: frame.inWall ? openingHeight - 0.06 - inset : frame.bottom + frame.height - 0.06,
+        pivotX: frame.inWall ? -width / 2 + jamb + 0.01 : -width / 2,
+        panelWidth: frame.inWall ? Math.max(0.05, width - 2 * jamb - 0.02) : width,
+        panelHeight: frame.inWall ? Math.max(0.05, openingHeight - baseY - 0.13) : height,
+    };
+}
+
+export function houseWallWear(x, y, start, end, openings = []) {
+    const fade = (distance, range) => Math.max(0, 1 - distance / range);
+    const base = 0.055 * fade(y, 0.7);
+    const corner = 0.025 * fade(Math.min(x - start, end - x), 0.7);
+    let entrance = 0;
+    for (const opening of openings) {
+        if (opening.bottom > 0.15 || opening.top < 1.4) continue;
+        const edge = Math.min(Math.abs(x - opening.start), Math.abs(x - opening.end));
+        entrance = Math.max(entrance, fade(edge, 0.75) * fade(y, 1.8));
+    }
+    return Math.max(0.85, 1 - base - corner - 0.045 * entrance);
 }
 
 function intersection(a, b) {

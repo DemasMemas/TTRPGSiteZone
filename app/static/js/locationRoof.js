@@ -122,7 +122,7 @@ export function roofVisibleForCamera(plan, target, cameraDistance, enabled, edit
     return Math.hypot(edgeX, edgeZ, height) >= Math.max(5, Math.max(plan.width, plan.depth) * 0.85);
 }
 
-export function applyInteriorFloorShade(material, width, depth) {
+export function applyInteriorFloorShade(material, width, depth, entrance = null) {
     const previousCompile = material.onBeforeCompile;
     const previousKey = material.customProgramCacheKey?.bind(material);
     const intensity = { value: 0 };
@@ -132,6 +132,8 @@ export function applyInteriorFloorShade(material, width, depth) {
         previousCompile?.(shader);
         shader.uniforms.interiorShadeIntensity = intensity;
         shader.uniforms.interiorFloorHalfSize = { value: [width / 2, depth / 2] };
+        shader.uniforms.interiorEntrance = { value: entrance || [0, 0] };
+        shader.uniforms.interiorEntranceEnabled = { value: entrance ? 1 : 0 };
         shader.vertexShader = shader.vertexShader
             .replace('#include <common>', '#include <common>\nvarying vec2 vInteriorFloorXZ;')
             .replace('#include <project_vertex>', 'vInteriorFloorXZ = position.xz;\n#include <project_vertex>');
@@ -140,12 +142,20 @@ export function applyInteriorFloorShade(material, width, depth) {
                 varying vec2 vInteriorFloorXZ;
                 uniform float interiorShadeIntensity;
                 uniform vec2 interiorFloorHalfSize;
+                uniform vec2 interiorEntrance;
+                uniform float interiorEntranceEnabled;
             `)
             .replace('#include <color_fragment>', `#include <color_fragment>
                 float interiorWallDistance = min(interiorFloorHalfSize.x - abs(vInteriorFloorXZ.x),
                     interiorFloorHalfSize.y - abs(vInteriorFloorXZ.y));
                 float interiorOcclusion = 0.12 + 0.14
                     * (1.0 - smoothstep(0.0, 1.15, interiorWallDistance));
+                vec2 interiorEdge = 1.0 - smoothstep(vec2(0.0), vec2(0.8),
+                    interiorFloorHalfSize - abs(vInteriorFloorXZ));
+                interiorOcclusion += 0.035 * interiorEdge.x * interiorEdge.y;
+                vec2 entranceDelta = vInteriorFloorXZ - interiorEntrance;
+                interiorOcclusion += interiorEntranceEnabled * 0.045
+                    * (1.0 - smoothstep(0.05, 1.6, dot(entranceDelta, entranceDelta)));
                 diffuseColor.rgb *= 1.0 - interiorShadeIntensity * interiorOcclusion;
             `);
     };

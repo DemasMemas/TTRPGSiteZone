@@ -117,15 +117,19 @@ test('small and large roofs cut away at comparable framing, and enclosed floors 
         shader.vertexShader = shader.vertexShader.replace('#include <project_vertex>',
             '// surface pattern\n#include <project_vertex>');
     } };
-    applyInteriorFloorShade(material, 6, 5);
+    applyInteriorFloorShade(material, 6, 5, [1.5, -2]);
     const shader = { uniforms: {}, vertexShader: '#include <common>\n#include <project_vertex>',
         fragmentShader: '#include <common>\n#include <color_fragment>' };
     material.onBeforeCompile(shader);
     assert.deepEqual(shader.uniforms.interiorFloorHalfSize.value, [3, 2.5]);
     assert.equal(shader.uniforms.interiorShadeIntensity, material.userData.interiorShade);
+    assert.deepEqual(shader.uniforms.interiorEntrance.value, [1.5, -2]);
+    assert.equal(shader.uniforms.interiorEntranceEnabled.value, 1);
     assert.match(shader.vertexShader, /vInteriorFloorXZ = position\.xz/);
     assert.match(shader.fragmentShader, /interiorWallDistance/);
     assert.match(shader.fragmentShader, /smoothstep/);
+    assert.match(shader.fragmentShader, /0\.035 \* interiorEdge\.x \* interiorEdge\.y/);
+    assert.match(shader.fragmentShader, /interiorEntranceEnabled \* 0\.045/);
     assert.match(sceneSource, /enclosedFloors\.has\(object\.userData\.locationObjectId\)/);
     assert.match(sceneSource, /const FLOOR_SURFACE_OFFSET = 0\.035/);
     assert.match(sceneSource, /height - FLOOR_SURFACE_OFFSET/);
