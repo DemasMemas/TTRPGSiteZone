@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>D.5.2 | Grass Medium 01 и 02 одного размера</title>
+    <script type="importmap">
+        {"imports":{"three":"https://unpkg.com/three@0.128.0/build/three.module.js"}}
+    </script>
+    <style>
+        :root { font-family: Georgia, serif; color: #e9e6d8; background: #262c27; }
+        * { box-sizing: border-box; }
+        body { margin: 0; height: 100vh; overflow: hidden; display: grid; grid-template-columns: 322px minmax(0, 1fr); }
+        aside { min-height: 0; padding: 22px; border-right: 1px solid #59614f; background: #262c27; overflow-y: auto; }
+        main { position: relative; min-height: 0; overflow: hidden; background: #777d74; }
+        h1 { margin: 0 0 10px; font-size: 30px; font-weight: normal; line-height: 1.08; }
+        h2 { margin: 22px 0 9px; color: #bfb58a; font: 12px Georgia, serif; letter-spacing: .16em; text-transform: uppercase; }
+        p { margin: 0 0 12px; font-size: 14px; line-height: 1.45; color: #c8cdbf; }
+        button { display: block; width: 100%; margin: 6px 0; padding: 9px 11px; color: #eee9d9; background: #39433a; border: 1px solid #6b755f; border-radius: 4px; text-align: left; font: 14px Georgia, serif; cursor: pointer; }
+        button[aria-pressed="true"] { background: #5d694e; border-color: #cbbd8d; }
+        #view { position: absolute; inset: 0; touch-action: none; }
+        #view canvas { display: block; }
+        #readout { margin: 17px 0 12px; padding: 10px; background: #171d18; border: 1px solid #4c594c; color: #d4dbd0; font: 12px/1.45 Consolas, monospace; }
+        table { width: 100%; border-collapse: collapse; font: 11px/1.4 Consolas, monospace; }
+        th, td { padding: 6px 2px; border-bottom: 1px solid #4c5749; text-align: right; }
+        th:first-child, td:first-child { text-align: left; }
+        .hint { position: absolute; right: 14px; bottom: 14px; padding: 7px 10px; background: #1b211ccc; font: 12px Georgia, serif; pointer-events: none; }
+        @media (max-width: 720px) { body { height: auto; min-height: 100vh; overflow: auto; grid-template-columns: 1fr; grid-template-rows: auto minmax(60vh, 1fr); } aside { padding: 14px; } main { min-height: 65vh; } button { display: inline-block; width: auto; } h2 { margin-top: 15px; } }
+    </style>
+</head>
+<body>
+    <aside>
+        <h1>Два кандидата травы</h1>
+        <p>Три участка по 4×4 м с одинаковыми грунтом и светом. B и C используют одни и те же 103 корня из распределения D.4.3, высоту 17–19 см и средний диаметр около 34 см. Грунт переключается сразу для всех участков.</p>
+        <h2>Сравнение</h2>
+        <button data-focus="all" aria-pressed="true">Все три участка рядом</button>
+        <button data-focus="reduced" aria-pressed="false">A · D.4.3 Reduced Weed</button>
+        <button data-focus="medium01" aria-pressed="false">B · Grass Medium 01</button>
+        <button data-focus="medium02" aria-pressed="false">C · Grass Medium 02</button>
+        <h2>Грунт</h2>
+        <button data-ground="original" aria-pressed="true">Исходный PBR-грунт</button>
+        <button data-ground="tuned" aria-pressed="false">Forest Ground 01 · подстилка CC0</button>
+        <h2>Ракурс</h2>
+        <button data-angle="top" aria-pressed="false">Строго сверху</button>
+        <button data-angle="game" aria-pressed="true">Игровой угол</button>
+        <button data-angle="middle" aria-pressed="false">Низкий угол</button>
+        <button data-distance="middle">Средняя дистанция</button>
+        <button data-distance="close">Осмотреть основания</button>
+        <div id="readout">Загрузка реальных моделей и исходных карт...</div>
+        <table aria-label="Стоимость вариантов">
+            <thead><tr><th>Участок</th><th>Пучков</th><th>Треуг.</th><th>Выз. травы</th></tr></thead>
+            <tbody id="variant-stats"></tbody>
+        </table>
+    </aside>
+    <main>
+        <div id="view"></div>
+        <div class="hint">Перетаскивание: поворот · колесо: масштаб</div>
+    </main>
+    <script>
+        if (location.protocol === 'file:') {
+            document.getElementById('readout').textContent = 'Откройте через сервер: /static/vegetation-natural-comparison.html';
+        } else {
+            const script = document.createElement('script');
+            script.type = 'module';
+            script.src = '/static/js/vegetationNaturalComparison.js';
+            script.onerror = () => { document.getElementById('readout').textContent = 'Не загрузился модуль сцены. Проверьте сервер и доступ к unpkg.com.'; };
+            document.body.appendChild(script);
+        }
+    </script>
+</body>
+</html>
