@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Предпросмотр ассетов | Периметр</title>
+    <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.128.0/build/three.module.js"}}</script>
+    <style>
+        :root { font-family: Georgia, serif; color: #e9e5d4; background: #1b211f; }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; }
+        #view { position: fixed; inset: 0; }
+        #view canvas { display: block; }
+        aside { position: relative; z-index: 1; width: min(360px, calc(100vw - 24px)); margin: 12px; padding: 18px; border: 1px solid #737e6a; border-radius: 10px; background: #1c2827ec; box-shadow: 0 14px 40px #0008; }
+        h1 { margin: 0 0 8px; font-size: 24px; }
+        p { margin: 0 0 15px; line-height: 1.4; color: #c7cbbb; }
+        label { display: block; margin: 12px 0 5px; font-size: 14px; }
+        select { width: 100%; padding: 9px; color: #fff; background: #2a3a34; border: 1px solid #808d77; border-radius: 5px; font: inherit; }
+        input[type="checkbox"] { accent-color: #b5d6aa; }
+        #readout { margin-top: 15px; white-space: pre-wrap; font: 12px/1.5 Consolas, monospace; }
+        a { color: #b5d6aa; }
+        @media (max-width: 600px) { aside { max-height: 45vh; overflow: auto; } }
+    </style>
+</head>
+<body>
+    <div id="view"></div>
+    <aside>
+        <h1>Библиотека ассетов</h1>
+        <p>Нейтральный свет, орбита мышью. PBR-плоскость показывает 3×3 повтора без наложения геометрии.</p>
+        <label for="asset">Ассет</label><select id="asset"></select>
+        <label for="copies" id="copies-label">Экземпляров модели</label><select id="copies"><option>1</option><option>16</option><option>64</option></select>
+        <label><input type="checkbox" id="diagnostic"> Границы, оси и масштаб 1 м</label>
+        <div id="readout">Загрузка...</div>
+        <a id="source" target="_blank" rel="noopener noreferrer">Оригинал и лицензия CC0</a>
+    </aside>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
+        import { IMPORTED_LOCATION_ASSETS } from './js/locationImportedAssets.js';
+        import { mountLocationModel } from './js/locationModelAssets.js';
+        import { applyLocationPbrMaterial } from './js/locationPbrMaterials.js';
+
+        const params = new URLSearchParams(location.search);
+        const asset = IMPORTED_LOCATION_ASSETS.find(item => item.id === params.get('asset')) || IMPORTED_LOCATION_ASSETS[0];
+        const copies = [1, 16, 64].includes(Number(params.get('copies'))) ? Number(params.get('copies')) : 1;
+        const select = document.getElementById('asset');
+        for (const item of IMPORTED_LOCATION_ASSETS) {
+            const option = document.createElement('option');
+            option.value = item.id;
+            option.textContent = item.label;
+            option.selected = item.id === asset.id;
+            select.appendChild(option);
+        }
+        document.getElementById('copies').value = String(copies);
+        document.getElementById('copies').disabled = asset.visual.renderMode !== 'glb';
+        document.getElementById('copies-label').hidden = asset.visual.renderMode !== 'glb';
+        const update = () => { location.search = `?asset=${encodeURIComponent(select.value)}&copies=${document.getElementById('copies').value}`; };
+        select.addEventListener('change', update);
+        document.getElementById('copies').addEventListener('change', update);
+        const sourceLink = document.getElementById('source');
+        if (asset.visual.source) sourceLink.href = asset.visual.source;
+        else {
+            sourceLink.removeAttribute('href');
+            sourceLink.textContent = 'Локальный ассет: проверьте лицензию перед публикацией';
+        }
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.setClearColor(0x707777);
+        document.getElementById('view').appendChild(renderer.domElement);
+        const scene = new THREE.Scene();
+        const envFaces = Array.from({ length: 6 }, () => {
+            const face = document.createElement('canvas');
+            face.width = face.height = 16;
+            face.getContext('2d').fillStyle = '#909090';
+            face.getContext('2d').fillRect(0, 0, 16, 16);
+            return face;
+        });
+        const environment = new THREE.CubeTexture(envFaces);
+        environment.encoding = THREE.sRGBEncoding;
+        environment.needsUpdate = true;
+        scene.environment = environment;
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x777777, 1.1));
+        const key = new THREE.DirectionalLight(0xffffff, 1.35);
+        key.position.set(6, 10, 6);
+        key.castShadow = true;
+        key.shadow.mapSize.set(1024, 1024);
+        scene.add(key);
+        const fill = new THREE.DirectionalLight(0xffffff, 0.45);
+        fill.position.set(-5, 5, -5);
+        scene.add(fill);
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.MeshStandardMaterial({ color: 0x4b554e, roughness: 1 }));
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+        const camera = new THREE.PerspectiveCamera(50, 1, 0.3, 100);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        const isModel = asset.visual.renderMode === 'glb';
+        const count = isModel ? Math.ceil(Math.sqrt(copies)) : 1;
+        const stepX = asset.dimensions[0] + 0.5;
+        const stepZ = asset.dimensions[1] + 0.5;
+        const span = isModel ? (count - 1) * Math.max(stepX, stepZ) : 6;
+        camera.position.set(span + 3.5, span * 0.65 + 3, span + 4.5);
+        controls.target.set(0, isModel ? asset.dimensions[2] / 2 : 1, 0);
+        controls.update();
+        const diagnostics = new THREE.Group();
+        diagnostics.visible = false;
+        scene.add(diagnostics);
+        diagnostics.add(new THREE.AxesHelper(1));
+        const grid = new THREE.GridHelper(10, 10, 0xe1d391, 0x939f9a);
+        grid.position.y = 0.012;
+        diagnostics.add(grid);
+        const diagnosticToggle = document.getElementById('diagnostic');
+        diagnosticToggle.addEventListener('change', () => { diagnostics.visible = diagnosticToggle.checked; });
+        const readout = document.getElementById('readout');
+        const start = performance.now();
+        let loaded = 0;
+        let loadMs = null;
+        let firstRenderMs = null;
+        let sourceStats = null;
+        if (asset.visual.renderMode === 'glb') {
+            fetch(`/static/models/art/${asset.id}.json`).then(response => response.json()).then(data => { sourceStats = data; });
+        }
+        const displayedCopies = isModel ? copies : 1;
+        for (let index = 0; index < displayedCopies; index++) {
+            const holder = new THREE.Group();
+            holder.position.set((index % count - (count - 1) / 2) * stepX, 0,
+                (Math.floor(index / count) - (count - 1) / 2) * stepZ);
+            scene.add(holder);
+            if (isModel) {
+                const [width, depth, height] = asset.dimensions;
+                mountLocationModel(holder, asset, { width, depth, height }, model => {
+                    model.traverse(child => { if (child.isMesh) { child.castShadow = !child.userData.importedNoShadow; child.receiveShadow = true; } });
+                    holder.add(model);
+                    const bounds = new THREE.Box3().setFromObject(model);
+                    const outline = new THREE.Box3Helper(bounds, 0xf4cf66);
+                    diagnostics.add(outline);
+                    loaded++;
+                    if (loaded === displayedCopies) loadMs = Math.round(performance.now() - start);
+                }, error => { readout.textContent = `Ошибка GLB: ${error.message}`; });
+            } else {
+                const isFloor = asset.baseType === 'floor';
+                const mesh = new THREE.Mesh(isFloor
+                    ? new THREE.BoxGeometry(6, 0.12, 6)
+                    : new THREE.BoxGeometry(6, 6, 0.16),
+                    new THREE.MeshStandardMaterial({ roughness: 1, metalness: 1 }));
+                const uv = mesh.geometry.attributes.uv;
+                for (let point = 0; point < uv.count; point++) uv.setXY(point, uv.getX(point) * 3, uv.getY(point) * 3);
+                uv.needsUpdate = true;
+                mesh.geometry.setAttribute('uv2', uv.clone());
+                mesh.position.y = isFloor ? 0.08 : 3;
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                applyLocationPbrMaterial(mesh.material, asset.visual.maps);
+                holder.add(mesh);
+                const edgePoints = [];
+                for (const position of [-1, 1]) {
+                    if (isFloor) edgePoints.push(-3, 0.145, position, 3, 0.145, position,
+                        position, 0.145, -3, position, 0.145, 3);
+                    else edgePoints.push(position, 0, 0.083, position, 6, 0.083,
+                        -3, position + 3, 0.083, 3, position + 3, 0.083);
+                }
+                const lines = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(
+                    Array.from({ length: edgePoints.length / 3 }, (_, i) =>
+                        new THREE.Vector3(...edgePoints.slice(i * 3, i * 3 + 3)))),
+                    new THREE.LineBasicMaterial({ color: 0xe6d481 }));
+                diagnostics.add(lines);
+                loaded++;
+                loadMs = Math.round(performance.now() - start);
+            }
+        }
+        function resize() {
+            renderer.setSize(innerWidth, innerHeight);
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+        }
+        addEventListener('resize', resize);
+        resize();
+        function frame() {
+            requestAnimationFrame(frame);
+            controls.update();
+            renderer.render(scene, camera);
+            if (loaded === displayedCopies && firstRenderMs === null) firstRenderMs = Math.round(performance.now() - start);
+            readout.textContent = `${loaded}/${displayedCopies} экземпляров\n`
+                + `Первое создание: ${loadMs ?? '-'} мс; первый кадр: ${firstRenderMs ?? '-'} мс\n`
+                + `${renderer.info.render.calls} draw calls; ${renderer.info.render.triangles} треугольников\n`
+                + `${renderer.info.memory.geometries} геометрий; ${renderer.info.memory.textures} GPU-текстур\n`
+                + (isModel ? `Габарит: ${asset.dimensions.join(' × ')} м; угол: ${asset.visual.orientation || 0} рад\n` : 'Повтор: 3 × 3 на одной поверхности; OPAQUE, RGB=AO/Rough/Metal\n')
+                + (asset.artStatus ? 'Художественный статус: тестовый, не финальный\n' : '')
+                + (sourceStats ? `GLB: ${Math.round(sourceStats.bytes / 1024)} КБ; ${sourceStats.materials} материал(ов); ${sourceStats.triangles} треугольников/экземпляр` : '');
+        }
+        frame();
+    </script>
+</body>
+</html>

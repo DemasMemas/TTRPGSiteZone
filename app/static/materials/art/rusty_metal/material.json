@@ -1,0 +1,13 @@
+{
+  "id": "rusty_metal",
+  "type": "material",
+  "label": "Окрашенный ржавый металл (PBR)",
+  "sourceUrl": "https://polyhaven.com/a/rusty_metal_sheet",
+  "license": "CC0",
+  "maps": {
+    "color": "/static/materials/art/rusty_metal/color.jpg",
+    "normal": "/static/materials/art/rusty_metal/normal.jpg",
+    "arm": "/static/materials/art/rusty_metal/arm.jpg"
+  },
+  "sha256": "f4936fed1a3ba189c2bb57e19a8d1642a041e9805bdd8e2b889c72cb3b8d868b"
+}

@@ -1,0 +1,13 @@
+{
+  "id": "worn_plaster",
+  "type": "material",
+  "label": "Выцветшая штукатурка (PBR)",
+  "sourceUrl": "https://polyhaven.com/a/concrete_wall_003",
+  "license": "CC0",
+  "maps": {
+    "color": "/static/materials/art/worn_plaster/color.jpg",
+    "normal": "/static/materials/art/worn_plaster/normal.jpg",
+    "arm": "/static/materials/art/worn_plaster/arm.jpg"
+  },
+  "sha256": "4a7527d169c14863cad74dc68100b360a9cd8a9457b3800f829a9511edbe404b"
+}

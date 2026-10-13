@@ -3,6 +3,9 @@ import { createGrassDetailGroup } from './locationGrassDetail.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { MAX_ANOMALY_RENDER_LIGHTS } from './locationAnomalyRenderLights.js';
 import { ALL_MUTANT_TYPES, MODELED_MUTANT_TYPES, createMutantModel } from './mutantModels.js';
+import { findLocationAsset } from './locationAssetCatalog.js';
+import { mountLocationModel } from './locationModelAssets.js';
+import { createCrateModel, createFenceModel } from './locationSimpleModels.js';
 
 const view = document.getElementById('view');
 const scenarioSelect = document.getElementById('scenario');
@@ -33,7 +36,16 @@ const grass = new THREE.Group();
 const localAnomalies = new THREE.Group();
 const worldAnomalies = new THREE.Group();
 const mutants = new THREE.Group();
-scene.add(localTerrain, worldTerrain, grass, localAnomalies, worldAnomalies, mutants);
+const assetProcedural = new THREE.Group();
+const assetTest = new THREE.Group();
+const assetArt = new THREE.Group();
+const assetGroups = { 'asset-procedural': assetProcedural, 'asset-test-glb': assetTest, 'asset-art-glb': assetArt };
+const assetLoads = { 'asset-procedural': { done: 24, errors: 0, ms: 0 },
+    'asset-test-glb': { done: 0, errors: 0, ms: null },
+    'asset-art-glb': { done: 0, errors: 0, ms: null } };
+const builtAssetGroups = new Set();
+scene.add(localTerrain, worldTerrain, grass, localAnomalies, worldAnomalies, mutants,
+    assetProcedural, assetTest, assetArt);
 const anomalyRoots = { local: [], world: [] };
 const dummy = new THREE.Object3D();
 
@@ -71,6 +83,44 @@ function fallbackMutant() {
     head.castShadow = true;
     group.add(head);
     return group;
+}
+
+function addAssetComparison(key) {
+    if (builtAssetGroups.has(key)) return;
+    builtAssetGroups.add(key);
+    const started = performance.now();
+    const artIds = ['art_rusty_barrel', 'art_wooden_crate', 'art_chainlink_fence'];
+    for (let index = 0; index < 24; index++) {
+        const type = index % 3;
+        const x = 15 + (index % 8) * 2.5;
+        const z = 18 + Math.floor(index / 8) * 3;
+        if (key === 'asset-procedural') {
+            const procedural = type === 0
+                ? new THREE.Mesh(new THREE.CylinderGeometry(0.33, 0.33, 0.9, 16),
+                    new THREE.MeshStandardMaterial({ color: 0x86654b, roughness: 0.9 }))
+                : type === 1 ? createCrateModel(THREE, 0.8, 0.7, 0.8, '#8b6b4f', false)
+                    : createFenceModel(THREE, 2, 1.2, 0.15, '#8b7458');
+            procedural.position.set(x, type === 0 ? 0.45 : 0, z);
+            assetProcedural.add(procedural);
+            continue;
+        }
+        const id = key === 'asset-test-glb' ? 'box' : artIds[type];
+        const asset = findLocationAsset(id);
+        const holder = new THREE.Group();
+        holder.position.set(x, 0, z);
+        assetGroups[key].add(holder);
+        const [width, depth, height] = asset.dimensions;
+        mountLocationModel(holder, asset, { width, depth, height }, model => {
+            holder.add(model);
+            assetLoads[key].done++;
+            if (assetLoads[key].done === 24) assetLoads[key].ms = Math.round(performance.now() - started);
+        }, error => {
+            assetLoads[key].done++;
+            assetLoads[key].errors++;
+            console.warn(`Benchmark asset ${id} failed`, error);
+            if (assetLoads[key].done === 24) assetLoads[key].ms = Math.round(performance.now() - started);
+        });
+    }
 }
 
 function buildScene() {
@@ -125,6 +175,7 @@ function buildScene() {
 }
 
 function setScenario(id) {
+    if (assetGroups[id]) addAssetComparison(id);
     const world = id.startsWith('world-');
     localTerrain.visible = !world;
     worldTerrain.visible = world;
@@ -132,6 +183,7 @@ function setScenario(id) {
     localAnomalies.visible = id === 'local-anomalies' || id === 'local-all';
     worldAnomalies.visible = id === 'world-anomalies';
     mutants.visible = id === 'local-mutants' || id === 'local-all';
+    for (const [key, group] of Object.entries(assetGroups)) group.visible = id === key;
     return world;
 }
 
@@ -154,6 +206,17 @@ function finishMeasurement() {
         p95Ms: Number(percentile(frames, 0.95).toFixed(1)),
         drawCalls: Math.round(measurement.calls / Math.max(1, frames.length)),
         triangles: Math.round(measurement.triangles / Math.max(1, frames.length)),
+        materials: (() => {
+            const values = new Set();
+            assetGroups[measurement.scenario]?.traverse(child => {
+                if (child.isMesh) for (const material of Array.isArray(child.material) ? child.material : [child.material]) values.add(material);
+            });
+            return values.size;
+        })(),
+        gpuGeometries: renderer.info.memory.geometries,
+        gpuTextures: renderer.info.memory.textures,
+        initialLoadMs: assetLoads[measurement.scenario]?.ms ?? null,
+        loadErrors: assetLoads[measurement.scenario]?.errors ?? 0,
     };
     const item = document.createElement('li');
     item.textContent = `${row.scenario}: ${row.fps} FPS, p95 ${row.p95Ms} мс, ${row.drawCalls} calls`;
@@ -222,6 +285,9 @@ function frame(now) {
     renderer.render(scene, camera);
     const ms = lastFrame ? now - lastFrame : 0;
     lastFrame = now;
+    if (measurement && assetLoads[measurement.scenario]?.done < 24) {
+        measurement.warmupUntil = now + 2000;
+    }
     if (measurement && now >= measurement.warmupUntil) {
         if (!measurement.started) measurement.started = now;
         if (ms > 0 && ms < 1000) {
@@ -237,6 +303,7 @@ function frame(now) {
             + `${renderer.info.render.calls} draw calls  |  ${renderer.info.render.triangles} треугольников\n`
             + `${grass.children[0]?.userData.detailCounts?.tufts || 0} пучков травы в тесте\n`
             + `${renderer.getPixelRatio()}x, ${renderer.domElement.width}×${renderer.domElement.height}`
+            + (assetLoads[scenarioSelect.value] ? `\nАссеты: ${assetLoads[scenarioSelect.value].done}/24, ошибок: ${assetLoads[scenarioSelect.value].errors}` : '')
             + (measurement ? '\nИзмерение: 2 с прогрев + 10 с сбор...' : '');
     }
 }

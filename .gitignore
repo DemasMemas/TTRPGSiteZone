@@ -37,3 +37,6 @@ Thumbs.db
 *.bak
 *.swp
 tmp_write_test.txt
+# Local asset-import dependencies are build tools, not browser dependencies.
+scripts/asset_import/node_modules/
+scripts/asset_import/import-state.json

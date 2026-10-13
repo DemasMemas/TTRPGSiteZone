@@ -1,0 +1,24 @@
+{
+  "id": "art_wooden_crate",
+  "type": "model",
+  "sourceUrl": "https://polyhaven.com/a/wooden_crate_02",
+  "license": "CC0",
+  "sourceFile": "assets/sources/polyhaven/wooden_crate_02/1k/wooden_crate_02_1k.gltf",
+  "output": "/static/models/art/art_wooden_crate.glb",
+  "bytes": 2234632,
+  "sha256": "28196d8dfd41b03b31dbdc833a461526db04f49e1b5763d9c93d7f8b1a1655f0",
+  "meshes": 2,
+  "primitives": 2,
+  "triangles": 5176,
+  "materials": 1,
+  "textures": 3,
+  "extensionsRequired": [],
+  "orientation": 0,
+  "pivot": "bottom-center",
+  "groundClearance": 0.008,
+  "dimensions": [
+    0.8,
+    0.8,
+    0.7
+  ]
+}

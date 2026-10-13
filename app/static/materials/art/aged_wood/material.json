@@ -1,0 +1,13 @@
+{
+  "id": "aged_wood",
+  "type": "material",
+  "label": "Состаренное дерево (PBR)",
+  "sourceUrl": "https://polyhaven.com/a/wood_planks_dirt",
+  "license": "CC0",
+  "maps": {
+    "color": "/static/materials/art/aged_wood/color.jpg",
+    "normal": "/static/materials/art/aged_wood/normal.jpg",
+    "arm": "/static/materials/art/aged_wood/arm.jpg"
+  },
+  "sha256": "20e542958f57ca8ed298fadd71aeffb675fad435c1820d0979d8079c7884a867"
+}

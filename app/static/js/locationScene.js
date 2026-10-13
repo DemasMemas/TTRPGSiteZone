@@ -24,6 +24,11 @@ import {
 } from './locationTerrain.js';
 import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting } from './locationLighting.js';
 import { findLocationAsset } from './locationAssetCatalog.js';
+import { placementForLocationAsset, visualAssetForLocationObject } from './locationAssetVariants.js';
+import {
+    alignLocationPbrFloorUvs, applyLocationPbrMaterial, releaseLocationPbrMaterial,
+    tileLocationPbrBoxUvs,
+} from './locationPbrMaterials.js';
 import {
     bearingFromDelta, bearingToObjectRotation, clampAssetElevation, objectRotationToBearing,
     rotatePointAround,
@@ -39,6 +44,9 @@ import { createGrassDetailGroup } from './locationGrassDetail.js';
 import { buildRoundedWaterData, classifyWaterRegions, waterLevelForTile } from './locationWaterEdge.js';
 import { createWaterDetailGroup } from './locationWaterDetail.js';
 import { createCrateModel, createFenceModel, createShelfModel, createTentModel } from './locationSimpleModels.js';
+import {
+    clearUnusedLocationModels, isSharedLocationModelGeometry, mountLocationModel, releaseLocationModel,
+} from './locationModelAssets.js';
 import { animateFireObjectModels, createFireObjectModel, fireLightSource, getFireLightSources, isFireObject } from './locationFire.js';
 import { createElectricFixtureModel, electricFixtureLightSource, isElectricFixture } from './locationFixtures.js';
 import { getAnomalyLightSources } from './locationAnomalyLight.js';
@@ -553,12 +561,14 @@ function getTileHeight(tileX, tileZ) {
 
 function disposeObject(obj) {
     if (!obj) return;
+    releaseLocationModel(obj);
     if (obj.isLight && obj.shadow?.map) obj.shadow.map.dispose();
-    if (obj.geometry) obj.geometry.dispose();
+    if (obj.geometry && !isSharedLocationModelGeometry(obj.geometry)) obj.geometry.dispose();
     if (obj.material) {
         if (Array.isArray(obj.material)) {
-            obj.material.forEach(mat => mat.dispose());
+            obj.material.forEach(mat => { releaseLocationPbrMaterial(mat); mat.dispose(); });
         } else {
+            releaseLocationPbrMaterial(obj.material);
             obj.material.dispose();
         }
     }
@@ -9244,11 +9254,7 @@ function showObjectContextMenu(clientX, clientY, object) {
 }
 
 function disposeLocationObject(mesh) {
-    mesh.traverse(child => {
-        if (child.isLight && child.shadow?.map) child.shadow.map.dispose();
-        if (child.geometry) child.geometry.dispose();
-        if (child.material) child.material.dispose();
-    });
+    disposeObject(mesh);
 }
 
 function getStructureDimensions(preset = structurePreset) {
@@ -9267,20 +9273,27 @@ function getStructureDimensions(preset = structurePreset) {
 
 const FLOOR_SURFACE_OFFSET = 0.035;
 
-function createLocationObjectMesh(obj) {
+function createLocationObjectMesh(obj, forPreview = false) {
     const properties = obj.properties || {};
+    const asset = visualAssetForLocationObject(obj.type, properties);
     const floorPose = obj.type === 'floor' ? floorVisualPose(obj, currentLocationData?.objects) : null;
     const dimensions = properties.dimensions || floorPose
         || (isFireObject(obj) ? baseAssetDimensions(obj.type, 'structure') : getStructureDimensions(obj.type));
     const width = floorPose?.width || dimensions.width || 1;
     const depth = floorPose?.depth || dimensions.depth || 1;
     const height = dimensions.height || 1;
-    const material = new THREE.MeshStandardMaterial({ color: properties.color || '#aa8866', roughness: 0.93 });
-    if (['wall', 'floor'].includes(obj.type)) {
+    const hasSeparateMaterials = ['fence', 'window', 'box', 'military_crate', 'shelf', 'ground_item'].includes(obj.type)
+        || properties.is_ground_item || isFireObject(obj) || isElectricFixture(obj);
+    const material = hasSeparateMaterials ? null
+        : new THREE.MeshStandardMaterial({ color: properties.color || '#aa8866', roughness: 0.93 });
+    if (['wall', 'floor'].includes(obj.type) && asset?.visual?.renderMode !== 'pbr') {
         applySurfacePattern(material, getSurfaceTexture(THREE, obj.type),
             obj.type === 'floor' ? 0.32 : 0.25, obj.type === 'floor' ? 'top' : 'sides');
     }
     if (obj.type === 'floor') applyInteriorFloorShade(material, width, depth);
+    if (asset?.visual?.renderMode === 'pbr' && material) {
+        applyLocationPbrMaterial(material, asset.visual.maps);
+    }
     const group = new THREE.Group();
     let main;
 
@@ -9294,6 +9307,9 @@ function createLocationObjectMesh(obj) {
                 new THREE.BoxGeometry(span.end - span.start, span.top - span.bottom, depth),
                 material,
             );
+            if (asset?.visual?.renderMode === 'pbr') {
+                tileLocationPbrBoxUvs(piece.geometry, span.end - span.start, span.top - span.bottom, depth);
+            }
             piece.position.set((span.start + span.end) / 2, (span.bottom + span.top) / 2, 0);
             group.add(piece);
         }
@@ -9418,6 +9434,14 @@ function createLocationObjectMesh(obj) {
         main.position.y = height / 2;
         group.add(main);
     }
+    if (obj.type === 'floor' && asset?.visual?.renderMode === 'pbr') {
+        group.traverse(child => {
+            if (child.isMesh && child.geometry?.attributes?.uv) {
+                const size = child.geometry.parameters;
+                tileLocationPbrBoxUvs(child.geometry, size.width, size.height, size.depth);
+            }
+        });
+    }
 
     const objectPosition = getObjectGridPosition(obj);
     const tileX = objectPosition.x ?? 0;
@@ -9430,6 +9454,12 @@ function createLocationObjectMesh(obj) {
         group.position.y += 0.04;
     }
     group.rotation.y = properties.rotation || 0;
+    if (obj.type === 'floor' && asset?.visual?.renderMode === 'pbr') {
+        group.updateMatrixWorld(true);
+        group.traverse(child => {
+            if (child.isMesh) alignLocationPbrFloorUvs(child.geometry, child);
+        });
+    }
     group.traverse(child => {
         if (!child.isMesh) return;
         child.castShadow = obj.type !== 'floor' && !child.userData.fireFlame;
@@ -9437,6 +9467,30 @@ function createLocationObjectMesh(obj) {
     });
     group.userData = { ...group.userData, locationObjectId: obj.id, locationObject: obj };
     if (properties.gm_hidden && window.isGM) makeGmHiddenGhost(group);
+    const customColor = properties.color && String(properties.color).toLowerCase() !== asset?.color?.toLowerCase();
+    if (asset?.visual?.renderMode === 'glb' && !customColor) {
+        const fallback = [...group.children];
+        mountLocationModel(group, asset, { width, depth, height }, model => {
+            fallback.forEach(child => {
+                group.remove(child);
+                disposeObject(child);
+            });
+            model.traverse(child => {
+                if (!child.isMesh) return;
+                child.castShadow = !forPreview && !child.userData.importedNoShadow;
+                child.receiveShadow = !forPreview;
+            });
+            group.add(model);
+            if (forPreview) fadeEditorPreview(model);
+            if (properties.gm_hidden && window.isGM) makeGmHiddenGhost(model);
+            else if (!forPreview) tintLocationMesh(model, darknessFactorAt(group.position.x, group.position.z));
+        }, error => {
+            group.userData.assetLoadError = true;
+            if (!forPreview) {
+                console.warn(`Unable to load location model ${asset.visual.modelPath}; using procedural fallback`, error);
+            }
+        });
+    }
     return group;
 }
 
@@ -9929,7 +9983,7 @@ function createEditorGroupMovePreview() {
         if (!source) continue;
         let mesh;
         if (selection.kind === 'structure') {
-            mesh = createLocationObjectMesh(source);
+            mesh = createLocationObjectMesh(source, true);
         } else if (selection.kind === 'lamp') {
             mesh = createEditorLampPreview(source, false);
             mesh.position.set(Number(source.x),
@@ -10039,12 +10093,11 @@ function updateBuildPreview() {
     const editingSelection = editorMoveMode || editorRotateMode || editorResizeMode;
     const source = editingSelection ? getSelectedEditorSource() : selectedLocationAsset;
     const placingAsset = window.locationEditorTool === 'assets' && selectedLocationAsset;
-    const movableFirePreview = placingAsset && !editingSelection && source?.kind === 'structure'
-        && isObjectLightSource({ type: source.id });
+    const movableStructurePreview = placingAsset && !editingSelection && source?.kind === 'structure';
     const mountOffsetX = !editingSelection ? Math.sin(structureRotation) * Number(source?.offsetZ || 0) : 0;
     const mountOffsetZ = !editingSelection ? Math.cos(structureRotation) * Number(source?.offsetZ || 0) : 0;
-    const previewKey = [window.locationEditorTool, movableFirePreview ? 'fire' : x,
-        movableFirePreview ? 'preview' : z, editorMoveMode, editorRotateMode, editorRotateAngle,
+    const previewKey = [window.locationEditorTool, movableStructurePreview ? 'structure' : x,
+        movableStructurePreview ? 'preview' : z, editorMoveMode, editorRotateMode, editorRotateAngle,
         editorResizeMode, editorResizeAxis, JSON.stringify(editorResizeDimensions),
         editorMovePreviewPoint?.x?.toFixed(2), editorMovePreviewPoint?.z?.toFixed(2),
         source?.id || source?.type || source?.kind,
@@ -10054,7 +10107,7 @@ function updateBuildPreview() {
         JSON.stringify(source?.dimensions || source?.properties?.dimensions || null),
         structureWidth, structureDepth, structureHeight, structureColor, structureRotation].join(':');
     if (buildPreviewMesh && buildPreviewKey === previewKey) {
-        if (movableFirePreview) buildPreviewMesh.position.set(x + 0.5 + mountOffsetX,
+        if (movableStructurePreview) buildPreviewMesh.position.set(x + 0.5 + mountOffsetX,
             getTileHeight(x, z) + clampAssetElevation(source.elevation), z + 0.5 + mountOffsetZ);
         return;
     }
@@ -10072,7 +10125,7 @@ function updateBuildPreview() {
                         offset_x: editorMovePreviewPoint.x - x - 0.5,
                         offset_z: editorMovePreviewPoint.z - z - 0.5 },
                 } : source) : {
-                type: source.id, tile_x: x, tile_y: z,
+                type: placementForLocationAsset(source).type, tile_x: x, tile_y: z,
                 properties: {
                     dimensions: { width: structureWidth, depth: structureDepth, height: structureHeight },
                     color: structureColor,
@@ -10080,11 +10133,12 @@ function updateBuildPreview() {
                     offset_x: mountOffsetX,
                     offset_z: mountOffsetZ,
                     elevation: clampAssetElevation(source.elevation),
+                    ...(placementForLocationAsset(source).visualAsset ? { visual_asset: source.id } : {}),
                     ...(isFireObject({ type: source.id }) ? { is_lit: true } : {}),
                     ...(isElectricFixture({ type: source.id }) ? { is_on: true } : {}),
                 },
             };
-            buildPreviewMesh = createLocationObjectMesh(object);
+            buildPreviewMesh = createLocationObjectMesh(object, true);
         } else if (kind === 'lamp') {
             const lampPreview = editorResizeMode
                 ? { ...source, dimensions: editorResizeDimensions, intensity: 0 } : source;
@@ -10156,17 +10210,21 @@ function updateBuildPreview() {
 async function placeStructureAtTile(x, z) {
     if (!window.currentLobbyId || !currentLocationId) return;
     const dimensions = getStructureDimensions();
+    const placement = window.locationEditorTool === 'assets' && selectedLocationAsset?.id === structurePreset
+        ? placementForLocationAsset(selectedLocationAsset) : { type: structurePreset, visualAsset: null };
+    const placedType = placement.type;
     const selectedCoverClass = document.getElementById('loc-structure-cover-class')?.value || 'medium';
     const coverProfile = COVER_CLASS_DEFAULTS[selectedCoverClass] || COVER_CLASS_DEFAULTS.medium;
     try {
         const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, {
-            name: structurePreset,
-            type: structurePreset,
+            name: placedType,
+            type: placedType,
             tile_x: x,
             tile_y: z,
             properties: {
                 dimensions,
                 color: structureColor,
+                ...(placement.visualAsset ? { visual_asset: placement.visualAsset } : {}),
                 rotation: structureRotation,
                 offset_x: Math.sin(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
                 offset_z: Math.cos(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
@@ -10177,18 +10235,18 @@ async function placeStructureAtTile(x, z) {
                 cover_hp: coverProfile.maxHp,
                 cover_base_physical_protection: coverProfile.protection,
                 cover_physical_protection: coverProfile.protection,
-                weight_kg: THROWABLE_OBJECT_WEIGHTS[structurePreset],
-                interactions: objectInteractions[structurePreset] || [],
-                interaction_requirements: (objectInteractions[structurePreset] || []).reduce((rules, action) => {
+                weight_kg: THROWABLE_OBJECT_WEIGHTS[placedType],
+                interactions: objectInteractions[placedType] || [],
+                interaction_requirements: (objectInteractions[placedType] || []).reduce((rules, action) => {
                     rules[action] = interactionRequirements[action];
                     return rules;
                 }, {}),
-                contents: ['shelf', 'box', 'military_crate', 'chest'].includes(structurePreset) ? [] : undefined,
+                contents: ['shelf', 'box', 'military_crate', 'chest'].includes(placedType) ? [] : undefined,
                 is_open: false,
-                ...(isFireObject({ type: structurePreset }) ? { is_lit: true } : {}),
-                ...(isElectricFixture({ type: structurePreset }) ? { is_on: true } : {}),
-                passable: isObjectLightSource({ type: structurePreset }),
-                cover_enabled: !isObjectLightSource({ type: structurePreset }),
+                ...(isFireObject({ type: placedType }) ? { is_lit: true } : {}),
+                ...(isElectricFixture({ type: placedType }) ? { is_on: true } : {}),
+                passable: isObjectLightSource({ type: placedType }),
+                cover_enabled: !isObjectLightSource({ type: placedType }),
             }
         });
         addLocationObject(object);
@@ -11382,6 +11440,7 @@ export function loadLocation(data) {
         disposeObject(child);
         scene.remove(child);
     });
+    clearUnusedLocationModels();
     grassDetailGroup = null;
     clearAllCharacters();
 
@@ -13377,17 +13436,19 @@ export function setEditButtonVisible(visible) {
 
 function getLocationViewToggleGroup() {
     let group = document.getElementById('location-view-toggle-group');
-    if (group) return group;
-    group = document.createElement('div');
-    group.id = 'location-view-toggle-group';
+    if (!group) {
+        group = document.createElement('div');
+        group.id = 'location-view-toggle-group';
+        document.getElementById('location-container').appendChild(group);
+    }
     group.style.position = 'absolute';
     group.style.top = '20px';
-    group.style.right = '271px';
+    const exitWidth = document.getElementById('exit-location-btn')?.getBoundingClientRect().width || 129;
+    group.style.right = window.isGM ? '271px' : `${Math.ceil(exitWidth) + 28}px`;
     group.style.zIndex = '20';
     group.style.display = 'flex';
     group.style.alignItems = 'center';
     group.style.gap = '8px';
-    document.getElementById('location-container').appendChild(group);
     return group;
 }
 
@@ -13562,6 +13623,7 @@ export function destroyLocationScene() {
             disposeObject(obj);
             scene.remove(obj);
         });
+        clearUnusedLocationModels();
         tileCubes = [];
         locationTileMesh = null;
         waterTileMesh = null;

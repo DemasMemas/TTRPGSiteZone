@@ -1,0 +1,13 @@
+{
+  "id": "dirty_earth",
+  "type": "material",
+  "label": "Грязная земля (PBR)",
+  "sourceUrl": "https://polyhaven.com/a/dirt",
+  "license": "CC0",
+  "maps": {
+    "color": "/static/materials/art/dirty_earth/color.jpg",
+    "normal": "/static/materials/art/dirty_earth/normal.jpg",
+    "arm": "/static/materials/art/dirty_earth/arm.jpg"
+  },
+  "sha256": "a2580bdb98f721282cfe40937dc254522142e239ec80e1b6c0e30db502815584"
+}

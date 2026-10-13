@@ -1,0 +1,49 @@
+{
+  "models": [
+    {
+      "id": "art_rusty_barrel",
+      "label": "Ржавая бочка (Poly Haven)",
+      "baseType": "barrel",
+      "source": { "provider": "polyhaven", "id": "Barrel_01", "resolution": "1k" },
+      "dimensions": [0.65, 0.65, 0.9],
+      "orientation": 0,
+      "pivot": "bottom-center",
+      "groundClearance": 0.008
+    },
+    {
+      "id": "art_wooden_crate",
+      "label": "Старый деревянный ящик (тест, не финальный)",
+      "artStatus": "reference-only",
+      "baseType": "box",
+      "source": { "provider": "polyhaven", "id": "wooden_crate_02", "resolution": "1k" },
+      "dimensions": [0.8, 0.8, 0.7],
+      "orientation": 0,
+      "pivot": "bottom-center",
+      "groundClearance": 0.008
+    },
+    {
+      "id": "art_chainlink_fence",
+      "label": "Ржавый сетчатый забор (Poly Haven)",
+      "baseType": "fence",
+      "source": { "provider": "polyhaven", "id": "modular_chainlink_fence", "resolution": "1k" },
+      "keepNodes": ["modular_chainlink_fence_double"],
+      "nodeInstances": [
+        { "sourceNode": "modular_chainlink_fence_post", "name": "fence_post_left", "translation": [-2, 0, 0] },
+        { "sourceNode": "modular_chainlink_fence_post", "name": "fence_post_right", "translation": [0, 0, 0] }
+      ],
+      "stripFenceBraces": { "node": "modular_chainlink_fence_double", "material": "modular_chainlink_fence_posts", "minVerticalHeight": 2 },
+      "cutoutMaterial": "modular_chainlink_fence_wire",
+      "shadowExcludedMaterials": ["modular_chainlink_fence_wire"],
+      "dimensions": [2, 0.15, 1.2],
+      "orientation": 0,
+      "pivot": "bottom-center",
+      "groundClearance": 0.008
+    }
+  ],
+  "materials": [
+    { "id": "rusty_metal", "label": "Окрашенный ржавый металл (PBR)", "baseType": "wall", "dimensions": [2, 0.2, 2.4], "source": { "provider": "polyhaven", "id": "rusty_metal_sheet", "resolution": "1k" } },
+    { "id": "aged_wood", "label": "Состаренное дерево (PBR)", "baseType": "floor", "dimensions": [2, 2, 0.12], "source": { "provider": "polyhaven", "id": "wood_planks_dirt", "resolution": "1k" } },
+    { "id": "worn_plaster", "label": "Выцветшая штукатурка (PBR)", "baseType": "wall", "dimensions": [2, 0.2, 2.4], "source": { "provider": "polyhaven", "id": "concrete_wall_003", "resolution": "1k" } },
+    { "id": "dirty_earth", "label": "Грязная земля (PBR)", "baseType": "floor", "dimensions": [2, 2, 0.12], "source": { "provider": "polyhaven", "id": "dirt", "resolution": "1k" } }
+  ]
+}

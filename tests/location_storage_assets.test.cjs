@@ -34,5 +34,5 @@ test('new and existing crates expose container actions', () => {
         assert.ok(context.getObjectActions({ type, properties: { interactions: ['move', 'climb'] } })
             .includes('open_container'));
     }
-    assert.match(source, /contents: \['shelf', 'box', 'military_crate', 'chest'\]\.includes\(structurePreset\) \? \[\] : undefined/);
+    assert.match(source, /contents: \['shelf', 'box', 'military_crate', 'chest'\]\.includes\(placedType\) \? \[\] : undefined/);
 });

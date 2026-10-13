@@ -1,0 +1,24 @@
+{
+  "id": "art_rusty_barrel",
+  "type": "model",
+  "sourceUrl": "https://polyhaven.com/a/Barrel_01",
+  "license": "CC0",
+  "sourceFile": "assets/sources/polyhaven/Barrel_01/1k/Barrel_01_1k.gltf",
+  "output": "/static/models/art/art_rusty_barrel.glb",
+  "bytes": 692004,
+  "sha256": "151fd60feb8af6d8c259d73819daa3773df5021bee9fe4785122f48bbe654550",
+  "meshes": 1,
+  "primitives": 1,
+  "triangles": 2682,
+  "materials": 1,
+  "textures": 3,
+  "extensionsRequired": [],
+  "orientation": 0,
+  "pivot": "bottom-center",
+  "groundClearance": 0.008,
+  "dimensions": [
+    0.65,
+    0.65,
+    0.9
+  ]
+}

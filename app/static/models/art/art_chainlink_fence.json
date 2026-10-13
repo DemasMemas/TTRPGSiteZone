@@ -1,0 +1,47 @@
+{
+  "id": "art_chainlink_fence",
+  "type": "model",
+  "sourceUrl": "https://polyhaven.com/a/modular_chainlink_fence",
+  "license": "CC0",
+  "sourceFile": "assets/sources/polyhaven/modular_chainlink_fence/1k/modular_chainlink_fence_1k.gltf",
+  "output": "/static/models/art/art_chainlink_fence.glb",
+  "bytes": 4370236,
+  "sha256": "c78ea3d68e74bece52838a27a6e8f6688a5d5abd5974cf734a47b0bbf409177a",
+  "meshes": 2,
+  "primitives": 3,
+  "triangles": 1188,
+  "materials": 2,
+  "textures": 6,
+  "extensionsRequired": [
+    "KHR_texture_transform"
+  ],
+  "orientation": 0,
+  "pivot": "bottom-center",
+  "groundClearance": 0.008,
+  "dimensions": [
+    2,
+    0.15,
+    1.2
+  ],
+  "removedFenceComponents": 17,
+  "assembly": [
+    {
+      "sourceNode": "modular_chainlink_fence_post",
+      "name": "fence_post_left",
+      "translation": [
+        -2,
+        0,
+        0
+      ]
+    },
+    {
+      "sourceNode": "modular_chainlink_fence_post",
+      "name": "fence_post_right",
+      "translation": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -247,6 +247,7 @@ window.enterLocation = async function(locationId) {
         initLocationScene('location-canvas');
         loadLocation(data);
         addLocationRoofButton();
+        addLocationGridButton();
 
         setLocationBrushRadius(window.brushRadius);
         setLocationBrushHeight(window.tileHeight);
@@ -270,7 +271,6 @@ window.enterLocation = async function(locationId) {
             setDeleteButtonVisible(true);
             addEditLocationButton(() => openLocationEditModal(currentLocationData));
             setEditButtonVisible(true);
-            addLocationGridButton();
 
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) {

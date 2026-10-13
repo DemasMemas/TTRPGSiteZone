@@ -137,15 +137,19 @@ def _structures(location):
         add('Ящик', 'box', x, z, 0.8, 0.8, 0.7, '#8b6b4f', weight_kg=25, contents=[])
     for z in range(5, 18, 3):
         add('Ограждение аномалий', 'fence', 18, z, 2.2, 0.15, 1.2, '#8b7458', rotation=math.pi / 2)
-    add('Северная стена туннеля', 'wall', 14, 24, 8, 0.2, 2.5, '#575c5b')
+    add('Северная стена туннеля', 'wall', 14, 24, 8, 0.2, 2.5, '#575c5b',
+        visual_asset='art_rusty_metal')
     add('Южная стена туннеля', 'wall', 14, 30, 8, 0.2, 2.5, '#575c5b')
     add('Западная стена туннеля', 'wall', 10, 27, 6, 0.2, 2.5, '#575c5b', rotation=math.pi / 2)
     add('Восточная стена туннеля', 'wall', 18, 27, 6, 0.2, 2.5, '#575c5b', rotation=math.pi / 2)
     add('Дверь туннеля', 'door', 14, 24, 0.9, 0.18, 2.1, '#646861', is_open=True)
-    add('Пол туннеля', 'floor', 14, 27, 8, 6, 0.12, '#555958')
-    add('Пол малого дома', 'floor', 33, 21, 4, 4, 0.12, '#756b5d')
+    add('Пол туннеля', 'floor', 14, 27, 8, 6, 0.12, '#555958',
+        visual_asset='art_dirty_earth')
+    add('Пол малого дома', 'floor', 33, 21, 4, 4, 0.12, '#756b5d',
+        visual_asset='art_aged_wood')
     add('Северная стена малого дома', 'wall', 33, 19, 4, 0.2, 2.3, '#867e70')
-    add('Южная стена малого дома', 'wall', 33, 23, 4, 0.2, 2.3, '#867e70')
+    add('Южная стена малого дома', 'wall', 33, 23, 4, 0.2, 2.3, '#867e70',
+        visual_asset='art_worn_plaster')
     add('Западная стена малого дома', 'wall', 31, 21, 4, 0.2, 2.3, '#867e70', rotation=math.pi / 2)
     add('Восточная стена малого дома', 'wall', 35, 21, 4, 0.2, 2.3, '#867e70', rotation=math.pi / 2)
     add('Дверь малого дома', 'door', 33, 23, 0.9, 0.18, 2.1, '#75583e', is_open=True)
@@ -153,6 +157,13 @@ def _structures(location):
     add('Костёр', 'campfire', 6, 27, 0.9, 0.9, 0.7, '#74604b', is_lit=True)
     add('Факел', 'torch', 32, 21, 0.25, 0.25, 1.7, '#6b4a30', is_lit=True)
     add('Бочка с огнём', 'fire_barrel', 23, 19, 0.72, 0.72, 0.78, '#5f625c', is_lit=True)
+    # The base types keep storage, collision and interactions unchanged.
+    add('Ржавая бочка PBR', 'barrel', 23, 25, 0.65, 0.65, 0.9, '#8a6444',
+        visual_asset='art_rusty_barrel', weight_kg=40)
+    add('Старый ящик PBR', 'box', 25, 25, 0.8, 0.8, 0.7, '#8b6b4f',
+        visual_asset='art_wooden_crate', weight_kg=25, contents=[])
+    add('Сетчатый забор PBR', 'fence', 28, 25, 2, 0.15, 1.2, '#8b7458',
+        visual_asset='art_chainlink_fence')
     return structures
 
 
