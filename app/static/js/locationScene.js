@@ -429,7 +429,7 @@ const COMBAT_POSTURES = {
         stealthBonus: 0,
     },
     sitting: {
-        label: 'Сидя',
+        label: 'Присев',
         icon: '↘',
         movementMultiplier: 2,
         walkMaxDistance: 5,
@@ -3416,9 +3416,26 @@ function posturePaymentLabel(option) {
 
 function movementModeSummary(key, mode, posture) {
     if (key !== 'walk') return mode.summary;
-    if (posture === 'sitting') return 'Сидя: 1 м = 2 ОП, не более 5 м';
+    if (posture === 'sitting') return 'Присев: 1 м = 2 ОП, не более 5 м';
     if (posture === 'prone') return 'Ползком: 1 м = 3 ОП, не более 3 м';
     return mode.summary;
+}
+
+async function saveProneVisualVariant(characterId, proneOnBack) {
+    const response = await fetch(
+        `/lobbies/${window.currentLobbyId}/locations/${getCurrentLocationId()}/characters/${characterId}/visual-pose`,
+        {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${localStorage.getItem('access_token')}`,
+            },
+            body: JSON.stringify({ prone_on_back: proneOnBack }),
+        },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || 'Не удалось изменить визуальный вариант позы');
+    applyCharacterVisualPose(characterId, payload.prone_on_back);
 }
 
 function showPostureMenu(characterId) {
@@ -3443,6 +3460,8 @@ function showPostureMenu(characterId) {
 
     const menu = ensurePostureMenu();
     const currentPosture = character.posture || 'standing';
+    const modelEntry = getCharacterModelEntry(characterId);
+    const canSelectVisualVariant = Boolean(modelEntry?.model.userData.isStandardHuman && !modelEntry.isMutant);
     menu.innerHTML = `
         <div class="posture-panel" style="
             width:min(620px, calc(100vw - 32px));
@@ -3503,6 +3522,15 @@ function showPostureMenu(characterId) {
             <span class="posture-payment-buttons" style="display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end;"></span>
         `;
         const paymentButtons = card.querySelector('.posture-payment-buttons');
+        let backToggle = null;
+        if (targetPosture === 'prone' && canSelectVisualVariant) {
+            const label = document.createElement('label');
+            label.style.cssText = 'grid-column:2 / -1; display:flex; gap:8px; align-items:center; font-size:13px;';
+            label.innerHTML = '<input type="checkbox"> Лежать на спине';
+            backToggle = label.querySelector('input');
+            backToggle.checked = Boolean(modelEntry.proneOnBack);
+            card.appendChild(label);
+        }
         paymentOptions.forEach((option) => {
             const available = option.resource === 'free'
                 || (
@@ -3528,9 +3556,11 @@ function showPostureMenu(characterId) {
                 opacity:${available ? '1' : '0.42'};
             `;
             button.onclick = async () => {
+                const requestedBack = backToggle?.checked;
                 menu.querySelectorAll('button').forEach((item) => {
                     item.disabled = true;
                 });
+                if (backToggle) backToggle.disabled = true;
                 try {
                     if (isCombatActive) {
                         await Server.performLocationCombatAction(window.currentLobbyId, getCurrentLocationId(), {
@@ -3557,6 +3587,14 @@ function showPostureMenu(characterId) {
                         }
                     }
                     closePostureMenu();
+                    if (targetPosture === 'prone' && requestedBack !== undefined
+                        && requestedBack !== Boolean(modelEntry.proneOnBack)) {
+                        try {
+                            await saveProneVisualVariant(characterId, requestedBack);
+                        } catch (error) {
+                            showNotification(error.message || 'Не удалось сохранить вариант позы', 'system');
+                        }
+                    }
                     showNotification(`Положение изменено: ${profile.label}`, 'success');
                 } catch (error) {
                     showNotification(error.message || 'Не удалось изменить положение', 'system');
@@ -3567,6 +3605,26 @@ function showPostureMenu(characterId) {
         });
         options.appendChild(card);
     });
+
+    if (currentPosture === 'prone' && canSelectVisualVariant) {
+        const label = document.createElement('label');
+        label.style.cssText = 'display:flex; gap:9px; align-items:center; padding:12px 13px; font-size:13px;';
+        label.innerHTML = '<input type="checkbox"> Лежать на спине';
+        const toggle = label.querySelector('input');
+        toggle.checked = Boolean(modelEntry.proneOnBack);
+        toggle.onchange = async () => {
+            toggle.disabled = true;
+            try {
+                await saveProneVisualVariant(characterId, toggle.checked);
+            } catch (error) {
+                toggle.checked = Boolean(modelEntry.proneOnBack);
+                showNotification(error.message || 'Не удалось сохранить вариант позы', 'system');
+            } finally {
+                toggle.disabled = false;
+            }
+        };
+        options.appendChild(label);
+    }
 
     menu.querySelector('.posture-close').onclick = closePostureMenu;
     menu.style.display = 'flex';
@@ -4688,32 +4746,118 @@ async function resolveCombatPointSelection(clientX, clientY) {
 function createCharacterModel(userId) {
     const group = new THREE.Group();
     const color = getUserColor(userId);
-    const bodyGeo = new THREE.CylinderGeometry(0.25, 0.25, 0.7, 8);
+    const bodyGeo = new THREE.CylinderGeometry(0.23, 0.28, 0.7, 8);
     const bodyMat = new THREE.MeshStandardMaterial({ color });
     const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.y = 0.35;
+    body.position.y = 1.18;
     body.userData.posturePart = 'body';
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
-    const headGeo = new THREE.SphereGeometry(0.15, 8);
+    for (const side of [-1, 1]) {
+        const upperLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.105, 0.45, 6), bodyMat);
+        upperLeg.position.set(side * 0.14, 0.675, 0);
+        upperLeg.userData.posturePart = `upperLeg${side}`;
+        const lowerLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.075, 0.45, 6), bodyMat);
+        lowerLeg.position.set(side * 0.14, 0.225, 0);
+        lowerLeg.userData.posturePart = `lowerLeg${side}`;
+        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, 0.32), bodyMat);
+        foot.position.set(side * 0.14, 0.05, 0.1);
+        foot.userData.posturePart = `foot${side}`;
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.075, 0.62, 6), bodyMat);
+        arm.position.set(side * 0.3, 1.2, 0.02);
+        arm.userData.posturePart = `arm${side}`;
+        for (const part of [upperLeg, lowerLeg, foot, arm]) {
+            part.castShadow = true;
+            part.receiveShadow = true;
+            group.add(part);
+        }
+    }
+    const headGeo = new THREE.SphereGeometry(0.18, 8);
     const headMat = new THREE.MeshStandardMaterial({ color: 0xffddbb });
     const head = new THREE.Mesh(headGeo, headMat);
-    head.position.y = 0.8;
+    head.position.set(0, 1.62, 0.03);
     head.userData.posturePart = 'head';
     head.castShadow = true;
     head.receiveShadow = true;
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.24, 6), headMat);
+    neck.userData.posturePart = 'neck';
+    neck.castShadow = true;
+    neck.receiveShadow = true;
+    neck.visible = false;
+    group.add(neck);
+    const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x29241f, roughness: 1 });
+    for (const side of [-1, 1]) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.024, 6), eyeMaterial);
+        eye.position.set(side * 0.07, 0.035, 0.15);
+        head.add(eye);
+    }
     group.add(head);
     const facingMarker = new THREE.Mesh(
         new THREE.ConeGeometry(0.07, 0.22, 6),
         new THREE.MeshStandardMaterial({ color: 0xf2b84b })
     );
     facingMarker.rotation.x = Math.PI / 2;
-    facingMarker.position.set(0, 0.68, 0.28);
+    facingMarker.position.set(0, 1.3, 0.3);
     facingMarker.userData.posturePart = 'facingMarker';
     group.add(facingMarker);
     group.userData.isCharacter = true;
+    group.userData.isStandardHuman = true;
     return group;
+}
+
+function poseStandardHumanModel(model, posture, proneOnBack = false) {
+    const parts = Object.fromEntries(model.children
+        .filter(child => child.userData?.posturePart)
+        .map(child => [child.userData.posturePart, child]));
+    const crouching = posture === 'sitting';
+    const prone = posture === 'prone';
+    const proneLegDirection = proneOnBack ? 1 : -1;
+    parts.body.rotation.set(prone ? (proneOnBack ? -Math.PI / 2 : Math.PI / 2)
+        : crouching ? 0.18 : 0, 0, 0);
+    parts.body.position.set(0, prone ? 0.3 : crouching ? 0.77 : 1.18,
+        crouching ? 0.08 : 0);
+    parts.head.rotation.x = prone ? (proneOnBack ? -0.25 : 0.25) : 0;
+    parts.head.position.set(0, prone ? (proneOnBack ? 0.43 : 0.4) : crouching ? 1.15 : 1.62,
+        prone ? (proneOnBack ? -0.6 : 0.47) : crouching ? 0.16 : 0.03);
+    parts.neck.visible = prone && proneOnBack;
+    if (parts.neck.visible) {
+        parts.neck.rotation.x = Math.PI / 2;
+        parts.neck.position.set(0, 0.36, -0.46);
+    }
+    parts.facingMarker.position.set(0, prone ? 0.24 : crouching ? 1.02 : 1.3,
+        prone ? (proneOnBack ? 1.45 : 0.7) : crouching ? 0.35 : 0.3);
+    for (const side of [-1, 1]) {
+        const upperLeg = parts[`upperLeg${side}`];
+        const lowerLeg = parts[`lowerLeg${side}`];
+        const foot = parts[`foot${side}`];
+        const arm = parts[`arm${side}`];
+        const kneelingLeg = crouching && side < 0;
+        upperLeg.rotation.x = prone || (crouching && !kneelingLeg) ? Math.PI / 2
+            : kneelingLeg ? -0.27 : 0;
+        upperLeg.position.set(side * 0.14,
+            prone ? 0.19 : kneelingLeg ? 0.33 : crouching ? 0.51 : 0.675,
+            prone ? proneLegDirection * 0.5 : kneelingLeg ? 0.08 : crouching ? 0.22 : 0);
+        lowerLeg.rotation.x = prone || kneelingLeg ? Math.PI / 2 : 0;
+        lowerLeg.position.set(side * 0.14, prone ? 0.16 : kneelingLeg ? 0.11 : 0.225,
+            prone ? proneLegDirection * 0.93 : kneelingLeg ? -0.18 : crouching ? 0.45 : 0);
+        foot.position.set(side * 0.14, prone ? 0.1 : 0.05,
+            prone ? proneLegDirection * 1.18 : kneelingLeg ? -0.42 : crouching ? 0.54 : 0.1);
+        arm.rotation.x = prone ? Math.PI / 2 : 0;
+        if (crouching) arm.rotation.x = -0.36;
+        arm.position.set(side * (proneOnBack && prone ? 0.37 : 0.3),
+            prone ? (proneOnBack ? 0.18 : 0.22) : crouching ? 0.74 : 1.2,
+            prone ? (proneOnBack ? -0.08 : 0.25) : crouching ? 0.21 : 0.02);
+    }
+}
+
+function characterLabelOffset(entry) {
+    if (entry.model.userData.isStandardHuman) {
+        return entry.posture === 'prone' ? 0.78 : entry.posture === 'sitting' ? 1.55 : 2.05;
+    }
+    return entry.model.userData.labelHeight && entry.posture === 'standing'
+        ? entry.model.userData.labelHeight
+        : entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55;
 }
 
 // ========== Добавление персонажа ==========
@@ -4740,7 +4884,7 @@ function updateCharacterTeamVisual(characterId, teamName, teamColor) {
     badge.style.borderColor = entry.teamColor || '#8b98a3';
 }
 
-export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1, isMutant = false, isNpc = false, gmHidden = false, mutantType = '') {
+export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1, isMutant = false, isNpc = false, gmHidden = false, mutantType = '', posture = 'standing', proneOnBack = false) {
     if (characterModels.has(characterId)) {
         const old = characterModels.get(characterId);
         disposeObject(old.model);
@@ -4829,7 +4973,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     div.style.borderRadius = '10px';
     div.style.pointerEvents = 'none';
     const label = new CSS2DObject(div);
-    label.position.set(posX + 0.5, tileHeight + (model.userData.labelHeight || 1.55), posY + 0.5);
+    label.position.set(posX + 0.5, tileHeight + characterLabelOffset({ model, posture: 'standing' }), posY + 0.5);
     scene.add(label);
 
     characterModels.set(characterId, {
@@ -4849,6 +4993,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
         posX,
         posY,
         posture: 'standing',
+        proneOnBack: Boolean(proneOnBack),
         controlledBy: resolvedControlledBy ?? fallbackOwnerId,
         grappleBadge,
         gunpointBadge,
@@ -4860,8 +5005,8 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     updateCharacterTeamVisual(characterId, teamName, teamColor);
     applyCharacterFacingVisual(characterId, facingX, facingY);
     const combatCharacter = findCombatCharacterByCharacterId(characterId);
-    if (combatCharacter?.posture) {
-        applyCharacterPostureVisual(characterId, combatCharacter.posture);
+    if (combatCharacter?.posture || posture !== 'standing') {
+        applyCharacterPostureVisual(characterId, combatCharacter?.posture || posture);
     }
     applyCharacterGrappleVisual(characterId, combatCharacter);
     applyCharacterGunpointVisual(characterId, combatCharacter);
@@ -5039,8 +5184,12 @@ function cloneFogGhost(root) {
     return ghost;
 }
 
-function applyFogGhostPosture(model, posture) {
+function applyFogGhostPosture(model, posture, proneOnBack = false) {
     const normalized = COMBAT_POSTURES[posture] ? posture : 'standing';
+    if (model.userData.isStandardHuman) {
+        poseStandardHumanModel(model, normalized, proneOnBack);
+        return;
+    }
     const body = model.children.find((child) => child.userData?.posturePart === 'body');
     const head = model.children.find((child) => child.userData?.posturePart === 'head');
     if (!body || !head) return;
@@ -5094,6 +5243,7 @@ function rememberVisibleCharacters(sources) {
             characterId: id, ownerId: Number(entry.ownerId) || 0,
             mutantType: entry.mutantType || '',
             posX: x, posY: y, posture: entry.posture || 'standing',
+            proneOnBack: Boolean(entry.proneOnBack),
             facingX: Number(entry.facingX) || 0, facingY: Number(entry.facingY ?? 1),
         };
         visible.set(id, snapshot);
@@ -5138,7 +5288,7 @@ function createCharacterFogGhost(snapshot) {
         || createCharacterModel(snapshot.ownerId));
     ghost.position.set(snapshot.posX + 0.5, Number(snapshot.height) || 1, snapshot.posY + 0.5);
     ghost.rotation.y = Math.atan2(Number(snapshot.facingX) || 0, Number(snapshot.facingY) || 1);
-    applyFogGhostPosture(ghost, snapshot.posture);
+    applyFogGhostPosture(ghost, snapshot.posture, snapshot.proneOnBack);
     return ghost;
 }
 
@@ -5673,14 +5823,13 @@ export function applyCharacterPostureVisual(characterId, posture = 'standing') {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
     const normalized = COMBAT_POSTURES[posture] ? posture : 'standing';
-    const labelOffset = entry.model.userData.labelHeight && normalized === 'standing'
-        ? entry.model.userData.labelHeight
-        : normalized === 'prone' ? 0.95 : normalized === 'sitting' ? 1.25 : 1.55;
     const tileHeight = getTileHeight(entry.posX, entry.posY);
     const body = entry.model.children.find((child) => child.userData?.posturePart === 'body');
     const head = entry.model.children.find((child) => child.userData?.posturePart === 'head');
     entry.model.scale.set(1, 1, 1);
-    if (body && head) {
+    if (entry.model.userData.isStandardHuman) {
+        poseStandardHumanModel(entry.model, normalized, entry.proneOnBack);
+    } else if (body && head) {
         body.rotation.z = normalized === 'prone' ? Math.PI / 2 : 0;
         body.scale.set(1, normalized === 'sitting' ? 0.68 : 1, 1);
         body.position.set(0, normalized === 'prone' ? 0.25 : normalized === 'sitting' ? 0.25 : 0.35, 0);
@@ -5691,8 +5840,18 @@ export function applyCharacterPostureVisual(characterId, posture = 'standing') {
         );
     }
     entry.model.userData.posture = normalized;
-    entry.label.position.y = tileHeight + labelOffset;
     entry.posture = normalized;
+    entry.label.position.y = tileHeight + characterLabelOffset(entry);
+}
+
+export function applyCharacterVisualPose(characterId, proneOnBack) {
+    const entry = getCharacterModelEntry(characterId);
+    if (!entry || !entry.model.userData.isStandardHuman) return;
+    entry.proneOnBack = proneOnBack === true;
+    if (entry.posture === 'prone') {
+        poseStandardHumanModel(entry.model, 'prone', entry.proneOnBack);
+        applyFogOfWar();
+    }
 }
 
 function applyCharacterFacingVisual(characterId, facingX = 0, facingY = 1) {
@@ -5801,10 +5960,7 @@ export function updateCharacterPosition(characterId, posX, posY, options = {}) {
     const tileHeight = getTileHeight(posX, posY);
     entry.model.position.set(posX + 0.5, tileHeight, posY + 0.5);
     tintLocationMesh(entry.model, darknessFactorAt(posX, posY));
-    const labelOffset = entry.model.userData.labelHeight && entry.posture === 'standing'
-        ? entry.model.userData.labelHeight
-        : entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55;
-    entry.label.position.set(posX + 0.5, tileHeight + labelOffset, posY + 0.5);
+    entry.label.position.set(posX + 0.5, tileHeight + characterLabelOffset(entry), posY + 0.5);
     entry.posX = posX;
     entry.posY = posY;
     if (!options.deferRefresh) {
@@ -12325,7 +12481,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
         entry.model.position.y = height;
-        entry.label.position.y = height + (entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55);
+        entry.label.position.y = height + characterLabelOffset(entry);
     });
 }
 
@@ -12462,7 +12618,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     characterModels.forEach((entry) => {
         const height = getTileHeight(entry.posX, entry.posY);
         entry.model.position.y = height;
-        entry.label.position.y = height + (entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55);
+        entry.label.position.y = height + characterLabelOffset(entry);
     });
     applyFogOfWar();
 }
@@ -12743,7 +12899,7 @@ function setupCharacterDragging() {
         dragCharacter.model.position.set(newX, height, newZ);
         const entry = characterModels.get(dragCharacter.characterId);
         if (entry) {
-            entry.label.position.set(newX, height + (entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55), newZ);
+            entry.label.position.set(newX, height + characterLabelOffset(entry), newZ);
             entry.posX = tileX;
             entry.posY = tileZ;
         }

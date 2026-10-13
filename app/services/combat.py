@@ -64,7 +64,7 @@ POSTURES = {
         'can_use_low_cover': False,
     },
     'sitting': {
-        'label': 'Сидя',
+        'label': 'Присев',
         'movement_multiplier': 2,
         'walk_max_distance': 5,
         'shooting_bonus': 1,

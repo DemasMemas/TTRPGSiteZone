@@ -32,6 +32,7 @@ class LocationCharacter(db.Model):
     correction_distance_this_turn = db.Column(db.Integer, nullable=False, default=0)
     strenuous_movement_blocked_until_round = db.Column(db.Integer, nullable=False, default=0)
     posture = db.Column(db.String(20), nullable=False, default='standing')
+    prone_on_back = db.Column(db.Boolean, nullable=False, default=False, server_default='0')
     drawn_weapon_index = db.Column(db.Integer, nullable=True)
     rapid_fire_round = db.Column(db.Integer, nullable=True)
     aimed_target_character_id = db.Column(db.Integer, nullable=True)

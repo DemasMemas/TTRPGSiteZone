@@ -2749,6 +2749,8 @@ def spawn_character_in_location(lobby_id, location_id):
             'effects': loc_char.effects,
             'pos_x': loc_char.pos_x,
             'pos_y': loc_char.pos_y,
+            'posture': loc_char.posture,
+            'prone_on_back': bool(loc_char.prone_on_back),
             'gm_hidden': bool(loc_char.gm_hidden),
             'is_mutant': CombatService._is_mutant_character(character.data or {}),
             'mutant_type': CombatService._mutant_profile_name(character.data),
@@ -2948,6 +2950,55 @@ def change_character_posture_outside_combat(
         payload,
         room=f"location_{location_id}",
     )
+    return jsonify(payload), 200
+
+
+@lobbies_bp.route(
+    '/<int:lobby_id>/locations/<int:location_id>/characters/<int:character_id>/visual-pose',
+    methods=['PATCH'],
+)
+@jwt_required()
+@requires_participant
+def change_character_visual_pose(lobby_id, location_id, character_id, lobby, participant):
+    location = Location.query.filter_by(id=location_id, lobby_id=lobby_id).first()
+    if not location:
+        return jsonify({'error': 'Location not found'}), 404
+    location_character = LocationCharacter.query.filter_by(
+        location_id=location_id, character_id=character_id,
+    ).first()
+    if not location_character:
+        return jsonify({'error': 'Character is not in this location'}), 404
+    user_id = participant.user_id
+    can_control = (
+        lobby.gm_id == user_id
+        or location_character.controlled_by == user_id
+        or (
+            location_character.character
+            and location_character.character.owner_id == user_id
+        )
+    )
+    if not can_control:
+        return jsonify({'error': 'You do not control this character'}), 403
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    if type(data.get('prone_on_back')) is not bool:
+        return jsonify({'error': 'prone_on_back must be a boolean'}), 400
+    if location_character.posture != 'prone':
+        return jsonify({'error': 'This visual variant requires the prone posture'}), 409
+    character_data = location_character.character.data if location_character.character else {}
+    if CombatService._is_mutant_character(character_data or {}):
+        return jsonify({'error': 'Visual variant is unavailable for mutants'}), 400
+
+    location_character.prone_on_back = data['prone_on_back']
+    db.session.commit()
+    payload = {
+        'location_id': location_id,
+        'character_id': character_id,
+        'prone_on_back': bool(location_character.prone_on_back),
+    }
+    socketio.emit('location_character_visual_pose_updated', payload,
+                  room=f'location_{location_id}')
     return jsonify(payload), 200
 
 

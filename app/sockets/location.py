@@ -122,6 +122,8 @@ def handle_join_location(data):
             'x': lc.pos_x,
             'y': lc.pos_y,
             'status': lc.status,
+            'posture': lc.posture,
+            'prone_on_back': bool(lc.prone_on_back),
             'is_mutant': CombatService._is_mutant_character(
                 character.data if isinstance(character.data, dict) else {}
             ),

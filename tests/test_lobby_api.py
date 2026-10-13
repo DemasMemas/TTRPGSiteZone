@@ -2629,6 +2629,70 @@ def test_controller_can_change_posture_outside_combat_for_free(
     assert location_character.movement_points_current == 0
 
 
+def test_prone_visual_variant_is_persisted_without_changing_combat_posture(
+    app,
+    client,
+    create_user,
+    auth_headers,
+):
+    gm = create_user('visual-pose-gm')
+    player = create_user('visual-pose-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    character = create_character(client, lobby, player, auth_headers)
+    location = Location(lobby_id=lobby['id'], name='Visual pose', world_tile_x=0, world_tile_z=0)
+    db.session.add(location)
+    db.session.flush()
+    placed = LocationCharacter(
+        location_id=location.id,
+        character_id=character['id'],
+        controlled_by=player['id'],
+        posture='standing',
+    )
+    db.session.add(placed)
+    db.session.commit()
+    assert placed.prone_on_back is False
+
+    url = f"/lobbies/{lobby['id']}/locations/{location.id}/characters/{character['id']}"
+    assert client.patch(f'{url}/visual-pose', headers=auth_headers(player),
+                        json={'prone_on_back': True}).status_code == 409
+    assert client.patch(f'{url}/posture', headers=auth_headers(player),
+                        json={'posture': 'prone'}).status_code == 200
+    assert client.patch(f'{url}/visual-pose', headers=auth_headers(player),
+                        json={'prone_on_back': 'yes'}).status_code == 400
+    response = client.patch(f'{url}/visual-pose', headers=auth_headers(player),
+                            json={'prone_on_back': True})
+    assert response.status_code == 200
+    db.session.expire_all()
+    saved = db.session.get(LocationCharacter, placed.id)
+    assert saved.prone_on_back is True
+    assert saved.posture == 'prone'
+    assert saved.action_points_current == 5
+    assert saved.movement_points_current == 0
+
+    from flask_jwt_extended import create_access_token
+    from app.extensions import socketio
+    from app.sockets.location import handle_join_location
+
+    socketio.on_event('join_location', handle_join_location)
+    connection = socketio.test_client(app)
+    try:
+        connection.emit('join_location', {
+            'token': create_access_token(identity=str(player['id'])),
+            'location_id': location.id,
+            'character_id': character['id'],
+        })
+        states = [event['args'][0] for event in connection.get_received()
+                  if event['name'] == 'location_state']
+        assert states
+        restored = next(item for item in states[-1]
+                        if item['character_id'] == character['id'])
+        assert restored['posture'] == 'prone'
+        assert restored['prone_on_back'] is True
+    finally:
+        connection.disconnect()
+
+
 def test_combat_start_rolls_tactics_initiative_only_for_selected_characters(
     client,
     create_user,

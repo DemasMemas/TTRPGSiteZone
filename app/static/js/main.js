@@ -1439,6 +1439,8 @@ if (socket) {
                     s.is_npc,
                     s.gm_hidden,
                     s.mutant_type,
+                    s.posture,
+                    s.prone_on_back,
                 );
             });
         });
@@ -1496,6 +1498,8 @@ if (socket) {
                 data.character.is_npc,
                 data.character.gm_hidden,
                 data.character.mutant_type,
+                data.character.posture,
+                data.character.prone_on_back,
             );
         });
     });
@@ -1515,6 +1519,12 @@ if (socket) {
         if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
         import('./locationScene.js').then(module => {
             module.applyCharacterPostureVisual(data.character_id, data.posture);
+        });
+    });
+    socket.on('location_character_visual_pose_updated', (data) => {
+        if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
+        import('./locationScene.js').then(module => {
+            module.applyCharacterVisualPose(data.character_id, data.prone_on_back);
         });
     });
     socket.on('location_character_facing_updated', (data) => {
