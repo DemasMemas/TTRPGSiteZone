@@ -36,11 +36,14 @@ import {
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
 import { doorOnWall, doorFrameStyle, floorVisualPose, wallVisualPlan } from './locationArchitecture.js';
 import { applyInteriorFloorShade, createRoofGeometry, createRoofGableGeometry, roofPlans, roofVisibleForCamera } from './locationRoof.js';
-import { createLocationTerrainPixels, updateLocationTerrainPixels } from './locationTerrainTexture.js';
+import { createLocationTerrainPixels, loadGrassGroundPixels,
+    updateLocationTerrainPixels } from './locationTerrainTexture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
 import { applySurfaceDarkness, writeDarknessPixels } from './locationDarknessSurface.js';
 import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
 import { createGrassDetailGroup } from './locationGrassDetail.js';
+import { addNaturalGrassInstances, loadNaturalGrassAssets,
+    naturalGrassPlacements } from './locationNaturalGrass.js';
 import { buildRoundedWaterData, classifyWaterRegions, waterLevelForTile } from './locationWaterEdge.js';
 import { createWaterDetailGroup } from './locationWaterDetail.js';
 import { createCrateModel, createFenceModel, createShelfModel, createTentModel } from './locationSimpleModels.js';
@@ -238,6 +241,13 @@ let terrainSurfaceMesh = null;
 let terrainSurfaceTexture = null;
 let locationGridMesh = null;
 let grassDetailGroup = null;
+let naturalGrassAssets = null;
+let naturalGrassLoading = false;
+let naturalGrassError = null;
+let naturalGrassBuild = null;
+let naturalGrassReported = false;
+let grassGroundReady = false;
+let grassGroundLoading = false;
 let locationGridVisible = false;
 let darknessEditorOverlay = null;
 let darknessOverlayRequested = false;
@@ -268,6 +278,7 @@ let hoveredCharacterId = null;
 let editMode = false;
 let brushRadius = 0;
 let currentBrushTerrain = 'grass';
+let currentBrushGrassSubtype = 'plain';
 let currentBrushHeight = 1.0;
 let eraserMode = false;
 let brushRadiation = 0.0;
@@ -6888,6 +6899,7 @@ export function initLocationScene(containerId) {
     // Сцена
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x111122);
+    window.getLocationGrassDiagnostics = getLocationGrassDiagnostics;
 
     // Камера
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -11399,6 +11411,7 @@ export function loadLocation(data) {
     locationObjectMeshes = [];
     darknessEditorOverlay = null;
     currentLocationData = data;
+    naturalGrassReported = false;
     selectedLocationAsset = null;
     editorSelection = null;
     editorSelections = [];
@@ -11848,6 +11861,83 @@ function rebuildWaterSurfaceMesh() {
     scene.add(waterDetailGroup);
 }
 
+export function getLocationGrassDiagnostics() {
+    const meshes = grassDetailGroup?.children.filter(child => child.userData.naturalGrassKind) || [];
+    let frustum = null;
+    if (camera && scene) {
+        camera.updateMatrixWorld();
+        scene.updateMatrixWorld();
+        frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4()
+            .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    }
+    const kinds = Object.fromEntries(['medium01'].map(kind => {
+        const matching = meshes.filter(mesh => mesh.userData.naturalGrassKind === kind);
+        const sample = matching[0];
+        let firstInstance = null;
+        if (sample?.count) {
+            const transform = new THREE.Matrix4();
+            sample.getMatrixAt(0, transform);
+            transform.premultiply(sample.matrixWorld);
+            const position = new THREE.Vector3().setFromMatrixPosition(transform);
+            const scale = new THREE.Vector3().setFromMatrixScale(transform).y;
+            const bounds = sample.geometry.boundingBox;
+            const groundHeight = createTerrainSurfaceHeightSampler(currentLocationData.tiles_data)
+                (position.x, position.z);
+            firstInstance = {
+                position: position.toArray().map(value => Number(value.toFixed(3))),
+                heightMeters: Number(((bounds.max.y - bounds.min.y) * scale).toFixed(3)),
+                bottomAboveGround: Number((position.y + bounds.min.y * scale - groundHeight)
+                    .toFixed(3)),
+            };
+        }
+        return [kind, {
+            created: naturalGrassBuild?.created[kind] || 0,
+            added: matching.reduce((count, mesh) => count + mesh.count, 0),
+            chunks: matching.length,
+            chunksInCameraFrustum: frustum ? matching.filter(mesh => frustum.intersectsObject(mesh)).length : null,
+            material: sample ? {
+                alphaTest: sample.material.alphaTest,
+                alphaMapLoaded: Boolean(sample.material.alphaMap?.image),
+                colorMapLoaded: Boolean(sample.material.map?.image),
+                normalMapLoaded: Boolean(sample.material.normalMap?.image),
+                colorMapEncoding: sample.material.map?.encoding === THREE.sRGBEncoding
+                    ? 'sRGB' : 'linear',
+                opacity: sample.material.opacity,
+                transparent: sample.material.transparent,
+                doubleSided: sample.material.side === THREE.DoubleSide,
+                vertexColors: sample.material.vertexColors,
+                toneMapped: sample.material.toneMapped,
+            } : null,
+            firstInstance,
+        }];
+    }));
+    return {
+        locationId: currentLocationId,
+        model: 'grass_medium_01_game_d7.glb',
+        rendererOutputEncoding: renderer?.outputEncoding === THREE.sRGBEncoding
+            ? 'sRGB' : 'linear',
+        lighting: { ambient: locationAmbientLight?.intensity,
+            directional: locationDirectionalLight?.intensity },
+        grassTiles: naturalGrassBuild?.stats.grassTiles || 0,
+        subtypes: { plain: naturalGrassBuild?.stats.plainTiles || 0,
+            forest: naturalGrassBuild?.stats.forestTiles || 0 },
+        assets: naturalGrassError ? 'error' : naturalGrassAssets ? 'loaded'
+            : naturalGrassLoading ? 'loading' : 'not requested',
+        error: naturalGrassError,
+        groupAddedToScene: grassDetailGroup?.parent === scene,
+        groupVisible: grassDetailGroup?.visible || false,
+        skipped: {
+            density: naturalGrassBuild?.stats.densityRejected || 0,
+            floor: naturalGrassBuild?.stats.floorRejected || 0,
+            slope: naturalGrassBuild?.slopeRejected || { medium01: 0 },
+        },
+        kinds,
+        understory: grassDetailGroup?.userData.detailCounts?.understory || 0,
+        flowers: grassDetailGroup?.userData.detailCounts?.flowers || 0,
+        triangles: naturalGrassBuild?.triangles || { medium01: 0, understory: 0, total: 0 },
+    };
+}
+
 function rebuildGrassDetailMesh() {
     if (grassDetailGroup) {
         scene.remove(grassDetailGroup);
@@ -11855,6 +11945,37 @@ function rebuildGrassDetailMesh() {
         grassDetailGroup = null;
     }
     if (!scene || !currentLocationData) return;
+    const tiles = currentLocationData.tiles_data;
+    naturalGrassBuild = null;
+    if (!naturalGrassAssets && !naturalGrassLoading && tiles.some(row => row.some(tile => tile.terrain === 'grass'))) {
+        naturalGrassLoading = true;
+        naturalGrassError = null;
+        loadNaturalGrassAssets(THREE, renderer.outputEncoding).then(assets => {
+            naturalGrassAssets = assets;
+            naturalGrassLoading = false;
+            if (currentLocationData) rebuildGrassDetailMesh();
+        }).catch(error => {
+            naturalGrassLoading = false;
+            naturalGrassError = String(error);
+            console.warn('Natural grass unavailable; using procedural fallback', error);
+        });
+    }
+    if (!grassGroundReady && !grassGroundLoading
+        && tiles.some(row => row.some(tile => tile.terrain === 'grass'))) {
+        grassGroundLoading = true;
+        loadGrassGroundPixels().then(() => {
+            grassGroundReady = true;
+            grassGroundLoading = false;
+            if (terrainSurfaceTexture && currentLocationData) {
+                const image = createLocationTerrainPixels(currentLocationData.tiles_data);
+                terrainSurfaceTexture.image.data.set(image.data);
+                terrainSurfaceTexture.needsUpdate = true;
+            }
+        }).catch(error => {
+            grassGroundLoading = false;
+            console.warn('Grass ground unavailable; using procedural soil fallback', error);
+        });
+    }
     const objects = currentLocationData.objects || [];
     const floors = objects.filter(object => object.type === 'floor')
         .map(object => floorVisualPose(object, objects));
@@ -11864,9 +11985,37 @@ function rebuildGrassDetailMesh() {
         return Math.abs(dx * floor.axis.x + dz * floor.axis.z) < floor.width / 2
             && Math.abs(dx * floor.normal.x + dz * floor.normal.z) < floor.depth / 2;
     });
-    grassDetailGroup = createGrassDetailGroup(THREE, currentLocationData.tiles_data,
-        createTerrainSurfaceHeightSampler(currentLocationData.tiles_data), isCovered);
+    const getHeight = createTerrainSurfaceHeightSampler(tiles);
+    grassDetailGroup = createGrassDetailGroup(THREE, tiles, getHeight, isCovered,
+        Boolean(naturalGrassAssets));
+    const placements = naturalGrassPlacements(tiles, isCovered);
+    naturalGrassBuild = { stats: placements.stats,
+        created: { medium01: placements.medium01.length } };
+    if (naturalGrassAssets) {
+        Object.assign(naturalGrassBuild,
+            addNaturalGrassInstances(THREE, grassDetailGroup, placements, naturalGrassAssets, getHeight));
+        naturalGrassBuild.triangles.understory =
+            grassDetailGroup.userData.detailCounts.understoryTriangles;
+        naturalGrassBuild.triangles.total = naturalGrassBuild.triangles.medium01
+            + naturalGrassBuild.triangles.understory;
+    }
     scene.add(grassDetailGroup);
+    if (naturalGrassAssets && !naturalGrassReported) {
+        console.info('[D.6.1 grass] game scene:', {
+            grassTiles: naturalGrassBuild.stats.grassTiles,
+            subtypes: { plain: naturalGrassBuild.stats.plainTiles,
+                forest: naturalGrassBuild.stats.forestTiles },
+            created: naturalGrassBuild.created,
+            added: naturalGrassBuild.added,
+            understory: grassDetailGroup.userData.detailCounts.understory,
+            skipped: { density: naturalGrassBuild.stats.densityRejected,
+                floor: naturalGrassBuild.stats.floorRejected,
+                slope: naturalGrassBuild.slopeRejected },
+            triangles: naturalGrassBuild.triangles,
+            details: 'window.getLocationGrassDiagnostics()',
+        });
+        naturalGrassReported = true;
+    }
 }
 
 function updateTileInstance(instanceId, x, z, tile) {
@@ -12024,8 +12173,15 @@ export function applyLocationTilesUpdate(locationId, updates) {
             || upd.objects.some(obj => ['campfire', 'anomaly'].includes(obj.type))
         )) lightChanged = true;
         if (upd.height !== undefined) lightChanged = true;
-        if (upd.terrain !== undefined || upd.height !== undefined) gridNeedsRebuild = true;
+        if (upd.terrain !== undefined || upd.height !== undefined
+            || upd.grass_subtype !== undefined) gridNeedsRebuild = true;
         if (upd.terrain !== undefined) tile.terrain = upd.terrain;
+        if (upd.grass_subtype !== undefined) {
+            if (tile.terrain === 'grass') tile.grass_subtype = upd.grass_subtype;
+            else delete tile.grass_subtype;
+        } else if (upd.terrain !== undefined && tile.terrain !== 'grass') {
+            delete tile.grass_subtype;
+        }
         if (upd.height !== undefined) tile.height = upd.height;
         if (upd.objects !== undefined) tile.objects = upd.objects;
         if (upd.radiation !== undefined) tile.radiation = upd.radiation;
@@ -12035,7 +12191,8 @@ export function applyLocationTilesUpdate(locationId, updates) {
     }
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
     if (gridNeedsRebuild) {
-        if (updates.some(update => update.terrain !== undefined)) updateLocationTerrainSurfaceTexture(updates);
+        if (updates.some(update => update.terrain !== undefined
+            || update.grass_subtype !== undefined)) updateLocationTerrainSurfaceTexture(updates);
         rebuildLocationTerrainSurface(true);
         rebuildWaterSurfaceMesh();
         rebuildLocationGrid();
@@ -12070,6 +12227,12 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             let needUpdate = false;
             if (updates.terrain !== undefined && tile.terrain !== updates.terrain) {
                 tile.terrain = updates.terrain;
+                if (tile.terrain !== 'grass') delete tile.grass_subtype;
+                needUpdate = true;
+            }
+            if (updates.grass_subtype !== undefined && tile.terrain === 'grass'
+                && tile.grass_subtype !== updates.grass_subtype) {
+                tile.grass_subtype = updates.grass_subtype;
                 needUpdate = true;
             }
             if (updates.height !== undefined && tile.height !== updates.height) {
@@ -12129,7 +12292,8 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 if (updates.objects !== undefined || updates.addObject) {
                     rebuildTileObjects(x, z);
                 }
-                changed.push({ x, z, terrain: tile.terrain, height: tile.height, objects: tile.objects, radiation: tile.radiation });
+                changed.push({ x, z, terrain: tile.terrain, grass_subtype: tile.grass_subtype || null,
+                    height: tile.height, objects: tile.objects, radiation: tile.radiation });
             }
         }
     }
@@ -12143,7 +12307,8 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             const cell = changedByTile.get(`${x},${z}`);
             if (cell) cell.height = height;
             else {
-                const added = { x, z, terrain: tiles[z][x].terrain, height,
+                const added = { x, z, terrain: tiles[z][x].terrain,
+                    grass_subtype: tiles[z][x].grass_subtype || null, height,
                     objects: tiles[z][x].objects, radiation: tiles[z][x].radiation };
                 changed.push(added);
                 changedByTile.set(`${x},${z}`, added);
@@ -12152,22 +12317,28 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     }
     if (changed.length === 0) return;
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
-    if (updates.terrain !== undefined || updates.height !== undefined) {
-        if (updates.terrain !== undefined) updateLocationTerrainSurfaceTexture(changed);
+    if (updates.terrain !== undefined || updates.height !== undefined
+        || updates.grass_subtype !== undefined) {
+        if (updates.terrain !== undefined || updates.grass_subtype !== undefined) {
+            updateLocationTerrainSurfaceTexture(changed);
+        }
         rebuildLocationTerrainSurface(true);
         rebuildWaterSurfaceMesh();
         rebuildLocationGrid();
         rebuildGrassDetailMesh();
     }
     if (updates.height !== undefined) rebuildLocationRoofs();
-    if (updates.terrain !== undefined || updates.height !== undefined) clearFogOverlay();
+    if (updates.terrain !== undefined || updates.height !== undefined
+        || updates.grass_subtype !== undefined) clearFogOverlay();
     if (lightChanged || updates.height !== undefined) applyLocationLighting();
     if (updates.height !== undefined && editorSelection) updateEditorSelectionVisual();
     if (window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
             token: localStorage.getItem('access_token'),
             location_id: window.currentLocationId,
-            updates: changed.map(c => ({ x: c.x, z: c.z, terrain: c.terrain, height: c.height, objects: c.objects, radiation: c.radiation }))
+            updates: changed.map(c => ({ x: c.x, z: c.z, terrain: c.terrain,
+                grass_subtype: c.grass_subtype, height: c.height,
+                objects: c.objects, radiation: c.radiation }))
         });
     }
     characterModels.forEach((entry) => {
@@ -12700,7 +12871,8 @@ function getEditBrushUpdates() {
     if (eraserMode || tool === 'erase') return { objects: [] };
     if (tool === 'radiation') return { radiation: brushRadiation };
     if (tool === 'decor') return { addObject: true };
-    if (tool === 'terrain') return { terrain: currentBrushTerrain };
+    if (tool === 'terrain') return { terrain: currentBrushTerrain,
+        ...(currentBrushTerrain === 'grass' ? { grass_subtype: currentBrushGrassSubtype } : {}) };
     if (tool === 'height') return { height: currentBrushHeight };
     return {};
 }
@@ -13296,6 +13468,13 @@ export function setLocationBrushTerrain(t) {
     if (select) select.value = t;
     const locSelect = document.getElementById('loc-edit-terrain');
     if (locSelect) locSelect.value = t;
+    const subtypeField = document.getElementById('loc-grass-subtype-field');
+    if (subtypeField) subtypeField.style.display = t === 'grass' ? 'flex' : 'none';
+}
+export function setLocationGrassSubtype(value) {
+    currentBrushGrassSubtype = value === 'forest' ? 'forest' : 'plain';
+    const select = document.getElementById('loc-grass-subtype');
+    if (select) select.value = currentBrushGrassSubtype;
 }
 export function setLocationBrushHeight(h) {
     currentBrushHeight = h;

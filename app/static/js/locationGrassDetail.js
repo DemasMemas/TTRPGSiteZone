@@ -57,7 +57,7 @@ function edgePosition(tile, local, salt) {
     return tile + local;
 }
 
-export function grassPlacements(tiles, isCovered = () => false) {
+export function grassPlacements(tiles, isCovered = () => false, includeGrass = true) {
     const tufts = [];
     const flowers = [];
     for (let z = 0; z < tiles.length; z++) {
@@ -74,19 +74,24 @@ export function grassPlacements(tiles, isCovered = () => false) {
                 continue;
             }
             if (tiles[z][x].terrain !== 'grass') continue;
-            for (let cell = 0; cell < 25; cell++) {
+            const understory = includeGrass === 'understory';
+            for (let cell = 0; includeGrass && cell < (understory ? 20 : 25); cell++) {
                 const localX = hash(x, z, 40 + cell);
                 const localZ = hash(x, z, 80 + cell);
                 const px = edgePosition(x, localX, 610 + z * 25 + cell);
                 const pz = edgePosition(z, localZ, 710 + x * 25 + cell);
-                if (hash(x, z, 120 + cell) > grassDensity(px, pz)) continue;
+                if (hash(x, z, 120 + cell) > grassDensity(px, pz)
+                    * (understory ? (tiles[z][x].grass_subtype === 'forest' ? 0.45 : 0.9) : 1)) continue;
+                if (understory && tiles[Math.floor(pz)]?.[Math.floor(px)]?.terrain !== 'grass') continue;
                 if (!isCovered(px, pz) && acceptsDetail(tiles, 'grass', px, pz, 180 + cell)) tufts.push({ x: px, z: pz,
-                    size: 0.58 + hash(x, z, 220 + cell) * 0.24,
+                    size: understory ? 0.52 + hash(x, z, 220 + cell) * 0.2
+                        : 0.58 + hash(x, z, 220 + cell) * 0.24,
                     width: 0.78 + hash(x, z, 260 + cell) * 0.5,
-                    height: 0.8 + hash(x, z, 300 + cell) * 0.38,
+                    height: understory ? 0.78 + hash(x, z, 300 + cell) * 0.27
+                        : 0.8 + hash(x, z, 300 + cell) * 0.38,
                     lean: (hash(x, z, 340 + cell) - 0.5) * 0.34,
                     turn: hash(x, z, 380 + cell) * Math.PI * 2,
-                    color: hash(x, z, 420 + cell) });
+                    color: hash(x, z, 420 + cell), understory });
             }
             if (hash(x, z, 7) < 0.07) {
                 const centerX = x + 0.25 + hash(x, z, 8) * 0.5;
@@ -193,6 +198,48 @@ function makeGrassGeometry(THREE) {
     return geometry;
 }
 
+function makeLowCoverGeometry(THREE) {
+    const positions = [];
+    const colors = [];
+    const blades = [
+        [0.22, 0.032, 0.18, 0.11, 0.025],
+        [1.43, 0.028, 0.22, 0.13, -0.017],
+        [2.67, 0.035, 0.16, 0.09, 0.022],
+        [4.02, 0.030, 0.20, 0.12, -0.020],
+        [5.27, 0.025, 0.14, 0.10, 0.030],
+    ];
+    const triangle = (a, b, c, ca, cb, cc) => {
+        positions.push(...a, ...b, ...c);
+        colors.push(...ca, ...cb, ...cc);
+    };
+    for (const [angle, width, height, reach, bend] of blades) {
+        const dx = Math.cos(angle);
+        const dz = Math.sin(angle);
+        const ax = -dz;
+        const az = dx;
+        const baseLeft = [ax * -width, 0, az * -width];
+        const baseRight = [ax * width, 0, az * width];
+        const midX = dx * reach * 0.55 + ax * bend * 0.5;
+        const midZ = dz * reach * 0.55 + az * bend * 0.5;
+        const midLeft = [midX - ax * width * 0.52, height * 0.72,
+            midZ - az * width * 0.52];
+        const midRight = [midX + ax * width * 0.52, height * 0.72,
+            midZ + az * width * 0.52];
+        const tip = [dx * reach + ax * bend, height, dz * reach + az * bend];
+        const root = [0.68, 0.66, 0.57];
+        const leaf = [1, 1, 1];
+        const end = [0.82, 0.85, 0.75];
+        triangle(baseLeft, baseRight, midRight, root, root, leaf);
+        triangle(baseLeft, midRight, midLeft, root, leaf, leaf);
+        triangle(midLeft, midRight, tip, leaf, leaf, end);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+    return geometry;
+}
+
 export function makeReedGeometry(THREE) {
     const positions = [];
     const colors = [];
@@ -256,13 +303,17 @@ function makeFlowerGeometry(THREE) {
     return geometry;
 }
 
-export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
+export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered, useNaturalGrass = false) {
     const group = new THREE.Group();
-    const { tufts, flowers } = grassPlacements(tiles, isCovered);
+    const placements = grassPlacements(tiles, isCovered,
+        useNaturalGrass ? 'understory' : true);
+    const tufts = placements.tufts;
+    const { flowers } = placements;
     const { pebbles } = groundPlacements(tiles, isCovered);
     const { pools, reeds } = swampPlacements(tiles, isCovered);
     const dummy = new THREE.Object3D();
     let visiblePools = 0;
+    let tuftTriangles = 0;
     if (pools.length) {
         const positions = [];
         const colors = [];
@@ -332,9 +383,13 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
         group.add(mesh);
     }
     if (tufts.length) {
-        const mesh = new THREE.InstancedMesh(makeGrassGeometry(THREE),
-            new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
+        const mesh = new THREE.InstancedMesh(
+            useNaturalGrass ? makeLowCoverGeometry(THREE) : makeGrassGeometry(THREE),
+            new THREE.MeshLambertMaterial({ color: 0xffffff,
+                vertexColors: useNaturalGrass, side: THREE.DoubleSide }),
             tufts.length);
+        tuftTriangles = mesh.geometry.getAttribute('position').count / 3;
+        const tuftColor = new THREE.Color();
         for (let index = 0; index < tufts.length; index++) {
             const tuft = tufts[index];
             dummy.position.set(tuft.x, getHeight(tuft.x, tuft.z) + 0.004, tuft.z);
@@ -343,9 +398,16 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
                 tuft.size * (tuft.height || 1), tuft.size * (tuft.width || 1));
             dummy.updateMatrix();
             mesh.setMatrixAt(index, dummy.matrix);
-            mesh.setColorAt(index, new THREE.Color().setHSL(0.17 + tuft.color * 0.12,
-                tuft.rock ? 0.23 : 0.28 + tuft.color * 0.1,
-                (tuft.rock ? 0.29 : 0.32) + tuft.color * 0.09));
+            if (tuft.understory) {
+                tuftColor.setHSL(
+                    tuft.color < 0.22 ? 0.13 : 0.19 + tuft.color * 0.035,
+                    0.22 + tuft.color * 0.07, 0.34 + tuft.color * 0.08);
+            } else {
+                tuftColor.setHSL(0.17 + tuft.color * 0.12,
+                    tuft.rock ? 0.23 : 0.28 + tuft.color * 0.1,
+                    (tuft.rock ? 0.29 : 0.32) + tuft.color * 0.09);
+            }
+            mesh.setColorAt(index, tuftColor);
         }
         mesh.instanceMatrix.needsUpdate = true;
         mesh.instanceColor.needsUpdate = true;
@@ -398,7 +460,11 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
         mesh.raycast = () => {};
         group.add(mesh);
     }
-    group.userData.detailCounts = { tufts: tufts.length, flowers: flowers.length,
+    const understoryCount = tufts.filter(tuft => tuft.understory).length;
+    group.userData.detailCounts = { tufts: tufts.length,
+        understory: understoryCount,
+        understoryTriangles: understoryCount * tuftTriangles,
+        flowers: flowers.length,
         pebbles: settledPebbles.length, pools: visiblePools, reeds: reeds.length };
     return group;
 }

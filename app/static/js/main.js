@@ -35,7 +35,8 @@ import {
     loadCombatStartRequests, handleCombatStartRequest, handleCombatStartRequestResolved,
     addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible,
     addLocationGridButton, addLocationRoofButton, destroyLocationScene,
-    setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationEraserMode, setLocationEditMode,
+    setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationGrassSubtype,
+    setLocationEraserMode, setLocationEditMode,
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
@@ -301,6 +302,13 @@ window.enterLocation = async function(locationId) {
                                 <option value="water">🌊 Вода</option>
                             </select>
                         </div>
+                        <label id="loc-grass-subtype-field" style="display: flex; align-items: center; gap: 5px;">
+                            Подтип травы:
+                            <select id="loc-grass-subtype" class="form-control" style="width: auto;">
+                                <option value="plain">Обычная земля</option>
+                                <option value="forest">Лесная подстилка</option>
+                            </select>
+                        </label>
                         <div style="display: flex; align-items: center; gap: 5px;">
                             <span>Радиус:</span>
                             <input type="range" id="loc-edit-radius" min="0" max="5" value="0">
@@ -408,7 +416,7 @@ window.enterLocation = async function(locationId) {
                     mode: createToolSection('Режим', ['loc-edit-toggle-checkbox']),
                     select: createToolSection('Выбор', []),
                     brush: createToolSection('Кисть', ['loc-edit-radius']),
-                    terrain: createToolSection('Ландшафт', ['loc-edit-terrain']),
+                    terrain: createToolSection('Ландшафт', ['loc-edit-terrain', 'loc-grass-subtype']),
                     height: createToolSection('Высота', ['loc-edit-height']),
                     radiation: createToolSection('Радиация', ['loc-edit-radiation']),
                 };
@@ -920,6 +928,7 @@ window.enterLocation = async function(locationId) {
                 // Получаем элементы
                 const editCheckbox = document.getElementById('loc-edit-toggle-checkbox');
                 const terrainSelect = document.getElementById('loc-edit-terrain');
+                const grassSubtypeSelect = document.getElementById('loc-grass-subtype');
                 const radiusSlider = document.getElementById('loc-edit-radius');
                 const heightSlider = document.getElementById('loc-edit-height');
                 const eraserCheck = document.getElementById('loc-eraser');
@@ -944,6 +953,7 @@ window.enterLocation = async function(locationId) {
 
                 terrainSelect.value = window.currentTileType;
                 setLocationBrushTerrain(window.currentTileType);
+                setLocationGrassSubtype(grassSubtypeSelect.value);
 
                 const objModeCheck = document.getElementById('loc-obj-mode');
                 const objTypeSelect = document.getElementById('loc-obj-type');
@@ -1019,6 +1029,7 @@ window.enterLocation = async function(locationId) {
                 editCheckbox.onchange = (e) => setLocationEditMode(e.target.checked);
 
                 terrainSelect.onchange = (e) => setLocationBrushTerrain(e.target.value);
+                grassSubtypeSelect.onchange = (e) => setLocationGrassSubtype(e.target.value);
 
                 radiusSlider.oninput = (e) => {
                     const val = parseInt(e.target.value);

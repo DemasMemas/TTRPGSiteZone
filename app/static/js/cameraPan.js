@@ -15,6 +15,6 @@ export function isTypingTarget(target) {
         return !['range', 'checkbox', 'radio', 'button', 'submit', 'color'].includes(input.type);
     }
     const select = target?.closest?.('select');
-    if (select) return !['tile-type-select', 'loc-edit-terrain'].includes(select.id);
+    if (select) return !['tile-type-select', 'loc-edit-terrain', 'loc-grass-subtype'].includes(select.id);
     return Boolean(target?.closest?.('textarea, [contenteditable="true"]'));
 }

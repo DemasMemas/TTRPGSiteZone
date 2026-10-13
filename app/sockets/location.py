@@ -285,6 +285,7 @@ def handle_update_location_tiles(data):
         if 0 <= z < len(tiles) and 0 <= x < len(tiles[0]):
             tile = dict(tiles[z][x])
             terrain_changed = False
+            subtype_changed = False
             height_changed = False
             objects_changed = False
             radiation_changed = False
@@ -292,6 +293,14 @@ def handle_update_location_tiles(data):
             if 'terrain' in upd and tile.get('terrain') != upd['terrain']:
                 tile['terrain'] = upd['terrain']
                 terrain_changed = True
+            if 'grass_subtype' in upd and tile.get('terrain') == 'grass':
+                subtype = 'forest' if upd['grass_subtype'] == 'forest' else 'plain'
+                if tile.get('grass_subtype') != subtype:
+                    tile['grass_subtype'] = subtype
+                    subtype_changed = True
+            elif tile.get('terrain') != 'grass' and 'grass_subtype' in tile:
+                del tile['grass_subtype']
+                subtype_changed = True
             if 'height' in upd and tile.get('height') != upd['height']:
                 tile['height'] = upd['height']
                 height_changed = True
@@ -302,12 +311,13 @@ def handle_update_location_tiles(data):
                 tile['radiation'] = upd['radiation']
                 radiation_changed = True
 
-            if terrain_changed or height_changed or objects_changed or radiation_changed:
+            if terrain_changed or subtype_changed or height_changed or objects_changed or radiation_changed:
                 tiles[z][x] = tile
                 changed.append({
                     'x': x,
                     'z': z,
                     'terrain': tile.get('terrain'),
+                    'grass_subtype': tile.get('grass_subtype'),
                     'height': tile.get('height'),
                     'objects': tile.get('objects'),
                     'radiation': tile.get('radiation'),

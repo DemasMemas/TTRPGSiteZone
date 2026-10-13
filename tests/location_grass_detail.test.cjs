@@ -27,9 +27,29 @@ test('grass placements are patchy, batched, stable, and exclude floors and non-g
     assert.ok([...perTile.values()].filter(count => count < 5).length > 30);
     assert.ok([...perTile.values()].filter(count => count > 18).length > 30);
     assert.ok(new Set(a.tufts.map(tuft => `${tuft.width.toFixed(2)},${tuft.height.toFixed(2)}`)).size > 100);
-    assert.match(source, /new THREE\.InstancedMesh\(makeGrassGeometry/);
+    assert.match(source, /useNaturalGrass \? makeLowCoverGeometry\(THREE\) : makeGrassGeometry\(THREE\)/);
     assert.match(source, /mesh\.castShadow = false/);
     assert.match(source, /mesh\.raycast = \(\) => \{\}/);
+});
+
+test('natural grass retains low muted understory without replacing flowers', async () => {
+    const { grassPlacements } = await import(moduleUrl);
+    const tiles = Array.from({ length: 20 }, () => Array.from({ length: 20 },
+        () => ({ terrain: 'grass' })));
+    const full = grassPlacements(tiles);
+    const plain = grassPlacements(tiles, () => false, 'understory');
+    assert.ok(plain.tufts.length > 0 && plain.tufts.length < full.tufts.length);
+    assert.deepEqual(plain.flowers, full.flowers);
+    assert.ok(plain.tufts.every(tuft => tuft.understory && tuft.size < 0.73));
+    tiles.forEach(row => row.forEach(tile => { tile.grass_subtype = 'forest'; }));
+    const forest = grassPlacements(tiles, () => false, 'understory');
+    assert.ok(forest.tufts.length < plain.tufts.length);
+    assert.deepEqual(forest.flowers, plain.flowers);
+    const mixed = Array.from({ length: 20 }, (_, z) => Array.from({ length: 20 }, (_, x) =>
+        ({ terrain: ['grass', 'sand', 'rock', 'water'][(x + z) % 4] })));
+    const bounded = grassPlacements(mixed, x => x < 3, 'understory');
+    assert.ok(bounded.tufts.filter(tuft => tuft.understory).every(tuft =>
+        tuft.x >= 3 && mixed[Math.floor(tuft.z)]?.[Math.floor(tuft.x)]?.terrain === 'grass'));
 });
 
 test('sand pebbles are sparse, irregular, deterministic, and absent from floors', async () => {
@@ -151,8 +171,8 @@ test('grass and reeds feather across land borders but never enter water', async 
 });
 
 test('local terrain rebuilds instanced plants and water uses continuous world coordinates', () => {
-    assert.match(scene, /createGrassDetailGroup\(THREE, currentLocationData\.tiles_data/);
-    assert.match(scene, /createTerrainSurfaceHeightSampler\(currentLocationData\.tiles_data\)/);
+    assert.match(scene, /createGrassDetailGroup\(THREE, tiles/);
+    assert.match(scene, /createTerrainSurfaceHeightSampler\(tiles\)/);
     assert.match(scene, /rebuildGrassDetailMesh\(\)/);
     assert.match(water, /vWaterWorldXZ \* 0\.16 \+ waterPatternOffset/);
     assert.match(water, /waterWorld = instanceMatrix \* waterWorld/);

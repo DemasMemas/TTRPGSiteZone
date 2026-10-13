@@ -1,10 +1,51 @@
+import { grassSubtype } from './locationGrassSubtype.js';
+
 const COLORS = {
-    grass: [78, 87, 54],
+    grass: [94, 83, 63],
     sand: [193, 175, 125],
     swamp: [75, 65, 45],
     rock: [126, 128, 123],
     water: [43, 70, 62],
 };
+
+let forestGroundPixels = null;
+let plainGroundPixels = null;
+let grassGroundLoading = null;
+const FOREST_TEXTURE_SIZE = 256;
+const FOREST_TEXELS_PER_TILE = 64;
+
+function loadGroundPixels(url) {
+    return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = FOREST_TEXTURE_SIZE;
+            const context = canvas.getContext('2d', { willReadFrequently: true });
+            if (!context) { reject(new Error('Forest ground canvas unavailable')); return; }
+            context.drawImage(image, 0, 0, FOREST_TEXTURE_SIZE, FOREST_TEXTURE_SIZE);
+            resolve(context.getImageData(0, 0,
+                FOREST_TEXTURE_SIZE, FOREST_TEXTURE_SIZE).data);
+        };
+        image.onerror = reject;
+        image.src = url;
+    });
+}
+
+export function loadGrassGroundPixels() {
+    if (plainGroundPixels && forestGroundPixels) return Promise.resolve();
+    if (grassGroundLoading) return grassGroundLoading;
+    grassGroundLoading = Promise.all([
+        loadGroundPixels('/static/materials/art/dirty_earth/color.jpg'),
+        loadGroundPixels('/static/textures/vegetation/forrest_ground_01_diff_1k.jpg'),
+    ]).then(([plain, forest]) => {
+        plainGroundPixels = plain;
+        forestGroundPixels = forest;
+    }).catch(error => {
+        grassGroundLoading = null;
+        throw error;
+    });
+    return grassGroundLoading;
+}
 
 function hash(x, z, seed = 0) {
     let value = Math.imul(x + seed * 37 + 1, 374761393)
@@ -35,10 +76,24 @@ const smoothstep = value => {
 function terrainAt(tiles, x, z) {
     const clampedZ = Math.max(0, Math.min(tiles.length - 1, z));
     const clampedX = Math.max(0, Math.min(tiles[clampedZ].length - 1, x));
-    return tiles[clampedZ][clampedX]?.terrain || 'grass';
+    const tile = tiles[clampedZ][clampedX];
+    return tile?.terrain === 'grass' && grassSubtype(tile) === 'forest'
+        ? 'grass_forest' : tile?.terrain || 'grass';
 }
 
-function terrainColor(kind, detail) {
+function terrainColor(kind, detail, x, z) {
+    const groundPixels = kind === 'grass_forest' ? forestGroundPixels
+        : kind === 'grass' ? plainGroundPixels : null;
+    if (groundPixels) {
+        const px = ((Math.floor(x * FOREST_TEXELS_PER_TILE) % FOREST_TEXTURE_SIZE)
+            + FOREST_TEXTURE_SIZE) % FOREST_TEXTURE_SIZE;
+        const pz = ((Math.floor(z * FOREST_TEXELS_PER_TILE) % FOREST_TEXTURE_SIZE)
+            + FOREST_TEXTURE_SIZE) % FOREST_TEXTURE_SIZE;
+        const index = (pz * FOREST_TEXTURE_SIZE + px) * 4;
+        return [0, 1, 2].map(channel => groundPixels[index + channel] * 0.88
+            + COLORS.grass[channel] * 0.12 + detail.broad * 8);
+    }
+    if (kind === 'grass_forest') kind = 'grass';
     const color = COLORS[kind] || COLORS.grass;
     const { broad, fine, speck, dirt, moss, wet } = detail;
     if (kind === 'grass') {
@@ -86,7 +141,7 @@ function paintPixels(tiles, image, pixelsPerTile, startX, startZ, endX, endZ,
             const k10 = w10 ? sampleTerrain(ix + 1, iz) : null;
             const k01 = w01 ? sampleTerrain(ix, iz + 1) : null;
             const k11 = w11 ? sampleTerrain(ix + 1, iz + 1) : null;
-            const grass = k00 === 'grass' || k10 === 'grass' || k01 === 'grass' || k11 === 'grass';
+            const grass = [k00, k10, k01, k11].some(kind => kind === 'grass' || kind === 'grass_forest');
             const swamp = k00 === 'swamp' || k10 === 'swamp' || k01 === 'swamp' || k11 === 'swamp';
             const detailColor = (k00 && k00 !== 'water') || (k10 && k10 !== 'water')
                 || (k01 && k01 !== 'water') || (k11 && k11 !== 'water');
@@ -104,12 +159,12 @@ function paintPixels(tiles, image, pixelsPerTile, startX, startZ, endX, endZ,
             const firstKind = k00 || k10 || k01 || k11;
             if ((!k00 || k00 === firstKind) && (!k10 || k10 === firstKind)
                 && (!k01 || k01 === firstKind) && (!k11 || k11 === firstKind)) {
-                const sample = terrainColor(firstKind, detail);
+                const sample = terrainColor(firstKind, detail, x, z);
                 rgb[0] = sample[0]; rgb[1] = sample[1]; rgb[2] = sample[2];
             } else {
                 for (const [kind, weight] of [[k00, w00], [k10, w10], [k01, w01], [k11, w11]]) {
                     if (!kind) continue;
-                    const sample = terrainColor(kind, detail);
+                    const sample = terrainColor(kind, detail, x, z);
                     for (let channel = 0; channel < 3; channel++) rgb[channel] += sample[channel] * weight;
                 }
             }

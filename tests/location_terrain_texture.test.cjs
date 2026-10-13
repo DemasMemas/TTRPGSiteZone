@@ -4,8 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationTerrainTexture.js'), 'utf8');
+const subtypeSource = fs.readFileSync(path.join(__dirname, '../app/static/js/locationGrassSubtype.js'), 'utf8');
 const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
-const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+const subtypeUrl = `data:text/javascript;base64,${Buffer.from(subtypeSource).toString('base64')}`;
+const moduleUrl = `data:text/javascript;base64,${Buffer.from(
+    source.replace("'./locationGrassSubtype.js'", `'${subtypeUrl}'`)).toString('base64')}`;
 
 test('terrain texture varies by soil and blends adjacent cells continuously', async () => {
     const { createLocationTerrainPixels, updateLocationTerrainPixels } = await import(moduleUrl);
@@ -19,7 +22,7 @@ test('terrain texture varies by soil and blends adjacent cells continuously', as
     const sand = color(30);
     const swamp = color(50);
     const rock = color(70);
-    assert.ok(grass[1] > grass[0]);
+    assert.ok(grass[0] > grass[1]);
     assert.ok(sand[0] > grass[0] + 80);
     assert.ok(swamp[0] < sand[0] - 60);
     assert.ok(Math.abs(rock[0] - rock[1]) < 20);
@@ -46,6 +49,17 @@ test('grass soil is muted and has deterministic dry patches', async () => {
     assert.ok(greenBias / (image.data.length / 4) < 20);
     assert.deepEqual(image.data, createLocationTerrainPixels(structuredClone(tiles), 12).data);
     assert.match(scene, /terrainSurfaceTexture\.encoding = THREE\.sRGBEncoding/);
+});
+
+test('legacy grass stays plain and forest subtype changes only grass surface', async () => {
+    const { createLocationTerrainPixels } = await import(moduleUrl);
+    const plain = [[{ terrain: 'grass' }, { terrain: 'sand' }]];
+    const explicitPlain = [[{ terrain: 'grass', grass_subtype: 'plain' }, { terrain: 'sand' }]];
+    const forest = [[{ terrain: 'grass', grass_subtype: 'forest' }, { terrain: 'sand' }]];
+    assert.deepEqual(createLocationTerrainPixels(plain, 20).data,
+        createLocationTerrainPixels(explicitPlain, 20).data);
+    assert.deepEqual(createLocationTerrainPixels(forest, 20).data,
+        createLocationTerrainPixels(plain, 20).data);
 });
 
 test('swamp soil has distinct moss and dark wet pockets instead of uniform blur', async () => {
