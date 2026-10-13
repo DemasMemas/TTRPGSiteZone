@@ -11,7 +11,9 @@ from app.services.exceptions import ValidationError
 from app.services.location_lighting import normalize_location_lighting
 from app.services.combat import CombatService
 from scripts.seed_visual_test_location import (
-    SCENE_NAME, SCENE_HEIGHT, create_visual_test_location, rebuild_visual_test_location,
+    SCENE_NAME, SCENE_HEIGHT, STRESS_SCENE_NAME, STRESS_WIDTH, STRESS_HEIGHT,
+    create_visual_test_location, rebuild_visual_test_location,
+    rebuild_both_visual_test_locations,
 )
 
 
@@ -152,6 +154,10 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
     assert {tile['terrain'] for row in location.tiles_data for tile in row} == {
         'grass', 'rock', 'sand', 'swamp', 'water',
     }
+    assert all(location.tiles_data[z][x]['terrain'] == 'sand'
+               for z in range(6, 11) for x in range(3))
+    assert all(location.tiles_data[z][x]['terrain'] == 'grass'
+               for z in range(11, 15) for x in range(3))
     assert location.tiles_data[20][5]['height'] >= 2.3
     assert location.tiles_data[20][8]['height'] > location.tiles_data[20][9]['height']
     assert location.tiles_data[22][23]['height'] == 2.6
@@ -226,6 +232,34 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
     assert rebuilt.id == location.id
     assert {entry.character_id for entry in rebuilt.location_participants} == participant_ids
     assert len(rebuilt.location_participants) == 5
+
+    stress = Location(
+        lobby_id=lobby_id, name=STRESS_SCENE_NAME, type='exploration',
+        grid_width=1, grid_height=1,
+        tiles_data=[[{'terrain': 'grass', 'height': 1, 'objects': []}]],
+        world_tile_x=33, world_tile_z=32,
+    )
+    db.session.add(stress)
+    db.session.commit()
+    standard_marker = (rebuilt.world_tile_x, rebuilt.world_tile_z)
+    stress_marker = (stress.world_tile_x, stress.world_tile_z)
+    standard, stress = rebuild_both_visual_test_locations(lobby_id)
+    assert standard.id == location.id
+    assert (standard.world_tile_x, standard.world_tile_z) == standard_marker
+    assert (stress.world_tile_x, stress.world_tile_z) == stress_marker
+    assert (stress.grid_width, stress.grid_height) == (STRESS_WIDTH, STRESS_HEIGHT)
+    assert len(stress.tiles_data) == STRESS_HEIGHT
+    assert all(len(row) == STRESS_WIDTH for row in stress.tiles_data)
+    assert len(stress.objects) > len(standard.objects) + 35
+    assert len(stress.location_participants) == 15
+    assert len(stress.lighting['local_lights']) == 7
+    assert sum(tile['terrain'] == 'grass' for row in stress.tiles_data for tile in row) > 1500
+    assert MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=1, chunk_y=1).first().data == []
+    stress_ids = {entry.character_id for entry in stress.location_participants}
+    standard, stress = rebuild_both_visual_test_locations(lobby_id)
+    assert len(stress.location_participants) == 15
+    assert {entry.character_id for entry in stress.location_participants} == stress_ids
+    assert len(stress.objects) > len(standard.objects) + 35
 
 
 def test_resizing_location_cannot_leave_lamps_outside_grid(client, create_user, auth_headers):

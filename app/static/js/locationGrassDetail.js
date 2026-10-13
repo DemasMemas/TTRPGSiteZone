@@ -4,6 +4,27 @@ function hash(x, z, salt = 0) {
     return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
 }
 
+function patchNoise(x, z, scale, salt) {
+    const px = x * scale;
+    const pz = z * scale;
+    const ix = Math.floor(px);
+    const iz = Math.floor(pz);
+    const fx = px - ix;
+    const fz = pz - iz;
+    const sx = fx * fx * (3 - 2 * fx);
+    const sz = fz * fz * (3 - 2 * fz);
+    const top = hash(ix, iz, salt) * (1 - sx) + hash(ix + 1, iz, salt) * sx;
+    const bottom = hash(ix, iz + 1, salt) * (1 - sx) + hash(ix + 1, iz + 1, salt) * sx;
+    return top * (1 - sz) + bottom * sz;
+}
+
+function grassDensity(x, z) {
+    const patch = patchNoise(x, z, 0.42, 811) * 0.72
+        + patchNoise(x, z, 1.35, 812) * 0.28;
+    const t = Math.max(0, Math.min(1, (patch - 0.35) / 0.3));
+    return 0.07 + 0.88 * t * t * (3 - 2 * t);
+}
+
 function detailTerrainWeight(tiles, kind, px, pz) {
     const cx = px - 0.5;
     const cz = pz - 0.5;
@@ -54,17 +75,18 @@ export function grassPlacements(tiles, isCovered = () => false) {
             }
             if (tiles[z][x].terrain !== 'grass') continue;
             for (let cell = 0; cell < 25; cell++) {
-                const gx = cell % 5;
-                const gz = Math.floor(cell / 5);
-                if (hash(x, z, 20 + cell) < 0.14) continue;
-                const localX = (gx + 0.08 + hash(x, z, 40 + cell) * 0.84) / 5;
-                const localZ = (gz + 0.08 + hash(x, z, 60 + cell) * 0.84) / 5;
+                const localX = hash(x, z, 40 + cell);
+                const localZ = hash(x, z, 80 + cell);
                 const px = edgePosition(x, localX, 610 + z * 25 + cell);
                 const pz = edgePosition(z, localZ, 710 + x * 25 + cell);
+                if (hash(x, z, 120 + cell) > grassDensity(px, pz)) continue;
                 if (!isCovered(px, pz) && acceptsDetail(tiles, 'grass', px, pz, 180 + cell)) tufts.push({ x: px, z: pz,
-                    size: 0.6 + hash(x, z, 80 + cell) * 0.3,
-                    turn: hash(x, z, 100 + cell) * Math.PI * 2,
-                    color: hash(x, z, 120 + cell) });
+                    size: 0.58 + hash(x, z, 220 + cell) * 0.24,
+                    width: 0.78 + hash(x, z, 260 + cell) * 0.5,
+                    height: 0.8 + hash(x, z, 300 + cell) * 0.38,
+                    lean: (hash(x, z, 340 + cell) - 0.5) * 0.34,
+                    turn: hash(x, z, 380 + cell) * Math.PI * 2,
+                    color: hash(x, z, 420 + cell) });
             }
             if (hash(x, z, 7) < 0.07) {
                 const centerX = x + 0.25 + hash(x, z, 8) * 0.5;
@@ -152,15 +174,18 @@ export function swampPlacements(tiles, isCovered = () => false) {
 
 function makeGrassGeometry(THREE) {
     const positions = [];
-    for (let blade = 0; blade < 3; blade++) {
-        const angle = blade * Math.PI * 2 / 3;
+    const blades = [
+        [0.17, 0.032, 0.19, 0.095],
+        [2.31, 0.041, 0.25, 0.065],
+        [4.56, 0.028, 0.21, 0.11],
+    ];
+    for (const [angle, width, height, reach] of blades) {
         const dx = Math.cos(angle);
         const dz = Math.sin(angle);
-        const sideX = -dz * 0.04;
-        const sideZ = dx * 0.04;
-        const height = 0.19 + blade % 2 * 0.07;
+        const sideX = -dz * width;
+        const sideZ = dx * width;
         positions.push(-sideX, 0, -sideZ, sideX, 0, sideZ,
-            dx * 0.075, height, dz * 0.075);
+            dx * reach, height, dz * reach);
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -313,12 +338,14 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered) {
         for (let index = 0; index < tufts.length; index++) {
             const tuft = tufts[index];
             dummy.position.set(tuft.x, getHeight(tuft.x, tuft.z) + 0.004, tuft.z);
-            dummy.rotation.set(0, tuft.turn, 0);
-            dummy.scale.setScalar(tuft.size);
+            dummy.rotation.set(tuft.lean || 0, tuft.turn, (tuft.lean || 0) * 0.7);
+            dummy.scale.set(tuft.size * (tuft.width || 1),
+                tuft.size * (tuft.height || 1), tuft.size * (tuft.width || 1));
             dummy.updateMatrix();
             mesh.setMatrixAt(index, dummy.matrix);
-            mesh.setColorAt(index, new THREE.Color().setHSL(0.25 + tuft.color * 0.035,
-                tuft.rock ? 0.38 : 0.52, (tuft.rock ? 0.3 : 0.36) + tuft.color * 0.12));
+            mesh.setColorAt(index, new THREE.Color().setHSL(0.17 + tuft.color * 0.12,
+                tuft.rock ? 0.23 : 0.28 + tuft.color * 0.1,
+                (tuft.rock ? 0.29 : 0.32) + tuft.color * 0.09));
         }
         mesh.instanceMatrix.needsUpdate = true;
         mesh.instanceColor.needsUpdate = true;

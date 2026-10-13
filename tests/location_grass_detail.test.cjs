@@ -8,16 +8,25 @@ const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationSce
 const water = fs.readFileSync(path.join(__dirname, '../app/static/js/waterSurface.js'), 'utf8');
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 
-test('grass placements are dense, batched, stable, and exclude floors and non-grass', async () => {
+test('grass placements are patchy, batched, stable, and exclude floors and non-grass', async () => {
     const { grassPlacements } = await import(moduleUrl);
     const tiles = Array.from({ length: 20 }, () => Array.from({ length: 20 }, () => ({ terrain: 'grass' })));
     tiles[0][0].terrain = 'water';
     const a = grassPlacements(tiles, x => x < 3);
     const b = grassPlacements(tiles, x => x < 3);
     assert.deepEqual(a, b);
-    assert.ok(a.tufts.length > 7000 && a.tufts.length < 7800);
+    assert.ok(a.tufts.length > 3000 && a.tufts.length < 5500);
     assert.ok(a.flowers.length > 30 && a.flowers.length < 130);
     assert.ok([...a.tufts, ...a.flowers].every(item => item.x >= 3));
+    assert.deepEqual(a, grassPlacements(structuredClone(tiles), x => x < 3));
+    const perTile = new Map();
+    for (const tuft of a.tufts) {
+        const key = `${Math.floor(tuft.x)},${Math.floor(tuft.z)}`;
+        perTile.set(key, (perTile.get(key) || 0) + 1);
+    }
+    assert.ok([...perTile.values()].filter(count => count < 5).length > 30);
+    assert.ok([...perTile.values()].filter(count => count > 18).length > 30);
+    assert.ok(new Set(a.tufts.map(tuft => `${tuft.width.toFixed(2)},${tuft.height.toFixed(2)}`)).size > 100);
     assert.match(source, /new THREE\.InstancedMesh\(makeGrassGeometry/);
     assert.match(source, /mesh\.castShadow = false/);
     assert.match(source, /mesh\.raycast = \(\) => \{\}/);

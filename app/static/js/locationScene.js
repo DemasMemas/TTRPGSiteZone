@@ -508,7 +508,7 @@ const handlers = {
 };
 
 const terrainColors = {
-    grass: 0x3a5f0b,
+    grass: 0x4e5736,
     sand: 0xC2B280,
     rock: 0x808080,
     swamp: 0x4B3B2A,

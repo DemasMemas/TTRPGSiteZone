@@ -30,6 +30,24 @@ test('terrain texture varies by soil and blends adjacent cells continuously', as
     assert.deepEqual(image.data, createLocationTerrainPixels(tiles, 20).data);
 });
 
+test('grass soil is muted and has deterministic dry patches', async () => {
+    const { createLocationTerrainPixels } = await import(moduleUrl);
+    const tiles = Array.from({ length: 12 }, () => Array.from({ length: 12 }, () => ({ terrain: 'grass' })));
+    const image = createLocationTerrainPixels(tiles, 12);
+    let minRed = 255;
+    let maxRed = 0;
+    let greenBias = 0;
+    for (let index = 0; index < image.data.length; index += 4) {
+        minRed = Math.min(minRed, image.data[index]);
+        maxRed = Math.max(maxRed, image.data[index]);
+        greenBias += image.data[index + 1] - image.data[index];
+    }
+    assert.ok(maxRed - minRed > 20);
+    assert.ok(greenBias / (image.data.length / 4) < 20);
+    assert.deepEqual(image.data, createLocationTerrainPixels(structuredClone(tiles), 12).data);
+    assert.match(scene, /terrainSurfaceTexture\.encoding = THREE\.sRGBEncoding/);
+});
+
 test('swamp soil has distinct moss and dark wet pockets instead of uniform blur', async () => {
     const { createLocationTerrainPixels } = await import(moduleUrl);
     const tiles = Array.from({ length: 6 }, () => Array.from({ length: 6 }, () => ({ terrain: 'swamp' })));

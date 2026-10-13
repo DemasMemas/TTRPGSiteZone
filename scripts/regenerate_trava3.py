@@ -11,13 +11,13 @@ from app.models.location import Location
 from app.models.map_chunk import MapChunk
 from app.services.map import MapService
 from scripts.seed_visual_test_location import (
-    SCENE_DESCRIPTION, SCENE_HEIGHT, SCENE_NAME, SCENE_WIDTH,
-    _lighting, _populate, _tiles,
+    SCENE_DESCRIPTION, STRESS_HEIGHT, STRESS_SCENE_NAME, STRESS_WIDTH,
+    _lighting, _populate, _stress_tiles,
 )
 
 
 LOBBY_ID = 19
-NEW_SCENE_NAME = f'{SCENE_NAME} 2'
+NEW_SCENE_NAME = STRESS_SCENE_NAME
 
 
 def _new_marker(lobby, chunks):
@@ -63,15 +63,16 @@ def regenerate_trava3():
             LOBBY_ID, chunk_x, chunk_y, lobby.map_type)
     marker = _new_marker(lobby, chunks)
     location = Location(
-        lobby_id=lobby.id, name=NEW_SCENE_NAME, description=SCENE_DESCRIPTION,
-        type='exploration', grid_width=SCENE_WIDTH, grid_height=SCENE_HEIGHT,
-        tiles_data=_tiles(), lighting=_lighting(),
+        lobby_id=lobby.id, name=NEW_SCENE_NAME,
+        description=SCENE_DESCRIPTION + ' Расширенная стресс-сцена для замера FPS.',
+        type='exploration', grid_width=STRESS_WIDTH, grid_height=STRESS_HEIGHT,
+        tiles_data=_stress_tiles(), lighting=_lighting(stress=True),
         world_tile_x=marker[0], world_tile_z=marker[1], world_radius=0,
         spawn_points=[{'x': 8, 'y': 19}],
     )
     db.session.add(location)
     db.session.flush()
-    _populate(location, lobby, commit=False)
+    _populate(location, lobby, commit=False, stress=True)
     db.session.commit()
     return len(chunks), location.id, marker
 

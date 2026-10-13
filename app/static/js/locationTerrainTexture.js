@@ -1,5 +1,5 @@
 const COLORS = {
-    grass: [63, 99, 22],
+    grass: [78, 87, 54],
     sand: [193, 175, 125],
     swamp: [75, 65, 45],
     rock: [126, 128, 123],
@@ -42,9 +42,9 @@ function terrainColor(kind, detail) {
     const color = COLORS[kind] || COLORS.grass;
     const { broad, fine, speck, dirt, moss, wet } = detail;
     if (kind === 'grass') {
-        return [color[0] + broad * 21 + dirt * 20,
-            color[1] + broad * 25 - dirt * 17,
-            color[2] + broad * 13 + dirt * 5].map(value => value + fine * 7);
+        return [color[0] + broad * 23 + dirt * 33 + fine * 8,
+            color[1] + broad * 21 + dirt * 13 + fine * 8,
+            color[2] + broad * 17 + dirt * 10 + fine * 7];
     }
     if (kind === 'sand') {
         const grain = speck > 0.988 ? -27 : speck < 0.012 ? 13 : 0;
@@ -95,7 +95,7 @@ function paintPixels(tiles, image, pixelsPerTile, startX, startZ, endX, endZ,
                 fine: detailColor ? noise(x, z, 5.8, 23) - 0.5 : 0,
                 speck: hash(Math.floor(originX * pixelsPerTile) + px,
                     Math.floor(originZ * pixelsPerTile) + pz, 41),
-                dirt: grass ? smoothstep((noise(x, z, 1.6, 12) - 0.58) * 5) : 0,
+                dirt: grass ? smoothstep((noise(x, z, 1.15, 12) - 0.48) * 4) : 0,
                 moss: swamp ? smoothstep((noise(x, z, 6.2, 31) - 0.56) * 12) : 0,
                 wet: swamp ? smoothstep((noise(x, z, 3.4, 51)
                     + (noise(x, z, 10.4, 52) - 0.5) * 0.22 - 0.62) * 10) : 0,

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Сравнение травы | Периметр</title>
+    <script type="importmap">
+        {"imports":{"three":"https://unpkg.com/three@0.128.0/build/three.module.js"}}
+    </script>
+    <style>
+        :root { color-scheme: dark; font-family: Georgia, serif; background: #20251e; color: #e9e3cf; }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; display: grid; grid-template-columns: 330px minmax(0, 1fr); }
+        aside { z-index: 1; padding: 22px; overflow-y: auto; background: #20251e; border-right: 1px solid #555b46; }
+        main { position: relative; min-width: 0; min-height: 100vh; background: #565c50; }
+        #view { position: absolute; inset: 0; touch-action: none; }
+        #view canvas { display: block; }
+        h1 { margin: 0 0 9px; font-size: 26px; line-height: 1.08; font-weight: normal; }
+        h2 { margin: 20px 0 9px; font-size: 13px; letter-spacing: .13em; text-transform: uppercase; color: #c7ba88; }
+        p { font: 14px/1.5 Georgia, serif; color: #c5c6b2; }
+        small { color: #a6ae9b; line-height: 1.4; }
+        button { display: block; width: 100%; margin: 6px 0; padding: 9px 11px; text-align: left; border: 1px solid #69715c; border-radius: 5px; color: #eee9d7; background: #303a2d; font: 14px Georgia, serif; cursor: pointer; }
+        button:hover, button[aria-pressed="true"] { border-color: #c2ae73; background: #526047; }
+        button[data-focus="reference"] { border-color: #b9aa74; box-shadow: inset 3px 0 #c4a666; }
+        .featured { border-left: 3px solid #c4a666; padding-left: 11px; color: #ded4b1; }
+        button:disabled { opacity: .45; cursor: wait; }
+        #measure { margin-top: 16px; text-align: center; background: #85704b; border-color: #b9a47e; }
+        #readout { margin-top: 12px; padding: 10px; background: #151b17; border: 1px solid #4c5946; font: 12px/1.45 Consolas, monospace; white-space: pre-wrap; }
+        select { width: 100%; padding: 8px; color: #eee9d7; background: #303a2d; border: 1px solid #69715c; }
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; margin-top: 12px; border-collapse: collapse; font: 11px/1.35 Consolas, monospace; }
+        th, td { padding: 6px 3px; border-bottom: 1px solid #495144; text-align: right; }
+        th:first-child, td:first-child { text-align: left; }
+        a { color: #d7bd7e; }
+        .tip { position: absolute; right: 14px; bottom: 12px; padding: 7px 10px; background: #1b211cbd; color: #f4eac9; font: 12px Georgia, serif; pointer-events: none; }
+        @media (max-width: 760px) {
+            body { grid-template-columns: 1fr; grid-template-rows: auto minmax(60vh, 1fr); }
+            aside { max-height: 37vh; padding: 13px 16px; border-right: 0; border-bottom: 1px solid #555b46; }
+            main { min-height: 63vh; }
+            h1 { font-size: 20px; }
+            h2 { margin-top: 10px; }
+            button { width: auto; display: inline-block; margin: 3px; }
+            #measure { display: block; width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <aside>
+        <h1>Три силуэта, одна земля</h1>
+        <p>Изолированный полигон D.2.3. Четыре одинаковые площадки с общим грунтом, дорогой и забором. Основные локации не изменяются.</p>
+        <p class="featured">01 — неизменный эталон Grass Cards D.2.1. Рядом новая низкая трава, новая высокая сухая трава и участок, где они смешаны с эталоном.</p>
+        <h2>Ракурс</h2>
+        <button data-focus="all" aria-pressed="true">Все варианты рядом</button>
+        <button data-focus="reference" aria-pressed="false">01 · Эталон D.2.1</button>
+        <button data-focus="low" aria-pressed="false">02 · Низкая трава</button>
+        <button data-focus="tall" aria-pressed="false">03 · Высокая трава</button>
+        <button data-focus="mixed" aria-pressed="false">04 · Смешанный покров</button>
+        <h2>Угол камеры</h2>
+        <button data-angle="top" aria-pressed="false">Строго сверху</button>
+        <button data-angle="game" aria-pressed="true">Игровой наклон</button>
+        <button data-angle="low" aria-pressed="false">Низкий ракурс</button>
+        <h2>Нагрузка</h2>
+        <label for="density">Плотность растительности</label>
+        <select id="density">
+            <option value="1">Обычная ×1</option>
+            <option value="5">Стресс ×5</option>
+            <option value="10">Стресс ×10</option>
+        </select>
+        <button id="measure" disabled>Замерить каждый вариант</button>
+        <div id="readout">Подготовка сцены...</div>
+        <div class="table-wrap"><table aria-label="Результаты замера">
+            <thead><tr><th>Вариант</th><th>Шт.</th><th>Верш.</th><th>Треуг.</th><th>Выз.</th><th>мс</th><th>p95</th><th>FPS</th></tr></thead>
+            <tbody id="results"></tbody>
+        </table></div>
+        <p><small>Вершины и треугольники в таблице относятся к растительности; draw calls — ко всей сцене, включая грунт и забор. * означает возможный лимит дисплея, а не доказанную одинаковую скорость GPU. Замер фиксирует одинаковый игровой ракурс; пиксельное покрытие alpha-tested карточек тоже влияет на скорость. Canvas-карточки пока тестовые.</small></p>
+        <p><a href="/static/performance-benchmark.html">Общий бенчмарк графики</a></p>
+    </aside>
+    <main>
+        <div id="view"></div>
+        <div class="tip">Потянуть — поворот · Колесо — масштаб</div>
+    </main>
+    <script>
+        if (location.protocol === 'file:') {
+            document.getElementById('readout').textContent = 'Откройте страницу через сервер: /static/vegetation-comparison.html';
+        } else {
+            const script = document.createElement('script');
+            script.type = 'module';
+            script.src = '/static/js/vegetationComparison.js';
+            const readout = document.getElementById('readout');
+            const timeout = setTimeout(() => {
+                if (readout.textContent === 'Подготовка сцены...') {
+                    readout.textContent = 'Не удалось запустить сцену. Проверьте доступ к unpkg.com и WebGL.';
+                }
+            }, 8000);
+            window.addEventListener('vegetation-comparison-ready', () => clearTimeout(timeout), { once: true });
+            script.onerror = () => {
+                clearTimeout(timeout);
+                readout.textContent = 'Не загрузился модуль сцены. Проверьте доступ к unpkg.com.';
+            };
+            document.body.appendChild(script);
+        }
+    </script>
+</body>
+</html>

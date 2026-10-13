@@ -23,11 +23,15 @@ from app.services.world_rules import mutant_character_data, mutant_profile
 
 
 SCENE_NAME = 'Визуальный полигон'
+STRESS_SCENE_NAME = 'Визуальный полигон 2'
 SCENE_WIDTH = 38
 SCENE_HEIGHT = 34
+STRESS_WIDTH = 64
+STRESS_HEIGHT = 56
 SCENE_DESCRIPTION = (
     'Полигон визуала: бар с окнами и дверями, склад, тёмный туннель, '
-    'пять поверхностей, плавный холм и резкий уступ, четыре вида ламп и галерея всех аномалий.'
+    'пять поверхностей, открытый грунт и трава разной густоты у дороги и забора, '
+    'плавный холм и резкий уступ, четыре вида ламп и галерея всех аномалий.'
 )
 
 
@@ -46,6 +50,8 @@ def _tiles():
                 terrain, height = 'sand', 1
             elif x >= 25 and z >= 25:
                 terrain = 'swamp'
+            if x <= 2 and 6 <= z <= 10:
+                terrain = 'sand'
             if 27 <= x <= 33 and 26 <= z <= 30 and math.hypot(x - 30, z - 28) < 3.4:
                 terrain, height = 'water', 0.65
             if 10 <= x <= 18 and 24 <= z <= 31:
@@ -93,7 +99,37 @@ def _tiles():
     return tiles
 
 
-def _structures(location):
+def _stress_tiles():
+    base = _tiles()
+    tiles = []
+    for z in range(STRESS_HEIGHT):
+        row = []
+        for x in range(STRESS_WIDTH):
+            if x < SCENE_WIDTH and z < SCENE_HEIGHT:
+                row.append(base[z][x])
+                continue
+            terrain = 'grass'
+            height = round(1 + 0.05 * math.sin(x / 4) * math.cos(z / 6), 2)
+            if x >= 38 and abs(z - (20 + 1.5 * math.sin(x / 5))) < 1.5:
+                terrain, height = 'sand', 1
+            elif 40 <= x <= 45 and 40 <= z <= 45:
+                terrain, height = 'rock', 1.35
+            elif x >= 51 and z >= 37:
+                terrain = 'swamp'
+            if 54 <= x <= 60 and 44 <= z <= 50 and math.hypot(x - 57, z - 47) < 3.5:
+                terrain, height = 'water', 0.65
+            row.append({'terrain': terrain, 'height': height, 'objects': [], 'radiation': 0})
+        tiles.append(row)
+    for index in range(45):
+        x = 38 + (index * 17) % 26
+        z = 34 + (index * 23) % 22
+        tile = tiles[z][x]
+        if tile['terrain'] == 'grass':
+            tile['objects'].append({'type': 'tree' if index % 3 == 0 else 'rock'})
+    return tiles
+
+
+def _structures(location, *, stress=False):
     structures = []
 
     def add(name, kind, x, z, width, depth, height, color, **extra):
@@ -164,10 +200,27 @@ def _structures(location):
         visual_asset='art_wooden_crate', weight_kg=25, contents=[])
     add('Сетчатый забор PBR', 'fence', 28, 25, 2, 0.15, 1.2, '#8b7458',
         visual_asset='art_chainlink_fence')
+    if stress:
+        for index, x in enumerate(range(41, 62, 3)):
+            add(f'Секция забора {index}', 'fence', x, 8, 2, 0.15, 1.2, '#8b7458',
+                visual_asset='art_chainlink_fence')
+            add(f'Секция ограды {index}', 'fence', x, 30, 2, 0.15, 1.2, '#8b7458',
+                visual_asset='art_chainlink_fence')
+        for index in range(18):
+            x = 41 + (index % 6) * 3
+            z = 12 + (index // 6) * 4
+            add(f'Складской ящик {index}', 'box', x, z, 0.8, 0.8, 0.7, '#8b6b4f',
+                visual_asset='art_wooden_crate', contents=[])
+        for index in range(8):
+            add(f'Бочка полигона {index}', 'barrel', 42 + index * 2, 26,
+                0.65, 0.65, 0.9, '#8a6444', visual_asset='art_rusty_barrel', weight_kg=40)
+        for index, x in enumerate((43, 49, 55, 61)):
+            add(f'Грунтовая площадка {index}', 'floor', x, 34, 3, 3, 0.12, '#776d5d',
+                visual_asset='art_dirty_earth')
     return structures
 
 
-def _lighting():
+def _lighting(*, stress=False):
     dark_tiles = [
         {'x': x, 'z': z}
         for x in range(4, 16) for z in range(4, 14)
@@ -175,6 +228,19 @@ def _lighting():
         {'x': x, 'z': z}
         for x in range(11, 18) for z in range(25, 30)
     ]
+    lights = [
+        {'x': 7.5, 'z': 7.5, 'height': 2.2, 'color': '#ffd090', 'intensity': 2.5, 'distance': 6},
+        {'x': 12.5, 'z': 11.5, 'height': 2.2, 'color': '#ffd090', 'intensity': 2.2, 'distance': 5},
+        {'x': 18.5, 'z': 22.5, 'height': 2.2, 'color': '#a9d9ff', 'intensity': 2.5, 'distance': 7},
+        {'x': 12.5, 'z': 26.5, 'height': 1.8, 'color': '#ff674f', 'intensity': 1.6, 'distance': 4},
+        {'x': 18.5, 'z': 19.5, 'height': 2.6, 'color': '#fff0c8', 'intensity': 4,
+         'distance': 12, 'kind': 'spot', 'azimuth': 0},
+    ]
+    if stress:
+        lights.extend([
+            {'x': 45.5, 'z': 17.5, 'height': 2.4, 'color': '#f4dfb3', 'intensity': 1.8, 'distance': 8},
+            {'x': 56.5, 'z': 25.5, 'height': 2.4, 'color': '#d9e7f0', 'intensity': 1.8, 'distance': 8},
+        ])
     return normalize_location_lighting({
         'mode': 'manual',
         'ambient_color': '#aab6bd', 'ambient_intensity': 0.55,
@@ -182,25 +248,23 @@ def _lighting():
         'directional_azimuth': 50, 'directional_elevation': 58,
         'background_color': '#445467',
         'dark_tiles': dark_tiles,
-        'local_lights': [
-            {'x': 7.5, 'z': 7.5, 'height': 2.2, 'color': '#ffd090', 'intensity': 2.5, 'distance': 6},
-            {'x': 12.5, 'z': 11.5, 'height': 2.2, 'color': '#ffd090', 'intensity': 2.2, 'distance': 5},
-            {'x': 18.5, 'z': 22.5, 'height': 2.2, 'color': '#a9d9ff', 'intensity': 2.5, 'distance': 7},
-            {'x': 12.5, 'z': 26.5, 'height': 1.8, 'color': '#ff674f', 'intensity': 1.6, 'distance': 4},
-            {'x': 18.5, 'z': 19.5, 'height': 2.6, 'color': '#fff0c8', 'intensity': 4,
-             'distance': 12, 'kind': 'spot', 'azimuth': 0},
-        ],
-    }, SCENE_WIDTH, SCENE_HEIGHT)
+        'local_lights': lights,
+    }, STRESS_WIDTH if stress else SCENE_WIDTH, STRESS_HEIGHT if stress else SCENE_HEIGHT)
 
 
-def _test_participants(location, gm_id):
-    roster = (
+def _test_participants(location, gm_id, *, stress=False):
+    roster = [
         ('scout', 'Полигон: разведчик', None, 8, 19, 'Испытатели', '#68b8bd'),
         ('keeper', 'Полигон: смотритель', None, 8, 9, 'Испытатели', '#68b8bd'),
         ('dog', 'Полигон: собака', 'Собака', 18, 22, 'Мутанты', '#c46f54'),
         ('blind', 'Полигон: слепыш', 'Слепыш', 25, 25, 'Мутанты', '#c46f54'),
         ('bloodsucker', 'Полигон: кровопийца', 'Кровопийца', 16, 28, 'Мутанты', '#c46f54'),
-    )
+    ]
+    if stress:
+        roster.extend((f'stress-dog-{index}', f'Полигон: собака {index}', 'Собака',
+                       42 + index * 2, 37, 'Мутанты', '#c46f54') for index in range(6))
+        roster.extend((f'stress-blind-{index}', f'Полигон: слепыш {index}', 'Слепыш',
+                       43 + index * 3, 48, 'Мутанты', '#c46f54') for index in range(4))
     existing = {
         character.data.get('_visual_test_role'): character
         for character in LobbyCharacter.query.filter_by(lobby_id=location.lobby_id).all()
@@ -230,7 +294,7 @@ def _test_participants(location, gm_id):
         ))
 
 
-def _populate(location, lobby, *, commit=True):
+def _populate(location, lobby, *, commit=True, stress=False):
     combat = LocationCombatState.query.filter_by(location_id=location.id).first()
     if combat and combat.status != 'idle':
         raise ValueError('Stop combat in the visual sandbox before rebuilding it')
@@ -244,15 +308,16 @@ def _populate(location, lobby, *, commit=True):
         db.session.delete(obj)
     db.session.flush()
     db.session.expire(location, ['objects'])
-    location.grid_width = SCENE_WIDTH
-    location.grid_height = SCENE_HEIGHT
-    location.tiles_data = _tiles()
-    location.lighting = _lighting()
-    location.description = SCENE_DESCRIPTION
+    location.grid_width = STRESS_WIDTH if stress else SCENE_WIDTH
+    location.grid_height = STRESS_HEIGHT if stress else SCENE_HEIGHT
+    location.tiles_data = _stress_tiles() if stress else _tiles()
+    location.lighting = _lighting(stress=stress)
+    location.description = (SCENE_DESCRIPTION + ' Расширенная стресс-сцена для замера FPS.'
+                            if stress else SCENE_DESCRIPTION)
     location.spawn_points = [{'x': 8, 'y': 19}]
-    db.session.add_all(_structures(location))
+    db.session.add_all(_structures(location, stress=stress))
     db.session.flush()
-    _test_participants(location, lobby.gm_id)
+    _test_participants(location, lobby.gm_id, stress=stress)
     if commit:
         db.session.commit()
 
@@ -299,24 +364,47 @@ def rebuild_visual_test_location(lobby_id):
     return location, False
 
 
+def rebuild_both_visual_test_locations(lobby_id):
+    lobby = db.session.get(Lobby, lobby_id)
+    if lobby is None or lobby.name != 'Трава3':
+        raise ValueError('Expected the selected existing Trava3 lobby')
+    standard = Location.query.filter_by(lobby_id=lobby.id, name=SCENE_NAME).first()
+    stress = Location.query.filter_by(lobby_id=lobby.id, name=STRESS_SCENE_NAME).first()
+    if standard is None or stress is None:
+        raise ValueError('Both visual sandboxes must already exist; no map markers were changed')
+    _populate(standard, lobby, commit=False)
+    _populate(stress, lobby, commit=False, stress=True)
+    db.session.commit()
+    return standard, stress
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lobby-id', type=int, required=True)
     parser.add_argument('--rebuild', action='store_true')
+    parser.add_argument('--both', action='store_true', help='Rebuild both existing sandboxes atomically')
     args = parser.parse_args()
     app = create_app()
     with app.app_context():
         try:
-            location, created = (
-                rebuild_visual_test_location(args.lobby_id) if args.rebuild
-                else create_visual_test_location(args.lobby_id)
-            )
+            if args.both:
+                standard, stress = rebuild_both_visual_test_locations(args.lobby_id)
+            else:
+                location, created = (
+                    rebuild_visual_test_location(args.lobby_id) if args.rebuild
+                    else create_visual_test_location(args.lobby_id)
+                )
         except Exception:
             db.session.rollback()
             raise
-        state = 'Created' if created else 'Rebuilt' if args.rebuild else 'Already exists'
-        print(f'{state}: location {location.id}, lobby {location.lobby_id}, '
-              f'world tile ({location.world_tile_x}, {location.world_tile_z})')
+        if args.both:
+            print(f'Rebuilt: standard {standard.id} ({standard.grid_width}x{standard.grid_height}), '
+                  f'stress {stress.id} ({stress.grid_width}x{stress.grid_height}); '
+                  'world markers and chunks unchanged')
+        else:
+            state = 'Created' if created else 'Rebuilt' if args.rebuild else 'Already exists'
+            print(f'{state}: location {location.id}, lobby {location.lobby_id}, '
+                  f'world tile ({location.world_tile_x}, {location.world_tile_z})')
 
 
 if __name__ == '__main__':
