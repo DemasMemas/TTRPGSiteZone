@@ -1,15 +1,145 @@
 # app/services/map.py
 import logging
 import copy
+import math
+import re
 from app.extensions import db
 from app.models import MapChunk, Lobby, LobbyParticipant
 from app.constants import CHUNK_SIZE
 from app.services.world_generation import generated_world_tile
-from app.services.exceptions import NotFoundError, PermissionDenied, ValidationError
+from app.services.world_travel_events import PROTECTED_BUILDING_TYPES
+from app.services.exceptions import ConflictError, NotFoundError, PermissionDenied, ValidationError
 
 logger = logging.getLogger(__name__)
 
 class MapService:
+    @staticmethod
+    def edit_world_object(lobby_id, gm_id, payload):
+        """Update one object, optionally moving it between tiles in one commit."""
+        lobby = db.session.get(Lobby, lobby_id)
+        if not lobby:
+            raise NotFoundError('Lobby not found')
+        if lobby.gm_id != gm_id:
+            raise PermissionDenied('Only GM can edit world objects')
+        if not isinstance(payload, dict):
+            raise ValidationError('Expected world object edit data')
+        source = payload.get('source')
+        target = payload.get('target')
+        changes = payload.get('changes')
+        if not isinstance(source, dict) or not isinstance(target, dict) or not isinstance(changes, dict):
+            raise ValidationError('Source, target and changes are required')
+
+        def position(data):
+            x, y = data.get('tile_x'), data.get('tile_y')
+            if (type(x) is not int or type(y) is not int
+                    or not 0 <= x < lobby.chunks_width * CHUNK_SIZE
+                    or not 0 <= y < lobby.chunks_height * CHUNK_SIZE):
+                raise ValidationError('World object tile is outside the map')
+            return x, y
+
+        source_x, source_y = position(source)
+        target_x, target_y = position(target)
+        index = source.get('index')
+        if type(index) is not int or index < 0:
+            raise ValidationError('Invalid world object index')
+        allowed = {'name', 'type', 'color', 'x', 'z', 'scale', 'rotation', 'is_active'}
+        if set(changes) - allowed:
+            raise ValidationError('Unsupported world object property')
+
+        def get_chunk(x, y, create=False):
+            cx, cy = x // CHUNK_SIZE, y // CHUNK_SIZE
+            chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).first()
+            if not chunk and create:
+                chunk = MapChunk(
+                    lobby_id=lobby_id, chunk_x=cx, chunk_y=cy,
+                    data=MapService._generate_chunk_data(lobby_id, cx, cy, lobby.map_type),
+                )
+                db.session.add(chunk)
+            return chunk
+
+        source_chunk = get_chunk(source_x, source_y)
+        if not source_chunk:
+            raise NotFoundError('Source world tile not found')
+        source_data = copy.deepcopy(source_chunk.data)
+        source_tile = source_data[source_y % CHUNK_SIZE][source_x % CHUNK_SIZE]
+        objects = source_tile.get('objects') or []
+        if index >= len(objects) or not isinstance(objects[index], dict):
+            raise ConflictError('World object changed; reopen its tile')
+        original = objects[index]
+        if original != payload.get('expected'):
+            raise ConflictError('World object changed; reopen its tile')
+        edited = copy.deepcopy(original)
+        if 'name' in changes:
+            name = changes['name']
+            if not isinstance(name, str) or len(name.strip()) > 100:
+                raise ValidationError('Invalid world object name')
+            if name.strip():
+                edited['name'] = name.strip()
+            else:
+                edited.pop('name', None)
+        if 'type' in changes:
+            kind = changes['type']
+            allowed_types = {'tree', 'forest', 'road', 'hamlet', 'village', 'factory',
+                             'base', 'camp', 'house', 'fence'}
+            if kind not in allowed_types or original.get('type') == 'anomaly':
+                raise ValidationError('This world object type cannot be changed')
+            edited['type'] = kind
+        if 'color' in changes:
+            color = changes['color']
+            if not isinstance(color, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
+                raise ValidationError('Invalid world object color')
+            edited['color'] = color
+        for key, lower, upper in (('x', -0.5, 0.5), ('z', -0.5, 0.5),
+                                  ('scale', 0.2, 2.0), ('rotation', 0, 359)):
+            if key in changes:
+                value = changes[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not lower <= value <= upper:
+                    raise ValidationError(f'Invalid world object {key}')
+                edited[key] = value
+        if 'is_active' in changes:
+            if type(changes['is_active']) is not bool:
+                raise ValidationError('Invalid world object is_active')
+            if edited.get('type') not in PROTECTED_BUILDING_TYPES and changes['is_active']:
+                raise ValidationError('Only a building can have a protected zone')
+            edited['is_active'] = changes['is_active']
+        edited.pop('is_major', None)
+        if edited.get('type') not in PROTECTED_BUILDING_TYPES:
+            edited.pop('is_active', None)
+        if edited.get('type') != 'road' or (source_x, source_y) != (target_x, target_y):
+            edited.pop('connections', None)
+            edited.pop('manual_connections', None)
+
+        if (source_x, source_y) == (target_x, target_y):
+            objects[index] = edited
+            source_tile['objects'] = objects
+            source_chunk.data = source_data
+            updates = [{'chunk_x': source_x // CHUNK_SIZE, 'chunk_y': source_y // CHUNK_SIZE,
+                        'tile_x': source_x % CHUNK_SIZE, 'tile_y': source_y % CHUNK_SIZE,
+                        'updates': {'objects': objects}}]
+            target_index = index
+        else:
+            objects.pop(index)
+            source_tile['objects'] = objects
+            target_chunk = get_chunk(target_x, target_y, create=True)
+            target_data = source_data if target_chunk is source_chunk else copy.deepcopy(target_chunk.data)
+            target_tile = target_data[target_y % CHUNK_SIZE][target_x % CHUNK_SIZE]
+            target_objects = list(target_tile.get('objects') or [])
+            target_index = len(target_objects)
+            target_objects.append(edited)
+            target_tile['objects'] = target_objects
+            source_chunk.data = source_data
+            target_chunk.data = target_data
+            updates = [
+                {'chunk_x': source_x // CHUNK_SIZE, 'chunk_y': source_y // CHUNK_SIZE,
+                 'tile_x': source_x % CHUNK_SIZE, 'tile_y': source_y % CHUNK_SIZE,
+                 'updates': {'objects': objects}},
+                {'chunk_x': target_x // CHUNK_SIZE, 'chunk_y': target_y // CHUNK_SIZE,
+                 'tile_x': target_x % CHUNK_SIZE, 'tile_y': target_y % CHUNK_SIZE,
+                 'updates': {'objects': target_objects}},
+            ]
+        db.session.commit()
+        return {'updates': updates, 'index': target_index}
+
     @staticmethod
     def get_tile_data(lobby_id, tile_x, tile_y):
         """Return a world tile without generating or modifying its chunk."""

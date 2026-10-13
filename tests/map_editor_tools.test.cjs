@@ -253,6 +253,7 @@ test('world object tool places once at the pointer without replacing other tile 
         window: { worldEditorTool: 'objects' },
         placingObjectTiles: new Set(), lastPlacedObjectKey: null, lastPlacedObjectAt: 0,
         roadLinkActive: false,
+        choosingExistingObjectTarget: false,
         CHUNK_SIZE: 32,
         worldObjectSettings() { return { type: 'tree', color: '#2d5a27', scale: 1, rotation: 0 }; },
         async handleTileUpdate(...args) { updates.push(args); return true; },
@@ -275,6 +276,194 @@ test('world object tool places once at the pointer without replacing other tile 
     assert.equal(await context.placeWorldObjectAtTile({ ...tile, tileData: { terrain: 'water' } }), false);
     assert.equal(notifications.length, 1);
     assert.match(read('lobbyData.js'), /worldEditorTool === 'objects'[\s\S]*?placeWorldObjectAtTile/);
+});
+
+test('only a marked building creates a protected travel zone', () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('function worldObjectSettings(');
+    const end = source.indexOf('\nexport function updateWorldObjectPreview(', start);
+    assert.ok(start >= 0 && end > start);
+    const inputs = {
+        'world-object-scale': { value: '1' },
+        'world-object-rotation': { value: '0' },
+        'world-object-color': { value: '#123456' },
+        'world-object-active-base': { checked: true },
+    };
+    const context = vm.createContext({
+        selectedWorldObject: 'tree',
+        WORLD_OBJECT_COLORS: { tree: '#123456', base: '#654321', factory: '#66747b' },
+        PROTECTED_BUILDING_TYPES: new Set(['base', 'factory']),
+        document: { getElementById(id) { return inputs[id]; } },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    assert.equal(context.worldObjectSettings().is_active, undefined);
+    context.selectedWorldObject = 'base';
+    inputs['world-object-active-base'].checked = false;
+    assert.equal(context.worldObjectSettings().is_active, undefined);
+    inputs['world-object-active-base'].checked = true;
+    assert.equal(context.worldObjectSettings().is_major, undefined);
+    assert.equal(context.worldObjectSettings().is_active, true);
+    context.selectedWorldObject = 'factory';
+    assert.equal(context.worldObjectSettings().is_active, true);
+    context.selectedWorldObject = 'road';
+    assert.equal(context.worldObjectSettings().is_active, undefined);
+    assert.match(fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8'),
+        /id="world-object-active-base-option" hidden/);
+});
+
+test('existing world object selection retains its data and saves edits through the move endpoint', async () => {
+    const source = read('mapEdit.js');
+    const selectStart = source.indexOf('export function selectExistingWorldObject(');
+    const selectEnd = source.indexOf('\nexport function highlightSelectedWorldObject(', selectStart);
+    const saveStart = source.indexOf('export async function saveExistingWorldObject(');
+    const saveEnd = source.indexOf('\nexport async function clearObjectsFromTile(', saveStart);
+    assert.ok(selectStart >= 0 && selectEnd > selectStart && saveStart >= 0 && saveEnd > saveStart);
+    const original = { type: 'base', name: 'Old base', color: '#6c765d', x: 0.1, z: 0,
+        scale: 1, rotation: 0, is_major: false, is_active: false };
+    const sourceTile = { objects: [{ type: 'tree' }, original] };
+    const destinationTile = { objects: [] };
+    const chunksMap = new Map([
+        ['0,0', { tilesData: Array.from({ length: 32 }, (_, y) =>
+            Array.from({ length: 32 }, (_, x) => y === 10 && x === 31 ? sourceTile : { objects: [] })) }],
+        ['1,0', { tilesData: Array.from({ length: 32 }, (_, y) =>
+            Array.from({ length: 32 }, (_, x) => y === 10 && x === 0 ? destinationTile : { objects: [] })) }],
+    ]);
+    const inputs = Object.fromEntries(Object.entries({
+        name: 'New base', type: 'base', color: '#6c765d', scale: '1', rotation: '0',
+        'offset-x': '0.1', 'offset-z': '0', 'tile-x': '32', 'tile-y': '10',
+    }).map(([id, value]) => [`world-existing-${id}`, { value, checkValidity: () => true }]));
+    inputs['world-existing-active'] = { checked: true };
+    inputs['world-existing-save'] = { disabled: false };
+    const calls = [];
+    const context = vm.createContext({
+        window: {},
+        currentEditTile: { chunkX: 0, chunkY: 0, tileX: 31, tileY: 10, tileData: sourceTile },
+        selectedExistingObjectIndex: null, selectedExistingObjectSnapshot: null,
+        savingExistingObject: false, CHUNK_SIZE: 32, currentLobbyId: 19, chunksMap,
+        PROTECTED_BUILDING_TYPES: new Set(['base', 'factory']),
+        document: { getElementById(id) { return inputs[id]; } },
+        updateTileEditModal() {}, highlightObject() {}, closeTileEditModal() {},
+        showNotification() {},
+        updateTileInChunk(cx, cy, tx, ty, updates) {
+            Object.assign(chunksMap.get(`${cx},${cy}`).tilesData[ty][tx], updates);
+        },
+        Server: { async editWorldObject(_id, payload) {
+            calls.push(payload);
+            const moved = { ...original, ...payload.changes };
+            return { index: 0, updates: [
+                { chunk_x: 0, chunk_y: 0, tile_x: 31, tile_y: 10,
+                    updates: { objects: [{ type: 'tree' }] } },
+                { chunk_x: 1, chunk_y: 0, tile_x: 0, tile_y: 10,
+                    updates: { objects: [moved] } },
+            ] };
+        } },
+    });
+    vm.runInContext(source.slice(selectStart, selectEnd).replace('export function', 'function'), context);
+    vm.runInContext(source.slice(saveStart, saveEnd).replace('export async function', 'async function'), context);
+    context.selectExistingWorldObject(1);
+    assert.equal(context.selectedExistingObjectIndex, 1);
+    assert.equal(context.selectedExistingObjectSnapshot.name, 'Old base');
+    await context.saveExistingWorldObject();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].expected.name, 'Old base');
+    assert.equal(calls[0].changes.name, 'New base');
+    assert.equal(calls[0].changes.is_major, undefined);
+    assert.equal(calls[0].changes.is_active, true);
+    assert.equal(calls[0].target.tile_x, 32);
+    assert.equal(sourceTile.objects.length, 1);
+    assert.equal(destinationTile.objects[0].name, 'New base');
+    assert.equal(context.currentEditTile.chunkX, 1);
+});
+
+test('existing base editor displays active flag and hides it for other types', () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('function updateExistingBaseOptions(');
+    const end = source.indexOf('\nexport function selectExistingWorldObject(', start);
+    assert.ok(start >= 0 && end > start);
+    const fields = Object.fromEntries([
+        'world-existing-object-editor', 'world-existing-object-title', 'world-existing-name',
+        'world-existing-type', 'world-existing-color', 'world-existing-scale',
+        'world-existing-rotation', 'world-existing-offset-x', 'world-existing-offset-z',
+        'world-existing-tile-x', 'world-existing-tile-y',
+        'world-existing-active', 'world-existing-base-options',
+    ].map(id => [id, { value: '', checked: false, hidden: true }]));
+    fields['world-existing-type'].querySelector = () => null;
+    const context = vm.createContext({
+        document: { getElementById(id) { return fields[id]; } },
+        currentEditTile: { chunkX: 0, chunkY: 1, tileX: 5, tileY: 2,
+            tileData: { objects: [{ type: 'base', name: 'North base', color: '#6c765d',
+                is_major: true, is_active: false, scale: 1.2, x: 0.1 }] } },
+        selectedExistingObjectIndex: 0, WORLD_OBJECT_TYPES: new Set(['base', 'tree']),
+        PROTECTED_BUILDING_TYPES: new Set(['base', 'factory']),
+        WORLD_OBJECT_LABELS: { base: 'База' }, CHUNK_SIZE: 32,
+        worldObjectDisplayName(object) { return object.name; },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    context.renderExistingWorldObject();
+    assert.equal(fields['world-existing-object-editor'].hidden, false);
+    assert.equal(fields['world-existing-object-title'].textContent, 'North base');
+    assert.equal(fields['world-existing-type'].value, 'base');
+    assert.equal(fields['world-existing-active'].checked, false);
+    assert.equal(fields['world-existing-base-options'].hidden, false);
+    assert.equal(fields['world-existing-tile-y'].value, 34);
+    fields['world-existing-type'].value = 'tree';
+    context.updateExistingBaseOptions();
+    assert.equal(fields['world-existing-base-options'].hidden, true);
+    fields['world-existing-type'].value = 'factory';
+    context.updateExistingBaseOptions();
+    assert.equal(fields['world-existing-base-options'].hidden, false);
+});
+
+test('choosing a destination tile saves the move immediately without spawning another object', async () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('export async function placeWorldObjectAtTile(');
+    const end = source.indexOf('\nwindow.updateWorldObjectPreview', start);
+    const fields = {
+        'world-existing-tile-x': { value: '' },
+        'world-existing-tile-y': { value: '' },
+    };
+    let finished = 0;
+    let placed = 0;
+    let saved = 0;
+    const context = vm.createContext({
+        choosingExistingObjectTarget: true, CHUNK_SIZE: 32,
+        document: { getElementById(id) { return fields[id]; } },
+        finishExistingObjectTargetChoice() { finished += 1; },
+        async saveExistingWorldObject() { saved += 1; },
+        async handleTileUpdate() { placed += 1; },
+    });
+    vm.runInContext(source.slice(start, end).replace('export async function', 'async function'), context);
+    assert.equal(await context.placeWorldObjectAtTile({ chunkX: 1, chunkY: 2, tileX: 3, tileY: 4 }), true);
+    assert.equal(fields['world-existing-tile-x'].value, 35);
+    assert.equal(fields['world-existing-tile-y'].value, 68);
+    assert.equal(finished, 1);
+    assert.equal(saved, 1);
+    assert.equal(placed, 0);
+});
+
+test('Esc and right click cancel world object movement without saving', () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf("document.addEventListener('keydown', event => {");
+    const end = source.indexOf("document.getElementById('panel-tools')?.addEventListener('change'", start);
+    const listeners = {};
+    let cancelled = 0;
+    let prevented = 0;
+    let stopped = 0;
+    const context = vm.createContext({
+        choosingExistingObjectTarget: true, roadLinkActive: false,
+        document: { addEventListener(type, listener) { listeners[type] = listener; } },
+        finishExistingObjectTargetChoice() { cancelled += 1; context.choosingExistingObjectTarget = false; },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    listeners.keydown({ key: 'Escape', preventDefault() { prevented += 1; },
+        stopImmediatePropagation() { stopped += 1; } });
+    assert.equal(cancelled, 1);
+    context.choosingExistingObjectTarget = true;
+    listeners.contextmenu({ preventDefault() { prevented += 1; },
+        stopImmediatePropagation() { stopped += 1; } });
+    assert.equal(cancelled, 2);
+    assert.equal(prevented, 2);
+    assert.equal(stopped, 2);
 });
 
 test('road connector links two existing adjacent roads without placing a third object', async () => {

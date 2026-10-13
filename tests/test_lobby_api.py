@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from app.extensions import db
 from app.lobbies import _world_group_speed
@@ -22,6 +23,7 @@ from app.models import (
 )
 from app.models.templates import ItemTemplate
 from app.services.map import MapService
+from app.services.world_travel_events import travel_scenario
 from app.services.world_rules import mutant_catalog, mutant_character_data, mutant_profile
 
 
@@ -1863,10 +1865,9 @@ def test_random_world_event_blocks_travel_until_gm_resolves_it(
         json={"name": "Event party", "tile_x": 5, "tile_y": 5},
     ).get_json()
     move_endpoint = f"/lobbies/{lobby['id']}/world-groups/{created['id']}/move"
-    monkeypatch.setattr("app.lobbies.random.random", lambda: 0.0)
     monkeypatch.setattr(
-        "app.lobbies.random.choice",
-        lambda values: "Test world encounter",
+        "app.lobbies.roll_travel_event",
+        lambda _scenario: SimpleNamespace(name="Test world encounter", prompt="GM prompt"),
     )
 
     moved = client.post(
@@ -1903,14 +1904,188 @@ def test_random_world_event_blocks_travel_until_gm_resolves_it(
     assert moved.get_json()["event_pending"] is True
     assert blocked.status_code == 409
     assert hidden_list["pending_events"][0]["description"] is None
-    assert visible_list["pending_events"][0]["description"] == "Test world encounter"
+    assert visible_list["pending_events"][0]["description"] == "Test world encounter: GM prompt"
     assert forbidden.status_code == 403
     assert approved.status_code == 200
     assert approved.get_json()["status"] == "approved"
     assert ChatMessage.query.filter_by(
         lobby_id=lobby["id"],
         username="Событие",
-    ).one().message == "Event party: Test world encounter"
+    ).one().message == "Event party: Test world encounter: GM prompt"
+
+
+def test_world_travel_scenario_uses_only_explicit_active_bases(
+    client, create_user, auth_headers
+):
+    gm = create_user("world-base-gm")
+    lobby = create_lobby(client, gm, auth_headers)
+    tiles = [[{'terrain': 'grass', 'objects': []} for _ in range(32)] for _ in range(32)]
+    tiles[10][10]['objects'] = [{'type': 'base'}]
+    tiles[10][13]['objects'] = [{'type': 'road'}]
+    tiles[10][14]['objects'] = [{'type': 'road'}]
+    tiles[20][20]['objects'] = [{'type': 'forest'}]
+    chunk = MapChunk(lobby_id=lobby['id'], chunk_x=0, chunk_y=0, data=tiles)
+    db.session.add(chunk)
+    db.session.commit()
+
+    assert travel_scenario(lobby['id'], 14, 10) == 'road'
+    tiles[10][10]['objects'][0].update(is_active=True)
+    chunk.data = tiles
+    db.session.commit()
+    assert travel_scenario(lobby['id'], 13, 10) == 'near_base'
+    assert travel_scenario(lobby['id'], 14, 10) == 'base_perimeter'
+    assert travel_scenario(lobby['id'], 20, 20) == 'forest'
+    assert travel_scenario(lobby['id'], 31, 31) == 'wild'
+
+
+def test_gm_edits_and_moves_existing_world_object_without_duplicates(
+    client, create_user, auth_headers
+):
+    gm = create_user('world-object-edit-gm')
+    player = create_user('world-object-edit-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    MapService.get_chunks(lobby['id'], gm['id'], (0, 1, 0, 0))
+    source_objects = [
+        {'type': 'base', 'name': 'Old base', 'x': 0.1, 'z': -0.2,
+         'scale': 1, 'rotation': 0, 'color': '#6c765d'},
+        {'type': 'tree', 'x': 0.2, 'z': 0.1, 'color': '#2d5a27'},
+    ]
+    source_url = f"/lobbies/{lobby['id']}/chunks/0/0/tile/31/10"
+    created = client.patch(source_url, headers=auth_headers(gm), json={'objects': source_objects})
+    assert created.status_code == 200
+    endpoint = f"/lobbies/{lobby['id']}/world-objects/edit"
+    move = {
+        'source': {'tile_x': 31, 'tile_y': 10, 'index': 0},
+        'target': {'tile_x': 32, 'tile_y': 10},
+        'expected': source_objects[0],
+        'changes': {'name': 'Active base', 'x': -0.1, 'is_active': True},
+    }
+    assert client.post(endpoint, headers=auth_headers(player), json=move).status_code == 403
+    moved = client.post(endpoint, headers=auth_headers(gm), json=move)
+    assert moved.status_code == 200, moved.json
+    assert len(moved.json['updates']) == 2
+    db.session.expire_all()
+    source = MapService.get_tile_data(lobby['id'], 31, 10)['objects']
+    destination = MapService.get_tile_data(lobby['id'], 32, 10)['objects']
+    assert source == [source_objects[1]]
+    assert len(destination) == 1
+    assert destination[0]['name'] == 'Active base'
+    assert destination[0]['x'] == -0.1
+    assert destination[0]['z'] == -0.2
+    assert 'is_major' not in destination[0]
+    assert destination[0]['is_active'] is True
+    assert travel_scenario(lobby['id'], 34, 10) == 'near_base'
+    assert travel_scenario(lobby['id'], 35, 10) == 'near_base'
+    assert travel_scenario(lobby['id'], 36, 10) == 'base_perimeter'
+    reloaded = client.get(
+        f"/lobbies/{lobby['id']}/chunks?min_chunk_x=0&max_chunk_x=1&min_chunk_y=0&max_chunk_y=0",
+        headers=auth_headers(gm),
+    )
+    assert reloaded.status_code == 200
+    chunks = {item['chunk_x']: item['data'] for item in reloaded.get_json()}
+    assert chunks[0][10][31]['objects'] == [source_objects[1]]
+    assert chunks[1][10][0]['objects'] == destination
+
+    stale = client.post(endpoint, headers=auth_headers(gm), json=move)
+    assert stale.status_code == 409
+    assert MapService.get_tile_data(lobby['id'], 32, 10)['objects'] == destination
+    turn_off = client.post(endpoint, headers=auth_headers(gm), json={
+        'source': {'tile_x': 32, 'tile_y': 10, 'index': 0},
+        'target': {'tile_x': 32, 'tile_y': 10},
+        'expected': destination[0],
+        'changes': {'is_active': False},
+    })
+    assert turn_off.status_code == 200
+    db.session.expire_all()
+    assert MapService.get_tile_data(lobby['id'], 32, 10)['objects'][0]['is_active'] is False
+    assert travel_scenario(lobby['id'], 34, 10) == 'wild'
+
+
+def test_world_buildings_require_active_flag_and_other_types_cannot_claim_zone(
+    client, create_user, auth_headers
+):
+    gm = create_user('world-object-base-flags-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    MapService.get_chunks(lobby['id'], gm['id'], (0, 0, 0, 0))
+    url = f"/lobbies/{lobby['id']}/chunks/0/0/tile/10/10"
+    endpoint = f"/lobbies/{lobby['id']}/world-objects/edit"
+    base = {'type': 'base', 'color': '#6c765d'}
+    assert client.patch(url, headers=auth_headers(gm), json={'objects': [base]}).status_code == 200
+    assert travel_scenario(lobby['id'], 12, 10) == 'wild'
+    def edit(expected, changes):
+        return client.post(endpoint, headers=auth_headers(gm), json={
+            'source': {'tile_x': 10, 'tile_y': 10, 'index': 0},
+            'target': {'tile_x': 10, 'tile_y': 10},
+            'expected': expected, 'changes': changes,
+        })
+    legacy = {**base, 'is_major': True}
+    assert client.patch(url, headers=auth_headers(gm), json={'objects': [legacy]}).status_code == 200
+    assert travel_scenario(lobby['id'], 12, 10) == 'wild'
+    legacy_active = {**base, 'is_major': False, 'is_active': True}
+    assert client.patch(url, headers=auth_headers(gm), json={'objects': [legacy_active]}).status_code == 200
+    assert travel_scenario(lobby['id'], 12, 10) == 'near_base'
+    assert client.patch(url, headers=auth_headers(gm), json={'objects': [legacy]}).status_code == 200
+    assert edit(legacy, {'is_active': True}).status_code == 200
+    active = MapService.get_tile_data(lobby['id'], 10, 10)['objects'][0]
+    assert 'is_major' not in active
+    assert travel_scenario(lobby['id'], 12, 10) == 'near_base'
+    assert edit(active, {'is_major': False}).status_code == 400
+    assert edit(active, {'is_active': False}).status_code == 200
+    inactive = MapService.get_tile_data(lobby['id'], 10, 10)['objects'][0]
+    assert travel_scenario(lobby['id'], 12, 10) == 'wild'
+    assert edit(inactive, {'type': 'tree', 'is_active': True}).status_code == 400
+    assert edit(inactive, {'type': 'factory', 'is_active': True}).status_code == 200
+    factory = MapService.get_tile_data(lobby['id'], 10, 10)['objects'][0]
+    assert travel_scenario(lobby['id'], 12, 10) == 'near_base'
+    assert edit(factory, {'type': 'road', 'is_active': True}).status_code == 400
+    assert edit(factory, {'type': 'road'}).status_code == 200
+    road = MapService.get_tile_data(lobby['id'], 10, 10)['objects'][0]
+    assert 'is_active' not in road
+    assert travel_scenario(lobby['id'], 12, 10) == 'wild'
+    for kind in ('hamlet', 'village', 'factory', 'base', 'camp', 'house', 'fence'):
+        protected = {'type': kind, 'is_active': True}
+        assert client.patch(url, headers=auth_headers(gm), json={'objects': [protected]}).status_code == 200
+        assert travel_scenario(lobby['id'], 12, 10) == 'near_base'
+    for kind in ('tree', 'forest', 'road'):
+        unprotected = {'type': kind, 'is_active': True}
+        assert client.patch(url, headers=auth_headers(gm), json={'objects': [unprotected]}).status_code == 200
+        assert travel_scenario(lobby['id'], 12, 10) == 'wild'
+
+
+def test_empty_world_step_does_not_pause_and_gm_can_skip_random_event(
+    client, create_user, auth_headers, monkeypatch
+):
+    gm = create_user('world-skip-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    group = client.post(
+        f"/lobbies/{lobby['id']}/world-groups",
+        headers=auth_headers(gm),
+        json={'name': 'Quiet party', 'tile_x': 5, 'tile_y': 5},
+    ).get_json()
+    endpoint = f"/lobbies/{lobby['id']}/world-groups/{group['id']}/move"
+    monkeypatch.setattr('app.lobbies.roll_travel_event', lambda _scenario: None)
+    quiet = client.post(endpoint, headers=auth_headers(gm), json={'tile_x': 6, 'tile_y': 5})
+    assert quiet.status_code == 200
+    assert quiet.get_json()['event_pending'] is False
+    assert quiet.get_json()['time'] == {'game_day': 1, 'game_time_minutes': 490}
+    assert WorldTravelEvent.query.filter_by(group_id=group['id']).count() == 0
+
+    monkeypatch.setattr(
+        'app.lobbies.roll_travel_event',
+        lambda _scenario: SimpleNamespace(name='Мутанты', prompt='Угроза впереди.'),
+    )
+    encounter = client.post(endpoint, headers=auth_headers(gm), json={'tile_x': 7, 'tile_y': 5})
+    assert encounter.status_code == 200
+    assert encounter.get_json()['event_pending'] is True
+    event = WorldTravelEvent.query.filter_by(group_id=group['id'], status='pending').one()
+    skipped = client.patch(
+        f"/lobbies/{lobby['id']}/world-events/{event.id}",
+        headers=auth_headers(gm), json={'decision': 'reject'},
+    )
+    assert skipped.status_code == 200
+    assert skipped.get_json()['status'] == 'rejected'
+    assert ChatMessage.query.filter_by(lobby_id=lobby['id'], username='Событие').count() == 0
 
 
 def test_placed_world_event_is_hidden_and_stops_group_on_route(

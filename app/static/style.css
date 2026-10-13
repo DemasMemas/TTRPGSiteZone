@@ -1004,6 +1004,45 @@ body.light-theme .lobby-time-field input[type="time"] {
 .world-object-options label {
   white-space: nowrap;
 }
+.world-existing-object-editor {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 10px 0 18px;
+  background: var(--input-bg);
+}
+.world-existing-object-editor[hidden],
+.world-existing-base-options[hidden] {
+  display: none;
+}
+.world-existing-object-editor h4 {
+  margin: 0 0 10px;
+}
+.world-existing-object-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+.world-existing-object-fields label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.world-existing-object-fields input,
+.world-existing-object-fields select {
+  box-sizing: border-box;
+  width: 100%;
+}
+.world-existing-base-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.world-existing-object-select[aria-pressed="true"] {
+  outline: 2px solid var(--text-color);
+}
 .world-road-link-controls {
   display: flex;
   flex-wrap: wrap;

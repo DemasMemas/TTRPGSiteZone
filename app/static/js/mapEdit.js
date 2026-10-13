@@ -34,8 +34,19 @@ const WORLD_OBJECT_COLORS = {
     tree: '#2d5a27', house: '#8b4513', fence: '#8b5a2b',
 };
 const WORLD_OBJECT_TYPES = new Set(Object.keys(WORLD_OBJECT_COLORS));
+const PROTECTED_BUILDING_TYPES = new Set(['hamlet', 'village', 'factory', 'base', 'camp', 'house', 'fence']);
+const WORLD_OBJECT_LABELS = {
+    tree: 'Дерево', forest: 'Лес', road: 'Дорога', hamlet: 'Хутор',
+    village: 'Деревня', factory: 'Завод', base: 'База', camp: 'Лагерь',
+    house: 'Дом', fence: 'Забор', anomaly: 'Аномалия',
+};
 const placingObjectTiles = new Set();
 let selectedWorldObject = 'tree';
+let selectedExistingObjectIndex = null;
+let selectedExistingObjectSnapshot = null;
+let savingExistingObject = false;
+let choosingExistingObjectTarget = false;
+let toolBeforeTargetChoice = 'select';
 let lastPlacedObjectKey = null;
 let lastPlacedObjectAt = 0;
 let roadLinkActive = false;
@@ -71,7 +82,18 @@ export function initMapEdit(lobbyId, authToken) {
     });
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && roadLinkActive) toggleWorldRoadLink(false);
+        if (event.key === 'Escape' && choosingExistingObjectTarget) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            finishExistingObjectTargetChoice();
+        }
     });
+    document.addEventListener('contextmenu', event => {
+        if (!choosingExistingObjectTarget) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        finishExistingObjectTargetChoice();
+    }, { capture: true });
     document.getElementById('panel-tools')?.addEventListener('change', event => {
         if (event.target.id === 'tile-type-select') AppState.setCurrentTileType(event.target.value);
         if (event.target.id === 'world-brush-radiation') setWorldBrushRadiation(event.target.value);
@@ -91,6 +113,13 @@ export function initMapEdit(lobbyId, authToken) {
             updatePreviewFromModal();
         }
     });
+    document.getElementById('tile-objects-list')?.addEventListener('click', event => {
+        const button = event.target.closest('[data-existing-world-object]');
+        if (button) selectExistingWorldObject(Number(button.dataset.existingWorldObject));
+    });
+    document.getElementById('world-existing-type')?.addEventListener('change', updateExistingBaseOptions);
+    document.getElementById('world-existing-save')?.addEventListener('click', saveExistingWorldObject);
+    document.getElementById('world-existing-pick-tile')?.addEventListener('click', beginExistingObjectTargetChoice);
 
     const previewFields = [
         'object-type-select',
@@ -145,6 +174,7 @@ export function updateAnomalyFieldRankOptions() {
 export function setEditMode(enabled) {
     AppState.setEditMode(enabled);
     if (!enabled) {
+        if (choosingExistingObjectTarget) closeTileEditModal();
         toggleWorldRoadLink(false);
         removePreviewObject();
     }
@@ -194,6 +224,8 @@ export function selectWorldObject(type) {
     });
     const color = document.getElementById('world-object-color');
     if (color) color.value = WORLD_OBJECT_COLORS[type];
+    const activeBaseOption = document.getElementById('world-object-active-base-option');
+    if (activeBaseOption) activeBaseOption.hidden = !PROTECTED_BUILDING_TYPES.has(type);
     updateWorldObjectPreview(getHoveredTile());
 }
 
@@ -255,12 +287,19 @@ function worldObjectSettings() {
     const rotationOutput = document.getElementById('world-object-rotation-value');
     if (scaleOutput) scaleOutput.textContent = scale.toFixed(2);
     if (rotationOutput) rotationOutput.textContent = `${rotation}°`;
+    const activeBase = PROTECTED_BUILDING_TYPES.has(selectedWorldObject)
+        && document.getElementById('world-object-active-base')?.checked;
     return { type: selectedWorldObject, color: document.getElementById('world-object-color')?.value
-        || WORLD_OBJECT_COLORS[selectedWorldObject], scale, rotation };
+        || WORLD_OBJECT_COLORS[selectedWorldObject], scale, rotation,
+    ...(activeBase ? { is_active: true } : {}) };
 }
 
 export function updateWorldObjectPreview(tile) {
     if (document.getElementById('tile-edit-modal')?.style.display === 'flex') return;
+    if (choosingExistingObjectTarget) {
+        removePreviewObject();
+        return;
+    }
     if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects' || !tile || roadLinkActive) {
         removePreviewObject();
         return;
@@ -278,6 +317,13 @@ export function updateWorldObjectPreview(tile) {
 }
 
 export async function placeWorldObjectAtTile(tile) {
+    if (choosingExistingObjectTarget) {
+        document.getElementById('world-existing-tile-x').value = tile.chunkX * CHUNK_SIZE + tile.tileX;
+        document.getElementById('world-existing-tile-y').value = tile.chunkY * CHUNK_SIZE + tile.tileY;
+        finishExistingObjectTargetChoice();
+        await saveExistingWorldObject();
+        return true;
+    }
     if (roadLinkActive) {
         return AppState.isGM && AppState.editMode && window.worldEditorTool === 'objects' && tile?.tileData
             ? connectRoadAtTile(tile) : false;
@@ -456,6 +502,8 @@ export function openTileEditModal(tile) {
         return;
     }
     currentEditTile = tile;
+    selectedExistingObjectIndex = null;
+    selectedExistingObjectSnapshot = null;
     updateTileEditModal();
     document.getElementById('tile-edit-modal').style.display = 'flex';
     updatePreviewFromModal();
@@ -466,12 +514,110 @@ export function closeTileEditModal() {
     hideObjectHighlight();
     removePreviewObject();
     currentEditTile = null;
+    selectedExistingObjectIndex = null;
+    selectedExistingObjectSnapshot = null;
+    choosingExistingObjectTarget = false;
 }
+
+function beginExistingObjectTargetChoice() {
+    if (!currentEditTile || selectedExistingObjectIndex === null) return;
+    if (window.isWorldTravelSelectionActive?.()) {
+        showNotification('Сначала завершите выбор маршрута группы', 'error');
+        return;
+    }
+    toolBeforeTargetChoice = window.worldEditorTool || 'select';
+    choosingExistingObjectTarget = true;
+    document.getElementById('tile-edit-modal').style.display = 'none';
+    selectWorldEditorTool('objects', { autoExpand: false });
+    removePreviewObject();
+    showNotification('Выберите клетку для перемещения. Esc или ПКМ отменяет.', 'success');
+}
+
+function finishExistingObjectTargetChoice() {
+    choosingExistingObjectTarget = false;
+    selectWorldEditorTool(toolBeforeTargetChoice, { autoExpand: false });
+    document.getElementById('tile-edit-modal').style.display = 'flex';
+    removePreviewObject();
+    highlightSelectedWorldObject();
+}
+
+function escapeWorldObjectText(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[character]);
+}
+
+function worldObjectDisplayName(object) {
+    return object.name || object.anomalyName || WORLD_OBJECT_LABELS[object.type] || object.type || 'Объект';
+}
+
+function updateExistingBaseOptions() {
+    const isBase = PROTECTED_BUILDING_TYPES.has(document.getElementById('world-existing-type')?.value);
+    const options = document.getElementById('world-existing-base-options');
+    if (options) options.hidden = !isBase;
+    if (!isBase) {
+        document.getElementById('world-existing-active').checked = false;
+    }
+}
+
+function renderExistingWorldObject() {
+    const editor = document.getElementById('world-existing-object-editor');
+    if (!editor) return;
+    const object = currentEditTile?.tileData.objects?.[selectedExistingObjectIndex];
+    if (selectedExistingObjectIndex === null || !object) {
+        editor.hidden = true;
+        return;
+    }
+    editor.hidden = false;
+    document.getElementById('world-existing-object-title').textContent = worldObjectDisplayName(object);
+    document.getElementById('world-existing-name').value = object.name || '';
+    const typeInput = document.getElementById('world-existing-type');
+    typeInput.querySelector('[data-current-unlisted]')?.remove();
+    if (!WORLD_OBJECT_TYPES.has(object.type)) {
+        const option = document.createElement('option');
+        option.value = object.type;
+        option.textContent = WORLD_OBJECT_LABELS[object.type] || object.type;
+        option.dataset.currentUnlisted = 'true';
+        typeInput.appendChild(option);
+    }
+    typeInput.value = object.type;
+    typeInput.disabled = !WORLD_OBJECT_TYPES.has(object.type);
+    document.getElementById('world-existing-color').value = /^#[0-9a-f]{6}$/i.test(object.color || '')
+        ? object.color : '#808080';
+    document.getElementById('world-existing-scale').value = object.scale ?? 1;
+    document.getElementById('world-existing-rotation').value = object.rotation ?? 0;
+    document.getElementById('world-existing-offset-x').value = object.x ?? 0;
+    document.getElementById('world-existing-offset-z').value = object.z ?? 0;
+    document.getElementById('world-existing-tile-x').value = currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX;
+    document.getElementById('world-existing-tile-y').value = currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY;
+    document.getElementById('world-existing-active').checked = object.is_active === true;
+    updateExistingBaseOptions();
+}
+
+export function selectExistingWorldObject(index) {
+    const object = currentEditTile?.tileData.objects?.[index];
+    if (!object) return;
+    selectedExistingObjectIndex = index;
+    selectedExistingObjectSnapshot = JSON.parse(JSON.stringify(object));
+    updateTileEditModal();
+    highlightObject(index);
+}
+
+export function highlightSelectedWorldObject() {
+    if (selectedExistingObjectIndex === null) hideObjectHighlight();
+    else highlightObject(selectedExistingObjectIndex);
+}
+window.highlightSelectedWorldObject = highlightSelectedWorldObject;
 
 function updateTileEditModal() {
     if (!currentEditTile) return;
     hideObjectHighlight();
     const tileData = currentEditTile.tileData;
+    if (selectedExistingObjectIndex !== null
+        && JSON.stringify(tileData.objects?.[selectedExistingObjectIndex]) !== JSON.stringify(selectedExistingObjectSnapshot)) {
+        selectedExistingObjectIndex = null;
+        selectedExistingObjectSnapshot = null;
+    }
 
     let infoHtml = `
         <p>Координаты: (${currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX}, ${currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY})</p>
@@ -503,8 +649,11 @@ function updateTileEditModal() {
             listHtml += `
                 <li style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; padding: 3px; background: rgba(255,255,255,0.1); border-radius: 4px;"
                     onmouseenter="window.highlightObject(${index})"
-                    onmouseleave="window.hideObjectHighlight()">
-                    <span>${typeDisplay} (${obj.color})</span>
+                    onmouseleave="window.highlightSelectedWorldObject()">
+                    <button type="button" class="btn btn-sm btn-secondary world-existing-object-select"
+                        data-existing-world-object="${index}" aria-pressed="${selectedExistingObjectIndex === index}">
+                        ${escapeWorldObjectText(worldObjectDisplayName(obj))} · ${escapeWorldObjectText(typeDisplay)}
+                    </button>
                     <button class="btn btn-sm btn-danger" onclick="window.removeObjectFromTile(${index})" style="padding: 2px 8px;">✕</button>
                 </li>
             `;
@@ -512,6 +661,7 @@ function updateTileEditModal() {
         listHtml += '</ul>';
         objectsListDiv.innerHTML = listHtml;
     }
+    renderExistingWorldObject();
 
     document.getElementById('tile-edit-terrain').value = tileData.terrain;
     document.getElementById('tile-edit-height').value = tileData.height;
@@ -524,6 +674,7 @@ function updateTileEditModal() {
     updateAnomalyFieldRankOptions();
     const rankSelect = document.getElementById('tile-edit-anomaly-rank');
     if (rankSelect && selectedField) rankSelect.value = String(tileData.anomaly_field?.rank || selectedField.rank_min);
+    if (selectedExistingObjectIndex !== null) highlightObject(selectedExistingObjectIndex);
 }
 
 export async function applyAnomalyFieldChange() {
@@ -639,6 +790,90 @@ export async function addObjectToTile() {
     removePreviewObject();
 }
 
+export async function saveExistingWorldObject() {
+    if (!currentEditTile || selectedExistingObjectIndex === null || savingExistingObject) return;
+    const original = selectedExistingObjectSnapshot;
+    const field = id => document.getElementById(`world-existing-${id}`);
+    const numericFields = {
+        x: 'offset-x', z: 'offset-z', scale: 'scale', rotation: 'rotation',
+    };
+    const changes = {};
+    const name = field('name').value.trim();
+    if (name !== (original.name || '')) changes.name = name;
+    const type = field('type').value;
+    if (type !== original.type) changes.type = type;
+    const originalColor = /^#[0-9a-f]{6}$/i.test(original.color || '') ? original.color : '#808080';
+    if (field('color').value.toLowerCase() !== originalColor.toLowerCase()) {
+        changes.color = field('color').value;
+    }
+    for (const [key, inputId] of Object.entries(numericFields)) {
+        const input = field(inputId);
+        if (input.value.trim() === '' || !input.checkValidity()) {
+            showNotification(`Проверьте значение поля ${key}`, 'error');
+            return;
+        }
+        const value = Number(input.value);
+        if (!Number.isFinite(value)) return;
+        const fallback = key === 'scale' ? 1 : 0;
+        if (value !== Number(original[key] ?? fallback)) changes[key] = value;
+    }
+    if (PROTECTED_BUILDING_TYPES.has(type)) {
+        const checked = field('active').checked;
+        if (checked !== (original.is_active === true)) changes.is_active = checked;
+    }
+    const tileXInput = field('tile-x');
+    const tileYInput = field('tile-y');
+    const tileX = Number(tileXInput.value);
+    const tileY = Number(tileYInput.value);
+    if (!tileXInput.value.trim() || !tileYInput.value.trim()
+        || !Number.isInteger(tileX) || !Number.isInteger(tileY)
+        || !tileXInput.checkValidity() || !tileYInput.checkValidity()) {
+        showNotification('Укажите целые координаты клетки назначения', 'error');
+        return;
+    }
+    const sourceX = currentEditTile.chunkX * CHUNK_SIZE + currentEditTile.tileX;
+    const sourceY = currentEditTile.chunkY * CHUNK_SIZE + currentEditTile.tileY;
+    if (tileX === sourceX && tileY === sourceY && !Object.keys(changes).length) return;
+    const button = document.getElementById('world-existing-save');
+    savingExistingObject = true;
+    button.disabled = true;
+    try {
+        const result = await Server.editWorldObject(currentLobbyId, {
+            source: { tile_x: sourceX, tile_y: sourceY, index: selectedExistingObjectIndex },
+            target: { tile_x: tileX, tile_y: tileY },
+            expected: original,
+            changes,
+        });
+        for (const item of result.updates) {
+            updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates);
+        }
+        const targetChunkX = Math.floor(tileX / CHUNK_SIZE);
+        const targetChunkY = Math.floor(tileY / CHUNK_SIZE);
+        const entry = chunksMap.get(`${targetChunkX},${targetChunkY}`);
+        if (entry) {
+            currentEditTile = {
+                chunkX: targetChunkX, chunkY: targetChunkY,
+                tileX: tileX % CHUNK_SIZE, tileY: tileY % CHUNK_SIZE,
+                tileData: entry.tilesData[tileY % CHUNK_SIZE][tileX % CHUNK_SIZE],
+            };
+            selectedExistingObjectIndex = result.index;
+            selectedExistingObjectSnapshot = JSON.parse(JSON.stringify(
+                currentEditTile.tileData.objects[result.index],
+            ));
+            updateTileEditModal();
+            highlightObject(result.index);
+        } else {
+            closeTileEditModal();
+        }
+        showNotification('Объект сохранён', 'success');
+    } catch (error) {
+        showNotification(error.message, 'error');
+    } finally {
+        savingExistingObject = false;
+        button.disabled = false;
+    }
+}
+
 export async function clearObjectsFromTile() {
     if (!currentEditTile) return;
     await handleTileUpdate(
@@ -651,6 +886,8 @@ export async function clearObjectsFromTile() {
     const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
     const chunkEntry = chunksMap.get(chunkKey);
     if (chunkEntry) {
+        selectedExistingObjectIndex = null;
+        selectedExistingObjectSnapshot = null;
         currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
         updateTileEditModal();
     }
@@ -672,6 +909,8 @@ export async function removeObjectFromTile(index) {
     const chunkKey = `${currentEditTile.chunkX},${currentEditTile.chunkY}`;
     const chunkEntry = chunksMap.get(chunkKey);
     if (chunkEntry) {
+        selectedExistingObjectIndex = null;
+        selectedExistingObjectSnapshot = null;
         currentEditTile.tileData = chunkEntry.tilesData[currentEditTile.tileY][currentEditTile.tileX];
         updateTileEditModal();
     }

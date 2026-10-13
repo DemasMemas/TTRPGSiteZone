@@ -25,6 +25,7 @@ from app.services.custom_consumable_profile import validate_custom_consumable
 from app.services.exceptions import ConflictError, PermissionDenied, ValidationError, NotFoundError
 from app.services.character_events import emit_character_update, publish_character_save
 from app.services.combat import CombatService
+from app.services.world_travel_events import roll_travel_event, travel_scenario
 from app.services.artifact_effects import apply_artifact_world_movement
 from app.services.character_interaction import CharacterInteractionService
 from app.services.health import apply_health_maximums, heal_character_fully, health_zones_to_location
@@ -135,15 +136,7 @@ def create_mutant_character(lobby_id, lobby):
     socketio.emit('character_created', response, room=f'lobby_{lobby_id}')
     return jsonify(response), 201
 
-WORLD_EVENT_CHANCE = 0.25
 BODY_CARRY_ROPE_NAME = 'канат для переноски'
-WORLD_EVENT_DESCRIPTIONS = (
-    'На пути обнаружены свежие следы неизвестной группы.',
-    'Вдалеке слышны выстрелы. Источник звука находится неподалёку от маршрута.',
-    'Детекторы фиксируют нестабильную аномальную активность впереди.',
-    'Группа замечает заброшенный тайник у дороги.',
-    'Путь пересекает след недавно прошедших мутантов.',
-)
 
 
 def _iter_carried_items(character_data):
@@ -1104,17 +1097,19 @@ def move_world_group(lobby_id, group_id, lobby, participant):
         if not placed_event.repeatable:
             placed_event.is_active = False
         db.session.add(event)
-    elif random.random() < WORLD_EVENT_CHANCE:
-        event = WorldTravelEvent(
-            lobby_id=lobby_id,
-            group_id=group.id,
-            description=random.choice(WORLD_EVENT_DESCRIPTIONS),
-            from_tile_x=from_x,
-            from_tile_y=from_y,
-            to_tile_x=actual_tile_x,
-            to_tile_y=actual_tile_y,
-        )
-        db.session.add(event)
+    else:
+        outcome = roll_travel_event(travel_scenario(lobby_id, actual_tile_x, actual_tile_y))
+        if outcome:
+            event = WorldTravelEvent(
+                lobby_id=lobby_id,
+                group_id=group.id,
+                description=f'{outcome.name}: {outcome.prompt}',
+                from_tile_x=from_x,
+                from_tile_y=from_y,
+                to_tile_x=actual_tile_x,
+                to_tile_y=actual_tile_y,
+            )
+            db.session.add(event)
     time_advanced, updated_characters = _complete_world_turn_if_ready(lobby)
     db.session.commit()
 
@@ -2134,6 +2129,17 @@ def connect_world_roads(lobby_id, lobby):
     updates = MapService.connect_roads(lobby_id, lobby.gm_id, data.get('first'), data.get('second'))
     socketio.emit('tiles_updated', updates, room=f"lobby_{lobby_id}")
     return jsonify({'updates': updates}), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-objects/edit', methods=['POST'])
+@jwt_required()
+@requires_gm
+def edit_world_object(lobby_id, lobby):
+    result = MapService.edit_world_object(
+        lobby_id, lobby.gm_id, request.get_json(silent=True),
+    )
+    socketio.emit('tiles_updated', result['updates'], room=f"lobby_{lobby_id}")
+    return jsonify(result), 200
 
 @lobbies_bp.route('/<int:lobby_id>/export', methods=['GET'])
 @jwt_required()

@@ -236,6 +236,7 @@
                             <label>Цвет <input id="world-object-color" type="color" value="#2d5a27"></label>
                             <label>Масштаб <input id="world-object-scale" type="range" min="0.2" max="2" step="0.05" value="1"><output id="world-object-scale-value">1.00</output></label>
                             <label>Поворот <input id="world-object-rotation" type="range" min="0" max="359" step="1" value="0"><output id="world-object-rotation-value">0°</output></label>
+                            <label id="world-object-active-base-option" hidden><input id="world-object-active-base" type="checkbox"> Действующая база (охраняемая зона)</label>
                         </div>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="brush">
@@ -265,6 +266,31 @@
                 <h3>Редактирование тайла</h3>
                 <div id="tile-edit-info"></div>
                 <div id="tile-objects-list" style="max-height: 150px; overflow-y: auto; margin: 10px 0; border-top: 1px solid #444; padding-top: 5px;"></div>
+                <div id="world-existing-object-editor" class="world-existing-object-editor" hidden>
+                    <h4 id="world-existing-object-title">Выбранный объект</h4>
+                    <div class="world-existing-object-fields">
+                        <label>Название <input id="world-existing-name" type="text" maxlength="100" placeholder="Не задано"></label>
+                        <label>Тип <select id="world-existing-type">
+                            <option value="tree">Дерево</option><option value="forest">Лес</option>
+                            <option value="road">Дорога</option><option value="hamlet">Хутор</option>
+                            <option value="village">Деревня</option><option value="factory">Завод</option>
+                            <option value="base">База</option><option value="camp">Лагерь</option>
+                            <option value="house">Дом</option><option value="fence">Забор</option>
+                        </select></label>
+                        <label>Цвет <input id="world-existing-color" type="color"></label>
+                        <label>Масштаб <input id="world-existing-scale" type="number" min="0.2" max="2" step="any"></label>
+                        <label>Поворот, ° <input id="world-existing-rotation" type="number" min="0" max="359" step="any"></label>
+                        <label>Смещение X <input id="world-existing-offset-x" type="number" min="-0.5" max="0.5" step="any"></label>
+                        <label>Смещение Z <input id="world-existing-offset-z" type="number" min="-0.5" max="0.5" step="any"></label>
+                        <label>Клетка X <input id="world-existing-tile-x" type="number" min="0" step="1"></label>
+                        <label>Клетка Y <input id="world-existing-tile-y" type="number" min="0" step="1"></label>
+                    </div>
+                    <div id="world-existing-base-options" class="world-existing-base-options" hidden>
+                        <label><input id="world-existing-active" type="checkbox"> Действующая база</label>
+                    </div>
+                    <button id="world-existing-pick-tile" class="btn btn-secondary" type="button">Переместить объект</button>
+                    <button id="world-existing-save" class="btn btn-primary" type="button">Сохранить объект и положение</button>
+                </div>
                 <div class="tile-edit-controls">
                     <label>Ландшафт:</label>
                     <select id="tile-edit-terrain">

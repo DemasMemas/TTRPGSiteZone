@@ -354,6 +354,14 @@ export const Server = {
         });
     },
 
+    async editWorldObject(lobbyId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/world-objects/edit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    },
+
     async exportMap(lobbyId) {
         const response = await fetch(`/lobbies/${lobbyId}/export`, {
             headers: { 'Authorization': `Bearer ${token}` },
