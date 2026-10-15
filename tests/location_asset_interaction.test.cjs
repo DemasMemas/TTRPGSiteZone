@@ -167,6 +167,7 @@ test('rebuilding anomaly tile retains its effect model instead of replacing it w
     const end = source.indexOf('// ========== Обновления из сокета ==========', start);
     assert.ok(start >= 0 && end > start);
     const anomaly = { type: 'anomaly', anomalyType: 'electric', anomalyKey: 'tesla', scale: 1.5 };
+    const tiles = [[{ height: -2, objects: [anomaly] }]];
     const effect = {
         userData: { anomalyEffect: {} },
         position: { set(x, y, z) { Object.assign(this, { x, y, z }); } },
@@ -175,7 +176,8 @@ test('rebuilding anomaly tile retains its effect model instead of replacing it w
     };
     const added = [];
     const context = vm.createContext({
-        currentLocationData: { tiles_data: [[{ height: 1, objects: [anomaly] }]] },
+        currentLocationData: { tiles_data: tiles },
+        getTileHeight(x, z) { return tiles[z][x].height; },
         objectMeshes: [], anomalyEffectMeshes: [],
         scene: { add(mesh) { added.push(mesh); }, remove() {} },
         THREE: {
@@ -192,4 +194,5 @@ test('rebuilding anomaly tile retains its effect model instead of replacing it w
     assert.equal(added[0], effect);
     assert.equal(context.objectMeshes[0], effect);
     assert.equal(context.anomalyEffectMeshes[0], effect);
+    assert.equal(effect.position.y, -2);
 });

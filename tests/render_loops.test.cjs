@@ -24,6 +24,7 @@ function frameHarness(local) {
         worldSkySphere: { position: { copy: mark('sky') } },
         stars: { position: { copy: mark('stars') } },
         updateLocationCameraMovement: mark('camera'), updateGlobalCameraMovement: mark('camera'),
+        flushPendingTerrainRefresh: mark('terrainRefresh'),
         updateAnomalyRenderLights: mark('anomalyLights'), locationProfiler: null,
         updateRoofVisibility: mark('roofs'),
         updateChunkVisibility: mark('chunks'), updateRain: mark('rain'),
@@ -114,6 +115,10 @@ for (const local of [false, true]) {
         assert.equal(calls.find(call => call[0] === 'camera')[1], 0.016);
         assert.ok(calls.some(call => call[0] === 'render'));
         assert.ok(calls.some(call => call[0] === 'fps'));
-        if (local) assert.ok(calls.some(call => call[0] === 'labels'));
+        if (local) {
+            assert.ok(calls.some(call => call[0] === 'labels'));
+            assert.ok(calls.findIndex(call => call[0] === 'terrainRefresh')
+                < calls.findIndex(call => call[0] === 'render'));
+        }
     });
 }

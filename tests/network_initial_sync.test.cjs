@@ -210,7 +210,7 @@ test('re-authentication rejoins an open sublocation for character and fog state'
 test('initial sublocation build applies fog once after assembling objects', () => {
     const source = read('locationScene.js');
     const start = source.indexOf('export function loadLocation(data)');
-    const end = source.indexOf('\nfunction updateTileCube(', start);
+    const end = source.indexOf('\nfunction updateTileCubes(', start);
     const load = source.slice(start, end);
     assert.match(load, /if \(data\.tiles_data\[y\]\[x\]\.objects\?\.length\) rebuildTileObjects\(x, y\)/);
     assert.match(load, /data\.objects\.forEach\(object => addLocationObjectMesh\(object, false\)\)/);

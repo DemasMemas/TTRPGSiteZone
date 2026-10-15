@@ -274,6 +274,7 @@ let roofMeshes = [];
 let locationRoofsVisible = true;
 let groundPlaneMesh;
 let terrainFoundationY = 0;
+let pendingTerrainRefresh = null;
 let characterModels = new Map();
 const characterVisibilityOverrides = new Map();
 let previewSprite = null;
@@ -7119,6 +7120,7 @@ export function initLocationScene(containerId) {
             return;
         }
         const frameWorkStartedAt = performance.now();
+        flushPendingTerrainRefresh();
         updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
         updateAnomalyRenderLights(frameTime);
@@ -11646,6 +11648,7 @@ export function loadLocation(data) {
     locationObjectMeshes = [];
     darknessEditorOverlay = null;
     currentLocationData = data;
+    pendingTerrainRefresh = null;
     terrainFoundationY = terrainFoundationHeight(data.tiles_data);
     naturalGrassReported = false;
     selectedLocationAsset = null;
@@ -11782,23 +11785,33 @@ export function loadLocation(data) {
 }
 
 // ========== Обновление тайлов ==========
-function updateTileCube(x, z, tile, rebuildTerrain = true) {
+function updateTileCubes(changed) {
     if (!locationTileMesh || !currentLocationData) return false;
-    const neighbors = [];
-    for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) neighbors.push([x + dx, z + dz]);
+    const neighbors = new Set();
+    for (const { x, z } of changed) {
+        for (let dz = -1; dz <= 1; dz++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                const nx = x + dx;
+                const nz = z + dz;
+                if (currentLocationData.tiles_data[nz]?.[nx]) {
+                    neighbors.add(nz * currentLocationData.grid_width + nx);
+                }
+            }
+        }
     }
-    for (const [nx, nz] of neighbors) {
-        const next = currentLocationData.tiles_data[nz]?.[nx];
-        if (next) updateTileInstance(nz * currentLocationData.grid_width + nx, nx, nz, next);
+    let needsRebuild = Boolean(smoothTerrainMesh);
+    for (const index of neighbors) {
+        const nx = index % currentLocationData.grid_width;
+        const nz = Math.floor(index / currentLocationData.grid_width);
+        updateTileInstance(index, nx, nz, currentLocationData.tiles_data[nz][nx]);
+        if (!needsRebuild && isSmoothTerrainTile(currentLocationData.tiles_data, nx, nz)) {
+            needsRebuild = true;
+        }
     }
     locationTileMesh.instanceMatrix.needsUpdate = true;
     locationTileMesh.instanceColor.needsUpdate = true;
     waterTileMesh.instanceMatrix.needsUpdate = true;
     waterTileMesh.instanceColor.needsUpdate = true;
-    const needsRebuild = Boolean(smoothTerrainMesh) || neighbors.some(([nx, nz]) =>
-        isSmoothTerrainTile(currentLocationData.tiles_data, nx, nz));
-    if (rebuildTerrain && needsRebuild) rebuildSmoothTerrainMesh();
     return needsRebuild;
 }
 
@@ -11817,6 +11830,68 @@ function refreshTerrainFoundation() {
     locationTileMesh.instanceMatrix.needsUpdate = true;
     waterTileMesh.instanceMatrix.needsUpdate = true;
     return true;
+}
+
+function terrainEditTouchesWater(changed) {
+    const tiles = currentLocationData.tiles_data;
+    return changed.some(({ x, z }) => {
+        for (let dz = -1; dz <= 1; dz++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (tiles[z + dz]?.[x + dx]?.terrain === 'water') return true;
+            }
+        }
+        return false;
+    });
+}
+
+function terrainEditTouchesLight(changed) {
+    const cells = new Set(changed.map(({ x, z }) => `${x},${z}`));
+    if ((activeLightingProfile?.local_lights || []).some(light =>
+        cells.has(`${Math.floor(Number(light.x))},${Math.floor(Number(light.z))}`))) return true;
+    if ((currentLocationData.objects || []).some(object => isObjectLightSource(object)
+        && cells.has(`${object.tile_x},${object.tile_y}`))) return true;
+    return changed.some(({ x, z }) => currentLocationData.tiles_data[z][x].objects?.some(
+        object => object.type === 'anomaly' || object.type === 'campfire'));
+}
+
+function terrainEditTouchesRoof(changed) {
+    const cells = new Set(changed.map(({ x, z }) => `${x},${z}`));
+    return (currentLocationData.objects || []).some(object => object.type === 'floor'
+        && cells.has(`${object.tile_x},${object.tile_y}`));
+}
+
+function queueTerrainRefresh(changed, flags) {
+    pendingTerrainRefresh ??= { changed: new Map() };
+    for (const tile of changed) pendingTerrainRefresh.changed.set(`${tile.x},${tile.z}`, tile);
+    for (const [key, value] of Object.entries(flags)) {
+        pendingTerrainRefresh[key] = pendingTerrainRefresh[key] || value;
+    }
+}
+
+function flushPendingTerrainRefresh() {
+    const work = pendingTerrainRefresh;
+    pendingTerrainRefresh = null;
+    if (!work || !scene || !currentLocationData) return;
+    const changed = [...work.changed.values()];
+    const indices = new Set(changed.map(({ x, z }) => z * currentLocationData.grid_width + x));
+    if (work.smooth) rebuildSmoothTerrainMesh(true);
+    else if (work.terrainColor) updateSmoothTerrainColors(indices);
+    if (work.texture) updateLocationTerrainSurfaceTexture(changed);
+    if (work.surface) rebuildLocationTerrainSurface(true, true);
+    if (work.water) rebuildWaterSurfaceMesh();
+    if (work.grid) rebuildLocationGrid();
+    else if (work.terrainColor) updateLocationGridColors(indices);
+    if (work.grass) rebuildGrassDetailMesh();
+    if (work.roofs) rebuildLocationRoofs();
+    if (work.fogGeometry) clearFogOverlay();
+    if (work.lighting) applyLocationLighting();
+    else if (work.fog) applyFogOfWar();
+    if (work.selection && editorSelection) updateEditorSelectionVisual();
+    if (work.height) characterModels.forEach(entry => {
+        const height = getTileHeight(entry.posX, entry.posY);
+        entry.model.position.y = height;
+        entry.label.position.y = height + characterLabelOffset(entry);
+    });
 }
 
 function updateSmoothTerrainColors(changedTiles = null) {
@@ -11881,15 +11956,23 @@ function rebuildLocationGrid() {
     scene.add(locationGridMesh);
 }
 
-function rebuildSmoothTerrainMesh() {
-    if (smoothTerrainMesh) {
+function rebuildSmoothTerrainMesh(reuseMaterial = false) {
+    const reusableMesh = reuseMaterial ? smoothTerrainMesh : null;
+    if (smoothTerrainMesh && !reusableMesh) {
         scene.remove(smoothTerrainMesh);
         disposeObject(smoothTerrainMesh);
         smoothTerrainMesh = null;
     }
     const data = buildSmoothTerrainData(currentLocationData.tiles_data, () => true, terrainFoundationY);
     tileCubes = [locationTileMesh, waterTileMesh];
-    if (!data.positions.length) return;
+    if (!data.positions.length) {
+        if (reusableMesh) {
+            scene.remove(reusableMesh);
+            disposeObject(reusableMesh);
+            smoothTerrainMesh = null;
+        }
+        return;
+    }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(data.positions.length), 3));
@@ -11907,6 +11990,15 @@ function rebuildSmoothTerrainMesh() {
     }
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(terrainUvs, 2));
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3));
+    if (reusableMesh) {
+        reusableMesh.geometry.dispose();
+        reusableMesh.geometry = geometry;
+        reusableMesh.userData.tileByFace = data.tileByFace;
+        reusableMesh.userData.tileByVertex = data.tileByVertex;
+        updateSmoothTerrainColors();
+        tileCubes.push(reusableMesh);
+        return;
+    }
     const material = new THREE.MeshStandardMaterial({
         vertexColors: true, side: THREE.DoubleSide,
     });
@@ -11951,8 +12043,9 @@ function ensureTerrainGrassDetail() {
     return terrainGrassDetail;
 }
 
-function rebuildLocationTerrainSurface(preserveTexture = false) {
-    if (terrainSurfaceMesh) {
+function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = false) {
+    const reusableMesh = preserveTexture && reuseMaterial ? terrainSurfaceMesh : null;
+    if (terrainSurfaceMesh && !reusableMesh) {
         scene.remove(terrainSurfaceMesh);
         disposeObject(terrainSurfaceMesh);
         terrainSurfaceMesh = null;
@@ -12045,12 +12138,24 @@ function rebuildLocationTerrainSurface(preserveTexture = false) {
             indices.push(first, first + 1, first + 2);
         }
     }
-    if (!positions.length) return;
+    if (!positions.length) {
+        if (reusableMesh) {
+            scene.remove(reusableMesh);
+            disposeObject(reusableMesh);
+            terrainSurfaceMesh = null;
+        }
+        return;
+    }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     geometry.setIndex(indices);
+    if (reusableMesh) {
+        reusableMesh.geometry.dispose();
+        reusableMesh.geometry = geometry;
+        return;
+    }
     const material = new THREE.MeshStandardMaterial({
         map: terrainSurfaceTexture, side: THREE.DoubleSide, roughness: 0.97,
         polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
@@ -12473,18 +12578,23 @@ function moveTileDecorWithTerrain(tileX, tileZ, heightDelta) {
 export function applyLocationTilesUpdate(locationId, updates) {
     if (getCurrentLocationId() !== locationId) return;
     if (!currentLocationData) return;
-    let terrainNeedsRebuild = false;
-    let gridNeedsRebuild = false;
+    let heightChanged = false;
+    let terrainChanged = false;
+    let grassSubtypeChanged = false;
+    let waterTopologyChanged = false;
     let lightChanged = false;
+    const changed = [];
     for (const upd of updates) {
         const tile = currentLocationData.tiles_data[upd.z][upd.x];
-        if (upd.objects !== undefined && (
+        const previousTerrain = tile.terrain;
+        const previousGrassSubtype = tile.grass_subtype;
+        const previousHeight = getTileHeight(upd.x, upd.z);
+        const objectsChanged = upd.objects !== undefined
+            && JSON.stringify(tile.objects || []) !== JSON.stringify(upd.objects || []);
+        if (objectsChanged && (
             tile.objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
-            || upd.objects.some(obj => ['campfire', 'anomaly'].includes(obj.type))
+            || upd.objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
         )) lightChanged = true;
-        if (upd.height !== undefined) lightChanged = true;
-        if (upd.terrain !== undefined || upd.height !== undefined
-            || upd.grass_subtype !== undefined) gridNeedsRebuild = true;
         if (upd.terrain !== undefined) tile.terrain = upd.terrain;
         if (upd.grass_subtype !== undefined) {
             if (tile.terrain === 'grass') tile.grass_subtype = upd.grass_subtype;
@@ -12495,31 +12605,41 @@ export function applyLocationTilesUpdate(locationId, updates) {
         if (upd.height !== undefined) tile.height = upd.height;
         if (upd.objects !== undefined) tile.objects = upd.objects;
         if (upd.radiation !== undefined) tile.radiation = upd.radiation;
-        terrainNeedsRebuild = updateTileCube(upd.x, upd.z, tile, false) || terrainNeedsRebuild;
-        rebuildTileObjects(upd.x, upd.z);
-        updateLocationObjectHeight(upd.x, upd.z);
+        terrainChanged ||= tile.terrain !== previousTerrain;
+        waterTopologyChanged ||= (tile.terrain === 'water') !== (previousTerrain === 'water');
+        grassSubtypeChanged ||= tile.grass_subtype !== previousGrassSubtype;
+        if (getTileHeight(upd.x, upd.z) !== previousHeight) {
+            heightChanged = true;
+            updateLocationObjectHeight(upd.x, upd.z);
+            if (!objectsChanged) moveTileDecorWithTerrain(upd.x, upd.z,
+                getTileHeight(upd.x, upd.z) - previousHeight);
+        }
+        if (objectsChanged) rebuildTileObjects(upd.x, upd.z);
+        changed.push({ x: upd.x, z: upd.z });
     }
-    terrainNeedsRebuild = refreshTerrainFoundation() || terrainNeedsRebuild;
-    if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
-    if (gridNeedsRebuild) {
-        if (updates.some(update => update.terrain !== undefined
-            || update.grass_subtype !== undefined)) updateLocationTerrainSurfaceTexture(updates);
-        rebuildLocationTerrainSurface(true);
-        rebuildWaterSurfaceMesh();
-        rebuildLocationGrid();
-        rebuildGrassDetailMesh();
-    }
-    if (updates.some(update => update.height !== undefined)) rebuildLocationRoofs();
-    if (gridNeedsRebuild) clearFogOverlay();
-    if (lightChanged) applyLocationLighting();
-    invalidateMovementMapCache();
-    applyFogOfWar();
-    if (editorSelection) updateEditorSelectionVisual();
-    characterModels.forEach((entry) => {
-        const height = getTileHeight(entry.posX, entry.posY);
-        entry.model.position.y = height;
-        entry.label.position.y = height + characterLabelOffset(entry);
+    if (!changed.length) return;
+    const foundationChanged = refreshTerrainFoundation();
+    const tilesNeedSmooth = updateTileCubes(changed);
+    const smoothAffected = foundationChanged || tilesNeedSmooth;
+    queueTerrainRefresh(changed, {
+        smooth: (heightChanged || waterTopologyChanged) && smoothAffected,
+        texture: terrainChanged || grassSubtypeChanged,
+        terrainColor: terrainChanged,
+        surface: heightChanged || waterTopologyChanged,
+        water: (heightChanged || terrainChanged) &&
+            (waterTopologyChanged || terrainEditTouchesWater(changed)),
+        grid: heightChanged || waterTopologyChanged,
+        grass: terrainChanged || grassSubtypeChanged ||
+            (heightChanged && changed.some(({ x, z }) =>
+                currentLocationData.tiles_data[z][x].terrain !== 'water')),
+        roofs: heightChanged && terrainEditTouchesRoof(changed),
+        fogGeometry: heightChanged || waterTopologyChanged,
+        lighting: lightChanged || (heightChanged && terrainEditTouchesLight(changed)),
+        fog: true,
+        selection: heightChanged || updates.some(update => update.objects !== undefined),
+        height: heightChanged,
     });
+    invalidateMovementMapCache();
 }
 
 // ========== Кисть ==========
@@ -12527,25 +12647,38 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     if (!currentLocationData) return;
     const tiles = currentLocationData.tiles_data;
     const changed = [];
-    let terrainNeedsRebuild = false;
+    let heightChanged = false;
+    let terrainChanged = false;
+    let grassSubtypeChanged = false;
+    let waterTopologyChanged = false;
     let lightChanged = false;
-    for (let dz = -radius; dz <= radius; dz++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-            const x = centerX + dx;
-            const z = centerZ + dz;
+    const targets = new Map();
+    for (const [brushX, brushZ] of Array.isArray(centerX) ? centerX : [[centerX, centerZ]]) {
+        for (let dz = -radius; dz <= radius; dz++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+                const x = brushX + dx;
+                const z = brushZ + dz;
+                if (tiles[z]?.[x]) targets.set(`${x},${z}`, { x, z });
+            }
+        }
+    }
+    for (const { x, z } of targets.values()) {
             if (x < 0 || x >= currentLocationData.grid_width || z < 0 || z >= currentLocationData.grid_height) continue;
             const tile = tiles[z][x];
             const previousHeight = getTileHeight(x, z);
             let needUpdate = false;
             if (updates.terrain !== undefined && tile.terrain !== updates.terrain) {
+                waterTopologyChanged ||= (tile.terrain === 'water') !== (updates.terrain === 'water');
                 tile.terrain = updates.terrain;
                 if (tile.terrain !== 'grass') delete tile.grass_subtype;
                 if (tile.terrain === 'water' && previousHeight < 0.5) tile.height = 0.5;
+                terrainChanged = true;
                 needUpdate = true;
             }
             if (updates.grass_subtype !== undefined && tile.terrain === 'grass'
                 && tile.grass_subtype !== updates.grass_subtype) {
                 tile.grass_subtype = updates.grass_subtype;
+                grassSubtypeChanged = true;
                 needUpdate = true;
             }
             if (updates.height !== undefined) {
@@ -12555,6 +12688,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                         requestedHeight));
                     if (tile.height !== height) {
                         tile.height = height;
+                        heightChanged = true;
                         needUpdate = true;
                     }
                 }
@@ -12607,8 +12741,8 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                             && mesh.userData?.tileZ === z
                             && ['campfire', 'anomaly'].includes(mesh.userData?.objType));
                 }
-                terrainNeedsRebuild = updateTileCube(x, z, tile, false) || terrainNeedsRebuild;
                 if (tile.height !== previousHeight) {
+                    heightChanged = true;
                     updateLocationObjectHeight(x, z);
                     if (updates.objects === undefined && !updates.addObject) {
                         moveTileDecorWithTerrain(x, z, tile.height - previousHeight);
@@ -12620,15 +12754,13 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 changed.push({ x, z, terrain: tile.terrain, grass_subtype: tile.grass_subtype || null,
                     height: tile.height, objects: tile.objects, radiation: tile.radiation });
             }
-        }
     }
-    if (updates.terrain !== undefined) {
+    if (terrainChanged && changed.length) {
         const changedByTile = new Map(changed.map(item => [`${item.x},${item.z}`, item]));
         for (const { x, z, height } of waterSurfaceAdjustments(tiles, new Set(changedByTile.keys()))) {
             const previousHeight = getTileHeight(x, z);
             tiles[z][x].height = Math.max(0.5, height);
-            lightChanged = true;
-            terrainNeedsRebuild = updateTileCube(x, z, tiles[z][x], false) || terrainNeedsRebuild;
+            if (tiles[z][x].height !== previousHeight) heightChanged = true;
             updateLocationObjectHeight(x, z);
             moveTileDecorWithTerrain(x, z, tiles[z][x].height - previousHeight);
             const cell = changedByTile.get(`${x},${z}`);
@@ -12643,23 +12775,27 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         }
     }
     if (changed.length === 0) return;
-    terrainNeedsRebuild = refreshTerrainFoundation() || terrainNeedsRebuild;
-    if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
-    if (updates.terrain !== undefined || updates.height !== undefined
-        || updates.grass_subtype !== undefined) {
-        if (updates.terrain !== undefined || updates.grass_subtype !== undefined) {
-            updateLocationTerrainSurfaceTexture(changed);
-        }
-        rebuildLocationTerrainSurface(true);
-        rebuildWaterSurfaceMesh();
-        rebuildLocationGrid();
-        rebuildGrassDetailMesh();
-    }
-    if (updates.height !== undefined) rebuildLocationRoofs();
-    if (updates.terrain !== undefined || updates.height !== undefined
-        || updates.grass_subtype !== undefined) clearFogOverlay();
-    if (lightChanged || updates.height !== undefined) applyLocationLighting();
-    if (updates.height !== undefined && editorSelection) updateEditorSelectionVisual();
+    const foundationChanged = refreshTerrainFoundation();
+    const tilesNeedSmooth = updateTileCubes(changed);
+    const smoothAffected = foundationChanged || tilesNeedSmooth;
+    queueTerrainRefresh(changed, {
+        smooth: (heightChanged || waterTopologyChanged) && smoothAffected,
+        texture: terrainChanged || grassSubtypeChanged,
+        terrainColor: terrainChanged,
+        surface: heightChanged || waterTopologyChanged,
+        water: (heightChanged || terrainChanged) &&
+            (waterTopologyChanged || terrainEditTouchesWater(changed)),
+        grid: heightChanged || waterTopologyChanged,
+        grass: terrainChanged || grassSubtypeChanged ||
+            (heightChanged && changed.some(({ x, z }) => tiles[z][x].terrain !== 'water')),
+        roofs: heightChanged && terrainEditTouchesRoof(changed),
+        fogGeometry: heightChanged || waterTopologyChanged,
+        lighting: lightChanged || (heightChanged && terrainEditTouchesLight(changed)),
+        fog: true,
+        selection: heightChanged || updates.objects !== undefined || updates.addObject,
+        height: heightChanged,
+    });
+    invalidateMovementMapCache();
     if (window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
             token: localStorage.getItem('access_token'),
@@ -12669,15 +12805,25 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 objects: c.objects, radiation: c.radiation }))
         });
     }
-    characterModels.forEach((entry) => {
-        const height = getTileHeight(entry.posX, entry.posY);
-        entry.model.position.y = height;
-        entry.label.position.y = height + characterLabelOffset(entry);
-    });
-    applyFogOfWar();
 }
 
 // ========== Перетаскивание персонажей (3D) ==========
+function brushStrokeTiles(fromX, fromZ, toX, toZ) {
+    const tiles = [];
+    const dx = Math.abs(toX - fromX);
+    const dz = Math.abs(toZ - fromZ);
+    const stepX = fromX < toX ? 1 : -1;
+    const stepZ = fromZ < toZ ? 1 : -1;
+    let error = dx - dz;
+    while (true) {
+        tiles.push([fromX, fromZ]);
+        if (fromX === toX && fromZ === toZ) return tiles;
+        const doubled = error * 2;
+        if (doubled > -dz) { error -= dz; fromX += stepX; }
+        if (doubled < dx) { error += dx; fromZ += stepZ; }
+    }
+}
+
 function setupCharacterDragging() {
     if (!renderer) return;
     const canvas = renderer.domElement;
@@ -13215,6 +13361,7 @@ export function setupLocationEditing() {
     const canvas = renderer.domElement;
     const locInfo = document.getElementById('location-tile-info');
     locationActive = true;
+    let lastBrushTile = null;
     const onCameraRotatePointerDown = (event) => {
         if (event.button === 2) cameraDragMenuGuard.begin(event.clientX, event.clientY, event.pointerId);
         if (event.button === 2 && window.locationEditMode && !isDraggingCharacter) {
@@ -13288,6 +13435,7 @@ export function setupLocationEditing() {
         if (e.button !== 0) return;
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
+        lastBrushTile = null;
         if (pendingCharacterPlacement) {
             e.preventDefault();
             e.stopImmediatePropagation();
@@ -13375,6 +13523,7 @@ export function setupLocationEditing() {
         const updates = getEditBrushUpdates();
         if (Object.keys(updates).length) {
             applyLocationBrush(x, z, updates, brushRadius);
+            lastBrushTile = { x, z };
         }
         if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z, brushRadius);
         processedTilesForObjects.clear();
@@ -13400,7 +13549,10 @@ export function setupLocationEditing() {
         }
         const updates = getEditBrushUpdates();
         if (Object.keys(updates).length) {
-            applyLocationBrush(x, z, updates, brushRadius);
+            const path = lastBrushTile
+                ? brushStrokeTiles(lastBrushTile.x, lastBrushTile.z, x, z) : [[x, z]];
+            applyLocationBrush(path, null, updates, brushRadius);
+            lastBrushTile = { x, z };
         }
         if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z, brushRadius);
     };
@@ -13409,6 +13561,7 @@ export function setupLocationEditing() {
 
     const onPointerUp = (e) => {
         if (!locationActive) return;
+        lastBrushTile = null;
         if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     };
     canvas.addEventListener('pointerup', onPointerUp);
@@ -14014,6 +14167,7 @@ export function addLocationRoofButton() {
 }
 
 export function destroyLocationScene() {
+    pendingTerrainRefresh = null;
     locationProfiler?.destroy();
     locationProfiler = null;
     locationFpsCounter?.destroy();

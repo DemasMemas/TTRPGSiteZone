@@ -1,6 +1,6 @@
 import logging
 
-from flask import request
+from flask import has_request_context, request
 from flask_socketio import emit, join_room, leave_room
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -332,5 +332,6 @@ def handle_update_location_tiles(data):
         socketio.emit('location_tiles_updated', {
             'location_id': location_id,
             'updates': changed,
-        }, room=f"location_{location_id}")
+        }, room=f"location_{location_id}",
+            skip_sid=getattr(request, 'sid', None) if has_request_context() else None)
         logger.info(f"Location {location_id} tiles updated by GM {user.id}")

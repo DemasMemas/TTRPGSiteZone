@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const load = async name => import(`data:text/javascript;base64,${Buffer.from(read(name)).toString('base64')}`);
@@ -169,10 +170,24 @@ test('isolated flat terrain stays outside the smooth mesh; taller steps still bl
 test('a changed height also refreshes neighboring tile geometry', () => {
     const scene = read('locationScene.js');
     assert.match(scene, /for \(let dz = -1; dz <= 1; dz\+\+\)/);
-    assert.match(scene, /for \(let dx = -1; dx <= 1; dx\+\+\) neighbors\.push\(\[x \+ dx, z \+ dz\]\)/);
-    assert.match(scene, /for \(const \[nx, nz\] of neighbors\)[\s\S]*?updateTileInstance/);
-    assert.match(scene, /terrainNeedsRebuild = updateTileCube\(x, z, tile, false\) \|\| terrainNeedsRebuild/);
-    assert.match(scene, /if \(terrainNeedsRebuild\) rebuildSmoothTerrainMesh\(\)/);
+    assert.match(scene, /neighbors\.add\(nz \* currentLocationData\.grid_width \+ nx\)/);
+    assert.match(scene, /for \(const index of neighbors\)[\s\S]*?updateTileInstance/);
+    assert.match(scene, /updateTileCubes\(changed\)/);
+    assert.match(scene, /if \(work\.smooth\) rebuildSmoothTerrainMesh\(true\)/);
+});
+
+test('fast brush movement fills intermediate cells and combines work before rendering', () => {
+    const scene = read('locationScene.js');
+    const source = scene.match(/function brushStrokeTiles\([\s\S]*?\n}\n\nfunction setupCharacterDragging/);
+    assert.ok(source);
+    const line = new Function(`${source[0].replace(/\n\nfunction setupCharacterDragging$/, '')}; return brushStrokeTiles;`)();
+    assert.deepEqual(line(2, 2, 5, 2), [[2, 2], [3, 2], [4, 2], [5, 2]]);
+    assert.deepEqual(line(2, 2, 2, 5), [[2, 2], [2, 3], [2, 4], [2, 5]]);
+    assert.equal(line(1, 1, 4, 3).length, 4);
+    assert.match(scene, /applyLocationBrush\(path, null, updates, brushRadius\)/);
+    assert.match(scene, /flushPendingTerrainRefresh\(\);[\s\S]*?renderer\.render\(scene, camera\)/);
+    assert.match(scene, /if \(work\.surface\) rebuildLocationTerrainSurface\(true, true\)/);
+    assert.match(scene, /reusableMesh\.geometry\.dispose\(\);\s*reusableMesh\.geometry = geometry/);
 });
 
 test('steep top faces retain terrain blending while exposed vertical sides do not', async () => {
@@ -220,8 +235,36 @@ test('terrain grid omits covered floor tiles and rebuilds when surfaces change',
     assert.ok(grid.tileByVertex.every(tile => tile.x === 1));
     const scene = read('locationScene.js');
     assert.match(scene, /const uncovered = \(x, z\) => !floors\.some/);
-    assert.match(scene, /if \(gridNeedsRebuild\) \{[\s\S]*?rebuildLocationTerrainSurface\(true\);\s*rebuildWaterSurfaceMesh\(\);\s*rebuildLocationGrid\(\);/);
-    assert.match(scene, /if \(updates\.terrain !== undefined \|\| updates\.height !== undefined\) \{[\s\S]*?rebuildLocationTerrainSurface\(true\);\s*rebuildWaterSurfaceMesh\(\);\s*rebuildLocationGrid\(\);/);
+    const start = scene.indexOf('function flushPendingTerrainRefresh()');
+    const end = scene.indexOf('function updateSmoothTerrainColors(', start);
+    assert.ok(start >= 0 && end > start);
+    const flush = flags => {
+        const calls = [];
+        const mark = name => (...args) => calls.push({ name, args });
+        const context = vm.createContext({
+            pendingTerrainRefresh: { changed: new Map([['1,0', { x: 1, z: 0 }]]), ...flags },
+            scene: {}, currentLocationData: { grid_width: 2 }, editorSelection: null,
+            characterModels: new Map(),
+            rebuildSmoothTerrainMesh: mark('smooth'), updateSmoothTerrainColors: mark('smoothColors'),
+            updateLocationTerrainSurfaceTexture: mark('texture'),
+            rebuildLocationTerrainSurface: mark('surface'), rebuildWaterSurfaceMesh: mark('water'),
+            rebuildLocationGrid: mark('grid'), updateLocationGridColors: mark('gridColors'),
+            rebuildGrassDetailMesh: mark('grass'), rebuildLocationRoofs: mark('roofs'),
+            clearFogOverlay: mark('fogGeometry'), applyLocationLighting: mark('lighting'),
+            applyFogOfWar: mark('fog'), updateEditorSelectionVisual: mark('selection'),
+        });
+        vm.runInContext(scene.slice(start, end), context);
+        context.flushPendingTerrainRefresh();
+        assert.equal(context.pendingTerrainRefresh, null);
+        return calls;
+    };
+    const heightCalls = flush({ smooth: true, surface: true, water: true, grid: true });
+    assert.deepEqual(heightCalls.map(call => call.name), ['smooth', 'surface', 'water', 'grid']);
+    assert.deepEqual(heightCalls[1].args, [true, true]);
+    const paintCalls = flush({ terrainColor: true, texture: true, grass: true });
+    assert.deepEqual(paintCalls.map(call => call.name),
+        ['smoothColors', 'texture', 'gridColors', 'grass']);
+    assert.equal(paintCalls[1].args[0][0].x, 1);
     assert.match(scene, /updateLocationGridColors\(\)/);
     assert.match(scene, /locationGridMesh\.raycast = \(\) => \{\}/);
     assert.doesNotMatch(scene, /gridLines\.push\(x, -0\.1/);
@@ -251,7 +294,7 @@ test('one connected water surface follows the median shoreline and manual height
     ]], new Set(['1,0']));
     assert.deepEqual(separate.map(item => item.x), [1]);
     const scene = read('locationScene.js');
-    assert.match(scene, /if \(updates\.terrain !== undefined\) \{\s*const changedByTile/);
+    assert.match(scene, /if \(terrainChanged && changed\.length\) \{\s*const changedByTile/);
 });
 
 test('floor grid lies above the slab and is clipped to its footprint', async () => {
@@ -297,30 +340,74 @@ test('fog surface follows smoothed tile heights without gaps on shared edges', a
     assert.ok(shared.every(y => Math.abs(y - 1.545) < 1e-8));
     const scene = read('locationScene.js');
     assert.match(scene, /fogSurfaceData \?\?= buildFogSurfaceData\(currentLocationData\.tiles_data\)/);
-    assert.match(scene, /if \(gridNeedsRebuild\) clearFogOverlay\(\)/);
+    assert.match(scene, /if \(work\.fogGeometry\) clearFogOverlay\(\)/);
 });
 
-test('GM can toggle the terrain grid without changing location data', () => {
+function viewToggleHarness(isGM, exitWidth = 145.2) {
     const scene = read('locationScene.js');
+    const start = scene.indexOf('function getLocationViewToggleGroup()');
+    const end = scene.indexOf('export function destroyLocationScene()', start);
+    assert.ok(start >= 0 && end > start);
+    const nodes = new Map();
+    const makeElement = () => ({
+        id: '', style: {}, attributes: {}, children: [],
+        setAttribute(name, value) { this.attributes[name] = value; },
+        appendChild(child) { this.children.push(child); nodes.set(child.id, child); },
+        prepend(child) { this.children.unshift(child); nodes.set(child.id, child); },
+        remove() { nodes.delete(this.id); },
+        getBoundingClientRect() { return { width: exitWidth }; },
+    });
+    nodes.set('location-container', makeElement());
+    nodes.set('exit-location-btn', makeElement());
+    const calls = { grid: 0, roof: 0 };
+    const locationData = { tiles_data: [[{ terrain: 'grass' }]] };
+    const context = vm.createContext({
+        document: { getElementById: id => nodes.get(id), createElement: makeElement },
+        window: { isGM }, locationGridVisible: false, locationRoofsVisible: true,
+        currentLocationData: locationData,
+        rebuildLocationGrid() { calls.grid++; },
+        updateRoofVisibility() { calls.roof++; },
+    });
+    vm.runInContext(scene.slice(start, end).replaceAll('export function', 'function'), context);
+    return { context, nodes, calls, locationData };
+}
+
+test('players and GMs can toggle the terrain grid without changing location data', () => {
     const main = read('main.js');
-    assert.match(scene, /let locationGridVisible = false/);
-    assert.match(scene, /if \(!scene \|\| !currentLocationData \|\| !locationGridVisible\) return/);
-    assert.match(scene, /export function addLocationGridButton\(\)/);
-    assert.match(scene, /locationGridVisible = !locationGridVisible;\s*rebuildLocationGrid\(\);\s*sync\(\)/);
-    assert.match(scene, /btn\.setAttribute\('aria-pressed', String\(locationGridVisible\)\)/);
-    assert.match(main, /if \(window\.isGM\) \{[\s\S]*?addLocationGridButton\(\)/);
+    const entry = main.slice(main.indexOf('window.enterLocation = async function'),
+        main.indexOf('if (window.isGM)', main.indexOf('window.enterLocation = async function')));
+    assert.match(entry, /addLocationRoofButton\(\)/);
+    assert.match(entry, /addLocationGridButton\(\)/);
+    for (const isGM of [false, true]) {
+        const { context, calls, locationData } = viewToggleHarness(isGM);
+        const before = JSON.stringify(locationData);
+        const button = context.addLocationGridButton();
+        assert.equal(button.attributes['aria-pressed'], 'false');
+        button.onclick();
+        assert.equal(button.attributes['aria-pressed'], 'true');
+        assert.equal(calls.grid, 1);
+        assert.equal(JSON.stringify(locationData), before);
+    }
     assert.match(main, /document\.getElementById\('location-grid-btn'\)\?\.remove\(\)/);
 });
 
-test('roof and grid toggles share a fixed gap instead of separate offsets', () => {
-    const scene = read('locationScene.js');
-    const main = read('main.js');
-    assert.match(scene, /group\.id = 'location-view-toggle-group'/);
-    assert.match(scene, /group\.style\.right = '271px'/);
-    assert.match(scene, /group\.style\.gap = '8px'/);
-    assert.match(scene, /getLocationViewToggleGroup\(\)\.prepend\(btn\)/);
-    assert.match(scene, /getLocationViewToggleGroup\(\)\.appendChild\(btn\)/);
-    assert.match(main, /document\.getElementById\('location-view-toggle-group'\)\?\.remove\(\)/);
+test('roof and grid toggles share a gap and stay beside the exit for both roles', () => {
+    for (const isGM of [false, true]) {
+        const { context, nodes, calls } = viewToggleHarness(isGM);
+        const grid = context.addLocationGridButton();
+        const roof = context.addLocationRoofButton();
+        const group = nodes.get('location-view-toggle-group');
+        assert.equal(group.style.right, isGM ? '271px' : '174px');
+        assert.equal(group.style.gap, '8px');
+        assert.deepEqual(group.children.map(child => child.id),
+            ['location-roof-btn', 'location-grid-btn']);
+        roof.onclick();
+        assert.equal(roof.attributes['aria-pressed'], 'false');
+        assert.equal(calls.roof, 1);
+        assert.equal(grid.attributes['aria-pressed'], 'false');
+    }
+    assert.match(read('main.js'),
+        /document\.getElementById\('location-view-toggle-group'\)\?\.remove\(\)/);
 });
 
 test('flat terrain and water tiles fill their cells without permanent grid gaps', () => {

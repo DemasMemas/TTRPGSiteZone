@@ -77,7 +77,6 @@ test('switching a placed fire updates its existing light instead of rebuilding a
     assert.match(scene, /light\.intensity = source\.intensity/);
     assert.match(scene, /existing\.intensity = 0;\s*existing\.userData\.fireObjectId = null/);
     assert.match(scene, /fireLightCapacity = Math\.max\(MIN_FIRE_LIGHT_POOL/);
-    assert.match(scene, /if \(movableFirePreview\) buildPreviewMesh\.position\.set/);
     assert.doesNotMatch(scene.slice(scene.indexOf('function syncFireObjectLight('),
         scene.indexOf('\nfunction getLocationDecorFireSources(', scene.indexOf('function syncFireObjectLight('))),
     /locationLightGroup\.remove\(existing\)/);
@@ -87,6 +86,51 @@ test('switching a placed fire updates its existing light instead of rebuilding a
     assert.match(scene, /if \(fire\) syncFireObjectLight\(null, objectId\)/);
     assert.match(scene, /if \(isObjectLightSource\(object\)\) syncFireObjectLight\(null, objectId, false\)/);
     assert.match(catalog, /id: 'fire_barrel'.*dimensions: \[0\.72, 0\.72, 0\.78\]/);
+});
+
+test('fire placement preview follows the cursor without rebuilding its model', async () => {
+    const { LOCATION_ASSETS } = await import(`data:text/javascript;base64,${Buffer.from(catalog).toString('base64')}`);
+    const start = scene.indexOf('function updateBuildPreview()');
+    const end = scene.indexOf('async function placeStructureAtTile(', start);
+    assert.ok(start >= 0 && end > start);
+    for (const type of ['campfire', 'torch', 'wall_torch', 'fire_barrel']) {
+        const asset = LOCATION_ASSETS.find(item => item.id === type);
+        assert.equal(asset?.kind, 'structure', type);
+        const created = [];
+        const context = vm.createContext({
+            editorRotateMode: false, editorResizeMode: false, editorSelections: [], editorSelection: null,
+            editorMoveMode: false, editorMovePreviewPoint: null, editorRotateAngle: 0,
+            editorResizeAxis: null, editorResizeDimensions: null, selectedLocationAsset: asset,
+            structureRotation: 0, structureWidth: 1, structureDepth: 1, structureHeight: 1,
+            structureColor: '#fff', window: { locationEditMode: true, locationEditorTool: 'assets' },
+            hoveredTileCoords: { x: 1, z: 2 }, scene: { add() {} },
+            buildPreviewMesh: null, buildPreviewKey: null,
+            getTileHeight: x => x / 10, clampAssetElevation: value => Number(value) || 0,
+            placementForLocationAsset: source => ({ type: source.id, visualAsset: null }),
+            isFireObject: object => object.type === type, isElectricFixture: () => false,
+            createLocationObjectMesh(object) {
+                const mesh = { position: { set(x, y, z) { Object.assign(this, { x, y, z }); } } };
+                created.push({ object, mesh });
+                return mesh;
+            },
+            fadeEditorPreview: mesh => mesh,
+        });
+        context.clearBuildPreview = () => {
+            context.buildPreviewMesh = null;
+            context.buildPreviewKey = null;
+        };
+        vm.runInContext(scene.slice(start, end), context);
+        context.updateBuildPreview();
+        const first = context.buildPreviewMesh;
+        context.hoveredTileCoords = { x: 3, z: 4 };
+        context.updateBuildPreview();
+        assert.equal(created.length, 1, type);
+        assert.equal(created[0].object.properties.is_lit, true, type);
+        assert.equal(context.buildPreviewMesh, first, type);
+        assert.equal(first.position.x, 3.5, type);
+        assert.ok(Math.abs(first.position.y - (0.3 + Number(asset.elevation || 0))) < 1e-8, type);
+        assert.ok(Math.abs(first.position.z - (4.5 + Number(asset.offsetZ || 0))) < 1e-8, type);
+    }
 });
 
 test('fire light stays in the scene after deletion and is reused on the next placement', () => {
