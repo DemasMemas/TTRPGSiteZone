@@ -92,15 +92,95 @@ test('editor panel expands only for a new tool when the preference is enabled', 
     context.collapseMapToolsPanel();
     assert.equal(panel.classList.collapsed, true);
     assert.equal(JSON.parse(values.get('panelStates'))['panel-tools'].collapsed, true);
+    context.setMapEditorAutoExpandEnabled(false);
+    context.expandMapToolsPanel();
+    assert.equal(panel.classList.collapsed, false);
+    assert.equal(JSON.parse(values.get('panelStates'))['panel-tools'].collapsed, false);
 
     const main = read('main.js');
     assert.match(main, /if \(!newMode\) collapseMapToolsPanel\(\)/);
+    assert.match(main, /else expandMapToolsPanel\(\)/);
     assert.match(main, /if \(!getEditMode\(\)\) collapseMapToolsPanel\(\)/);
     assert.match(source, /if \(AppState\.isGM\) window\.toggleEditMode\(\)/);
     assert.match(main, /select: createToolSection\('Выбор', \[\]\)/);
     assert.match(main, /expandMapToolsPanelOnToolChange\(previousTool, tool\)/);
     assert.match(main, /selectWorldEditorTool\('select', \{ autoExpand: false \}\)/);
     assert.match(fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8'), /data-world-settings="select"[\s\S]*?data-map-editor-auto-expand/);
+});
+
+test('E restores the selected location tool panel without changing its settings', () => {
+    const main = read('main.js');
+    const start = main.indexOf('window.toggleEditMode = function()');
+    const end = main.indexOf('window.rotateLocationPlacement =', start);
+    assert.ok(start >= 0 && end > start);
+    let editing = true;
+    let collapsed = 0;
+    let expanded = 0;
+    const window = { isLocationActive: true, locationEditorTool: 'height' };
+    const context = vm.createContext({ window, getLocationEditMode: () => editing,
+        setLocationEditMode(value) { editing = value; },
+        collapseMapToolsPanel() { collapsed++; }, expandMapToolsPanel() { expanded++; },
+        document: { getElementById() { return null; } },
+    });
+    vm.runInContext(main.slice(start, end), context);
+    window.toggleEditMode();
+    assert.equal(editing, false);
+    assert.equal(collapsed, 1);
+    assert.equal(expanded, 0);
+    window.toggleEditMode();
+    assert.equal(editing, true);
+    assert.equal(collapsed, 1);
+    assert.equal(expanded, 1);
+    assert.equal(window.locationEditorTool, 'height');
+});
+
+test('local Q/E give placement or selection priority over the global edit toggle', () => {
+    const source = read('ui_interactions.js');
+    const start = source.indexOf('function handleKeyDown(e)');
+    const end = source.indexOf('function handleKeyUp(e)', start);
+    assert.ok(start >= 0 && end > start);
+    let modalVisible = false;
+    let rotationActive = true;
+    let transformActive = false;
+    let toggles = 0;
+    const rotations = [];
+    const context = vm.createContext({
+        window: { isLocationActive: true, isGM: true,
+            rotateLocationPlacement(direction) { rotations.push(direction); return rotationActive; },
+            isLocationEditorTransformActive() { return transformActive; },
+            toggleEditMode() { toggles++; } },
+        modalOpen: false,
+        isTypingTarget: target => Boolean(target?.typing),
+        document: { querySelectorAll: () => modalVisible ? [{ getClientRects: () => [1] }] : [] },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    const press = (code, options = {}) => {
+        let stopped = false;
+        context.handleKeyDown({ code, key: code === 'Escape' ? 'Escape' : code.slice(-1).toLowerCase(),
+            target: options.target || {}, repeat: Boolean(options.repeat),
+            altKey: Boolean(options.altKey), ctrlKey: Boolean(options.ctrlKey), metaKey: Boolean(options.metaKey),
+            preventDefault() {}, stopImmediatePropagation() { stopped = true; } });
+        return stopped;
+    };
+    assert.equal(press('KeyE'), true);
+    assert.equal(press('KeyQ'), true);
+    assert.deepEqual(rotations, [1, -1]);
+    assert.equal(toggles, 0);
+    rotationActive = false;
+    assert.equal(press('KeyE'), false);
+    assert.equal(toggles, 1);
+    press('KeyE', { repeat: true });
+    press('KeyE', { target: { typing: true } });
+    press('KeyE', { ctrlKey: true });
+    press('KeyE', { altKey: true });
+    modalVisible = true;
+    press('KeyE');
+    modalVisible = false;
+    assert.equal(toggles, 1);
+    transformActive = true;
+    rotationActive = true;
+    assert.equal(press('KeyE'), true);
+    assert.equal(toggles, 1);
 });
 
 test('location brush uses only the active tool, regardless of Alt and Shift', () => {
@@ -666,6 +746,7 @@ test('held Q selects the highlighted full-ring sector on release', async () => {
     let enabled = true;
     let location = false;
     let selectedObject = false;
+    let modalVisible = false;
     const createElement = tagName => ({
         tagName, style: {}, children: [], handlers: {}, attributes: {},
         classList: {
@@ -688,7 +769,7 @@ test('held Q selects the highlighted full-ring sector on release', async () => {
             createElementNS(namespace, tagName) { return createElement(tagName); },
             body: { appendChild(node) { appended.push(node); } },
             addEventListener(name, handler) { listeners[name] = handler; },
-            querySelectorAll() { return []; },
+            querySelectorAll() { return modalVisible ? [{ getClientRects: () => [1] }] : []; },
         },
     });
     vm.runInContext(source, context);
@@ -780,6 +861,28 @@ test('held Q selects the highlighted full-ring sector on release', async () => {
     assert.equal(selected.at(-1), 'select');
     assert.equal(press('KeyB', 'text'), false);
     assert.equal(selected.at(-1), 'select');
+    const rotations = [];
+    context.window.rotateLocationPlacement = direction => { rotations.push(direction); return true; };
+    const menusBefore = appended.length;
+    assert.equal(press('KeyQ'), true);
+    assert.equal(press('KeyE'), true);
+    assert.deepEqual(rotations, [-1, 1]);
+    assert.equal(appended.length, menusBefore);
+    assert.equal(press('KeyQ', 'text'), false);
+    assert.deepEqual(rotations, [-1, 1]);
+    modalVisible = true;
+    assert.equal(press('KeyE'), false);
+    assert.deepEqual(rotations, [-1, 1]);
+    modalVisible = false;
+    context.window.isLocationEditorTransformActive = () => true;
+    delete context.window.rotateLocationPlacement;
+    const previousActions = actions.length;
+    const previousMenus = appended.length;
+    assert.equal(press('KeyG'), true);
+    assert.equal(press('KeyR'), true);
+    assert.equal(press('KeyQ'), true);
+    assert.equal(actions.length, previousActions);
+    assert.equal(appended.length, previousMenus);
 });
 
 test('right drag while painting remains available to world and location cameras', () => {

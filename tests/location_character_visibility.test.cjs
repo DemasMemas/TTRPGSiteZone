@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
+const style = fs.readFileSync(path.join(__dirname, '../app/static/style.css'), 'utf8');
 
 function section(start, end) {
     const first = scene.indexOf(start);
@@ -55,4 +56,25 @@ test('hidden or camouflaged characters are not visible through fog memory', () =
     assert.equal(context.isCharacterVisibleToPlayer({ posX: 1, posY: 1 }, []), true);
     assert.match(scene, /if \(current\?\.gmHidden \|\| current\?\.camouflaged\) return false/);
     assert.match(scene, /if \(current\?\.gmHidden \|\| current\?\.camouflaged\) return;/);
+});
+
+test('location labels keep a dark surface while owner and team colors stay narrow accents', () => {
+    const entry = { teamBadge: { style: {}, textContent: '' }, ownerId: 7,
+        model: { traverse() {} }, label: { element: { style: { backgroundColor: 'rgba(17, 23, 20, 0.84)' } } } };
+    const context = vm.createContext({
+        getCharacterModelEntry: () => entry,
+        characterModels: new Map([[1, entry]]),
+        getUserColorHex: () => '#ff0000',
+    });
+    vm.runInContext(section('function normalizeTeamColor(', 'export function addCharacterToLocation('), context);
+    context.updateCharacterTeamVisual(1, 'Долг', '#00ff00');
+    assert.equal(entry.teamBadge.style.borderLeftColor, '#00ff00');
+    assert.equal(entry.teamBadge.style.backgroundColor, undefined);
+    assert.equal(entry.teamBadge.style.display, 'block');
+    vm.runInContext(section('export function refreshUserColor(', 'export function applyCharacterPostureVisual('), context);
+    context.refreshUserColor(7);
+    assert.equal(entry.label.element.style.borderLeftColor, '#ff0000');
+    assert.equal(entry.label.element.style.backgroundColor, 'rgba(17, 23, 20, 0.84)');
+    assert.match(style, /\.location-character-label\s*\{[^}]*background: rgba\(17, 23, 20, 0\.84\)/);
+    assert.match(scene, /div\.className = 'location-character-label'/);
 });

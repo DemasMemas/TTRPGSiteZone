@@ -410,12 +410,53 @@ test('roof and grid toggles share a gap and stay beside the exit for both roles'
         /document\.getElementById\('location-view-toggle-group'\)\?\.remove\(\)/);
 });
 
+test('switching between global map and location hides only global UI and restores it', () => {
+    const main = read('main.js');
+    const scene = read('locationScene.js');
+    const css = fs.readFileSync(path.join(__dirname, '../app/static/style.css'), 'utf8');
+    const start = main.indexOf('function setLocationViewActive(');
+    const end = main.indexOf('window.enterLocation = async function', start);
+    assert.ok(start >= 0 && end > start);
+    const classes = new Set();
+    const nodes = new Map([
+        ['canvas-container', { style: { display: 'block' } }],
+        ['location-container', { style: { display: 'none' } }],
+    ]);
+    const context = vm.createContext({ document: {
+        body: { classList: { toggle(name, enabled) {
+            if (enabled) classes.add(name);
+            else classes.delete(name);
+        } } },
+        getElementById: id => nodes.get(id),
+    } });
+    vm.runInContext(main.slice(start, end), context);
+    for (let iteration = 0; iteration < 3; iteration++) {
+        context.setLocationViewActive(true);
+        assert.equal(classes.has('location-view-active'), true);
+        assert.equal(nodes.get('canvas-container').style.display, 'none');
+        assert.equal(nodes.get('location-container').style.display, 'block');
+        context.setLocationViewActive(false);
+        assert.equal(classes.has('location-view-active'), false);
+        assert.equal(nodes.get('canvas-container').style.display, 'block');
+        assert.equal(nodes.get('location-container').style.display, 'none');
+    }
+    assert.match(main, /setLocationViewActive\(true\);\s*hideGlobalCanvas\(\)/);
+    assert.match(main, /setLocationViewActive\(false\);\s*showGlobalCanvas\(\)/);
+    for (const selector of ['.lobby-menu', '#settings-panel', '#tile-info', '.world-group-context-menu']) {
+        assert.ok(css.includes(`body.location-view-active ${selector}`));
+    }
+    assert.match(css, /body\.location-view-active \.world-group-context-menu \{\s*display: none !important;/);
+    assert.doesNotMatch(css, /body\.location-view-active #panel-tools/);
+    assert.match(scene, /createCompatibleWebGLRenderer\(THREE, \{ antialias: true, alpha: false \}\)/);
+});
+
 test('flat terrain and water tiles fill their cells without permanent grid gaps', () => {
     const scene = read('locationScene.js');
     assert.match(scene, /const geometry = new THREE\.BoxGeometry\(1, 1, 1\)/);
     assert.match(scene, /const waterMaterial = new THREE\.MeshStandardMaterial\(\{ color: 0xffffff \}\)/);
     assert.match(scene, /WATER_SIDE_COLORS = \{ grass: 0x183c4a/);
-    assert.match(scene, /new THREE\.InstancedMesh\(geometry\.clone\(\), \[/);
+    assert.match(scene, /const waterBoxGeometry = geometry\.clone\(\)/);
+    assert.match(scene, /waterTileMesh = new THREE\.InstancedMesh\(waterBoxGeometry, \[/);
     assert.match(scene, /Math\.max\(0\.05, waterLevelForTile\(tile, waterKind\) - 0\.01\)/);
     assert.match(scene, /Math\.max\(0\.05, height - terrainFoundationY\)/);
     assert.doesNotMatch(scene, /new THREE\.BoxGeometry\(0\.98, 1, 0\.98\)/);
@@ -425,4 +466,78 @@ test('floor is passable and does not charge climb movement in the client', () =>
     const scene = read('locationScene.js');
     assert.match(scene, /PASSABLE_OBJECT_TYPES = new Set\(\[[^\]]*'floor'/);
     assert.match(scene, /properties\.passable === true \|\| PASSABLE_OBJECT_TYPES\.has\(type\)[\s\S]*?climbCost: 0/);
+});
+
+test('terrain cap uses only a constant depth bias while floor materials stay independent', () => {
+    const scene = read('locationScene.js');
+    const cap = scene.slice(scene.indexOf('function rebuildLocationTerrainSurface('),
+        scene.indexOf('function rebuildWaterSurfaceMesh('));
+    assert.match(cap, /map: terrainSurfaceTexture, side: THREE\.DoubleSide, roughness: 0\.97,[\s\S]*?polygonOffset: true, polygonOffsetFactor: 0, polygonOffsetUnits: -1/);
+    assert.doesNotMatch(cap, /depthTest: false|depthWrite: false/);
+    const object = scene.slice(scene.indexOf('function createLocationObjectMesh('),
+        scene.indexOf('function darknessFactorAt('));
+    assert.match(object, /const material = hasSeparateMaterials \? null\s*: new THREE\.MeshStandardMaterial/);
+    assert.match(object, /if \(usePbrMaterial && material\) \{\s*applyLocationPbrMaterial\(material, asset\.visual\.maps\)/);
+});
+
+test('covered lower terrain tops do not draw color or depth while keeping pick geometry', () => {
+    const scene = read('locationScene.js');
+    assert.match(scene, /landTopMaterial = new THREE\.MeshBasicMaterial\(\{ colorWrite: false, depthWrite: false \}\)/);
+    assert.match(scene, /locationTileMesh = new THREE\.InstancedMesh\(geometry, \[\s*material, material, landTopMaterial, material, material, material,/);
+    assert.match(scene, /tileCubes = \[locationTileMesh, waterTileMesh\]/);
+    assert.match(scene, /tileCubes\.push\(smoothTerrainMesh\)/);
+    const smooth = scene.slice(scene.indexOf('function rebuildSmoothTerrainMesh('),
+        scene.indexOf('function updateLocationTerrainSurfaceTexture('));
+    assert.match(smooth, /geometry\.setAttribute\('terrainTop', new THREE\.Float32BufferAttribute\(data\.topByVertex, 1\)\)/);
+    const shaderSetup = smooth.slice(smooth.indexOf('    material.customProgramCacheKey ='),
+        smooth.indexOf('    smoothTerrainMesh = new THREE.Mesh('));
+    const material = {};
+    vm.runInNewContext(`(function(material) { ${shaderSetup} })(material)`, { material });
+    const shader = {
+        vertexShader: '#include <common>\n#include <begin_vertex>',
+        fragmentShader: '#include <common>\n#include <clipping_planes_fragment>',
+    };
+    material.onBeforeCompile(shader);
+    assert.match(shader.vertexShader, /attribute float terrainTop; varying float vTerrainTop;/);
+    assert.match(shader.vertexShader, /vTerrainTop = terrainTop;/);
+    assert.match(shader.fragmentShader, /if \(vTerrainTop > 0\.5\) discard;/);
+    assert.match(shader.fragmentShader, /#include <clipping_planes_fragment>/);
+    assert.match(smooth, /smoothTerrainMesh\.userData\.tileByFace = data\.tileByFace/);
+});
+
+test('F8 depth probe restores selected floor materials without changing another object', () => {
+    const scene = read('locationScene.js');
+    const probe = scene.slice(scene.indexOf('function restoreFloorDepthProbe()'),
+        scene.indexOf('export function getLocationBuildingIds()'));
+    const floorMaterial = { depthTest: true };
+    const alreadyDisabled = { depthTest: false };
+    const otherMaterial = { depthTest: true };
+    const floor = { userData: { locationObjectId: 11 }, traverse(visit) {
+        visit({ isMesh: true, material: [floorMaterial, alreadyDisabled] });
+    } };
+    const other = { userData: { locationObjectId: 12 }, traverse(visit) {
+        visit({ isMesh: true, material: otherMaterial });
+    } };
+    const context = vm.createContext({
+        floorDepthProbe: null, editorSelection: { kind: 'structure', id: 11 },
+        editorSelections: [{ kind: 'structure', id: 11 }], locationObjectMeshes: [floor, other],
+        getSelectedEditorSource: () => ({ type: 'floor', id: 11 }),
+        getSelectedLocationEditorAsset: () => null,
+        showNotification: () => {}, window: { dispatchEvent: () => {} },
+        CustomEvent: class { constructor() {} },
+    });
+    vm.runInContext(probe, context);
+    context.toggleFloorDepthProbe();
+    assert.equal(floorMaterial.depthTest, false);
+    assert.equal(alreadyDisabled.depthTest, false);
+    assert.equal(otherMaterial.depthTest, true);
+    context.toggleFloorDepthProbe();
+    assert.equal(floorMaterial.depthTest, true);
+    assert.equal(alreadyDisabled.depthTest, false);
+    context.toggleFloorDepthProbe();
+    context.editorSelection = null;
+    context.editorSelections = [];
+    context.notifyEditorSelection();
+    assert.equal(floorMaterial.depthTest, true);
+    assert.equal(otherMaterial.depthTest, true);
 });

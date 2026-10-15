@@ -16,7 +16,7 @@ import { hideGlobalCanvas, showGlobalCanvas, controls as globalControls } from '
 import { showNotification, getErrorMessage } from './utils.js';
 import { Server } from './api.js';
 import AppState, {
-    collapseMapToolsPanel, expandMapToolsPanelOnToolChange, initDraggablePanels, initHotkeys,
+    collapseMapToolsPanel, expandMapToolsPanel, expandMapToolsPanelOnToolChange, initDraggablePanels, initHotkeys,
     syncMapEditorAutoExpandCheckbox,
 } from './ui_interactions.js';
 import { initMapEditorQuickMenu, closeMapEditorQuickMenu } from './mapEditorQuickMenu.js';
@@ -40,11 +40,14 @@ import {
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
+    refreshLocationBuildPreview,
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
-    setLocationStructureRotation, applyLocationLighting, setLocationLightingPreset,
+    setLocationStructureRotation, rotateLocationPlacement, isLocationEditorTransformActive,
+    applyLocationLighting, setLocationLightingPreset,
     getLocationLightingPreset, setLocationAssetPreset, clearLocationAssetPreset,
     setLocationAssetElevation,
-    setLocationAssetDimensions, getSelectedLocationEditorAsset, beginMoveSelectedLocationAsset,
+    setLocationAssetDimensions, getSelectedLocationEditorAsset, getLocationBuildingIds,
+    addFloorAboveSelectedLocationAsset, beginMoveSelectedLocationAsset,
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
     setLocationAssetResizeAxis, getLocationAssetResizeState,
     deleteSelectedLocationAsset, toggleSelectedLocationAssetsHidden, toggleSelectedLocationFire,
@@ -182,11 +185,14 @@ window.toggleEditMode = function() {
         const btn = document.getElementById('edit-toggle');
         if (btn) btn.style.background = newMode ? '#4a6fa5' : '';
         if (!newMode) collapseMapToolsPanel();
+        else expandMapToolsPanel();
     } else {
         originalToggleEditMode();
         if (!getEditMode()) collapseMapToolsPanel();
     }
 };
+window.rotateLocationPlacement = rotateLocationPlacement;
+window.isLocationEditorTransformActive = isLocationEditorTransformActive;
 
 initMapEditorQuickMenu({
     isEnabled: () => Boolean(window.isGM && (window.isLocationActive ? getLocationEditMode() : getEditMode())),
@@ -223,6 +229,12 @@ function resumeWorldMapLoad() {
     }).catch(error => console.error('World map load failed', error));
 }
 
+function setLocationViewActive(active) {
+    document.body.classList.toggle('location-view-active', active);
+    document.getElementById('canvas-container').style.display = active ? 'none' : 'block';
+    document.getElementById('location-container').style.display = active ? 'block' : 'none';
+}
+
 window.enterLocation = async function(locationId) {
     closeMapEditorQuickMenu();
     if (window._locationEventCleanup) {
@@ -247,8 +259,7 @@ window.enterLocation = async function(locationId) {
         setCurrentLocationId(locationId);
 
         // Скрываем глобальную 3D-сцену
-        document.getElementById('canvas-container').style.display = 'none';
-        document.getElementById('location-container').style.display = 'block';
+        setLocationViewActive(true);
         hideGlobalCanvas();
 
         // Инициализируем сцену локации
@@ -283,6 +294,7 @@ window.enterLocation = async function(locationId) {
 
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) {
+                const editorBuildingId = `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
                 toolsPanel.classList.add('is-location-editor');
                 if (!window._originalToolsContent) {
                     window._originalToolsContent = toolsPanel.querySelector('.panel-content').innerHTML;
@@ -348,7 +360,12 @@ window.enterLocation = async function(locationId) {
                             <label id="loc-structure-width-field">Ширина <input id="loc-structure-width" type="number" min="0.2" max="30" step="0.1" value="3" style="width:58px;"></label>
                             <label id="loc-structure-depth-field">Глубина <input id="loc-structure-depth" type="number" min="0.1" max="30" step="0.1" value="0.2" style="width:58px;"></label>
                             <label id="loc-structure-height-field">Высота <input id="loc-structure-height" type="number" min="0.1" max="20" step="0.1" value="2.4" style="width:58px;"></label>
-                            <label id="loc-structure-rotation-field">Поворот <select id="loc-structure-rotation" class="form-control" style="width:auto;"><option value="0">0°</option><option value="1.5707963267948966">90°</option><option value="3.141592653589793">180°</option><option value="4.71238898038469">270°</option></select></label>
+                            <label>Здание <select id="loc-structure-building" class="form-control" style="width:auto;"></select></label>
+                            <button type="button" id="loc-structure-new-building">Новое здание</button>
+                            <input id="loc-structure-building-id" type="hidden" value="${editorBuildingId}">
+                            <label>Этаж <select id="loc-structure-level" class="form-control" style="width:auto;"><option value="0">1</option><option value="1">2</option></select></label>
+                            <label id="loc-structure-roof-type-field" style="display:none;">Крыша <select id="loc-structure-roof-type" class="form-control" style="width:auto;"><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
+                            <label id="loc-structure-rotation-field">Поворот, ° <input id="loc-structure-rotation" class="form-control" type="number" min="0" max="359" step="15" value="0" style="width:72px;" title="Q / E: поворот на 15°"></label>
                             <label>Класс укрытия <select id="loc-structure-cover-class" class="form-control" style="width:auto;">
                                 <option value="conditional">Условное</option>
                                 <option value="flimsy">Хлипкое</option>
@@ -540,6 +557,12 @@ window.enterLocation = async function(locationId) {
                             <label>Ширина Z, м <input class="form-control" type="number" data-placement-dimension="depth" min="0.02" max="30" step="any"></label>
                             <label>Высота модели, м <input class="form-control" type="number" data-placement-dimension="height" min="0.05" max="20" step="any"></label>
                         </div>
+                        <label data-placement-building-field style="display:none;">Здание <select class="form-control" data-placement-building></select></label>
+                        <button type="button" data-placement-new-building style="display:none;">Новое здание</button>
+                        <input type="hidden" data-placement-building-id value="${editorBuildingId}">
+                        <label data-placement-level-field style="display:none;">Этаж <select class="form-control" data-placement-level><option value="0">1</option><option value="1">2</option></select></label>
+                        <label data-placement-roof-type-field style="display:none;">Крыша <select class="form-control" data-placement-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
+                        <span data-placement-angle style="display:none;">Поворот: 0° · Q/E: 15°</span>
                         <span class="location-asset-placement-hint">Наведите на карту и кликните для размещения · ПКМ: отмена</span>
                     </div>
                     <div class="location-asset-inspector"></div>
@@ -567,6 +590,12 @@ window.enterLocation = async function(locationId) {
                     placementHeight.value = activeAsset.kind === 'lamp'
                         ? activeAsset.height : activeAsset.elevation ?? 0;
                     assetPlacement.querySelector('[data-placement-size]').hidden = activeAsset.id?.startsWith('anomaly_');
+                    assetPlacement.querySelector('[data-placement-building-field]').style.display = activeAsset.kind === 'structure' ? '' : 'none';
+                    assetPlacement.querySelector('[data-placement-new-building]').style.display = activeAsset.kind === 'structure' ? '' : 'none';
+                    assetPlacement.querySelector('[data-placement-level-field]').style.display = activeAsset.kind === 'structure' ? '' : 'none';
+                    assetPlacement.querySelector('[data-placement-roof-type-field]').style.display = activeAsset.id === 'floor' ? '' : 'none';
+                    assetPlacement.querySelector('[data-placement-angle]').style.display = activeAsset.kind === 'structure'
+                        || activeAsset.kind === 'decor' || activeAsset.lightKind === 'spot' ? '' : 'none';
                     const dimensions = assetDimensions(activeAsset, activeAsset.kind, activeAsset.lightKind || activeAsset.id);
                     assetPlacement.querySelectorAll('[data-placement-dimension]').forEach(input => {
                         input.value = dimensions[input.dataset.placementDimension];
@@ -641,8 +670,44 @@ window.enterLocation = async function(locationId) {
                     renderAssetCards();
                     renderPlacementSettings();
                 };
+                let activeBuildingId = editorBuildingId;
+                let activeLevel = 0;
+                const buildingSelectors = [document.getElementById('loc-structure-building'),
+                    assetPlacement.querySelector('[data-placement-building]')];
+                const buildingFields = [document.getElementById('loc-structure-building-id'),
+                    assetPlacement.querySelector('[data-placement-building-id]')];
+                const levelFields = [document.getElementById('loc-structure-level'),
+                    assetPlacement.querySelector('[data-placement-level]')];
+                const renderBuildingControls = () => {
+                    const ids = getLocationBuildingIds();
+                    for (const select of buildingSelectors) {
+                        select.replaceChildren(...ids.map((id, index) => new Option(`Здание ${index + 1}`, id)));
+                        if (!activeBuildingId) select.add(new Option('Старая постройка (без ID)', ''));
+                        else if (!ids.includes(activeBuildingId)) select.add(new Option('Новое здание', activeBuildingId));
+                        select.value = activeBuildingId;
+                    }
+                    for (const input of buildingFields) input.value = activeBuildingId;
+                    for (const input of levelFields) input.value = String(activeLevel);
+                };
+                const setActiveBuilding = (id, level = activeLevel) => {
+                    activeBuildingId = id || '';
+                    activeLevel = level === 1 ? 1 : 0;
+                    renderBuildingControls();
+                    refreshLocationBuildPreview();
+                };
+                for (const select of buildingSelectors) select.onchange = () => setActiveBuilding(select.value);
+                for (const button of [document.getElementById('loc-structure-new-building'),
+                    assetPlacement.querySelector('[data-placement-new-building]')]) {
+                    button.onclick = () => setActiveBuilding(
+                        `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`, 0);
+                }
+                for (const input of levelFields) input.onchange = () => setActiveBuilding(activeBuildingId, Number(input.value));
+                renderBuildingControls();
                 const renderAssetSelection = () => {
                     const selection = getSelectedLocationEditorAsset();
+                    if (selection?.kind === 'structure' && selection.selectedCount === 1) {
+                        setActiveBuilding(selection.buildingId, selection.level);
+                    }
                     const keepPreciseOpen = assetInspector.querySelector('.location-asset-precise')?.open || false;
                     assetInspector.replaceChildren();
                     if (!selection) {
@@ -673,13 +738,23 @@ window.enterLocation = async function(locationId) {
                             <label>Ширина Z, м <input class="form-control" type="number" data-selected-dimension="depth" min="0.02" max="30" step="any"></label>
                             <label>Высота модели, м <input class="form-control" type="number" data-selected-dimension="height" min="0.05" max="20" step="any"></label>
                         </div>
+                        <div data-selected-building-fields style="display:none;">
+                            <span data-selected-building-label></span>
+                            <button type="button" data-add-floor hidden>Добавить этаж</button>
+                            <details><summary>Принадлежность вручную</summary>
+                                <label>ID здания <input class="form-control" type="text" maxlength="64" data-selected-building-id></label>
+                                <label>Этаж <select class="form-control" data-selected-level><option value="0">1</option><option value="1">2</option></select></label>
+                            </details>
+                        </div>
+                        <label data-selected-roof-type-field style="display:none;">Крыша <select class="form-control" data-selected-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
                         <div class="location-asset-resize-tools" data-resize-tools hidden>
+                            <strong data-resize-status></strong>
                             <span>Ось размера:</span>
                             <button type="button" data-resize-axis="all" title="Все оси">Все</button>
                             <button type="button" data-resize-axis="width" title="X">X</button>
                             <button type="button" data-resize-axis="depth" title="Z">Z</button>
                             <button type="button" data-resize-axis="height" title="Y">Y</button>
-                            <span>ЛКМ сохранить, Esc отменить</span>
+                            <span data-resize-hint>Volume Scale: тяните маркер грани. Shift: симметрично; Ctrl: шаг 0,1 м (пол: 1 м); Esc: отменить перетаскивание или выйти; отпустите ЛКМ: сохранить и выбрать следующую грань.</span>
                         </div>
                         <details class="location-asset-precise">
                             <summary>Точная настройка</summary>
@@ -721,6 +796,23 @@ window.enterLocation = async function(locationId) {
                     if (selection.resizable) assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
                         input.value = selection.dimensions[input.dataset.selectedDimension];
                     });
+                    const buildingIdInput = assetInspector.querySelector('[data-selected-building-id]');
+                    const levelInput = assetInspector.querySelector('[data-selected-level]');
+                    assetInspector.querySelector('[data-selected-building-fields]').style.display = selection.kind === 'structure' && selection.selectedCount === 1 ? '' : 'none';
+                    if (selection.kind === 'structure') {
+                        buildingIdInput.value = selection.buildingId || '';
+                        levelInput.value = String(selection.level);
+                        const buildingNumber = getLocationBuildingIds().indexOf(selection.buildingId) + 1;
+                        assetInspector.querySelector('[data-selected-building-label]').textContent = buildingNumber
+                            ? `Здание ${buildingNumber} · этаж ${selection.level + 1}` : 'Старая постройка · без ID';
+                    }
+                    const addFloorButton = assetInspector.querySelector('[data-add-floor]');
+                    addFloorButton.hidden = selection.selectedCount !== 1 || selection.structureType !== 'floor'
+                        || selection.level !== 0;
+                    addFloorButton.onclick = () => addFloorAboveSelectedLocationAsset();
+                    const roofTypeInput = assetInspector.querySelector('[data-selected-roof-type]');
+                    roofTypeInput.parentElement.style.display = selection.selectedCount === 1 && selection.roofType !== undefined ? '' : 'none';
+                    if (selection.roofType !== undefined) roofTypeInput.value = selection.roofType;
                     for (const input of assetInspector.querySelectorAll('[data-asset-field]')) {
                         input.value = selection[input.dataset.assetField] ?? '';
                     }
@@ -730,7 +822,18 @@ window.enterLocation = async function(locationId) {
                             fields[input.dataset.assetField] = input.type === 'color' ? input.value : Number(input.value);
                         }
                         fields[selection.kind === 'lamp' ? 'height' : 'elevation'] = Number(heightInput.value);
+                        if (selection.kind === 'structure') {
+                            if (buildingIdInput.value.trim() !== (selection.buildingId || '')) fields.buildingId = buildingIdInput.value.trim();
+                            if (Number(levelInput.value) !== selection.level) fields.level = Number(levelInput.value);
+                        }
+                        if (selection.roofType !== undefined) fields.roofType = roofTypeInput.value;
                         return fields;
+                    };
+                    for (const input of [buildingIdInput, levelInput]) input.onchange = async () => {
+                        if (!await updateSelectedLocationAssetDetails(readFields())) renderAssetSelection();
+                    };
+                    roofTypeInput.onchange = async () => {
+                        if (!await updateSelectedLocationAssetDetails(readFields())) renderAssetSelection();
                     };
                     if (selection.kind === 'lamp') {
                         assetInspector.querySelector('.location-asset-fields').addEventListener('input', () => {
@@ -798,6 +901,13 @@ window.enterLocation = async function(locationId) {
                     const resizeState = getLocationAssetResizeState();
                     const resizeTools = assetInspector.querySelector('[data-resize-tools]');
                     resizeTools.hidden = !resizeState.active;
+                    resizeTools.querySelector('[data-resize-status]').textContent = resizeState.active
+                        ? `X: ${resizeState.dimensions.width.toFixed(2)} м  Y: ${resizeState.dimensions.height.toFixed(2)} м  Z: ${resizeState.dimensions.depth.toFixed(2)} м${resizeState.snapped ? '  ·  ПРИВЯЗКА Ctrl' : ''}`
+                        : '';
+                    if (selection.kind !== 'structure') {
+                        resizeTools.querySelector('[data-resize-hint]').textContent =
+                            'Двигайте курсор для изменения размера, ЛКМ — сохранить, Esc — отменить.';
+                    }
                     resizeTools.querySelectorAll('[data-resize-axis]').forEach(button => {
                         button.setAttribute('aria-pressed', String(button.dataset.resizeAxis === resizeState.axis));
                     });
@@ -812,6 +922,14 @@ window.enterLocation = async function(locationId) {
                 }
                 window.locationAssetSelectionHandler = renderAssetSelection;
                 window.addEventListener('location-editor-selection', renderAssetSelection);
+                if (window.locationBuildingListHandler) {
+                    window.removeEventListener('location-editor-buildings-changed', window.locationBuildingListHandler);
+                    window.removeEventListener('location-editor-active-building', window.locationActiveBuildingHandler);
+                }
+                window.locationBuildingListHandler = renderBuildingControls;
+                window.locationActiveBuildingHandler = event => setActiveBuilding(event.detail.buildingId, event.detail.level);
+                window.addEventListener('location-editor-buildings-changed', window.locationBuildingListHandler);
+                window.addEventListener('location-editor-active-building', window.locationActiveBuildingHandler);
                 if (window.locationAssetResizeHandler) {
                     window.removeEventListener('location-editor-resize', window.locationAssetResizeHandler);
                 }
@@ -819,6 +937,9 @@ window.enterLocation = async function(locationId) {
                     const tools = assetInspector.querySelector('[data-resize-tools]');
                     if (!tools) return;
                     tools.hidden = !event.detail.active;
+                    tools.querySelector('[data-resize-status]').textContent = event.detail.active
+                        ? `X: ${event.detail.dimensions.width.toFixed(2)} м  Y: ${event.detail.dimensions.height.toFixed(2)} м  Z: ${event.detail.dimensions.depth.toFixed(2)} м${event.detail.snapped ? '  ·  ПРИВЯЗКА Ctrl' : ''}`
+                        : '';
                     tools.querySelectorAll('[data-resize-axis]').forEach(button => {
                         button.setAttribute('aria-pressed', String(button.dataset.resizeAxis === event.detail.axis));
                     });
@@ -982,6 +1103,7 @@ window.enterLocation = async function(locationId) {
                 const structureWidthField = document.getElementById('loc-structure-width-field');
                 const structureDepthField = document.getElementById('loc-structure-depth-field');
                 const structureHeightField = document.getElementById('loc-structure-height-field');
+                const structureRoofTypeField = document.getElementById('loc-structure-roof-type-field');
                 const structureRotationField = document.getElementById('loc-structure-rotation-field');
                 const structureDefaults = {
                     wall: { width: 3, depth: 0.2, height: 2.4 },
@@ -1013,7 +1135,8 @@ window.enterLocation = async function(locationId) {
                     structureWidth.step = isFloor ? '1' : '0.1';
                     structureDepthField.style.display = isFloor ? 'none' : '';
                     structureHeightField.style.display = isFloor ? 'none' : '';
-                    structureRotationField.style.display = isFloor ? 'none' : '';
+                    structureRoofTypeField.style.display = isFloor ? '' : 'none';
+                    structureRotationField.style.display = '';
                 };
 
                 if (objModeCheck) objModeCheck.onchange = (e) => setLocationBrushObjectMode(e.target.checked);
@@ -1028,7 +1151,8 @@ window.enterLocation = async function(locationId) {
                 if (structureWidth) structureWidth.oninput = (e) => setLocationStructureWidth(e.target.value);
                 if (structureDepth) structureDepth.oninput = (e) => setLocationStructureDepth(e.target.value);
                 if (structureHeight) structureHeight.oninput = (e) => setLocationStructureHeight(e.target.value);
-                if (structureRotation) structureRotation.onchange = (e) => setLocationStructureRotation(e.target.value);
+                if (structureRotation) structureRotation.onchange = (e) =>
+                    setLocationStructureRotation(Number(e.target.value) * Math.PI / 180);
                 if (structureColor) structureColor.oninput = (e) => setLocationStructureColor(e.target.value);
                 applyStructurePreset(structurePreset.value);
 
@@ -1102,8 +1226,7 @@ window.exitLocation = function() {
     window.currentLocationId = null;
     window.currentLocationCharacterId = null;
 
-    document.getElementById('location-container').style.display = 'none';
-    document.getElementById('canvas-container').style.display = 'block';
+    setLocationViewActive(false);
     showGlobalCanvas();
 
     setCurrentLocationId(null);

@@ -5,6 +5,53 @@ const DEFAULT_DIMENSIONS = {
     floor: { width: 2, depth: 2, height: 0.12 },
 };
 
+export const STOREY_HEIGHT = 2.4;
+
+export function structureLevel(object) {
+    const level = Number(object?.properties?.level);
+    return Number.isInteger(level) && level > 0 ? level : 0;
+}
+
+export function structureLevelOffset(object) {
+    return structureLevel(object) * STOREY_HEIGHT;
+}
+
+export function structureBuildingId(object) {
+    const id = object?.properties?.building_id;
+    return id == null ? null : String(id).trim() || null;
+}
+
+export function sameBuildingLevel(a, b) {
+    return structureLevel(a) === structureLevel(b)
+        && structureBuildingId(a) === structureBuildingId(b);
+}
+
+export function nextStoreyFloors(source, objects) {
+    if (source?.type !== 'floor') return { error: 'Выберите пол первого этажа' };
+    const buildingId = structureBuildingId(source);
+    if (!buildingId) return { error: 'Сначала назначьте ID старому зданию и его элементам' };
+    if (structureLevel(source) !== 0) return { error: 'Пока поддерживаются только два этажа' };
+    const floors = (objects || []).filter(object => object.type === 'floor'
+        && structureBuildingId(object) === buildingId);
+    const upper = floors.filter(object => structureLevel(object) === 1);
+    const sameFootprint = (a, b) => {
+        const p = structurePose(a);
+        const q = structurePose(b);
+        return Math.abs(p.x - q.x) < 0.001 && Math.abs(p.z - q.z) < 0.001
+            && Math.abs(p.width - q.width) < 0.001 && Math.abs(p.depth - q.depth) < 0.001
+            && Math.abs(p.angle - q.angle) < 0.001;
+    };
+    const lower = floors.filter(object => structureLevel(object) === 0);
+    const missing = lower.filter((object, index) => !upper.some(other => sameFootprint(object, other))
+        && !lower.slice(0, index).some(other => sameFootprint(object, other)));
+    if (!missing.length) return { error: 'Перекрытие второго этажа уже существует' };
+    return { objects: missing.map(floor => ({
+        name: floor.name || 'floor', type: 'floor', tile_x: floor.tile_x, tile_y: floor.tile_y,
+        properties: { ...floor.properties, building_id: buildingId, level: 1,
+            dimensions: floor.properties?.dimensions ? { ...floor.properties.dimensions } : undefined },
+    })) };
+}
+
 export function structurePose(object) {
     const properties = object?.properties || {};
     const dimensions = { ...(DEFAULT_DIMENSIONS[object?.type] || DEFAULT_DIMENSIONS.wall), ...(properties.dimensions || {}) };
@@ -29,7 +76,7 @@ export function floorVisualPose(object, objects) {
     let minAcross = -pose.depth / 2;
     let maxAcross = pose.depth / 2;
     for (const wall of objects || []) {
-        if (wall.type !== 'wall') continue;
+        if (wall.type !== 'wall' || !sameBuildingLevel(object, wall)) continue;
         const edge = structurePose(wall);
         const dx = edge.x - pose.x;
         const dz = edge.z - pose.z;
@@ -57,11 +104,11 @@ export function floorVisualPose(object, objects) {
     };
 }
 
-export function floorEntrancePoint(pose, objects) {
+export function floorEntrancePoint(pose, objects, floor = null) {
     const halfWidth = pose.width / 2;
     const halfDepth = pose.depth / 2;
     for (const object of objects || []) {
-        if (object?.type !== 'door') continue;
+        if (object?.type !== 'door' || (floor && !sameBuildingLevel(floor, object))) continue;
         const door = structurePose(object);
         const dx = door.x - pose.x;
         const dz = door.z - pose.z;
@@ -77,6 +124,7 @@ export function floorEntrancePoint(pose, objects) {
 }
 
 export function doorOnWall(door, wall) {
+    if (!sameBuildingLevel(door, wall)) return null;
     const a = structurePose(wall);
     const b = structurePose(door);
     const parallel = Math.abs(a.axis.x * b.axis.x + a.axis.z * b.axis.z);
@@ -162,7 +210,8 @@ export function wallVisualPlan(wall, objects) {
     let start = -pose.width / 2;
     let end = pose.width / 2;
     for (const other of objects || []) {
-        if (other === wall || other?.type !== 'wall' || (wall.id != null && other.id === wall.id)) continue;
+        if (other === wall || other?.type !== 'wall' || !sameBuildingLevel(wall, other)
+            || (wall.id != null && other.id === wall.id)) continue;
         const otherPose = structurePose(other);
         const meeting = intersection(pose, otherPose);
         if (!meeting || Math.abs(Math.abs(meeting.onA) - pose.width / 2) > 0.7

@@ -6,6 +6,33 @@ const path = require('node:path');
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const load = async name => import(`data:text/javascript;base64,${Buffer.from(read(name)).toString('base64')}`);
 
+test('upper floor reuses all saved footprints and rejects duplicate or legacy floors', async () => {
+    const { nextStoreyFloors, structureLevelOffset } = await load('locationArchitecture.js');
+    const lower = { id: 1, name: 'floor', type: 'floor', tile_x: 4, tile_y: 6,
+        properties: { building_id: 'building-a', level: 0, elevation: 0.2, roof_type: 'flat',
+            rotation: Math.PI / 2, offset_x: 0.1,
+            dimensions: { width: 3, depth: 4, height: 0.12 } } };
+    const second = { ...lower, id: 3, tile_x: 9 };
+    const result = nextStoreyFloors(lower, [lower, second]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.objects.length, 2);
+    assert.equal(result.objects[0].properties.building_id, 'building-a');
+    assert.equal(result.objects[0].properties.level, 1);
+    assert.equal(structureLevelOffset(result.objects[0]), 2.4);
+    assert.equal(result.objects[0].properties.roof_type, 'flat');
+    assert.equal(result.objects[0].properties.elevation, 0.2);
+    assert.deepEqual(result.objects[0].properties.dimensions, lower.properties.dimensions);
+    assert.notEqual(result.objects[0].properties.dimensions, lower.properties.dimensions);
+    assert.equal(result.objects[0].tile_x, lower.tile_x);
+    assert.equal(result.objects[1].tile_x, second.tile_x);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.objects))[0].properties,
+        { ...lower.properties, level: 1 });
+    assert.equal(nextStoreyFloors(lower, [lower, second, { ...result.objects[0], id: 2 }]).objects.length, 1);
+    assert.ok(nextStoreyFloors(lower, [lower, second, ...result.objects]).error);
+    assert.ok(nextStoreyFloors({ ...lower, properties: { ...lower.properties, building_id: undefined } }, [lower]).error);
+    assert.ok(nextStoreyFloors({ ...lower, properties: { ...lower.properties, level: 1 } }, [lower]).error);
+});
+
 test('walls meet without both protruding through an outside corner', async () => {
     const { wallVisualPlan } = await load('locationArchitecture.js');
     const horizontal = { id: 1, type: 'wall', tile_x: 1, tile_y: 1,
@@ -49,6 +76,44 @@ test('an elevated window cuts a wall between its sill and lintel', async () => {
     assert.ok(plan.spans.some(span => span.bottom === 2 && span.top === 2.4));
     window.properties.elevation = 2;
     assert.equal(doorOnWall(window, wall), null);
+});
+
+test('building and level isolate coincident walls, openings, and upper floor boundaries', async () => {
+    const { doorOnWall, floorVisualPose, sameBuildingLevel, structureLevelOffset,
+        wallVisualPlan } = await load('locationArchitecture.js');
+    const dimensions = { width: 3, depth: 0.2, height: 2.4 };
+    const lower = { id: 1, type: 'wall', tile_x: 2, tile_y: 2,
+        properties: { building_id: 'house-a', level: 0, dimensions } };
+    const upper = { ...lower, id: 2, properties: { ...lower.properties, level: 1 } };
+    const otherBuilding = { ...lower, id: 3, properties: { ...lower.properties, building_id: 'house-b' } };
+    const upperDoor = { type: 'door', tile_x: 2, tile_y: 2,
+        properties: { building_id: 'house-a', level: 1,
+            dimensions: { width: 0.9, depth: 0.18, height: 2 } } };
+    assert.equal(structureLevelOffset(lower), 0);
+    assert.equal(structureLevelOffset(upper), 2.4);
+    assert.equal(sameBuildingLevel(lower, upper), false);
+    assert.equal(sameBuildingLevel(lower, otherBuilding), false);
+    assert.equal(doorOnWall(upperDoor, lower), null);
+    assert.ok(doorOnWall(upperDoor, upper));
+    assert.equal(wallVisualPlan(lower, [lower, upperDoor]).openings.length, 0);
+    assert.equal(wallVisualPlan(upper, [upper, upperDoor]).openings.length, 1);
+
+    const upperCorner = { ...upper, id: 4, tile_x: 3, tile_y: 3,
+        properties: { ...upper.properties, rotation: Math.PI / 2,
+            dimensions: { ...dimensions, width: 2 } } };
+    assert.deepEqual(wallVisualPlan(lower, [lower, upperCorner]).spans,
+        wallVisualPlan(lower, [lower]).spans);
+
+    const upperFloor = { type: 'floor', tile_x: 2, tile_y: 2,
+        properties: { building_id: 'house-a', level: 1,
+            dimensions: { width: 3, depth: 3, height: 0.12 } } };
+    const upperEdge = { ...upper, id: 5, tile_y: 0,
+        properties: { ...upper.properties, offset_z: 0.5 } };
+    const matching = floorVisualPose(upperFloor, [upperFloor, upperEdge]);
+    const mismatched = floorVisualPose(upperFloor, [upperFloor, lower,
+        { ...upperEdge, properties: { ...upperEdge.properties, level: 0 } }]);
+    assert.ok(matching.depth < mismatched.depth);
+    assert.equal(mismatched.depth, 3);
 });
 
 test('door frame follows its wall height and color while its panel stays separate', async () => {

@@ -89,6 +89,7 @@ export function createWaterDetailGroup(THREE, tiles, regions) {
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.raycast = () => {};
+        mesh.userData.waterDetailKind = 'film';
         group.add(mesh);
     }
     const addInstances = (items, createGeometry, createMaterial, transform, colorOf) => {

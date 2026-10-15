@@ -31,13 +31,15 @@ import {
     tileLocationPbrBoxUvs,
 } from './locationPbrMaterials.js';
 import {
-    bearingFromDelta, bearingToObjectRotation, clampAssetElevation, objectRotationToBearing,
-    rotatePointAround,
+    anchoredResizeCenter, bearingFromDelta, bearingToObjectRotation, cameraYawStepDegrees,
+    clampAssetElevation, objectRotationToBearing,
+    projectedAxisDrag, rotatePointAround, volumeResize,
 } from './locationAssetTransforms.js';
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
 import { doorOnWall, doorFrameStyle, doorTrimLayout, floorEntrancePoint, floorVisualPose,
-    houseWallWear, wallVisualPlan } from './locationArchitecture.js';
-import { applyInteriorFloorShade, createRoofGeometry, createRoofGableGeometry, roofPlans, roofVisibleForCamera } from './locationRoof.js';
+    houseWallWear, nextStoreyFloors, structureBuildingId, structureLevel, structureLevelOffset,
+    wallVisualPlan } from './locationArchitecture.js';
+import { applyInteriorFloorShade, createRoofVisual, roofPlans, roofVisibleForCamera } from './locationRoof.js';
 import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
     updateLocationTerrainPixels } from './locationTerrainTexture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
@@ -46,7 +48,8 @@ import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.
 import { createGrassDetailGroup } from './locationGrassDetail.js';
 import { addNaturalGrassInstances, loadNaturalGrassAssets,
     naturalGrassPlacements } from './locationNaturalGrass.js';
-import { buildRoundedWaterData, classifyWaterRegions, waterLevelForTile } from './locationWaterEdge.js';
+import { buildRoundedWaterData, classifyWaterRegions, waterExposedSideMask,
+    waterLevelForTile, waterSideCornerDrops } from './locationWaterEdge.js';
 import { createWaterDetailGroup } from './locationWaterDetail.js';
 import { createCrateModel, createFenceModel, createShelfModel, createTentModel } from './locationSimpleModels.js';
 import {
@@ -215,10 +218,13 @@ let locationDarknessTexture = null;
 let activeLightingProfile = null;
 let selectedLocationAsset = null;
 let editorSelection = null;
+let floorDepthProbe = null;
 let editorMoveMode = false;
 let editorMovePreviewPoint = null;
 let editorRotateMode = false;
 let editorRotateAngle = 0;
+let editorRotateHotkeyPending = false;
+let editorHotkeyRotationQueue = Promise.resolve();
 let editorGroupRotatePivot = null;
 let editorGroupRotateStartBearing = null;
 let editorGroupRotateWithPivot = false;
@@ -227,6 +233,11 @@ let editorResizeAxis = 'all';
 let editorResizeDimensions = null;
 let editorResizeBaseDimensions = null;
 let editorResizeAnchor = null;
+let editorResizeSymmetric = false;
+let editorResizeSnapped = false;
+let editorResizeBaseCenter = null;
+let editorResizeDragPointerId = null;
+let editorResizeElevation = null;
 const cameraDragMenuGuard = createSecondaryDragGuard();
 let editorSelectionRing = null;
 let editorSelections = [];
@@ -4884,8 +4895,7 @@ function updateCharacterTeamVisual(characterId, teamName, teamColor) {
     }
     badge.textContent = entry.teamName;
     badge.style.display = 'block';
-    badge.style.backgroundColor = entry.teamColor || '#56616a';
-    badge.style.borderColor = entry.teamColor || '#8b98a3';
+    badge.style.borderLeftColor = entry.teamColor || '#879486';
 }
 
 export function addCharacterToLocation(characterId, name, ownerId, ownerName, posX, posY, hpZones, effects, controlledBy, teamName = null, teamColor = null, facingX = 0, facingY = 1, isMutant = false, isNpc = false, gmHidden = false, mutantType = '', posture = 'standing', proneOnBack = false) {
@@ -4909,73 +4919,21 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
 
     const div = document.createElement('div');
     const colorHex = getUserColorHex(colorUserId);
+    div.className = 'location-character-label';
+    div.style.borderLeftColor = colorHex;
     const nameLine = document.createElement('div');
+    nameLine.className = 'location-character-label__name';
     nameLine.textContent = name;
+    nameLine.title = name;
     const grappleBadge = document.createElement('div');
-    grappleBadge.style.cssText = `
-        display:none;
-        margin-top:3px;
-        padding:2px 6px;
-        border-radius:7px;
-        background:rgba(45,18,14,.94);
-        border:1px solid rgba(235,126,91,.9);
-        color:#ffd6c7;
-        font-size:10px;
-        font-weight:800;
-        line-height:1.2;
-        white-space:nowrap;
-    `;
+    grappleBadge.className = 'location-character-label__badge location-character-label__badge--danger';
     const gunpointBadge = document.createElement('div');
-    gunpointBadge.style.cssText = `
-        display:none;
-        margin-top:3px;
-        padding:2px 6px;
-        border-radius:7px;
-        background:rgba(72,45,8,.94);
-        border:1px solid rgba(238,190,72,.9);
-        color:#ffe9a8;
-        font-size:10px;
-        font-weight:800;
-        line-height:1.2;
-        white-space:nowrap;
-    `;
+    gunpointBadge.className = 'location-character-label__badge location-character-label__badge--warning';
     const anomalyBadge = document.createElement('div');
-    anomalyBadge.style.cssText = `
-        display:none;
-        margin-top:3px;
-        padding:2px 6px;
-        border-radius:7px;
-        background:rgba(24,49,33,.94);
-        border:1px solid rgba(98,205,127,.9);
-        color:#caffd5;
-        font-size:10px;
-        font-weight:800;
-        line-height:1.2;
-        white-space:nowrap;
-    `;
+    anomalyBadge.className = 'location-character-label__badge location-character-label__badge--anomaly';
     const teamBadge = document.createElement('div');
-    teamBadge.style.cssText = `
-        display:none;
-        margin-top:3px;
-        padding:2px 6px;
-        border:1px solid transparent;
-        border-radius:7px;
-        color:#fff;
-        font-size:10px;
-        font-weight:800;
-        line-height:1.2;
-        white-space:nowrap;
-    `;
+    teamBadge.className = 'location-character-label__badge location-character-label__badge--team';
     div.append(nameLine, teamBadge, grappleBadge, gunpointBadge, anomalyBadge);
-    div.style.color = 'white';
-    div.style.fontSize = '14px';
-    div.style.fontWeight = 'bold';
-    div.style.textShadow = '1px 1px 3px black';
-    div.style.backgroundColor = colorHex;
-    div.style.border = `2px solid ${colorHex}`;
-    div.style.padding = '2px 8px';
-    div.style.borderRadius = '10px';
-    div.style.pointerEvents = 'none';
     const label = new CSS2DObject(div);
     label.position.set(posX + 0.5, tileHeight + characterLabelOffset({ model, posture: 'standing' }), posY + 0.5);
     scene.add(label);
@@ -5510,6 +5468,7 @@ function clearFogOverlay() {
 }
 
 function updateFogOverlay(active, sources) {
+    locationProfiler?.resetLayerProbe();
     if (!active) {
         fogOverlayMeshes.forEach(mesh => { mesh.visible = false; });
         return;
@@ -5821,8 +5780,7 @@ export function refreshUserColor(userId) {
         });
         const labelElement = entry.label?.element;
         if (labelElement) {
-            labelElement.style.backgroundColor = colorHex;
-            labelElement.style.borderColor = colorHex;
+            labelElement.style.borderLeftColor = colorHex;
         }
     });
 }
@@ -6942,10 +6900,92 @@ function createLocationProfileControl(container) {
     button.type = 'button';
     button.className = 'scene-profile-button';
     button.textContent = 'Профиль сцены';
+    const surfaceButton = document.createElement('button');
+    surfaceButton.type = 'button';
+    surfaceButton.className = 'scene-profile-button scene-surface-button';
+    surfaceButton.textContent = 'Без текстур поверхности';
+    surfaceButton.setAttribute('aria-pressed', 'false');
+    const layerButton = document.createElement('button');
+    layerButton.type = 'button';
+    layerButton.className = 'scene-profile-button scene-layer-button';
+    layerButton.textContent = 'Слои: все';
+    layerButton.title = 'Последовательно показывает группы поверхностей; после последней возвращает всю сцену';
+    layerButton.setAttribute('aria-pressed', 'false');
     const panel = document.createElement('pre');
     panel.className = 'scene-profile-results';
     panel.hidden = true;
-    container.append(button, panel);
+    container.append(button, surfaceButton, layerButton, panel);
+
+    let surfaceMaterials = [];
+    const groundPbrFloors = () => locationObjectMeshes.filter(mesh => {
+        const object = mesh.userData.locationObject;
+        if (object?.type !== 'floor' || structureLevel(object) !== 0) return false;
+        const asset = visualAssetForLocationObject('floor', object.properties);
+        return asset?.visual?.renderMode === 'pbr' && asset.id !== 'art_aged_wood';
+    });
+    function restoreSurfaceProbe() {
+        if (!surfaceMaterials.length) return;
+        restoreFloorDepthProbe();
+        for (const { mesh, original, replacement } of surfaceMaterials) {
+            mesh.material = original;
+            for (const material of Array.isArray(replacement) ? replacement : [replacement]) material.dispose();
+        }
+        surfaceMaterials = [];
+        surfaceButton.textContent = 'Без текстур поверхности';
+        surfaceButton.setAttribute('aria-pressed', 'false');
+    }
+    function replaceSurfaceMaterials(root, color) {
+        root?.traverse(mesh => {
+            if (!mesh.isMesh || !mesh.material) return;
+            const original = mesh.material;
+            const flat = material => new THREE.MeshStandardMaterial({
+                color, roughness: 1, metalness: 0, side: material.side,
+                depthTest: material.depthTest, depthWrite: material.depthWrite,
+                depthFunc: material.depthFunc, colorWrite: material.colorWrite,
+                polygonOffset: material.polygonOffset,
+                polygonOffsetFactor: material.polygonOffsetFactor,
+                polygonOffsetUnits: material.polygonOffsetUnits,
+                transparent: material.transparent, opacity: material.opacity,
+                fog: material.fog, toneMapped: material.toneMapped,
+            });
+            const replacement = Array.isArray(original) ? original.map(flat) : flat(original);
+            mesh.material = replacement;
+            surfaceMaterials.push({ mesh, original, replacement });
+        });
+    }
+    surfaceButton.addEventListener('click', () => {
+        if (surfaceMaterials.length) {
+            restoreSurfaceProbe();
+            return;
+        }
+        const groundMap = terrainSurfaceMesh?.material?.map;
+        const waterMap = waterSurfaceMesh?.material?.map;
+        let pbrMap = null;
+        restoreFloorDepthProbe();
+        replaceSurfaceMaterials(terrainSurfaceMesh, 0x7b856b);
+        replaceSurfaceMaterials(waterBankMesh, 0x9b876a);
+        replaceSurfaceMaterials(waterSurfaceMesh, 0x4e91a2);
+        for (const mesh of groundPbrFloors()) {
+            mesh.traverse(child => {
+                if (child.isMesh && child.material?.map) pbrMap ??= child.material.map;
+            });
+            replaceSurfaceMaterials(mesh, 0xc48b58);
+        }
+        if (!surfaceMaterials.length) return;
+        const context = renderer.getContext?.();
+        const attributes = context?.getContextAttributes?.();
+        const filterName = filter => filter === THREE.LinearMipmapLinearFilter
+            ? 'LinearMipmapLinear' : filter === THREE.LinearFilter ? 'Linear' : String(filter);
+        const textureInfo = (name, texture) => texture
+            ? `${name}: minFilter=${filterName(texture.minFilter)}, mipmaps=${texture.generateMipmaps}, anisotropy=${texture.anisotropy}`
+            : `${name}: текстура пока не загружена`;
+        surfaceButton.title = [
+            `WebGL${renderer.capabilities?.isWebGL2 ? '2' : '1'}, antialias=${attributes?.antialias ?? '?'}, DPR=${renderer.getPixelRatio?.() ?? '?'}`,
+            textureInfo('Грунт', groundMap), textureInfo('Вода', waterMap), textureInfo('PBR', pbrMap),
+        ].join('\n');
+        surfaceButton.textContent = 'Вернуть текстуры поверхности';
+        surfaceButton.setAttribute('aria-pressed', 'true');
+    });
 
     let skipLabels = false;
     let grass = null;
@@ -6955,6 +6995,57 @@ function createLocationProfileControl(container) {
     let lights = null;
     let lightsWereVisible = false;
     let shadowsWereEnabled = false;
+    const layerNames = [
+        'только верхний грунт', '+ нижний рельеф', '+ поверхность воды', '+ боковины воды',
+        '+ берега', '+ водные плёнки', '+ водный декор', '+ PBR-покрытия',
+        '+ трава и декор', '+ тайловые объекты', '+ туман и сетка',
+    ];
+    let layerStage = 0;
+    const layerVisibility = new Map();
+    function restoreLayerProbe() {
+        if (!layerStage) return;
+        for (const [mesh, visible] of layerVisibility) mesh.visible = visible;
+        layerVisibility.clear();
+        layerStage = 0;
+        layerButton.textContent = 'Слои: все';
+        layerButton.setAttribute('aria-pressed', 'false');
+    }
+    function applyLayerProbe() {
+        const groups = [
+            [terrainSurfaceMesh],
+            [locationTileMesh, smoothTerrainMesh, groundPlaneMesh],
+            [waterSurfaceMesh],
+            [waterTileMesh],
+            [waterBankMesh, sandBankMesh],
+            waterDetailGroup?.children.filter(mesh => mesh.userData.waterDetailKind === 'film') || [],
+            waterDetailGroup?.children.filter(mesh => mesh.userData.waterDetailKind !== 'film') || [],
+            groundPbrFloors(),
+            [grassDetailGroup],
+            objectMeshes,
+            [...fogOverlayMeshes.values(), ...fogMemoryGhosts.values(), darknessEditorOverlay, locationGridMesh],
+        ];
+        groups.forEach((meshes, index) => meshes.forEach(mesh => {
+            if (!mesh) return;
+            if (!layerVisibility.has(mesh)) layerVisibility.set(mesh, mesh.visible);
+            mesh.visible = layerVisibility.get(mesh) && index < layerStage;
+        }));
+    }
+    layerButton.addEventListener('click', () => {
+        if (profiler.running) {
+            profiler.stop();
+            button.textContent = 'Профиль сцены';
+        }
+        if (layerStage === layerNames.length) {
+            restoreLayerProbe();
+            return;
+        }
+        if (!terrainSurfaceMesh) return;
+        if (!layerStage) restoreFloorDepthProbe();
+        layerStage++;
+        applyLayerProbe();
+        layerButton.textContent = `Слои ${layerStage}/${layerNames.length}: ${layerNames[layerStage - 1]}`;
+        layerButton.setAttribute('aria-pressed', 'true');
+    });
     const phases = [
         { name: 'Полная сцена', apply() {}, restore() {} },
         { name: 'Без травы и декора почвы', apply() {
@@ -7007,6 +7098,8 @@ function createLocationProfileControl(container) {
         },
     });
     button.disabled = Boolean(renderer.isUnavailableRenderer);
+    surfaceButton.disabled = Boolean(renderer.isUnavailableRenderer);
+    layerButton.disabled = Boolean(renderer.isUnavailableRenderer);
     panel.title = 'Нажмите, чтобы закрыть результат';
     panel.addEventListener('click', () => { if (!profiler.running) panel.hidden = true; });
     button.addEventListener('click', () => {
@@ -7016,11 +7109,14 @@ function createLocationProfileControl(container) {
             panel.textContent = 'Замер остановлен, настройки сцены восстановлены.';
             return;
         }
+        restoreLayerProbe();
         button.textContent = 'Остановить замер';
         profiler.start(performance.now());
     });
     return {
         get skipLabels() { return skipLabels; },
+        resetSurfaceProbe: restoreSurfaceProbe,
+        resetLayerProbe: restoreLayerProbe,
         frame(now, metrics) { profiler.frame(now, metrics); },
         stop() {
             if (!profiler.running) return;
@@ -7028,7 +7124,12 @@ function createLocationProfileControl(container) {
             button.textContent = 'Профиль сцены';
             panel.textContent = 'Замер прерван изменением сцены; настройки восстановлены.';
         },
-        destroy() { profiler.stop(); button.remove(); panel.remove(); },
+        destroy() {
+            profiler.stop();
+            restoreLayerProbe();
+            restoreSurfaceProbe();
+            button.remove(); surfaceButton.remove(); layerButton.remove(); panel.remove();
+        },
     };
 }
 
@@ -7043,7 +7144,7 @@ export function initLocationScene(containerId) {
     while (container.firstChild) container.removeChild(container.firstChild);
 
     // WebGL рендерер
-    renderer = createCompatibleWebGLRenderer(THREE, { antialias: true })
+    renderer = createCompatibleWebGLRenderer(THREE, { antialias: true, alpha: false })
         || createUnavailableRenderer();
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -7196,7 +7297,7 @@ function updateHighlight(x, z, height) {
     if (!highlightBox) createHighlight();
     const size = 1 + brushRadius * 2;
     highlightBox.scale.set(size, 0.1, size);
-    highlightBox.position.set(x + 0.5, height + 0.1, z + 0.5);
+    highlightBox.position.set(x + 0.5, height + editorHoverLevelOffset() + 0.1, z + 0.5);
     highlightBox.visible = true;
 }
 
@@ -9456,6 +9557,84 @@ function getStructureDimensions(preset = structurePreset) {
     return { width: structureWidth, depth: Math.max(0.1, structureDepth), height: structureHeight };
 }
 
+function getStructurePlacementProperties() {
+    const library = window.locationEditorTool === 'assets';
+    const buildingId = library ? document.querySelector('[data-placement-building-id]')?.value
+        : document.getElementById('loc-structure-building-id')?.value;
+    const level = library ? document.querySelector('[data-placement-level]')?.value
+        : document.getElementById('loc-structure-level')?.value;
+    return { building_id: String(buildingId || '').trim(), level: level === '1' ? 1 : 0 };
+}
+
+function editorHoverLevelOffset() {
+    if (!window.locationEditMode) return 0;
+    if (editorMoveMode && editorSelection?.kind === 'structure') {
+        return structureLevelOffset(getSelectedEditorSource());
+    }
+    const tool = window.locationEditorTool;
+    if (tool === 'select' && editorSelection && editorSelection.kind !== 'structure') return 0;
+    if (tool !== 'select' && !(tool === 'assets' && selectedLocationAsset?.kind === 'structure')
+        && !(tool !== 'assets' && buildMode === 'structure')) return 0;
+    return structureLevelOffset({ properties: getStructurePlacementProperties() });
+}
+
+function hoveredEditorTile(clientX, clientY, groundCoords) {
+    const levelOffset = editorHoverLevelOffset();
+    if (!levelOffset) return groundCoords;
+    let { x, z } = groundCoords;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const point = getPointerWorldPoint(clientX, clientY, getTileHeight(x, z) + levelOffset);
+        if (!point) break;
+        const nextX = Math.floor(point.x);
+        const nextZ = Math.floor(point.z);
+        if (nextX < 0 || nextZ < 0 || nextX >= currentLocationData.grid_width
+            || nextZ >= currentLocationData.grid_height) return null;
+        x = nextX;
+        z = nextZ;
+    }
+    return { x, z };
+}
+
+function editorMovePointerPoint(clientX, clientY, coords) {
+    const source = getSelectedEditorSource();
+    if (!source || !coords) return null;
+    const extraHeight = editorSelection.kind === 'structure'
+        ? structureLevelOffset(source) + clampAssetElevation(source.properties?.elevation)
+        : editorSelection.kind === 'lamp' ? Number(source.height || 0)
+            : clampAssetElevation(source.elevation);
+    let { x, z } = coords;
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const point = getPointerWorldPoint(clientX, clientY, getTileHeight(x, z) + extraHeight);
+        if (!point) return null;
+        let centerX = point.x;
+        let centerZ = point.z;
+        if (editorSelections.length === 1 && editorSelection.kind === 'structure' && source.type === 'floor') {
+            // Keep the cursor on the visible floor center, not its untrimmed saved center.
+            for (let correction = 0; correction < 2; correction++) {
+                const tileX = Math.floor(centerX);
+                const tileZ = Math.floor(centerZ);
+                const candidate = { ...source, tile_x: tileX, tile_y: tileZ,
+                    properties: { ...source.properties,
+                        offset_x: centerX - tileX - 0.5, offset_z: centerZ - tileZ - 0.5 } };
+                const pose = floorVisualPose(candidate, currentLocationData.objects);
+                centerX += point.x - pose.x;
+                centerZ += point.z - pose.z;
+            }
+        }
+        const nextX = Math.floor(centerX);
+        const nextZ = Math.floor(centerZ);
+        if (nextX < 0 || nextZ < 0 || nextX >= currentLocationData.grid_width
+            || nextZ >= currentLocationData.grid_height) return null;
+        if (nextX === x && nextZ === z) return source.type === 'floor'
+            && editorSelection.kind === 'structure' && editorSelections.length === 1
+            ? { x: centerX, z: centerZ, cursorX: point.x, cursorZ: point.z }
+            : { x: centerX, z: centerZ };
+        x = nextX;
+        z = nextZ;
+    }
+    return null;
+}
+
 const FLOOR_SURFACE_OFFSET = 0.035;
 
 function quietHouseColor(color, type) {
@@ -9495,7 +9674,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
             obj.type === 'floor' ? 0.5 : 0.25, obj.type === 'floor' ? 'top' : 'sides');
     }
     if (obj.type === 'floor') applyInteriorFloorShade(material, width, depth,
-        floorEntrancePoint(floorPose, currentLocationData?.objects));
+        floorEntrancePoint(floorPose, currentLocationData?.objects, obj));
     if (usePbrMaterial && material) {
         applyLocationPbrMaterial(material, asset.visual.maps);
     }
@@ -9670,7 +9849,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
     const tileX = objectPosition.x ?? 0;
     const tileY = objectPosition.y ?? 0;
     group.position.set(floorPose?.x ?? tileX + 0.5 + Number(properties.offset_x || 0),
-        getTileHeight(tileX, tileY) + clampAssetElevation(properties.elevation)
+        getTileHeight(tileX, tileY) + structureLevelOffset(obj) + clampAssetElevation(properties.elevation)
             - (obj.type === 'floor' ? height - FLOOR_SURFACE_OFFSET : 0),
         floorPose?.z ?? tileY + 0.5 + Number(properties.offset_z || 0));
     if (obj.type === 'ground_item' || properties.is_ground_item) {
@@ -9867,6 +10046,7 @@ function tintLocationMesh(mesh, factor) {
 }
 
 function refreshDarknessEditorOverlay(darkTiles = activeLightingProfile?.dark_tiles || []) {
+    locationProfiler?.resetLayerProbe();
     if (darknessEditorOverlay) {
         scene?.remove(darknessEditorOverlay);
         disposeObject(darknessEditorOverlay);
@@ -9970,6 +10150,8 @@ function refreshLocationDarkness(profile = activeLightingProfile, lightOnly = fa
 }
 
 function addLocationObjectMesh(obj, refreshFog = true) {
+    locationProfiler?.resetSurfaceProbe();
+    locationProfiler?.resetLayerProbe();
     if (locationObjectMeshes.some(mesh => mesh.userData.locationObjectId === obj.id)) return;
     const mesh = createLocationObjectMesh(obj);
     tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
@@ -9981,6 +10163,9 @@ function addLocationObjectMesh(obj, refreshFog = true) {
 function removeLocationObjectMesh(objectId, refreshFog = true) {
     const mesh = locationObjectMeshes.find(item => Number(item.userData.locationObjectId) === Number(objectId));
     if (!mesh) return;
+    locationProfiler?.resetSurfaceProbe();
+    locationProfiler?.resetLayerProbe();
+    if (floorDepthProbe?.mesh === mesh) restoreFloorDepthProbe();
     scene.remove(mesh);
     disposeLocationObject(mesh);
     locationObjectMeshes = locationObjectMeshes.filter(item => item !== mesh);
@@ -9995,15 +10180,28 @@ function replaceLocationObjectMesh(object, refreshFog = true) {
 function updateRoofVisibility() {
     if (!camera || !controls || !roofMeshes.length) return;
     const distance = camera.position.distanceTo(controls.target);
+    const editedLevel = editMode ? Number(document.getElementById('loc-structure-level')?.value || 0) : 0;
     for (const roof of roofMeshes) {
         const visible = roofVisibleForCamera(roof.userData.roofPlan, controls.target,
             distance, locationRoofsVisible, editMode, camera.position);
         for (const child of roof.userData.visualMeshes) child.visible = visible;
+        const upperFloor = roof.userData.cutawayFloorMesh;
+        if (upperFloor) {
+            for (const child of roof.children) if (child.castShadow) child.visible = visible;
+            const hiddenByEditor = editMode && editedLevel < structureLevel(upperFloor.userData.locationObject);
+            const hiddenByCamera = !editMode && locationRoofsVisible && !visible;
+            const gmHidden = upperFloor.userData.locationObject?.properties?.gm_hidden && !window.isGM;
+            upperFloor.visible = !gmHidden && !hiddenByEditor && !hiddenByCamera;
+        }
     }
 }
 
 function rebuildLocationRoofs() {
+    locationProfiler?.resetSurfaceProbe();
+    locationProfiler?.resetLayerProbe();
     for (const roof of roofMeshes) {
+        const upperFloor = roof.userData.cutawayFloorMesh;
+        if (upperFloor) upperFloor.visible = !upperFloor.userData.locationObject?.properties?.gm_hidden || window.isGM;
         scene?.remove(roof);
         disposeLocationObject(roof);
     }
@@ -10011,6 +10209,11 @@ function rebuildLocationRoofs() {
     if (!scene || !currentLocationData) return;
     const plans = roofPlans(currentLocationData.objects, (x, z) => getTileHeight(x, z));
     const enclosedFloors = new Set(plans.map(plan => plan.floorId));
+    const floors = (currentLocationData.objects || []).filter(object => object.type === 'floor');
+    for (const floor of floors) {
+        if (floors.some(above => structureBuildingId(above) === structureBuildingId(floor)
+            && structureLevel(above) > structureLevel(floor))) enclosedFloors.add(floor.id);
+    }
     for (const object of locationObjectMeshes) {
         const enclosed = enclosedFloors.has(object.userData.locationObjectId);
         object.traverse(child => {
@@ -10020,40 +10223,23 @@ function rebuildLocationRoofs() {
         });
     }
     const texture = getSurfaceTexture(THREE, 'roof');
+    const floorMeshes = new Map(locationObjectMeshes.map(mesh => [mesh.userData.locationObjectId, mesh]));
     for (const plan of plans) {
         const floor = currentLocationData.objects.find(object => object.id === plan.floorId);
         const floorAsset = visualAssetForLocationObject('floor', floor?.properties);
         const quietGable = floorAsset?.visual?.renderMode !== 'pbr'
             || floorAsset.id === 'art_aged_wood';
-        const material = new THREE.MeshStandardMaterial({
-            color: plan.color, roughness: 0.94, side: THREE.DoubleSide,
+        const roof = createRoofVisual(THREE, plan, {
+            roofTexture: texture,
+            wallTexture: getSurfaceTexture(THREE, 'wall'),
+            gableColor: quietGable ? quietHouseColor(plan.gableColor, 'wall') : plan.gableColor,
+            applySurfacePattern,
         });
-        applySurfacePattern(material, texture, 0.22, 'top');
-        const roof = new THREE.Group();
-        const roofGeometry = createRoofGeometry(THREE, plan);
-        const roofFace = new THREE.Mesh(roofGeometry, material);
-        roof.add(roofFace);
-        const gableMaterial = new THREE.MeshStandardMaterial({
-            color: quietGable ? quietHouseColor(plan.gableColor, 'wall') : plan.gableColor,
-            roughness: 1, side: THREE.DoubleSide,
-        });
-        applySurfacePattern(gableMaterial, getSurfaceTexture(THREE, 'wall'), 0.25, 'sides');
-        const gable = new THREE.Mesh(createRoofGableGeometry(THREE, plan), gableMaterial);
-        roof.add(gable);
-        const shadowCaster = new THREE.Mesh(roofGeometry,
-            new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, side: THREE.DoubleSide }));
-        shadowCaster.castShadow = true;
-        shadowCaster.raycast = () => {};
-        roof.add(shadowCaster);
-        roof.position.set(plan.x, plan.eaveY, plan.z);
-        roof.rotation.y = plan.angle;
-        roof.traverse(child => {
-            if (!child.isMesh) return;
-            child.receiveShadow = true;
-        });
-        roof.raycast = () => {};
-        roof.userData.roofPlan = plan;
-        roof.userData.visualMeshes = [roofFace, gable];
+        if (floor && structureLevel(floor) > 0 && floors.some(lower => lower.id !== floor.id
+            && structureBuildingId(lower) === structureBuildingId(floor)
+            && structureLevel(lower) < structureLevel(floor))) {
+            roof.userData.cutawayFloorMesh = floorMeshes.get(plan.floorId) || null;
+        }
         scene.add(roof);
         roofMeshes.push(roof);
     }
@@ -10062,6 +10248,9 @@ function rebuildLocationRoofs() {
 
 function refreshArchitecturalMeshes() {
     if (!scene || !currentLocationData) return;
+    locationProfiler?.resetSurfaceProbe();
+    locationProfiler?.resetLayerProbe();
+    restoreFloorDepthProbe();
     for (let index = 0; index < locationObjectMeshes.length; index++) {
         const oldMesh = locationObjectMeshes[index];
         const source = (currentLocationData.objects || []).find(item => item.id === oldMesh.userData.locationObjectId);
@@ -10086,7 +10275,7 @@ function updateLocationObjectHeight(tileX, tileZ) {
         if (!object) return;
         const position = getObjectGridPosition(object);
         if (position.x === tileX && position.y === tileZ) {
-            mesh.position.y = height + clampAssetElevation(object.properties?.elevation)
+            mesh.position.y = height + structureLevelOffset(object) + clampAssetElevation(object.properties?.elevation)
                 - (object.type === 'floor'
                     ? Number(object.properties?.dimensions?.height || 0.12) - FLOOR_SURFACE_OFFSET : 0);
         }
@@ -10204,6 +10393,25 @@ function fadeEditorPreview(mesh) {
     return mesh;
 }
 
+function revealOpeningPlacementPreview(preview, dimensions, showOpening) {
+    preview.traverse(child => {
+        if (!child.isMesh) return;
+        for (const material of (Array.isArray(child.material) ? child.material : [child.material])) {
+            material.depthTest = false;
+        }
+        child.renderOrder = 90;
+    });
+    if (!showOpening) return;
+    const box = new THREE.BoxGeometry(dimensions.width, dimensions.height, dimensions.depth + 0.08);
+    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(box),
+        new THREE.LineBasicMaterial({ color: 0xf2d58a, depthTest: false, depthWrite: false }));
+    box.dispose();
+    outline.position.y = dimensions.height / 2;
+    outline.renderOrder = 91;
+    outline.raycast = () => {};
+    preview.add(outline);
+}
+
 function createEditorGroupMovePreview() {
     const group = new THREE.Group();
     for (const selection of editorSelections) {
@@ -10235,6 +10443,58 @@ function createEditorGroupMovePreview() {
         group.add(mesh);
     }
     return fadeEditorPreview(group);
+}
+
+function addEditorVolumeGizmo(preview, center) {
+    const { width, depth, height } = editorResizeDimensions;
+    const angle = preview.rotation.y;
+    const dx = center.x - preview.position.x;
+    const dz = center.z - preview.position.z;
+    const localX = Math.cos(angle) * dx - Math.sin(angle) * dz;
+    const localZ = Math.sin(angle) * dx + Math.cos(angle) * dz;
+    const boundsGeometry = new THREE.BoxGeometry(width, height, depth);
+    const edgesGeometry = new THREE.EdgesGeometry(boundsGeometry);
+    boundsGeometry.dispose();
+    const outline = new THREE.LineSegments(
+        edgesGeometry,
+        new THREE.LineBasicMaterial({ color: 0xeed69b, transparent: true,
+            opacity: 0.82, depthTest: false, depthWrite: false }),
+    );
+    outline.position.set(localX, height / 2, localZ);
+    outline.renderOrder = 100;
+    outline.raycast = () => {};
+    preview.add(outline);
+    const faces = [
+        ['width', -1, -width / 2, height / 2, 0, 0xd67868],
+        ['width', 1, width / 2, height / 2, 0, 0xd67868],
+        ['height', -1, 0, 0, 0, 0xe8cc70],
+        ['height', 1, 0, height, 0, 0xe8cc70],
+        ['depth', -1, 0, height / 2, -depth / 2, 0x7bc6ca],
+        ['depth', 1, 0, height / 2, depth / 2, 0x7bc6ca],
+    ];
+    for (const [axis, sign, x, y, z, color] of faces) {
+        if (editorResizeAxis !== 'all' && editorResizeAxis !== axis) continue;
+        const active = editorResizeAnchor?.volume && editorResizeAnchor.axis === axis
+            && editorResizeAnchor.sign === sign;
+        const handle = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1),
+            new THREE.MeshBasicMaterial({ color: active ? 0xffffff : color,
+                depthTest: false, depthWrite: false }));
+        handle.position.set(localX + x, y, localZ + z);
+        handle.scale.setScalar(0.2);
+        handle.userData.editorResizeHandleAxis = axis;
+        handle.userData.editorResizeHandleSign = sign;
+        handle.renderOrder = 101;
+        const worldPosition = new THREE.Vector3();
+        handle.onBeforeRender = (_renderer, _scene, viewCamera) => {
+            handle.getWorldPosition(worldPosition);
+            const distance = viewCamera.position.distanceTo(worldPosition);
+            const pixels = Math.max(1, renderer.domElement.clientHeight || renderer.domElement.height);
+            const size = 2 * distance * Math.tan(THREE.MathUtils.degToRad(viewCamera.fov) / 2)
+                * 18 / pixels;
+            handle.scale.setScalar(Math.max(0.14, Math.min(3, size)));
+        };
+        preview.add(handle);
+    }
 }
 
 function updateBuildPreview() {
@@ -10314,29 +10574,42 @@ function updateBuildPreview() {
         return;
     }
     const selectedPosition = editorRotateMode || editorResizeMode ? getSelectedLocationEditorAsset() : null;
+    const resizeCenter = editorResizeMode && selectedPosition ? editorResizeCenter(selectedPosition) : null;
     const x = editorMoveMode && editorMovePreviewPoint ? Math.floor(editorMovePreviewPoint.x)
-        : selectedPosition ? Math.floor(selectedPosition.x) : hoveredTileCoords.x;
+        : selectedPosition ? Math.floor(resizeCenter?.x ?? selectedPosition.x) : hoveredTileCoords.x;
     const z = editorMoveMode && editorMovePreviewPoint ? Math.floor(editorMovePreviewPoint.z)
-        : selectedPosition ? Math.floor(selectedPosition.z) : hoveredTileCoords.z;
+        : selectedPosition ? Math.floor(resizeCenter?.z ?? selectedPosition.z) : hoveredTileCoords.z;
     const editingSelection = editorMoveMode || editorRotateMode || editorResizeMode;
     const source = editingSelection ? getSelectedEditorSource() : selectedLocationAsset;
+    const placementProperties = getStructurePlacementProperties();
     const placingAsset = window.locationEditorTool === 'assets' && selectedLocationAsset;
-    const movableStructurePreview = placingAsset && !editingSelection && source?.kind === 'structure';
+    const openingPlacementPreview = placingAsset && !editingSelection && source?.kind === 'structure'
+        && ['door', 'window'].includes(placementForLocationAsset(source).type);
+    const movableStructurePreview = placingAsset && !editingSelection && source?.kind === 'structure'
+        && !openingPlacementPreview;
     const mountOffsetX = !editingSelection ? Math.sin(structureRotation) * Number(source?.offsetZ || 0) : 0;
     const mountOffsetZ = !editingSelection ? Math.cos(structureRotation) * Number(source?.offsetZ || 0) : 0;
     const previewKey = [window.locationEditorTool, movableStructurePreview ? 'structure' : x,
         movableStructurePreview ? 'preview' : z, editorMoveMode, editorRotateMode, editorRotateAngle,
-        editorResizeMode, editorResizeAxis, JSON.stringify(editorResizeDimensions),
+        editorResizeMode, editorResizeAxis, editorResizeSymmetric, JSON.stringify(editorResizeDimensions),
+        editorResizeElevation,
+        editorResizeAnchor?.volume ? `${editorResizeAnchor.axis}:${editorResizeAnchor.sign}` : '',
         editorMovePreviewPoint?.x?.toFixed(2), editorMovePreviewPoint?.z?.toFixed(2),
         source?.id || source?.type || source?.kind,
         source?.properties?.rotation ?? source?.rotation ?? source?.azimuth,
         source?.properties?.elevation ?? source?.elevation ?? source?.height,
         source?.x ?? source?.offsetX, source?.z ?? source?.offsetZ,
         JSON.stringify(source?.dimensions || source?.properties?.dimensions || null),
-        structureWidth, structureDepth, structureHeight, structureColor, structureRotation].join(':');
+        structureWidth, structureDepth, structureHeight, structureColor, structureRotation, brushObjectRotation,
+        placementProperties.building_id, placementProperties.level].join(':');
     if (buildPreviewMesh && buildPreviewKey === previewKey) {
-        if (movableStructurePreview) buildPreviewMesh.position.set(x + 0.5 + mountOffsetX,
-            getTileHeight(x, z) + clampAssetElevation(source.elevation), z + 0.5 + mountOffsetZ);
+        if (movableStructurePreview) {
+            const floorOffset = placementForLocationAsset(source).type === 'floor'
+                ? structureHeight - FLOOR_SURFACE_OFFSET : 0;
+            buildPreviewMesh.position.set(x + 0.5 + mountOffsetX,
+                getTileHeight(x, z) + structureLevelOffset({ properties: placementProperties })
+                    + clampAssetElevation(source.elevation) - floorOffset, z + 0.5 + mountOffsetZ);
+        }
         return;
     }
     clearBuildPreview();
@@ -10346,7 +10619,11 @@ function updateBuildPreview() {
         const kind = editingSelection ? editorSelection.kind : source.kind;
         if (kind === 'structure') {
             const object = editingSelection ? (editorResizeMode
-                ? { ...source, properties: { ...source.properties, dimensions: editorResizeDimensions } }
+                ? { ...source, tile_x: x, tile_y: z,
+                    properties: { ...source.properties, dimensions: editorResizeDimensions,
+                        elevation: editorResizeElevation,
+                        offset_x: resizeCenter.x - x - 0.5,
+                        offset_z: resizeCenter.z - z - 0.5 } }
                 : editorMoveMode && editorMovePreviewPoint ? {
                     ...source, tile_x: x, tile_y: z,
                     properties: { ...source.properties,
@@ -10355,6 +10632,7 @@ function updateBuildPreview() {
                 } : source) : {
                 type: placementForLocationAsset(source).type, tile_x: x, tile_y: z,
                 properties: {
+                    ...placementProperties,
                     dimensions: { width: structureWidth, depth: structureDepth, height: structureHeight },
                     color: structureColor,
                     rotation: structureRotation,
@@ -10367,6 +10645,10 @@ function updateBuildPreview() {
                 },
             };
             buildPreviewMesh = createLocationObjectMesh(object, true);
+            if (openingPlacementPreview) {
+                buildPreviewMesh.userData.openingWallMatched = (currentLocationData?.objects || [])
+                    .some(wall => wall.type === 'wall' && doorOnWall(object, wall));
+            }
         } else if (kind === 'lamp') {
             const lampPreview = editorResizeMode
                 ? { ...source, dimensions: editorResizeDimensions, intensity: 0 } : source;
@@ -10384,7 +10666,7 @@ function updateBuildPreview() {
                 ? { ...source, dimensions: editorResizeDimensions, scale: 1 } : source;
             applyDecorSize(buildPreviewMesh, decorPreview, decorType);
             buildPreviewMesh.rotation.y = THREE.MathUtils.degToRad(
-                editingSelection ? Number(source.rotation || 0) : -Number(source.rotation || 0),
+                editingSelection ? Number(source.rotation || 0) : brushObjectRotation,
             );
             buildPreviewMesh.position.set(
                 editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.x ?? source.offsetX ?? 0),
@@ -10393,11 +10675,23 @@ function updateBuildPreview() {
             );
         }
         if (kind === 'structure') buildPreviewMesh.position.set(
-            editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.properties?.offset_x || 0) + mountOffsetX,
+            (editorMoveMode || editorResizeMode) && source.type === 'floor' ? buildPreviewMesh.position.x
+                : editorMovePreviewPoint?.x ?? resizeCenter?.x
+                    ?? x + 0.5 + Number(source.properties?.offset_x || 0) + mountOffsetX,
             getTileHeight(x, z),
-            editorMovePreviewPoint?.z ?? z + 0.5 + Number(source.properties?.offset_z || 0) + mountOffsetZ,
+            (editorMoveMode || editorResizeMode) && source.type === 'floor' ? buildPreviewMesh.position.z
+                : editorMovePreviewPoint?.z ?? resizeCenter?.z
+                    ?? z + 0.5 + Number(source.properties?.offset_z || 0) + mountOffsetZ,
         );
-        if (kind === 'structure') buildPreviewMesh.position.y += clampAssetElevation(source.properties?.elevation ?? source.elevation);
+        if (kind === 'structure') {
+            const floorOffset = (editingSelection ? source.type : placementForLocationAsset(source).type) === 'floor'
+                ? (editingSelection ? Number(editorResizeDimensions?.height
+                    ?? source.properties?.dimensions?.height ?? 0.12) : structureHeight) - FLOOR_SURFACE_OFFSET : 0;
+            buildPreviewMesh.position.y += (editingSelection
+                ? structureLevelOffset(source) : structureLevelOffset({ properties: placementProperties }))
+                + (editorResizeMode ? editorResizeElevation
+                    : clampAssetElevation(source.properties?.elevation ?? source.elevation)) - floorOffset;
+        }
         if (editorRotateMode) {
             buildPreviewMesh.rotation.y = bearingToObjectRotation(editorRotateAngle);
             const arrow = new THREE.ArrowHelper(
@@ -10407,7 +10701,7 @@ function updateBuildPreview() {
             arrow.traverse(item => { item.raycast = () => {}; });
             buildPreviewMesh.add(arrow);
         }
-        if (editorResizeMode) {
+        if (editorResizeMode && kind !== 'structure') {
             const posterAxes = kind === 'decor' && source.type === 'poster';
             const axes = editorResizeAxis === 'all' ? ['width', 'depth', 'height'] : [editorResizeAxis];
             for (const axis of axes) {
@@ -10420,7 +10714,14 @@ function updateBuildPreview() {
                 buildPreviewMesh.add(arrow);
             }
         }
-        scene.add(fadeEditorPreview(buildPreviewMesh));
+        fadeEditorPreview(buildPreviewMesh);
+        if (openingPlacementPreview) {
+            revealOpeningPlacementPreview(buildPreviewMesh, {
+                width: structureWidth, height: structureHeight, depth: structureDepth,
+            }, buildPreviewMesh.userData.openingWallMatched);
+        }
+        if (editorResizeMode && kind === 'structure') addEditorVolumeGizmo(buildPreviewMesh, resizeCenter);
+        scene.add(buildPreviewMesh);
         return;
     }
     if (buildMode !== 'structure' || window.locationEditorTool === 'assets') return;
@@ -10429,7 +10730,10 @@ function updateBuildPreview() {
         new THREE.BoxGeometry(dimensions.width, dimensions.height, dimensions.depth),
         new THREE.MeshBasicMaterial({ color: structureColor, transparent: true, opacity: 0.35, depthWrite: false })
     );
-    mesh.position.set(x + 0.5, getTileHeight(x, z) + dimensions.height / 2, z + 0.5);
+    mesh.position.set(x + 0.5, getTileHeight(x, z)
+        + structureLevelOffset({ properties: getStructurePlacementProperties() })
+        + (structurePreset === 'floor' ? -dimensions.height / 2 + FLOOR_SURFACE_OFFSET
+            : dimensions.height / 2), z + 0.5);
     mesh.rotation.y = structureRotation;
     buildPreviewMesh = mesh;
     scene.add(mesh);
@@ -10441,6 +10745,14 @@ async function placeStructureAtTile(x, z) {
     const placement = window.locationEditorTool === 'assets' && selectedLocationAsset?.id === structurePreset
         ? placementForLocationAsset(selectedLocationAsset) : { type: structurePreset, visualAsset: null };
     const placedType = placement.type;
+    const building = getStructurePlacementProperties();
+    if (building.level > 0 && !building.building_id) {
+        showNotification('Укажите ID здания для второго этажа', 'system');
+        return;
+    }
+    const roofType = window.locationEditorTool === 'assets'
+        ? document.querySelector('[data-placement-roof-type]')?.value
+        : document.getElementById('loc-structure-roof-type')?.value;
     const selectedCoverClass = document.getElementById('loc-structure-cover-class')?.value || 'medium';
     const coverProfile = COVER_CLASS_DEFAULTS[selectedCoverClass] || COVER_CLASS_DEFAULTS.medium;
     try {
@@ -10450,7 +10762,9 @@ async function placeStructureAtTile(x, z) {
             tile_x: x,
             tile_y: z,
             properties: {
+                ...building,
                 dimensions,
+                ...(placedType === 'floor' ? { roof_type: roofType === 'flat' ? 'flat' : 'gable' } : {}),
                 color: structureColor,
                 ...(placement.visualAsset ? { visual_asset: placement.visualAsset } : {}),
                 rotation: structureRotation,
@@ -10533,11 +10847,82 @@ async function removeStructuresAtTile(x, z, radius = 0) {
 
 export function setLocationBuildMode(mode) { buildMode = mode; updateBuildPreview(); }
 export function setLocationStructurePreset(value) { structurePreset = value; updateBuildPreview(); }
+export function refreshLocationBuildPreview() {
+    if (hoveredTileCoords && currentLocationData) {
+        const { x, z } = hoveredTileCoords;
+        updateHighlight(x, z, getTileHeight(x, z));
+    }
+    updateBuildPreview();
+}
 export function setLocationStructureWidth(value) { structureWidth = Math.max(0.2, Number(value)); updateBuildPreview(); }
 export function setLocationStructureDepth(value) { structureDepth = Math.max(0.1, Number(value)); updateBuildPreview(); }
 export function setLocationStructureHeight(value) { structureHeight = Math.max(0.1, Number(value)); updateBuildPreview(); }
 export function setLocationStructureColor(value) { structureColor = value; updateBuildPreview(); }
-export function setLocationStructureRotation(value) { structureRotation = Number(value); updateBuildPreview(); }
+function syncLocationPlacementAngle() {
+    const angle = selectedLocationAsset?.kind === 'decor' ? brushObjectRotation
+        : selectedLocationAsset?.kind === 'lamp' ? Number(selectedLocationAsset.azimuth || 0)
+            : Math.round(structureRotation * 180 / Math.PI);
+    const normalized = ((Math.round(angle) % 360) + 360) % 360;
+    const label = document.querySelector('[data-placement-angle]');
+    if (label) label.textContent = `Поворот: ${normalized}° · Q/E: 15°`;
+    const manual = document.getElementById('loc-structure-rotation');
+    if (manual) manual.value = String(normalized);
+}
+
+export function setLocationStructureRotation(value) {
+    structureRotation = ((Number(value) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    syncLocationPlacementAngle();
+    updateBuildPreview();
+}
+
+export function rotateLocationPlacement(direction) {
+    if (!window.isGM || !window.locationEditMode || ![-1, 1].includes(direction)) return false;
+    const yawStep = cameraYawStepDegrees(camera, direction);
+    if (editorRotateMode) {
+        editorRotateAngle = ((editorRotateAngle - yawStep) % 360 + 360) % 360;
+        editorRotateHotkeyPending = true;
+        if (editorSelection?.kind === 'lamp') {
+            const selection = getSelectedLocationEditorAsset();
+            if (selection) previewSelectedLocationLamp({ ...selection, rotation: editorRotateAngle });
+        }
+        updateBuildPreview();
+        return true;
+    }
+    if (editorMoveMode || editorResizeMode) return true;
+    if (window.locationEditorTool === 'assets' && selectedLocationAsset) {
+        if (selectedLocationAsset.kind === 'structure') {
+            setLocationStructureRotation(structureRotation + yawStep * Math.PI / 180);
+        } else if (selectedLocationAsset.kind === 'decor') {
+            setLocationBrushObjectRotation(brushObjectRotation + yawStep);
+        } else if (selectedLocationAsset.kind === 'lamp' && selectedLocationAsset.lightKind === 'spot') {
+            selectedLocationAsset.azimuth = ((Number(selectedLocationAsset.azimuth || 0) - yawStep) % 360 + 360) % 360;
+            syncLocationPlacementAngle();
+            updateBuildPreview();
+        } else return false;
+        return true;
+    }
+    if (editorSelections.length) {
+        if (editorSelections.every(selection => selection.kind === 'lamp'
+            && getEditorSource(selection)?.kind !== 'spot')) return true;
+        const selections = editorSelections.map(selection => ({ ...selection }));
+        editorHotkeyRotationQueue = editorHotkeyRotationQueue.then(() => {
+            if (selections.length !== editorSelections.length
+                || !selections.every((selection, index) => sameEditorSelection(selection, editorSelections[index]))) return;
+            return updateSelectedLocationAssetGroup(asset => ({ rotation: asset.kind === 'lamp' && asset.lightKind !== 'spot'
+                ? asset.rotation : ((Number(asset.rotation) - yawStep) % 360 + 360) % 360 }));
+        }).catch(error => showNotification(error.message || 'Не удалось повернуть объект', 'system'));
+        return true;
+    }
+    if (window.locationEditorTool !== 'select' && buildMode === 'structure') {
+        setLocationStructureRotation(structureRotation + yawStep * Math.PI / 180);
+        return true;
+    }
+    return false;
+}
+
+export function isLocationEditorTransformActive() {
+    return Boolean(window.locationEditMode && (editorMoveMode || editorRotateMode || editorResizeMode));
+}
 
 export function addLocationObject(object) {
     if (!currentLocationData) return;
@@ -10553,6 +10938,7 @@ export function addLocationObject(object) {
         if ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive()) applyFogOfWar();
     }
     invalidateMovementMapCache();
+    if (['wall', 'door', 'window', 'floor'].includes(object.type)) notifyEditorBuildingsChanged();
 }
 
 window.addLocationObject = addLocationObject;
@@ -10569,6 +10955,7 @@ export function removeLocationObject(objectId) {
     if (fire) syncFireObjectLight(null, objectId);
     invalidateMovementMapCache();
     if (!fire || ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive())) applyFogOfWar();
+    if (['wall', 'door', 'window', 'floor'].includes(removed?.type)) notifyEditorBuildingsChanged();
 }
 
 window.removeLocationObject = removeLocationObject;
@@ -10601,6 +10988,7 @@ export function updateLocationObject(object) {
         containerExchangeTarget = object;
         containerInteractionRefresh?.(object);
     }
+    if (['wall', 'door', 'window', 'floor'].includes(object.type)) notifyEditorBuildingsChanged();
 }
 
 window.updateLocationObject = updateLocationObject;
@@ -10801,6 +11189,10 @@ function getPrimaryLocationEditorAsset() {
         rotation: Math.round((objectRotationToBearing(source.properties?.rotation || 0) + 360) % 360),
         elevation: clampAssetElevation(source.properties?.elevation),
         color: source.properties?.color || '#aa8866',
+        buildingId: structureBuildingId(source) || '',
+        level: structureLevel(source),
+        structureType: source.type,
+        ...(source.type === 'floor' ? { roofType: source.properties?.roof_type === 'flat' ? 'flat' : 'gable' } : {}),
         dimensions: assetDimensions(source, 'structure', source.type),
         resizable: true,
         fire: isObjectLightSource(source),
@@ -10835,10 +11227,82 @@ export function getSelectedLocationEditorAsset() {
         hidden: Boolean(editorSelection.kind === 'structure' ? source?.properties?.gm_hidden : source?.gm_hidden) } : null;
 }
 
+function restoreFloorDepthProbe() {
+    if (!floorDepthProbe) return;
+    for (const [material, depthTest] of floorDepthProbe.materialStates) material.depthTest = depthTest;
+    floorDepthProbe = null;
+    showNotification('F8: depthTest пола восстановлен', 'system');
+}
+
+function toggleFloorDepthProbe() {
+    if (floorDepthProbe) {
+        restoreFloorDepthProbe();
+        return;
+    }
+    const source = getSelectedEditorSource();
+    if (editorSelections.length !== 1 || editorSelection?.kind !== 'structure' || source?.type !== 'floor') return;
+    const mesh = locationObjectMeshes.find(item => item.userData.locationObjectId === source.id);
+    if (!mesh) return;
+    const materialStates = new Map();
+    mesh.traverse(child => {
+        if (!child.isMesh) return;
+        for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
+            if (material && !materialStates.has(material)) materialStates.set(material, material.depthTest);
+        }
+    });
+    if (!materialStates.size) return;
+    // Floor materials are per-object; PBR textures may be shared and are not changed.
+    for (const material of materialStates.keys()) material.depthTest = false;
+    floorDepthProbe = { mesh, materialStates };
+    showNotification('F8: depthTest пола отключён (временно)', 'system');
+}
+
 function notifyEditorSelection() {
+    if (floorDepthProbe && (editorSelection?.kind !== 'structure'
+        || editorSelection.id !== floorDepthProbe.mesh.userData.locationObjectId
+        || editorSelections.length !== 1)) restoreFloorDepthProbe();
     window.dispatchEvent(new CustomEvent('location-editor-selection', {
         detail: getSelectedLocationEditorAsset(),
     }));
+}
+
+export function getLocationBuildingIds() {
+    return [...new Set((currentLocationData?.objects || [])
+        .filter(object => ['wall', 'door', 'window', 'floor'].includes(object.type))
+        .map(structureBuildingId).filter(Boolean))];
+}
+
+function notifyEditorBuildingsChanged() {
+    window.dispatchEvent(new Event('location-editor-buildings-changed'));
+}
+
+const pendingUpperFloors = new Set();
+
+export async function addFloorAboveSelectedLocationAsset() {
+    const source = getSelectedEditorSource();
+    const plan = nextStoreyFloors(source, currentLocationData?.objects);
+    if (plan.error) {
+        showNotification(plan.error, 'system');
+        return false;
+    }
+    const buildingId = structureBuildingId(source);
+    if (pendingUpperFloors.has(buildingId)) return false;
+    pendingUpperFloors.add(buildingId);
+    try {
+        for (const floor of plan.objects) {
+            const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, floor);
+            addLocationObject(object);
+        }
+        window.dispatchEvent(new CustomEvent('location-editor-active-building', {
+            detail: { buildingId, level: 1 },
+        }));
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось добавить этаж', 'system');
+        return false;
+    } finally {
+        pendingUpperFloors.delete(buildingId);
+    }
 }
 
 export function getLocationAssetResizeState() {
@@ -10846,6 +11310,8 @@ export function getLocationAssetResizeState() {
         active: editorResizeMode,
         axis: editorResizeAxis,
         dimensions: editorResizeDimensions ? { ...editorResizeDimensions } : null,
+        handle: editorResizeAnchor?.volume ? editorResizeAnchor.axis : null,
+        snapped: editorResizeSnapped,
     };
 }
 
@@ -10861,6 +11327,28 @@ export function cancelLocationAssetResize() {
     editorResizeDimensions = null;
     editorResizeBaseDimensions = null;
     editorResizeAnchor = null;
+    editorResizeElevation = null;
+    editorResizeDragPointerId = null;
+    editorResizeSnapped = false;
+    notifyEditorResize();
+    updateBuildPreview();
+    return true;
+}
+
+function cancelCurrentAssetResizeDrag() {
+    if (editorResizeDragPointerId === null || !editorResizeAnchor?.volume) return false;
+    const canvas = renderer?.domElement;
+    if (canvas?.hasPointerCapture?.(editorResizeDragPointerId)) {
+        canvas.releasePointerCapture(editorResizeDragPointerId);
+    }
+    editorResizeDimensions = { ...editorResizeAnchor.baseDimensions };
+    editorResizeBaseDimensions = { ...editorResizeAnchor.baseDimensions };
+    editorResizeBaseCenter = { ...editorResizeAnchor.baseCenter };
+    editorResizeElevation = editorResizeAnchor.baseElevation;
+    editorResizeAnchor = null;
+    editorResizeDragPointerId = null;
+    editorResizeSymmetric = false;
+    editorResizeSnapped = false;
     notifyEditorResize();
     updateBuildPreview();
     return true;
@@ -10880,6 +11368,9 @@ function clearEditorSelection() {
     editorResizeDimensions = null;
     editorResizeBaseDimensions = null;
     editorResizeAnchor = null;
+    editorResizeElevation = null;
+    editorResizeDragPointerId = null;
+    editorResizeSnapped = false;
     notifyEditorResize();
     updateEditorSelectionVisual();
     notifyEditorSelection();
@@ -10912,9 +11403,13 @@ function updateEditorSelectionVisual(lightingOverride = null) {
         const source = selection.kind === 'lamp' && lightingOverride
             ? lightingOverride.local_lights?.[selection.index] : getEditorSource(selection);
         if (!source) continue;
-        const x = selection.kind === 'structure' ? Number(source.tile_x) + 0.5 + Number(source.properties?.offset_x || 0)
+        const floorPose = selection.kind === 'structure' && source.type === 'floor'
+            ? floorVisualPose(source, currentLocationData?.objects) : null;
+        const x = floorPose ? floorPose.x
+            : selection.kind === 'structure' ? Number(source.tile_x) + 0.5 + Number(source.properties?.offset_x || 0)
             : selection.kind === 'lamp' ? Number(source.x) : selection.x + 0.5 + Number(source.x || 0);
-        const z = selection.kind === 'structure' ? Number(source.tile_y) + 0.5 + Number(source.properties?.offset_z || 0)
+        const z = floorPose ? floorPose.z
+            : selection.kind === 'structure' ? Number(source.tile_y) + 0.5 + Number(source.properties?.offset_z || 0)
             : selection.kind === 'lamp' ? Number(source.z) : selection.z + 0.5 + Number(source.z || 0);
         const ring = new THREE.Mesh(
             new THREE.RingGeometry(0.38, 0.53, 28),
@@ -10925,7 +11420,12 @@ function updateEditorSelectionVisual(lightingOverride = null) {
             }),
         );
         ring.rotation.x = -Math.PI / 2;
-        ring.position.set(x, getTileHeight(Math.floor(x), Math.floor(z)) + 0.04, z);
+        ring.position.set(x, getTileHeight(floorPose ? Number(source.tile_x) : Math.floor(x),
+            floorPose ? Number(source.tile_y) : Math.floor(z))
+            + (selection.kind === 'structure' ? structureLevelOffset(source)
+                + clampAssetElevation(source.properties?.elevation)
+                : selection.kind === 'lamp' ? Number(source.height || 0)
+                    : clampAssetElevation(source.elevation)) + 0.04, z);
         ring.renderOrder = 100;
         ring.raycast = () => {};
         editorSelectionRing.add(ring);
@@ -11056,6 +11556,7 @@ export function setLocationAssetPreset(assetId) {
     } else {
         buildMode = 'light';
     }
+    syncLocationPlacementAngle();
     updateBuildPreview();
 }
 
@@ -11118,6 +11619,7 @@ export function beginRotateSelectedLocationAsset() {
     editorMoveMode = false;
     editorMovePreviewPoint = null;
     editorRotateMode = true;
+    editorRotateHotkeyPending = false;
     editorGroupRotatePivot = editorSelections.length > 1 ? getEditorGroupPivot() : null;
     editorGroupRotateStartBearing = null;
     editorGroupRotateWithPivot = false;
@@ -11149,8 +11651,14 @@ export function beginResizeSelectedLocationAsset() {
     editorResizeAxis = 'all';
     editorResizeDimensions = { ...selection.dimensions };
     editorResizeBaseDimensions = { ...selection.dimensions };
+    editorResizeElevation = selection.elevation;
     editorResizeAnchor = null;
-    showNotification('Размер: сейчас меняются все три оси. Для отдельной оси выберите X, Z или Y в панели. Клик сохранит, Esc отменит.', 'system');
+    editorResizeSymmetric = false;
+    editorResizeSnapped = false;
+    editorResizeBaseCenter = { x: selection.x, z: selection.z };
+    showNotification(selection.kind === 'structure'
+        ? 'Volume Scale: тяните грань. Shift: симметрично, Ctrl: шаг 0,1 м (пол: 1 м). Esc: отменить перетаскивание или выйти. Отпустите ЛКМ для сохранения; инструмент останется активным.'
+        : 'Размер: выберите ось и двигайте мышью. ЛКМ сохранит, Esc отменит.', 'system');
     notifyEditorResize();
     updateBuildPreview();
     return true;
@@ -11158,9 +11666,14 @@ export function beginResizeSelectedLocationAsset() {
 
 export function setLocationAssetResizeAxis(axis) {
     if (!editorResizeMode || !['all', 'width', 'depth', 'height'].includes(axis)) return false;
+    const selection = getSelectedLocationEditorAsset();
+    if (selection) editorResizeBaseCenter = editorResizeCenter(selection);
     editorResizeAxis = axis;
     editorResizeBaseDimensions = { ...editorResizeDimensions };
     editorResizeAnchor = null;
+    editorResizeDragPointerId = null;
+    editorResizeSymmetric = false;
+    editorResizeSnapped = false;
     notifyEditorResize();
     updateBuildPreview();
     return true;
@@ -11333,7 +11846,7 @@ export async function scaleSelectedLocationAssets(grow) {
     });
 }
 
-export async function updateSelectedLocationAssetDetails({ x, z, height, elevation, intensity, distance, color, rotation, dimensions }) {
+export async function updateSelectedLocationAssetDetails({ x, z, height, elevation, intensity, distance, color, rotation, dimensions, roofType, buildingId, level }) {
     const source = getSelectedEditorSource();
     if (!source || !currentLocationData) return false;
     if (!Number.isFinite(x) || !Number.isFinite(z)
@@ -11350,6 +11863,15 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
         return false;
     }
     if (color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(color)) return false;
+    if (editorSelection.kind === 'structure') {
+        if (level !== undefined && ![0, 1].includes(level)) return false;
+        if (buildingId !== undefined && buildingId.length > 64) return false;
+        if ((level ?? structureLevel(source)) > 0
+            && !(buildingId !== undefined ? buildingId : structureBuildingId(source))) {
+            showNotification('Укажите ID здания для второго этажа', 'system');
+            return false;
+        }
+    }
     if (editorSelection.kind === 'lamp') {
         const lights = [...currentLocationData.lighting.local_lights];
         const azimuth = ((Number(rotation) + 180) % 360 + 360) % 360 - 180;
@@ -11370,6 +11892,10 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
                     elevation: elevation ?? clampAssetElevation(source.properties?.elevation),
                     ...(color !== undefined ? { color } : {}),
                     ...(dimensions ? { dimensions } : {}),
+                    ...(buildingId !== undefined ? { building_id: buildingId } : {}),
+                    ...(level !== undefined ? { level } : {}),
+                    ...(source.type === 'floor' && roofType !== undefined
+                        ? { roof_type: roofType === 'flat' ? 'flat' : 'gable' } : {}),
                 },
             });
             updateLocationObject(object);
@@ -11458,10 +11984,37 @@ function updateEditorRotatePreview(clientX, clientY, snap = false, aroundGroup =
     }
 }
 
-function updateEditorResizePreview(clientX, clientY) {
+function updateEditorResizePreview(clientX, clientY, symmetric = false, snap = false) {
     if (!editorResizeMode || !editorResizeDimensions || !editorResizeBaseDimensions) return;
     const selection = getSelectedLocationEditorAsset();
     if (!selection) return;
+    if (selection.kind === 'structure') {
+        const anchor = editorResizeAnchor;
+        if (!anchor?.volume || editorResizeDragPointerId === null) return;
+        const distance = projectedAxisDrag(anchor.startX, anchor.startY, clientX, clientY,
+            anchor.screenAxisX, anchor.screenAxisY);
+        const result = volumeResize({ dimensions: anchor.baseDimensions,
+            center: anchor.baseCenter, elevation: anchor.baseElevation,
+            rotation: selection.rotation, axis: anchor.axis, side: anchor.sign,
+            distance, symmetric, snap: snap ? (getSelectedEditorSource()?.type === 'floor' ? 1 : 0.1) : 0,
+            floor: getSelectedEditorSource()?.type === 'floor' });
+        if (!result) return;
+        const unchanged = result.dimensions[anchor.axis] === editorResizeDimensions[anchor.axis]
+            && result.elevation === editorResizeElevation
+            && editorResizeSymmetric === symmetric && editorResizeSnapped === snap;
+        anchor.result = result;
+        editorResizeDimensions = result.dimensions;
+        editorResizeElevation = result.elevation;
+        editorResizeSymmetric = symmetric;
+        editorResizeSnapped = snap;
+        if (!unchanged) {
+            notifyEditorResize();
+            updateBuildPreview();
+        }
+        return;
+    }
+    const modeChanged = editorResizeSymmetric !== symmetric;
+    editorResizeSymmetric = symmetric;
     const centerX = selection.x;
     const centerZ = selection.z;
     let coordinate;
@@ -11470,7 +12023,14 @@ function updateEditorResizePreview(clientX, clientY) {
     } else if (editorResizeAxis === 'height') {
         coordinate = -clientY * 0.02;
     } else {
-        const point = getPointerWorldPoint(clientX, clientY, getTileHeight(Math.floor(centerX), Math.floor(centerZ)));
+        const source = getSelectedEditorSource();
+        const planeY = getTileHeight(Math.floor(centerX), Math.floor(centerZ))
+            + (selection.kind === 'structure' ? structureLevelOffset(source)
+                + clampAssetElevation(source?.properties?.elevation)
+                + (editorResizeDragPointerId !== null
+                    ? (source?.type === 'floor' ? -editorResizeDimensions.height / 2 + FLOOR_SURFACE_OFFSET
+                        : editorResizeDimensions.height / 2) : 0) : 0);
+        const point = getPointerWorldPoint(clientX, clientY, planeY);
         if (!point) return;
         const rotation = selection.kind === 'lamp' ? 0 : bearingToObjectRotation(selection.rotation);
         const dx = point.x - centerX;
@@ -11489,34 +12049,77 @@ function updateEditorResizePreview(clientX, clientY) {
         const next = resizedUniformDimensions(
             editorResizeBaseDimensions, 1 + (coordinate - editorResizeAnchor.coordinate) * 0.01,
         );
-        if (Object.keys(next).every(axis => next[axis] === editorResizeDimensions[axis])) return;
+        if (Object.keys(next).every(axis => next[axis] === editorResizeDimensions[axis])) {
+            if (modeChanged) updateBuildPreview();
+            return;
+        }
         editorResizeDimensions = next;
         notifyEditorResize();
         updateBuildPreview();
         return;
     }
-    const factor = editorResizeAxis === 'height' ? 1 : 2;
+    const factor = editorResizeAxis === 'height' || (selection.kind === 'structure' && !symmetric) ? 1 : 2;
     const min = editorResizeAxis === 'depth' ? 0.02 : 0.05;
     const max = editorResizeAxis === 'height' ? 20 : 30;
     const next = resizedAxis(editorResizeBaseDimensions[editorResizeAxis]
         + (coordinate - editorResizeAnchor.coordinate) * editorResizeAnchor.sign * factor, min, max);
-    if (next === editorResizeDimensions[editorResizeAxis]) return;
+    if (next === editorResizeDimensions[editorResizeAxis]) {
+        if (modeChanged) updateBuildPreview();
+        return;
+    }
     editorResizeDimensions[editorResizeAxis] = next;
     notifyEditorResize();
     updateBuildPreview();
 }
 
+function editorResizeCenter(selection) {
+    const base = editorResizeBaseCenter || { x: selection.x, z: selection.z };
+    if (editorResizeAnchor?.volume) return editorResizeAnchor.result?.center || base;
+    if (selection.kind !== 'structure' || !editorResizeAnchor || !editorResizeDimensions
+        || !editorResizeBaseDimensions || editorResizeSymmetric) return base;
+    return anchoredResizeCenter(base.x, base.z, selection.rotation, editorResizeAxis,
+        editorResizeBaseDimensions[editorResizeAxis], editorResizeDimensions[editorResizeAxis],
+        editorResizeAnchor.sign);
+}
+
 async function commitEditorAssetResize() {
     const selection = getSelectedLocationEditorAsset();
     if (!selection || !editorResizeDimensions) return;
+    const center = editorResizeCenter(selection);
+    const dimensions = { ...editorResizeDimensions };
+    const committedDimensions = editorResizeDimensions;
+    const elevation = editorResizeElevation;
+    const anchor = editorResizeAnchor;
+    if (anchor?.volume) {
+        editorResizeBaseDimensions = dimensions;
+        editorResizeBaseCenter = center;
+        editorResizeAnchor = null;
+        editorResizeSymmetric = false;
+        editorResizeSnapped = false;
+        notifyEditorResize();
+        updateBuildPreview();
+    }
     const saved = await updateSelectedLocationAssetDetails({
-        x: selection.x, z: selection.z,
+        x: center.x, z: center.z,
         height: selection.height, intensity: selection.intensity,
         distance: selection.distance, color: selection.color,
-        rotation: selection.rotation, elevation: selection.elevation,
-        dimensions: { ...editorResizeDimensions },
+        rotation: selection.rotation, elevation: selection.kind === 'structure'
+            ? elevation : selection.elevation,
+        dimensions,
     });
-    if (saved) cancelLocationAssetResize();
+    if (saved && selection.kind !== 'structure') {
+        cancelLocationAssetResize();
+        return;
+    }
+    if (!saved && anchor?.volume && editorResizeMode && !editorResizeAnchor
+        && editorResizeDimensions === committedDimensions) {
+        editorResizeDimensions = { ...selection.dimensions };
+        editorResizeBaseDimensions = { ...selection.dimensions };
+        editorResizeBaseCenter = { x: selection.x, z: selection.z };
+        editorResizeElevation = selection.elevation;
+        notifyEditorResize();
+        updateBuildPreview();
+    }
 }
 
 async function commitEditorAssetRotation() {
@@ -11626,7 +12229,7 @@ async function placeSelectedLocationAsset(x, z) {
     lights.push({
         x: x + 0.5, z: z + 0.5, height: asset.height,
         color: asset.color, intensity: asset.intensity, distance: asset.distance,
-        kind: asset.lightKind || 'point', azimuth: 0,
+        kind: asset.lightKind || 'point', azimuth: Number(asset.azimuth || 0),
         dimensions: assetDimensions(asset, 'lamp', asset.lightKind || 'point'),
     });
     if (await persistLocationLights(lights)) {
@@ -11640,6 +12243,9 @@ async function placeSelectedLocationAsset(x, z) {
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
     locationProfiler?.stop();
+    locationProfiler?.resetSurfaceProbe();
+    locationProfiler?.resetLayerProbe();
+    restoreFloorDepthProbe();
     clearFogOverlay();
     clearFogMemoryGhosts();
     tileCubes = [];
@@ -11726,11 +12332,49 @@ export function loadLocation(data) {
     const tileCount = gridWidth * gridHeight;
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material = new THREE.MeshStandardMaterial();
-    locationTileMesh = new THREE.InstancedMesh(geometry, material, tileCount);
+    // The textured terrain cap owns land tops; keep box tops pickable without drawing into depth.
+    const landTopMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+    locationTileMesh = new THREE.InstancedMesh(geometry, [
+        material, material, landTopMaterial, material, material, material,
+    ], tileCount);
     locationTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
     const waterMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    waterMaterial.customProgramCacheKey = () => 'location-water-exterior-sides-v1';
+    waterMaterial.onBeforeCompile = shader => {
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', `#include <common>
+                attribute float waterSideMask;
+                attribute vec4 waterCornerDrops;
+                varying float vWaterSideMask;
+                varying vec3 vWaterSideNormal;`)
+            .replace('#include <begin_vertex>', `#include <begin_vertex>
+                vWaterSideMask = waterSideMask;
+                vWaterSideNormal = normal;
+                if (position.y > 0.0 && abs(normal.y) < 0.5) {
+                    float cornerDrop = position.z < 0.0
+                        ? (position.x < 0.0 ? waterCornerDrops.x : waterCornerDrops.y)
+                        : (position.x > 0.0 ? waterCornerDrops.z : waterCornerDrops.w);
+                    transformed.y -= cornerDrop;
+                }`);
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', `#include <common>
+                varying float vWaterSideMask;
+                varying vec3 vWaterSideNormal;`)
+            .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+                float sideBit = 0.0;
+                if (vWaterSideNormal.x > 0.5) sideBit = 1.0;
+                else if (vWaterSideNormal.x < -0.5) sideBit = 2.0;
+                else if (vWaterSideNormal.z > 0.5) sideBit = 4.0;
+                else if (vWaterSideNormal.z < -0.5) sideBit = 8.0;
+                if (sideBit > 0.0 && mod(floor(vWaterSideMask / sideBit), 2.0) < 0.5) discard;`);
+    };
     const waterTopMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
-    waterTileMesh = new THREE.InstancedMesh(geometry.clone(), [
+    const waterBoxGeometry = geometry.clone();
+    waterBoxGeometry.setAttribute('waterSideMask',
+        new THREE.InstancedBufferAttribute(new Float32Array(tileCount), 1));
+    waterBoxGeometry.setAttribute('waterCornerDrops',
+        new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 4), 4));
+    waterTileMesh = new THREE.InstancedMesh(waterBoxGeometry, [
         waterMaterial, waterMaterial, waterTopMaterial,
         waterMaterial, waterMaterial, waterMaterial,
     ], tileCount);
@@ -11752,6 +12396,8 @@ export function loadLocation(data) {
     locationTileMesh.instanceColor.needsUpdate = true;
     waterTileMesh.instanceMatrix.needsUpdate = true;
     waterTileMesh.instanceColor.needsUpdate = true;
+    waterTileMesh.geometry.getAttribute('waterSideMask').needsUpdate = true;
+    waterTileMesh.geometry.getAttribute('waterCornerDrops').needsUpdate = true;
     tileCubes = [locationTileMesh, waterTileMesh];
     scene.add(locationTileMesh, waterTileMesh);
     rebuildSmoothTerrainMesh();
@@ -11812,6 +12458,8 @@ function updateTileCubes(changed) {
     locationTileMesh.instanceColor.needsUpdate = true;
     waterTileMesh.instanceMatrix.needsUpdate = true;
     waterTileMesh.instanceColor.needsUpdate = true;
+    waterTileMesh.geometry.getAttribute('waterSideMask').needsUpdate = true;
+    waterTileMesh.geometry.getAttribute('waterCornerDrops').needsUpdate = true;
     return needsRebuild;
 }
 
@@ -11829,6 +12477,8 @@ function refreshTerrainFoundation() {
     }
     locationTileMesh.instanceMatrix.needsUpdate = true;
     waterTileMesh.instanceMatrix.needsUpdate = true;
+    waterTileMesh.geometry.getAttribute('waterSideMask').needsUpdate = true;
+    waterTileMesh.geometry.getAttribute('waterCornerDrops').needsUpdate = true;
     return true;
 }
 
@@ -11921,6 +12571,7 @@ function updateLocationGridColors(changedTiles = null) {
 }
 
 function rebuildLocationGrid() {
+    locationProfiler?.resetLayerProbe();
     if (locationGridMesh) {
         scene.remove(locationGridMesh);
         disposeObject(locationGridMesh);
@@ -11930,10 +12581,12 @@ function rebuildLocationGrid() {
     const objects = currentLocationData.objects || [];
     const floors = objects.filter(object => object.type === 'floor').map(object => ({
         ...floorVisualPose(object, objects),
+        level: structureLevel(object),
         top: getTileHeight(object.tile_x, object.tile_y)
-            + clampAssetElevation(object.properties?.elevation) + 0.005,
+            + structureLevelOffset(object) + clampAssetElevation(object.properties?.elevation) + 0.005,
     }));
     const uncovered = (x, z) => !floors.some(floor => {
+        if (floor.level > 0) return false;
         const dx = x + 0.5 - floor.x;
         const dz = z + 0.5 - floor.z;
         const along = dx * floor.axis.x + dz * floor.axis.z;
@@ -11957,6 +12610,7 @@ function rebuildLocationGrid() {
 }
 
 function rebuildSmoothTerrainMesh(reuseMaterial = false) {
+    locationProfiler?.resetLayerProbe();
     const reusableMesh = reuseMaterial ? smoothTerrainMesh : null;
     if (smoothTerrainMesh && !reusableMesh) {
         scene.remove(smoothTerrainMesh);
@@ -12002,6 +12656,16 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
     const material = new THREE.MeshStandardMaterial({
         vertexColors: true, side: THREE.DoubleSide,
     });
+    material.customProgramCacheKey = () => 'location-smooth-terrain-sides-v1';
+    material.onBeforeCompile = shader => {
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nattribute float terrainTop; varying float vTerrainTop;')
+            .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTerrainTop = terrainTop;');
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', '#include <common>\nvarying float vTerrainTop;')
+            .replace('#include <clipping_planes_fragment>',
+                '#include <clipping_planes_fragment>\nif (vTerrainTop > 0.5) discard;');
+    };
     smoothTerrainMesh = new THREE.Mesh(geometry, material);
     smoothTerrainMesh.userData.tileByFace = data.tileByFace;
     smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
@@ -12044,6 +12708,8 @@ function ensureTerrainGrassDetail() {
 }
 
 function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = false) {
+    locationProfiler?.resetSurfaceProbe();
+    locationProfiler?.resetLayerProbe();
     const reusableMesh = preserveTexture && reuseMaterial ? terrainSurfaceMesh : null;
     if (terrainSurfaceMesh && !reusableMesh) {
         scene.remove(terrainSurfaceMesh);
@@ -12062,19 +12728,24 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
     const height = currentLocationData.grid_height;
     if (!terrainSurfaceTexture) {
         const image = createLocationTerrainPixels(tiles, 32, true);
+        const isPowerOfTwo = value => value > 0 && (value & (value - 1)) === 0;
+        const terrainMipmaps = renderer.capabilities?.isWebGL2
+            || (isPowerOfTwo(image.width) && isPowerOfTwo(image.height));
         terrainSurfaceTexture = new THREE.DataTexture(image.data, image.width, image.height,
             THREE.RGBAFormat, THREE.UnsignedByteType);
         terrainSurfaceTexture.image.grassBlendData = image.grassBlendData;
         terrainSurfaceTexture.magFilter = THREE.LinearFilter;
-        terrainSurfaceTexture.minFilter = THREE.LinearFilter;
-        terrainSurfaceTexture.generateMipmaps = false;
+        terrainSurfaceTexture.minFilter = terrainMipmaps
+            ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+        terrainSurfaceTexture.generateMipmaps = terrainMipmaps;
         terrainSurfaceTexture.encoding = THREE.sRGBEncoding;
         terrainSurfaceTexture.needsUpdate = true;
         terrainGrassBlendTexture = new THREE.DataTexture(image.grassBlendData,
             image.width, image.height, THREE.RGBAFormat, THREE.UnsignedByteType);
         terrainGrassBlendTexture.magFilter = THREE.LinearFilter;
-        terrainGrassBlendTexture.minFilter = THREE.LinearFilter;
-        terrainGrassBlendTexture.generateMipmaps = false;
+        terrainGrassBlendTexture.minFilter = terrainMipmaps
+            ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+        terrainGrassBlendTexture.generateMipmaps = terrainMipmaps;
         terrainGrassBlendTexture.needsUpdate = true;
     }
 
@@ -12158,7 +12829,8 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
     }
     const material = new THREE.MeshStandardMaterial({
         map: terrainSurfaceTexture, side: THREE.DoubleSide, roughness: 0.97,
-        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+        // A slope-dependent bias can pull this cap in front of nearby floors at grazing angles.
+        polygonOffset: true, polygonOffsetFactor: 0, polygonOffsetUnits: -1,
     });
     applySurfaceDarkness(material, locationDarknessTexture,
         new THREE.Vector2(width, height), null, ensureTerrainGrassDetail());
@@ -12169,6 +12841,8 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
 }
 
 function rebuildWaterSurfaceMesh() {
+    locationProfiler?.resetSurfaceProbe();
+    locationProfiler?.resetLayerProbe();
     if (waterSurfaceMesh) {
         scene.remove(waterSurfaceMesh);
         waterSurfaceMesh.material.map?.dispose();
@@ -12191,7 +12865,11 @@ function rebuildWaterSurfaceMesh() {
         waterDetailGroup = null;
     }
     if (!scene || !currentLocationData) return;
-    const data = buildRoundedWaterData(currentLocationData.tiles_data);
+    const waterTiles = currentLocationData.tiles_data;
+    const data = buildRoundedWaterData(waterTiles, 0.24, undefined, null, waterLevelForTile, {
+        shorelineRing: true,
+        landSurfaceHeightAt: createTerrainSurfaceHeightSampler(waterTiles),
+    });
     const previousRegions = waterRegions;
     waterRegions = data.regions;
     if (waterTileMesh) {
@@ -12206,6 +12884,7 @@ function rebuildWaterSurfaceMesh() {
         if (changed) {
             waterTileMesh.instanceMatrix.needsUpdate = true;
             waterTileMesh.instanceColor.needsUpdate = true;
+            waterTileMesh.geometry.getAttribute('waterCornerDrops').needsUpdate = true;
         }
     }
     if (!data.water.length) return;
@@ -12338,6 +13017,7 @@ export function getLocationGrassDiagnostics() {
 }
 
 function rebuildGrassDetailMesh() {
+    locationProfiler?.resetLayerProbe();
     if (grassDetailGroup) {
         scene.remove(grassDetailGroup);
         disposeObject(grassDetailGroup);
@@ -12436,6 +13116,13 @@ function updateTileInstance(instanceId, x, z, tile) {
     tileInstanceTransform.updateMatrix();
     const activeMesh = isWater ? waterTileMesh : locationTileMesh;
     const inactiveMesh = isWater ? locationTileMesh : waterTileMesh;
+    waterTileMesh.geometry.getAttribute('waterSideMask').setX(instanceId,
+        waterExposedSideMask(currentLocationData.tiles_data, x, z));
+    if (isWater) {
+        const drops = waterSideCornerDrops(currentLocationData.tiles_data,
+            x, z, waterRegions, renderedHeight);
+        waterTileMesh.geometry.getAttribute('waterCornerDrops').setXYZW(instanceId, ...drops);
+    }
     if (!isSmooth) activeMesh.setMatrixAt(instanceId, tileInstanceTransform.matrix);
     const color = new THREE.Color(isWater ? WATER_SIDE_COLORS[waterKind]
         : terrainColors[tile.terrain] || 0x3a5f0b);
@@ -12450,6 +13137,7 @@ function updateTileInstance(instanceId, x, z, tile) {
 }
 
 function rebuildTileObjects(tileX, tileZ) {
+    locationProfiler?.resetLayerProbe();
     if (!currentLocationData) return;
     const tile = currentLocationData.tiles_data[tileZ][tileX];
     const tileHeight = getTileHeight(tileX, tileZ);
@@ -13198,6 +13886,17 @@ function setupCharacterDragging() {
     handlers.canvas.contextmenu = onContextMenu;
 
     const onKeyDown = (e) => {
+        if (isKeyboardInputTarget(e.target)
+            || Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
+        if (e.code === 'F8' && window.isGM && window.locationEditMode
+            && !editorMoveMode && !editorRotateMode && !editorResizeMode
+            && !e.altKey && !e.ctrlKey && !e.metaKey
+            && editorSelection?.kind === 'structure' && getSelectedEditorSource()?.type === 'floor') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (!e.repeat) toggleFloorDepthProbe();
+            return;
+        }
         if (editorRotateMode && editorGroupRotatePivot
             && ['ControlLeft', 'ControlRight'].includes(e.code) && !editorGroupRotateWithPivot) {
             editorGroupRotateWithPivot = true;
@@ -13239,12 +13938,13 @@ function setupCharacterDragging() {
         if (e.key !== 'Escape') return;
         if (editorResizeMode) {
             e.preventDefault();
-            cancelLocationAssetResize();
+            if (!cancelCurrentAssetResizeDrag()) cancelLocationAssetResize();
             return;
         }
         if (editorRotateMode) {
             e.preventDefault();
             editorRotateMode = false;
+            editorRotateHotkeyPending = false;
             editorGroupRotatePivot = null;
             editorGroupRotateStartBearing = null;
             editorGroupRotateWithPivot = false;
@@ -13264,6 +13964,11 @@ function setupCharacterDragging() {
             e.preventDefault();
             window.selectLocationEditorTool?.('select');
             clearLocationAssetPreset();
+            return;
+        }
+        if (window.locationEditMode && editorSelections.length) {
+            e.preventDefault();
+            clearEditorSelection();
             return;
         }
         if (pendingCharacterPlacement) {
@@ -13375,10 +14080,14 @@ export function setupLocationEditing() {
         if (!locationActive) return;
         cameraDragMenuGuard.move(e.clientX, e.clientY, e.pointerId);
         if (editorRotateMode && e.target === canvas) {
+            editorRotateHotkeyPending = false;
             updateEditorRotatePreview(e.clientX, e.clientY, e.shiftKey, e.ctrlKey);
         }
-        if (editorResizeMode && e.target === canvas && !(e.buttons & 2)) {
-            updateEditorResizePreview(e.clientX, e.clientY);
+        if (editorResizeMode && e.target === canvas && !(e.buttons & 2)
+            && (editorResizeDragPointerId === e.pointerId
+                || (editorResizeDragPointerId === null
+                    && editorSelection?.kind !== 'structure'))) {
+            updateEditorResizePreview(e.clientX, e.clientY, e.shiftKey, e.ctrlKey);
         }
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -13387,8 +14096,23 @@ export function setupLocationEditing() {
         const intersects = raycaster.intersectObjects(tileCubes);
         if (intersects.length > 0) {
             const hit = intersects[0];
-            const coords = hitTileCoords(hit);
-            if (!coords) return;
+            const groundCoords = hitTileCoords(hit);
+            const movePoint = editorMoveMode && groundCoords
+                ? editorMovePointerPoint(e.clientX, e.clientY, groundCoords) : null;
+            const coords = editorMoveMode
+                ? movePoint && { x: Math.floor(movePoint.cursorX ?? movePoint.x),
+                    z: Math.floor(movePoint.cursorZ ?? movePoint.z) }
+                : groundCoords && hoveredEditorTile(e.clientX, e.clientY, groundCoords);
+            if (!coords || coords.x < 0 || coords.z < 0
+                || coords.x >= currentLocationData.grid_width || coords.z >= currentLocationData.grid_height) {
+                locInfo.style.display = 'none';
+                hideHighlight();
+                hoveredTileCoords = null;
+                if (editorMoveMode) editorMovePreviewPoint = null;
+                lastHighlightCoords = null;
+                clearBuildPreview();
+                return;
+            }
             const { x, z } = coords;
             const tile = currentLocationData.tiles_data[z][x];
             locInfo.innerHTML = `
@@ -13398,18 +14122,22 @@ export function setupLocationEditing() {
                 Радиация: ${tile.radiation !== undefined ? tile.radiation : '0'}<br>
             `;
             locInfo.style.display = 'block';
-            if (!lastHighlightCoords || lastHighlightCoords.x !== x || lastHighlightCoords.z !== z) {
-                updateHighlight(x, z, getTileHeight(x, z));
-                lastHighlightCoords = { x, z };
+            const highlightLevel = editorHoverLevelOffset();
+            const surfaceX = movePoint ? Math.floor(movePoint.x) : x;
+            const surfaceZ = movePoint ? Math.floor(movePoint.z) : z;
+            if (!lastHighlightCoords || lastHighlightCoords.x !== x || lastHighlightCoords.z !== z
+                || lastHighlightCoords.level !== highlightLevel
+                || lastHighlightCoords.surfaceX !== surfaceX || lastHighlightCoords.surfaceZ !== surfaceZ) {
+                updateHighlight(x, z, getTileHeight(surfaceX, surfaceZ));
+                lastHighlightCoords = { x, z, level: highlightLevel, surfaceX, surfaceZ };
             }
             hoveredTileCoords = { x, z };
             if (editorMoveMode && e.target === canvas && !(e.buttons & 2)) {
-                const point = getPointerWorldPoint(e.clientX, e.clientY, getTileHeight(x, z));
-                if (point) {
-                    editorMovePreviewPoint = { x: point.x, z: point.z };
+                if (movePoint) {
+                    editorMovePreviewPoint = movePoint;
                     if (editorSelections.length > 1 && editorSelectionRing) {
                         const anchor = getSelectedLocationEditorAsset();
-                        editorSelectionRing.position.set(point.x - anchor.x, 0, point.z - anchor.z);
+                        editorSelectionRing.position.set(movePoint.x - anchor.x, 0, movePoint.z - anchor.z);
                     }
                 }
             }
@@ -13433,8 +14161,41 @@ export function setupLocationEditing() {
     const onPointerDown = (e) => {
         if (!locationActive) return;
         if (e.button !== 0) return;
-        if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
+        if (window.locationEditMode && editorResizeMode && editorSelection?.kind === 'structure') {
+            const rect = canvas.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const handles = buildPreviewMesh?.children.filter(child =>
+                child.userData.editorResizeHandleSign != null) || [];
+            const handle = raycaster.intersectObjects(handles)[0]?.object;
+            if (!handle) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const axis = handle.userData.editorResizeHandleAxis;
+            const sign = handle.userData.editorResizeHandleSign;
+            buildPreviewMesh.updateMatrixWorld(true);
+            const point = handle.getWorldPosition(new THREE.Vector3());
+            const worldAxis = new THREE.Vector3(axis === 'width' ? 1 : 0,
+                axis === 'height' ? 1 : 0, axis === 'depth' ? 1 : 0)
+                .applyQuaternion(buildPreviewMesh.getWorldQuaternion(new THREE.Quaternion()));
+            const projected = point.clone().project(camera);
+            const projectedEnd = point.clone().add(worldAxis).project(camera);
+            const baseCenter = editorResizeCenter(getSelectedLocationEditorAsset());
+            editorResizeAnchor = { volume: true, axis, sign, startX: e.clientX, startY: e.clientY,
+                screenAxisX: (projectedEnd.x - projected.x) * rect.width / 2,
+                screenAxisY: -(projectedEnd.y - projected.y) * rect.height / 2,
+                baseDimensions: { ...editorResizeDimensions }, baseCenter,
+                baseElevation: editorResizeElevation };
+            editorResizeDragPointerId = e.pointerId;
+            editorResizeSnapped = e.ctrlKey;
+            canvas.setPointerCapture(e.pointerId);
+            notifyEditorResize();
+            updateBuildPreview();
+            return;
+        }
+        if (!hoveredTileCoords) return;
         lastBrushTile = null;
         if (pendingCharacterPlacement) {
             e.preventDefault();
@@ -13464,23 +14225,21 @@ export function setupLocationEditing() {
         if (editorResizeMode) {
             e.preventDefault();
             e.stopImmediatePropagation();
-            commitEditorAssetResize();
+            if (editorSelection?.kind !== 'structure') commitEditorAssetResize();
             return;
         }
         if (editorRotateMode) {
             e.preventDefault();
             e.stopImmediatePropagation();
-            updateEditorRotatePreview(e.clientX, e.clientY, e.shiftKey, e.ctrlKey);
+            if (!editorRotateHotkeyPending) updateEditorRotatePreview(e.clientX, e.clientY, e.shiftKey, e.ctrlKey);
             commitEditorAssetRotation();
             return;
         }
         if (editorMoveMode) {
             e.preventDefault();
             e.stopImmediatePropagation();
-            const point = getPointerWorldPoint(e.clientX, e.clientY,
-                getTileHeight(hoveredTileCoords.x, hoveredTileCoords.z));
-            commitEditorAssetMove(point?.x ?? hoveredTileCoords.x + 0.5,
-                point?.z ?? hoveredTileCoords.z + 0.5);
+            const point = editorMovePointerPoint(e.clientX, e.clientY, hoveredTileCoords);
+            if (point) commitEditorAssetMove(point.x, point.z);
             return;
         }
         if (window.locationEditorTool === 'select') {
@@ -13562,9 +14321,18 @@ export function setupLocationEditing() {
     const onPointerUp = (e) => {
         if (!locationActive) return;
         lastBrushTile = null;
+        if (editorResizeDragPointerId === e.pointerId) {
+            if (e.type === 'pointercancel') cancelCurrentAssetResizeDrag();
+            else {
+                updateEditorResizePreview(e.clientX, e.clientY, e.shiftKey, e.ctrlKey);
+                editorResizeDragPointerId = null;
+                commitEditorAssetResize();
+            }
+        }
         if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     };
     canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
     handlers.canvas.editPointerUp = onPointerUp;
 
     // Drag & Drop спавна персонажей
@@ -13682,6 +14450,7 @@ export function setupLocationEditing() {
     handlers.canvas.wheel = onWheel;
 
     eventCleanup = () => {
+        canvas.removeEventListener('pointercancel', onPointerUp);
         window.removeEventListener('pointerup', onCameraRotatePointerUp);
         window.removeEventListener('pointercancel', onCameraRotatePointerUp);
         cameraDragMenuGuard.reset();
@@ -14021,6 +14790,8 @@ export function setLocationBrushObjectRotation(rot) {
     if (input) input.value = String(brushObjectRotation);
     const span = document.getElementById('loc-obj-rotation-value');
     if (span) span.textContent = brushObjectRotation + '°';
+    syncLocationPlacementAngle();
+    updateBuildPreview();
 }
 
 // ========== Остальные экспорты ==========
@@ -14167,6 +14938,7 @@ export function addLocationRoofButton() {
 }
 
 export function destroyLocationScene() {
+    restoreFloorDepthProbe();
     pendingTerrainRefresh = null;
     locationProfiler?.destroy();
     locationProfiler = null;

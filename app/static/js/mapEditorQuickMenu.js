@@ -183,16 +183,31 @@ export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool, loca
     }, true);
 
     document.addEventListener('keydown', event => {
+        if (isTypingTarget(event.target)
+            || Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
         if (event.code === 'Escape' && quickMenu) {
             closeMapEditorQuickMenu();
             event.preventDefault();
             event.stopImmediatePropagation();
             return;
         }
-        if (['KeyE', 'KeyR'].includes(event.code) && quickMenu) closeMapEditorQuickMenu();
         if (!isEnabled() || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-        if (isTypingTarget(event.target)) return;
-        if (Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
+        if (['KeyE', 'KeyR'].includes(event.code) && quickMenu) closeMapEditorQuickMenu();
+
+        if (isLocation() && ['KeyQ', 'KeyE'].includes(event.code)
+            && window.rotateLocationPlacement?.(event.code === 'KeyE' ? 1 : -1)) {
+            closeMapEditorQuickMenu();
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return;
+        }
+        if (isLocation() && window.isLocationEditorTransformActive?.()
+            && (['KeyQ', 'KeyE', 'KeyG', 'KeyR', 'KeyT', 'KeyV', 'KeyB'].includes(event.code)
+                || /^(Digit|Numpad)[1-8]$/.test(event.code))) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return;
+        }
 
         if (event.code === 'KeyQ') {
             if (qHeld) return;

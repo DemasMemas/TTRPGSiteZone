@@ -1,7 +1,8 @@
 // static/js/lobbyData.js
 import { Server } from './api.js';
 import { addChunk, chunksMap, setMapDimensions, setTileClickCallback,
-    waitForWorldTerrainRefresh } from './lobby3d.js';
+    setWorldGrassGroundPixelsEnabled, waitForWorldTerrainRefresh } from './lobby3d.js';
+import { loadGrassGroundPixels } from './locationTerrainTexture.js';
 import { setLobbyData, updateParticipantsList } from './ui.js';
 import AppState from './ui_interactions.js';
 import { applyWeather, applyWorldTime } from './weather.js';
@@ -129,6 +130,17 @@ export async function loadLobbyInfo() {
 }
 
 let loadingAllChunks = null;
+let worldGrassGroundReady = null;
+
+function prepareWorldGrassGround() {
+    if (!worldGrassGroundReady) {
+        worldGrassGroundReady = loadGrassGroundPixels().then(() => true).catch(error => {
+            console.warn('World grass ground unavailable; using procedural fallback', error);
+            return false;
+        });
+    }
+    return worldGrassGroundReady;
+}
 
 export function loadAllChunks() {
     if (loadingAllChunks) return loadingAllChunks;
@@ -144,6 +156,16 @@ export function loadAllChunks() {
         loadedChunks: 0, requests: 0, failedRequests: 0, chunks: 0,
         requestAndParseMs: 0, addChunkMs: 0,
         terrainRefreshMs: 0, terrainRefreshes: 0,
+        terrainFullRefreshes: 0, terrainPartialRefreshes: 0,
+        terrainStages: { geometryMs: 0, groundPixelsMs: 0, waterMs: 0, dependentMeshesMs: 0 },
+        groundPixelDetails: {
+            fullMs: 0, partialMs: 0, reusedMs: 0,
+            fullPasses: 0, partialPasses: 0, reusedPasses: 0,
+            fullPixels: 0, partialPixels: 0, terrainLookups: 0,
+            photoColorCalls: 0, photoSampledCalls: 0, photoSampledMs: 0,
+            photoSamplingEstimateMs: 0, otherProcessingEstimateMs: 0,
+        },
+        grassGroundSource: 'unchanged', grassGroundReadyMs: 0,
     };
     window.worldLoadMetrics = metrics;
     window.getWorldLoadDiagnostics = () => ({ ...metrics });
@@ -170,11 +192,17 @@ export function loadAllChunks() {
                 + ((range[2] + range[3] + 1) / 2 - centerY) ** 2;
             return distance(a) - distance(b);
         });
+        const grassGroundStartedAt = performance.now();
+        const grassGroundReady = ranges.length ? prepareWorldGrassGround().then(enabled => {
+            setWorldGrassGroundPixelsEnabled(enabled);
+            metrics.grassGroundSource = enabled ? 'photos' : 'procedural-fallback';
+            metrics.grassGroundReadyMs = performance.now() - grassGroundStartedAt;
+        }) : Promise.resolve();
         let nextIndex = 0;
         const worker = async () => {
             while (nextIndex < ranges.length) {
                 if (window.isLocationActive) return;
-                await fetchChunkBatch(ranges[nextIndex++], metrics);
+                await fetchChunkBatch(ranges[nextIndex++], metrics, grassGroundReady);
             }
         };
         await Promise.all(Array.from({ length: Math.min(4, ranges.length) }, worker));
@@ -203,12 +231,14 @@ export function loadAllChunks() {
     return loadingAllChunks;
 }
 
-async function fetchChunkBatch([minX, maxX, minY, maxY], metrics) {
+async function fetchChunkBatch([minX, maxX, minY, maxY], metrics, grassGroundReady) {
     try {
         const requestedAt = performance.now();
         const chunks = await Server.getChunks(currentLobbyId, minX, maxX, minY, maxY);
         metrics.requests++;
         metrics.requestAndParseMs += performance.now() - requestedAt;
+        if (window.isLocationActive) return;
+        await grassGroundReady;
         if (window.isLocationActive) return;
         for (const chunk of chunks) {
             if (window.isLocationActive) return;

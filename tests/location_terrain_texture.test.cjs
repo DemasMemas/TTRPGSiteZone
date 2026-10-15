@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationTerrainTexture.js'), 'utf8');
 const subtypeSource = fs.readFileSync(path.join(__dirname, '../app/static/js/locationGrassSubtype.js'), 'utf8');
@@ -113,6 +115,140 @@ test('loaded plain and forest ground images reach their matching game tiles', as
     }
 });
 
+test('world grass uses shared ground photos without changing other soils or chunk seams', async () => {
+    const { loadGrassGroundPixels, createTerrainPixelsRegion,
+        updateTerrainPixelsRegion } = await import(`${moduleUrl}#world-ground-photos`);
+    const previousImage = global.Image;
+    const previousDocument = global.document;
+    const urls = [];
+    global.Image = class {
+        set src(url) {
+            this.url = url;
+            urls.push(url);
+            queueMicrotask(() => this.onload());
+        }
+    };
+    global.document = { createElement: () => ({ getContext: () => ({
+        drawImage(image) { this.source = image.url; },
+        getImageData() {
+            const data = new Uint8ClampedArray(512 * 512 * 4);
+            const forest = this.source.includes('forrest_ground');
+            for (let z = 0; z < 512; z++) {
+                for (let x = 0; x < 512; x++) {
+                    const index = (z * 512 + x) * 4;
+                    data[index] = forest ? 50 + (x % 64) : 140 + (x % 32);
+                    data[index + 1] = forest ? 75 + (z % 64) : 110 + (z % 32);
+                    data[index + 2] = forest ? 45 : 85;
+                    data[index + 3] = 255;
+                }
+            }
+            return { data };
+        },
+    }) }) };
+    try {
+        await Promise.all([loadGrassGroundPixels(), loadGrassGroundPixels()]);
+        await loadGrassGroundPixels();
+        assert.equal(urls.length, 2);
+        const overrides = new Map();
+        const terrain = (x, z) => overrides.get(`${x},${z}`)
+            || (x < 4 ? 'grass' : z < 2 ? 'sand' : 'swamp');
+        const left = createTerrainPixelsRegion(terrain, -1, -1, 128, 12, true);
+        const right = createTerrainPixelsRegion(terrain, 3, -1, 128, 12, true);
+        const procedural = createTerrainPixelsRegion(terrain, -1, -1, 128, 12, false);
+        const color = (image, x, z) => Array.from(image.data.slice((z * image.width + x) * 4,
+            (z * image.width + x) * 4 + 3));
+        assert.notDeepEqual(color(left, 18, 18), color(procedural, 18, 18));
+        assert.deepEqual(color(left, 82, 18), color(procedural, 82, 18));
+        assert.deepEqual(color(left, 82, 60), color(procedural, 82, 60));
+        assert.notDeepEqual(color(left, 58, 18), color(procedural, 58, 18));
+        for (let z = 0; z < 64; z++) {
+            for (let x = 0; x < 48; x++) {
+                assert.deepEqual(color(left, x + 48, z), color(right, x, z));
+            }
+        }
+        overrides.set('4,1', 'grass');
+        assert.equal(updateTerrainPixelsRegion(left, terrain, -1, -1,
+            { minX: 4, maxX: 4, minZ: 1, maxZ: 1 }, 12, true), true);
+        assert.deepEqual(left.data, createTerrainPixelsRegion(terrain, -1, -1, 128, 12, true).data);
+    } finally {
+        global.Image = previousImage;
+        global.document = previousDocument;
+    }
+});
+
+test('optimized world pixels match pre-optimization photo, fallback, and local outputs', async () => {
+    const { loadGrassGroundPixels, createTerrainPixelsRegion,
+        updateTerrainPixelsRegion, createLocationTerrainPixels } = await import(`${moduleUrl}#pixel-regression`);
+    const previousImage = global.Image;
+    const previousDocument = global.document;
+    global.Image = class {
+        set src(url) { this.url = url; queueMicrotask(() => this.onload()); }
+    };
+    global.document = { createElement: () => ({ getContext: () => ({
+        drawImage(image) { this.source = image.url; },
+        getImageData() {
+            const data = new Uint8ClampedArray(512 * 512 * 4);
+            const forest = this.source.includes('forrest_ground');
+            for (let z = 0; z < 512; z++) {
+                for (let x = 0; x < 512; x++) {
+                    const index = (z * 512 + x) * 4;
+                    data[index] = forest ? 50 + x % 64 : 140 + x % 32;
+                    data[index + 1] = forest ? 75 + z % 64 : 110 + z % 32;
+                    data[index + 2] = forest ? 45 : 85;
+                    data[index + 3] = 255;
+                }
+            }
+            return { data };
+        },
+    }) }) };
+    const hash = data => crypto.createHash('sha256').update(data).digest('hex');
+    try {
+        await loadGrassGroundPixels();
+        const overrides = new Map();
+        const terrain = (x, z) => overrides.get(`${x},${z}`)
+            || (x < 9 ? 'grass' : z < 4 ? 'sand' : x < 20 ? 'swamp' : z < 15 ? 'rock' : 'water');
+        const profile = { pixels: 0, terrainLookups: 0, photoColorCalls: 0,
+            photoSampledCalls: 0, photoSampledMs: 0 };
+        const image = createTerrainPixelsRegion(terrain, -2, -2, 512, 12, true, profile);
+        assert.equal(hash(image.data), '0f774b7492009f1019c2bb4c7571b7af86d3296cf6217fe07151ba3d2c67ad75');
+        assert.equal(profile.pixels, 512 * 512);
+        assert.ok(profile.terrainLookups < 2500);
+        assert.ok(profile.photoColorCalls > profile.photoSampledCalls && profile.photoSampledCalls > 0);
+        assert.equal(hash(createTerrainPixelsRegion(terrain, -2, -2, 128, 12, false).data),
+            '3159c9a3a0b2212b65ccbbf956185646222d7261c5293fb198bc7ea364254700');
+        const local = [[{ terrain: 'grass' }, { terrain: 'grass', grass_subtype: 'forest' },
+            { terrain: 'sand' }], [{ terrain: 'water' }, { terrain: 'swamp' }, { terrain: 'rock' }]];
+        assert.equal(hash(createLocationTerrainPixels(local, 20, true).data),
+            '3994d9345c13bffc2812c61bfd85064156fb289339169e0cefe6c43ca1c50d96');
+        overrides.set('9,4', 'grass');
+        const partial = { pixels: 0, terrainLookups: 0, photoColorCalls: 0,
+            photoSampledCalls: 0, photoSampledMs: 0 };
+        assert.equal(updateTerrainPixelsRegion(image, terrain, -2, -2,
+            { minX: 9, maxX: 9, minZ: 4, maxZ: 4 }, 12, true, partial), true);
+        assert.ok(partial.pixels > 0 && partial.pixels < profile.pixels);
+        assert.deepEqual(image.data, createTerrainPixelsRegion(terrain, -2, -2, 512, 12, true).data);
+    } finally {
+        global.Image = previousImage;
+        global.document = previousDocument;
+    }
+});
+
+test('world ground retains procedural fallback when photos are unavailable', async () => {
+    const { loadGrassGroundPixels, createTerrainPixelsRegion } = await import(`${moduleUrl}#world-ground-fallback`);
+    const previousImage = global.Image;
+    global.Image = class {
+        set src(url) { queueMicrotask(() => this.onerror(new Error(`Missing ${url}`))); }
+    };
+    try {
+        await assert.rejects(loadGrassGroundPixels());
+        const terrain = () => 'grass';
+        assert.deepEqual(createTerrainPixelsRegion(terrain, 0, 0, 32, 12, true).data,
+            createTerrainPixelsRegion(terrain, 0, 0, 32, 12, false).data);
+    } finally {
+        global.Image = previousImage;
+    }
+});
+
 test('swamp soil has distinct moss and dark wet pockets instead of uniform blur', async () => {
     const { createLocationTerrainPixels } = await import(moduleUrl);
     const tiles = Array.from({ length: 6 }, () => Array.from({ length: 6 }, () => ({ terrain: 'swamp' })));
@@ -166,4 +302,43 @@ test('land overlay follows slope geometry and water has a solid backing', () => 
     assert.match(scene, /map: terrainSurfaceTexture, vertexColors: true, side: THREE\.DoubleSide/);
     assert.match(scene, /applySurfaceDarkness\(bankMaterial, locationDarknessTexture/);
     assert.doesNotMatch(scene, /function updateTerrainSurfaceDarkness\(/);
+});
+
+test('local terrain minification uses mipmaps only where the WebGL context supports them', () => {
+    const start = scene.indexOf('const image = createLocationTerrainPixels(tiles, 32, true);',
+        scene.indexOf('function rebuildLocationTerrainSurface('));
+    const last = 'terrainGrassBlendTexture.needsUpdate = true;';
+    const end = scene.indexOf(last, start) + last.length;
+    assert.ok(start >= 0 && end > start);
+    const setup = scene.slice(start, end);
+    const build = (size, isWebGL2) => {
+        class DataTexture {
+            constructor(data, width, height) { this.image = { data, width, height }; }
+        }
+        const THREE = { DataTexture, RGBAFormat: 1, UnsignedByteType: 2,
+            LinearFilter: 3, LinearMipmapLinearFilter: 4, sRGBEncoding: 5 };
+        const image = { data: new Uint8Array(4), grassBlendData: new Uint8Array(4),
+            width: size, height: size };
+        return vm.runInNewContext(`(() => {
+            let terrainSurfaceTexture, terrainGrassBlendTexture;
+            ${setup}
+            return [terrainSurfaceTexture, terrainGrassBlendTexture];
+        })()`, { THREE, renderer: { capabilities: { isWebGL2 } },
+            tiles: [], createLocationTerrainPixels: () => image });
+    };
+    for (const texture of build(1536, true)) {
+        assert.equal(texture.minFilter, 4);
+        assert.equal(texture.generateMipmaps, true);
+        assert.equal(texture.needsUpdate, true);
+    }
+    for (const texture of build(1536, false)) {
+        assert.equal(texture.minFilter, 3);
+        assert.equal(texture.generateMipmaps, false);
+    }
+    for (const texture of build(1024, false)) {
+        assert.equal(texture.minFilter, 4);
+        assert.equal(texture.generateMipmaps, true);
+    }
+    assert.match(scene, /terrainGrassBlendTexture\.needsUpdate = true;/);
+    assert.match(scene, /terrainSurfaceTexture\.needsUpdate = true;/);
 });

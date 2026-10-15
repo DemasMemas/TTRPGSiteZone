@@ -14,6 +14,482 @@ function section(start, end) {
     return scene.slice(first, last).replaceAll('export ', '');
 }
 
+test('both construction tools inherit the active building and level', () => {
+    const fields = { 'loc-structure-building-id': { value: 'building-a' },
+        'loc-structure-level': { value: '1' } };
+    const placement = { '[data-placement-building-id]': { value: 'building-b' },
+        '[data-placement-level]': { value: '0' } };
+    const context = vm.createContext({ window: { locationEditorTool: 'structure' },
+        document: { getElementById: id => fields[id], querySelector: selector => placement[selector] } });
+    vm.runInContext(section('function getStructurePlacementProperties()', 'const FLOOR_SURFACE_OFFSET'), context);
+    assert.deepEqual({ ...context.getStructurePlacementProperties() }, { building_id: 'building-a', level: 1 });
+    context.window.locationEditorTool = 'assets';
+    assert.deepEqual({ ...context.getStructurePlacementProperties() }, { building_id: 'building-b', level: 0 });
+    assert.match(main, /const setActiveBuilding = \(id, level = activeLevel\)/);
+    assert.match(main, /selection\.buildingId, selection\.level/);
+});
+
+test('building choices derive from saved objects and omit legacy IDs', () => {
+    const context = vm.createContext({ currentLocationData: { objects: [
+        { type: 'floor', properties: { building_id: 'a' } },
+        { type: 'wall', properties: { building_id: 'a' } },
+        { type: 'floor', properties: {} },
+        { type: 'door', properties: { building_id: 'b' } },
+    ] }, structureBuildingId: object => object.properties?.building_id || null });
+    vm.runInContext(section('export function getLocationBuildingIds()', 'function notifyEditorBuildingsChanged()'), context);
+    assert.deepEqual(Array.from(context.getLocationBuildingIds()), ['a', 'b']);
+});
+
+test('anchored single-axis resize preserves the opposite edge after rotation and JSON storage', async () => {
+    const transforms = fs.readFileSync(path.join(__dirname, '../app/static/js/locationAssetTransforms.js'), 'utf8');
+    const { anchoredResizeCenter, bearingToObjectRotation } = await import(
+        `data:text/javascript;base64,${Buffer.from(transforms).toString('base64')}`);
+    for (const bearing of [0, 37, 90, 180]) for (const axis of ['width', 'depth']) for (const side of [-1, 1]) {
+        const oldSize = 3;
+        const newSize = 4.5;
+        const center = JSON.parse(JSON.stringify(anchoredResizeCenter(5, 7, bearing, axis, oldSize, newSize, side)));
+        const angle = bearingToObjectRotation(bearing);
+        const direction = axis === 'width'
+            ? { x: Math.cos(angle), z: -Math.sin(angle) }
+            : { x: Math.sin(angle), z: Math.cos(angle) };
+        const oppositeBefore = { x: 5 - side * oldSize / 2 * direction.x,
+            z: 7 - side * oldSize / 2 * direction.z };
+        const oppositeAfter = { x: center.x - side * newSize / 2 * direction.x,
+            z: center.z - side * newSize / 2 * direction.z };
+        assert.ok(Math.abs(oppositeAfter.x - oppositeBefore.x) < 1e-8);
+        assert.ok(Math.abs(oppositeAfter.z - oppositeBefore.z) < 1e-8);
+    }
+});
+
+test('camera-relative Q/E rotation uses the same 15 degree yaw for previews and saved objects', async () => {
+    const transforms = fs.readFileSync(path.join(__dirname, '../app/static/js/locationAssetTransforms.js'), 'utf8');
+    const { cameraYawStepDegrees, bearingToObjectRotation, objectRotationToBearing } = await import(
+        `data:text/javascript;base64,${Buffer.from(transforms).toString('base64')}`);
+    for (const azimuth of [0, Math.PI / 4, Math.PI / 2, Math.PI]) {
+        const matrix = { elements: [] };
+        const camera = { matrixWorld: matrix, updateMatrixWorld() {} };
+        matrix.elements[0] = Math.cos(azimuth);
+        matrix.elements[2] = -Math.sin(azimuth);
+        matrix.elements[4] = -Math.sin(azimuth) * 0.7;
+        matrix.elements[6] = -Math.cos(azimuth) * 0.7;
+        assert.equal(cameraYawStepDegrees(camera, 1), -15);
+        assert.equal(cameraYawStepDegrees(camera, -1), 15);
+        assert.ok(Math.abs(objectRotationToBearing(bearingToObjectRotation(15)) - 15) < 1e-8);
+        matrix.elements[4] *= -1;
+        matrix.elements[6] *= -1;
+        assert.equal(cameraYawStepDegrees(camera, 1), 15);
+    }
+    const context = vm.createContext({
+        window: { isGM: true, locationEditMode: true, locationEditorTool: 'assets' },
+        selectedLocationAsset: { kind: 'structure' }, structureRotation: 0,
+        brushObjectRotation: 0, buildMode: 'terrain', camera: null,
+        cameraYawStepDegrees: (_, direction) => -direction * 15,
+        editorRotateMode: false, editorMoveMode: false, editorResizeMode: false,
+        editorRotateHotkeyPending: false,
+        editorSelection: { kind: 'structure' },
+        editorSelections: [], editorHotkeyRotationQueue: Promise.resolve(),
+        setLocationStructureRotation(value) { context.structureRotation = value; },
+        setLocationBrushObjectRotation(value) { context.brushObjectRotation = value; },
+        syncLocationPlacementAngle() {}, updateBuildPreview() {},
+    });
+    vm.runInContext(section('export function rotateLocationPlacement(', 'export function addLocationObject('), context);
+    assert.equal(context.rotateLocationPlacement(1), true);
+    assert.ok(Math.abs(context.structureRotation + Math.PI / 12) < 1e-8);
+    assert.equal(context.rotateLocationPlacement(-1), true);
+    assert.equal(context.structureRotation, 0);
+    context.selectedLocationAsset = { kind: 'decor' };
+    assert.equal(context.rotateLocationPlacement(1), true);
+    assert.equal(context.brushObjectRotation, -15);
+    context.selectedLocationAsset = { kind: 'lamp', lightKind: 'spot', azimuth: 0 };
+    assert.equal(context.rotateLocationPlacement(1), true);
+    assert.equal(context.selectedLocationAsset.azimuth, 15);
+    context.selectedLocationAsset = null;
+    context.window.locationEditorTool = 'select';
+    const selection = { kind: 'structure', id: 7 };
+    context.editorSelections = [selection];
+    let savedRotation = 0;
+    const saves = [];
+    context.sameEditorSelection = (a, b) => a.kind === b.kind && a.id === b.id;
+    context.updateSelectedLocationAssetGroup = async transform => {
+        await Promise.resolve();
+        savedRotation = transform({ kind: 'structure', rotation: savedRotation }).rotation;
+        saves.push(savedRotation);
+    };
+    assert.equal(context.rotateLocationPlacement(1), true);
+    assert.equal(context.rotateLocationPlacement(1), true);
+    await context.editorHotkeyRotationQueue;
+    assert.deepEqual(saves, [15, 30]);
+    assert.ok(Math.abs(bearingToObjectRotation(savedRotation) + Math.PI / 6) < 1e-8);
+    context.editorMoveMode = true;
+    assert.equal(context.rotateLocationPlacement(1), true);
+    await context.editorHotkeyRotationQueue;
+    assert.deepEqual(saves, [15, 30]);
+    context.editorMoveMode = false;
+    context.editorRotateMode = true;
+    context.editorRotateAngle = savedRotation;
+    assert.equal(context.rotateLocationPlacement(-1), true);
+    assert.equal(context.editorRotateAngle, 15);
+    assert.equal(context.editorRotateHotkeyPending, true);
+    context.editorRotateMode = false;
+    context.editorSelections = [];
+    assert.equal(context.rotateLocationPlacement(1), false);
+});
+
+test('Esc cancels the active location transform before clearing selection', () => {
+    const start = scene.indexOf('const onKeyDown = (e) => {', scene.indexOf('function setupLocationControls('));
+    const end = scene.indexOf("document.addEventListener('keydown', onKeyDown)", start);
+    assert.ok(start >= 0 && end > start);
+    let clears = 0;
+    let cancels = 0;
+    let modalVisible = false;
+    const context = vm.createContext({
+        window: { locationEditMode: true, locationEditorTool: 'select' },
+        document: { querySelectorAll: () => modalVisible ? [{ getClientRects: () => [1] }] : [] },
+        isKeyboardInputTarget: target => Boolean(target?.typing),
+        editorSelections: [{ kind: 'structure', id: 4 }],
+        editorSelection: { kind: 'structure', id: 4 },
+        editorResizeMode: true, editorMoveMode: false, editorRotateMode: false,
+        cancelCurrentAssetResizeDrag() { cancels++; return true; },
+        cancelLocationAssetResize() { cancels++; },
+        clearEditorSelection() { clears++; context.editorSelections = []; },
+    });
+    vm.runInContext(`${scene.slice(start, end)}\nglobalThis.testOnKeyDown = onKeyDown;`, context);
+    const pressEsc = target => context.testOnKeyDown({ key: 'Escape', code: 'Escape', target: target || {},
+        preventDefault() {} });
+    pressEsc({ typing: true });
+    modalVisible = true;
+    pressEsc();
+    assert.equal(cancels, 0);
+    modalVisible = false;
+    pressEsc();
+    assert.equal(cancels, 1);
+    assert.equal(clears, 0);
+    context.editorResizeMode = false;
+    pressEsc();
+    assert.equal(clears, 1);
+});
+
+test('rotate click commits a Q/E preview without recomputing the pointer angle', () => {
+    assert.match(scene, /if \(!editorRotateHotkeyPending\) updateEditorRotatePreview\(e\.clientX, e\.clientY/);
+    assert.match(scene, /if \(editorRotateMode && e\.target === canvas\) \{\s*editorRotateHotkeyPending = false;/);
+});
+
+test('selected structure hotkey angle survives the existing save and JSON load path', async () => {
+    let saved;
+    const source = { id: 7, type: 'wall', properties: { rotation: 0, level: 0 } };
+    const context = vm.createContext({
+        editorSelection: { kind: 'structure', id: 7 },
+        currentLocationData: { grid_width: 8, grid_height: 8 },
+        getSelectedEditorSource: () => source,
+        window: { currentLobbyId: 19 },
+        Server: { updateLocationObject: async (_lobby, _id, payload) => {
+            saved = JSON.parse(JSON.stringify(payload));
+            return { ...source, ...saved };
+        } },
+        structureLevel: () => 0,
+        structureBuildingId: () => '',
+        bearingToObjectRotation: bearing => -bearing * Math.PI / 180,
+        clampAssetElevation: value => Math.max(0, Math.min(10, Number(value) || 0)),
+        updateLocationObject() {}, notifyEditorSelection() {}, showNotification() {},
+    });
+    vm.runInContext(section('export async function updateSelectedLocationAssetDetails(',
+        'export function previewSelectedLocationLamp('), context);
+    assert.equal(await context.updateSelectedLocationAssetDetails({ x: 2.5, z: 3.5,
+        rotation: 15, elevation: 0 }), true);
+    assert.ok(Math.abs(saved.properties.rotation + Math.PI / 12) < 1e-8);
+    const reloaded = JSON.parse(JSON.stringify(saved));
+    assert.ok(Math.abs(-reloaded.properties.rotation * 180 / Math.PI - 15) < 1e-8);
+});
+
+test('upper-storey hover projects onto the active level while ground decor stays on terrain', () => {
+    const planes = [];
+    let projectedPoint = { x: 5.2, z: 4.7 };
+    const context = vm.createContext({
+        window: { locationEditMode: true, locationEditorTool: 'assets' },
+        selectedLocationAsset: { kind: 'structure' }, buildMode: 'structure', editorMoveMode: false,
+        document: { querySelector: selector => ({ value: selector === '[data-placement-level]' ? '1' : 'building-a' }),
+            getElementById: () => ({ value: '1' }) },
+        structureLevelOffset: object => object.properties.level * 2.4,
+        getTileHeight: () => 1, getPointerWorldPoint: (x, y, planeY) => {
+            planes.push(planeY); return projectedPoint;
+        },
+        currentLocationData: { grid_width: 10, grid_height: 10 },
+    });
+    vm.runInContext(section('function getStructurePlacementProperties()', 'const FLOOR_SURFACE_OFFSET'), context);
+    assert.equal(context.editorHoverLevelOffset(), 2.4);
+    assert.deepEqual({ ...context.hoveredEditorTile(10, 20, { x: 1, z: 1 }) }, { x: 5, z: 4 });
+    assert.deepEqual(planes, [3.4, 3.4]);
+    projectedPoint = { x: 12, z: 4 };
+    assert.equal(context.hoveredEditorTile(10, 20, { x: 1, z: 1 }), null);
+    context.selectedLocationAsset = { kind: 'decor' };
+    assert.equal(context.editorHoverLevelOffset(), 0);
+    assert.deepEqual({ ...context.hoveredEditorTile(10, 20, { x: 1, z: 1 }) }, { x: 1, z: 1 });
+});
+
+test('move cursor uses the saved surface height for structures, decor and lights', () => {
+    const planes = [];
+    const source = { type: 'wall', properties: { level: 1, elevation: 0.2 } };
+    const context = vm.createContext({
+        editorSelection: { kind: 'structure' }, editorSelections: [{ kind: 'structure' }],
+        getSelectedEditorSource: () => source,
+        structureLevelOffset: object => object.properties.level * 2.4,
+        clampAssetElevation: value => Number(value || 0),
+        getTileHeight: x => x === 1 ? -2 : 0,
+        getPointerWorldPoint: (_x, _y, planeY) => {
+            planes.push(planeY);
+            return { x: planeY < 1 ? 2.4 : 2.2, z: 1.6 };
+        },
+        currentLocationData: { grid_width: 10, grid_height: 10 },
+    });
+    vm.runInContext(section('function editorMovePointerPoint(', 'const FLOOR_SURFACE_OFFSET'), context);
+    assert.deepEqual({ ...context.editorMovePointerPoint(10, 20, { x: 1, z: 1 }) }, { x: 2.2, z: 1.6 });
+    assert.ok(Math.abs(planes[0] - 0.6) < 1e-8);
+    assert.equal(planes[1], 2.6);
+    context.editorSelection.kind = 'decor';
+    source.elevation = 0.3;
+    planes.length = 0;
+    context.editorMovePointerPoint(10, 20, { x: 2, z: 1 });
+    assert.equal(planes[0], 0.3);
+    context.editorSelection.kind = 'lamp';
+    source.height = 1.1;
+    planes.length = 0;
+    context.editorMovePointerPoint(10, 20, { x: 2, z: 1 });
+    assert.equal(planes[0], 1.1);
+});
+
+test('moving a trimmed floor keeps its visible center on the cursor', () => {
+    const source = { type: 'floor', properties: { level: 1, dimensions: { width: 3, depth: 3 } } };
+    const context = vm.createContext({
+        editorSelection: { kind: 'structure' }, editorSelections: [{ kind: 'structure' }],
+        getSelectedEditorSource: () => source,
+        structureLevelOffset: () => 2.4, clampAssetElevation: () => 0,
+        getTileHeight: () => 0, getPointerWorldPoint: () => ({ x: 5.25, z: 6.75 }),
+        currentLocationData: { grid_width: 10, grid_height: 10, objects: [] },
+        floorVisualPose: object => ({ x: object.tile_x + 0.5 + object.properties.offset_x + 0.18,
+            z: object.tile_y + 0.5 + object.properties.offset_z - 0.12 }),
+    });
+    vm.runInContext(section('function editorMovePointerPoint(', 'const FLOOR_SURFACE_OFFSET'), context);
+    const center = context.editorMovePointerPoint(10, 20, { x: 5, z: 6 });
+    assert.ok(Math.abs(center.x - 5.07) < 1e-8);
+    assert.ok(Math.abs(center.z - 6.87) < 1e-8);
+    assert.equal(center.cursorX, 5.25);
+    assert.equal(center.cursorZ, 6.75);
+    assert.match(scene, /\(editorMoveMode \|\| editorResizeMode\) && source\.type === 'floor' \? buildPreviewMesh\.position\.x/);
+});
+
+test('single move commits the preview coordinates and preserves the saved rotation', async () => {
+    const saved = [];
+    const selection = { x: 2, z: 3, rotation: 135, elevation: 0.4 };
+    const context = vm.createContext({
+        editorSelections: [{ kind: 'structure' }], editorMoveMode: true,
+        editorMovePreviewPoint: { x: 5.2, z: 6.3 },
+        getSelectedLocationEditorAsset: () => selection,
+        getSelectedEditorSource: () => ({ height: 2.4 }),
+        async updateSelectedLocationAssetDetails(details) { saved.push(details); return true; },
+        updateBuildPreview() {},
+    });
+    vm.runInContext(section('async function commitEditorAssetMove(', 'async function placeSelectedLocationAsset('), context);
+    await context.commitEditorAssetMove(context.editorMovePreviewPoint.x, context.editorMovePreviewPoint.z);
+    assert.equal(saved[0].x, 5.2);
+    assert.equal(saved[0].z, 6.3);
+    assert.equal(saved[0].rotation, 135);
+    assert.equal(saved[0].elevation, 0.4);
+    assert.equal(context.editorMoveMode, false);
+    context.editorSelections = [{ kind: 'decor' }];
+    context.editorMoveMode = true;
+    await context.commitEditorAssetMove(1.1, 2.2);
+    assert.equal(saved[1].x, 1.1);
+    assert.equal(saved[1].rotation, 135);
+});
+
+test('Volume Scale exposes all six face handles and captures a chosen axis', () => {
+    assert.match(scene, /\['width', -1/);
+    assert.match(scene, /\['width', 1/);
+    assert.match(scene, /\['height', -1/);
+    assert.match(scene, /\['height', 1/);
+    assert.match(scene, /\['depth', -1/);
+    assert.match(scene, /\['depth', 1/);
+    assert.match(scene, /editorResizeHandleAxis = axis/);
+    assert.match(scene, /editorResizeHandleSign = sign/);
+    assert.match(scene, /canvas\.setPointerCapture\(e\.pointerId\)/);
+    assert.match(scene, /updateEditorResizePreview\(e\.clientX, e\.clientY, e\.shiftKey, e\.ctrlKey\)/);
+    assert.match(main, /Volume Scale: тяните маркер грани/);
+    assert.match(main, /Ctrl: шаг 0,1 м \(пол: 1 м\)/);
+});
+
+test('Volume Scale anchors the opposite face after rotation and supports Shift, snap and limits', async () => {
+    const transforms = fs.readFileSync(path.join(__dirname, '../app/static/js/locationAssetTransforms.js'), 'utf8');
+    const { volumeResize, bearingToObjectRotation, projectedAxisDrag } = await import(
+        `data:text/javascript;base64,${Buffer.from(transforms).toString('base64')}`);
+    const dimensions = { width: 4, depth: 0.2, height: 2.4 };
+    for (const rotation of [0, 45, 90]) for (const axis of ['width', 'depth']) for (const side of [-1, 1]) {
+        const resized = volumeResize({ dimensions, center: { x: 4, z: 5 }, elevation: 0.4,
+            rotation, axis, side, distance: 1.5 });
+        const yaw = bearingToObjectRotation(rotation);
+        const direction = axis === 'width'
+            ? { x: Math.cos(yaw), z: -Math.sin(yaw) }
+            : { x: Math.sin(yaw), z: Math.cos(yaw) };
+        const oldFace = { x: 4 - side * dimensions[axis] / 2 * direction.x,
+            z: 5 - side * dimensions[axis] / 2 * direction.z };
+        const newFace = { x: resized.center.x - side * resized.dimensions[axis] / 2 * direction.x,
+            z: resized.center.z - side * resized.dimensions[axis] / 2 * direction.z };
+        assert.ok(Math.abs(oldFace.x - newFace.x) < 1e-8);
+        assert.ok(Math.abs(oldFace.z - newFace.z) < 1e-8);
+    }
+    const symmetric = volumeResize({ dimensions, center: { x: 4, z: 5 }, elevation: 0,
+        rotation: 45, axis: 'width', side: 1, distance: 0.55, symmetric: true });
+    assert.equal(symmetric.dimensions.width, 5.1);
+    assert.deepEqual(symmetric.center, { x: 4, z: 5 });
+    const snapped = volumeResize({ dimensions, center: { x: 4, z: 5 }, elevation: 0,
+        rotation: 0, axis: 'width', side: 1, distance: 0.37, snap: 0.1 });
+    assert.equal(snapped.dimensions.width, 4.4);
+    const minimum = volumeResize({ dimensions, center: { x: 4, z: 5 }, elevation: 0,
+        rotation: 0, axis: 'depth', side: -1, distance: 5 });
+    assert.equal(minimum.dimensions.depth, 0.02);
+    assert.equal(projectedAxisDrag(10, 10, 50, 10, 40, 0), 1);
+});
+
+test('Volume Scale anchors vertical faces for walls and floors, then persists elevation', async () => {
+    const transforms = fs.readFileSync(path.join(__dirname, '../app/static/js/locationAssetTransforms.js'), 'utf8');
+    const { volumeResize } = await import(`data:text/javascript;base64,${Buffer.from(transforms).toString('base64')}`);
+    const dimensions = { width: 3, depth: 2, height: 2.4 };
+    const args = { dimensions, center: { x: 5, z: 7 }, elevation: 1,
+        rotation: 0, axis: 'height', distance: 0.5 };
+    const wallBottom = volumeResize({ ...args, side: -1 });
+    assert.equal(wallBottom.elevation + wallBottom.dimensions.height, args.elevation + dimensions.height);
+    const wallTop = volumeResize({ ...args, side: 1 });
+    assert.equal(wallTop.elevation, args.elevation);
+    const floorTop = volumeResize({ ...args, side: 1, floor: true });
+    assert.equal(floorTop.elevation - floorTop.dimensions.height, args.elevation - dimensions.height);
+    const floorBottom = volumeResize({ ...args, side: -1, floor: true });
+    assert.equal(floorBottom.elevation, args.elevation);
+    const limited = volumeResize({ ...args, elevation: 0, side: -1, distance: -1 });
+    assert.equal(limited.elevation, 0);
+    assert.equal(limited.dimensions.height, dimensions.height);
+    const secondFloor = volumeResize({ ...args, elevation: 0.2, side: 1, distance: 0.3 });
+    assert.equal(secondFloor.elevation, 0.2);
+    const result = volumeResize({ ...args, axis: 'width', side: 1, distance: 1 });
+    let saved;
+    let previewUpdates = 0;
+    const context = vm.createContext({
+        editorResizeMode: true, editorResizeAnchor: { volume: true, result },
+        editorResizeDimensions: result.dimensions, editorResizeElevation: result.elevation,
+        editorResizeBaseCenter: { x: 5, z: 7 },
+        getSelectedLocationEditorAsset: () => ({ kind: 'structure', x: 5, z: 7, rotation: 0,
+            elevation: 1, color: '#ffffff' }),
+        async updateSelectedLocationAssetDetails(details) { saved = details; return true; },
+        notifyEditorResize() {}, updateBuildPreview() { previewUpdates++; },
+    });
+    vm.runInContext(section('function editorResizeCenter(', 'async function commitEditorAssetRotation()'), context);
+    await context.commitEditorAssetResize();
+    assert.equal(saved.x, 5.5);
+    assert.equal(saved.z, 7);
+    assert.equal(saved.dimensions.width, 4);
+    assert.equal(saved.elevation, 1);
+    assert.equal(context.editorResizeMode, true);
+    assert.equal(context.editorResizeAnchor, null);
+    assert.equal(context.editorResizeBaseCenter.x, 5.5);
+    assert.equal(previewUpdates, 1);
+});
+
+test('Volume Scale preview tracks the captured face and Esc discards unsaved dimensions', async () => {
+    const transforms = fs.readFileSync(path.join(__dirname, '../app/static/js/locationAssetTransforms.js'), 'utf8');
+    const { volumeResize, projectedAxisDrag } = await import(
+        `data:text/javascript;base64,${Buffer.from(transforms).toString('base64')}`);
+    const selection = { kind: 'structure', x: 5, z: 7, rotation: 45, elevation: 0.4 };
+    let updates = 0;
+    const context = vm.createContext({
+        editorResizeMode: true, editorResizeDragPointerId: 3,
+        editorResizeDimensions: { width: 3, depth: 0.2, height: 2.4 },
+        editorResizeBaseDimensions: { width: 3, depth: 0.2, height: 2.4 },
+        editorResizeElevation: 0.4, editorResizeSymmetric: false,
+        editorResizeBaseCenter: { x: 5, z: 7 },
+        editorResizeAnchor: { volume: true, axis: 'width', sign: 1, startX: 10, startY: 10,
+            screenAxisX: 40, screenAxisY: 0,
+            baseDimensions: { width: 3, depth: 0.2, height: 2.4 },
+            baseCenter: { x: 5, z: 7 }, baseElevation: 0.4 },
+        getSelectedLocationEditorAsset: () => selection,
+        getSelectedEditorSource: () => ({ type: 'wall' }),
+        volumeResize, projectedAxisDrag,
+        notifyEditorResize() { updates++; }, updateBuildPreview() {},
+    });
+    vm.runInContext(section('function updateEditorResizePreview(', 'async function commitEditorAssetResize()'), context);
+    context.updateEditorResizePreview(50, 10, false);
+    assert.equal(context.editorResizeDimensions.width, 4);
+    assert.ok(context.editorResizeCenter(selection).x > 5);
+    context.updateEditorResizePreview(50, 10, true);
+    assert.equal(context.editorResizeDimensions.width, 5);
+    assert.equal(context.editorResizeCenter(selection).x, 5);
+    assert.equal(updates, 2);
+    vm.runInContext(section('export function cancelLocationAssetResize()', 'function clearEditorSelection()'), context);
+    assert.equal(context.cancelLocationAssetResize(), true);
+    assert.equal(context.editorResizeMode, false);
+    assert.equal(context.editorResizeDimensions, null);
+    assert.equal(context.editorResizeElevation, null);
+});
+
+test('canceling one Volume Scale drag restores its starting size without exiting the tool', () => {
+    const released = [];
+    const context = vm.createContext({
+        editorResizeMode: true, editorResizeDragPointerId: 7,
+        editorResizeAnchor: { volume: true, baseDimensions: { width: 3, depth: 0.2, height: 2.4 },
+            baseCenter: { x: 5, z: 7 }, baseElevation: 0.4 },
+        editorResizeDimensions: { width: 4, depth: 0.2, height: 2.4 },
+        editorResizeBaseDimensions: { width: 3, depth: 0.2, height: 2.4 },
+        editorResizeBaseCenter: { x: 5.5, z: 7 }, editorResizeElevation: 0.4,
+        editorResizeSymmetric: true, editorResizeSnapped: true,
+        renderer: { domElement: { hasPointerCapture: () => true,
+            releasePointerCapture: id => released.push(id) } },
+        notifyEditorResize() {}, updateBuildPreview() {},
+    });
+    vm.runInContext(section('function cancelCurrentAssetResizeDrag()', 'function clearEditorSelection()'), context);
+    assert.equal(context.cancelCurrentAssetResizeDrag(), true);
+    assert.equal(context.editorResizeMode, true);
+    assert.equal(context.editorResizeDimensions.width, 3);
+    assert.equal(context.editorResizeBaseCenter.x, 5);
+    assert.equal(context.editorResizeAnchor, null);
+    assert.equal(context.editorResizeDragPointerId, null);
+    assert.equal(context.editorResizeSymmetric, false);
+    assert.equal(context.editorResizeSnapped, false);
+    assert.deepEqual(released, [7]);
+    assert.equal(context.cancelCurrentAssetResizeDrag(), false);
+});
+
+test('door and window previews draw their model and opening outline over an opaque wall', () => {
+    const material = { depthTest: true };
+    const model = { isMesh: true, material, renderOrder: 0 };
+    const children = [];
+    let boxDimensions;
+    let boxDisposed = false;
+    const context = vm.createContext({ THREE: {
+        BoxGeometry: class { constructor(...size) { boxDimensions = size; } dispose() { boxDisposed = true; } },
+        EdgesGeometry: class {},
+        LineBasicMaterial: class { constructor(options) { Object.assign(this, options); } },
+        LineSegments: class { constructor(geometry, lineMaterial) {
+            this.geometry = geometry; this.material = lineMaterial;
+            this.position = { y: 0 };
+        } },
+    } });
+    vm.runInContext(section('function revealOpeningPlacementPreview(', 'function createEditorGroupMovePreview()'), context);
+    context.revealOpeningPlacementPreview({ traverse(fn) { fn(model); }, add(child) { children.push(child); } },
+        { width: 0.9, height: 2, depth: 0.18 }, true);
+    assert.equal(material.depthTest, false);
+    assert.equal(model.renderOrder, 90);
+    assert.equal(children.length, 1);
+    assert.deepEqual(boxDimensions, [0.9, 2, 0.26]);
+    assert.equal(children[0].position.y, 1);
+    assert.equal(children[0].material.depthTest, false);
+    assert.equal(children[0].material.depthWrite, false);
+    assert.equal(boxDisposed, true);
+    const unmatched = [];
+    context.revealOpeningPlacementPreview({ traverse(fn) { fn(model); }, add(child) { unmatched.push(child); } },
+        { width: 0.9, height: 2, depth: 0.18 }, false);
+    assert.equal(unmatched.length, 0);
+    assert.match(scene, /\['door', 'window'\]\.includes\(placementForLocationAsset\(source\)\.type\)/);
+    assert.match(scene, /const movableStructurePreview = [\s\S]*?&& !openingPlacementPreview/);
+    assert.match(scene, /doorOnWall\(object, wall\)/);
+});
+
 test('shift-click adds and removes objects without discarding the rest', () => {
     const selections = [{ kind: 'structure', id: 1 }];
     const context = vm.createContext({
@@ -72,9 +548,12 @@ test('canceling placement clears the structure ghost and does not recreate a cub
         editorRotateMode: false, editorMoveMode: false, editorResizeMode: false,
         editorSelections: [], editorMovePreviewPoint: null,
         editorRotateAngle: 0, editorResizeAxis: 'all', editorResizeDimensions: null,
+        editorResizeElevation: null, editorResizeAnchor: null,
+        editorResizeSymmetric: false, brushObjectRotation: 0,
         structureWidth: 1, structureDepth: 1, structureHeight: 1,
         structureColor: '#ffffff', structureRotation: 0,
         getSelectedEditorSource: () => null,
+        getStructurePlacementProperties: () => ({ building_id: 'test-building', level: 0 }),
         clearBuildPreview() { clears++; },
     });
     vm.runInContext(section('export function clearLocationAssetPreset()',

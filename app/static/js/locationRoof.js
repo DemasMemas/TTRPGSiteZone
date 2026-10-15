@@ -1,14 +1,18 @@
-import { floorVisualPose, structurePose } from './locationArchitecture.js';
+import { floorVisualPose, sameBuildingLevel, structureBuildingId, structureLevel,
+    structureLevelOffset, structurePose } from './locationArchitecture.js';
 
 export function roofPlans(objects, groundHeight = () => 1) {
     const walls = (objects || []).filter(object => object.type === 'wall'
         && !object.properties?.gm_hidden);
-    return (objects || []).filter(object => object.type === 'floor'
-        && !object.properties?.gm_hidden
-        && object.properties?.roof_enabled !== false).flatMap(floor => {
+    const floors = (objects || []).filter(object => object.type === 'floor'
+        && !object.properties?.gm_hidden);
+    return floors.filter(floor => floor.properties?.roof_enabled !== false
+        && !floors.some(other => structureBuildingId(other) === structureBuildingId(floor)
+            && structureLevel(other) > structureLevel(floor))).flatMap(floor => {
         const pose = floorVisualPose(floor, objects);
         const sides = new Map();
         for (const wall of walls) {
+            if (!sameBuildingLevel(floor, wall)) continue;
             const edge = structurePose(wall);
             const dx = edge.x - pose.x;
             const dz = edge.z - pose.z;
@@ -24,7 +28,7 @@ export function roofPlans(objects, groundHeight = () => 1) {
                 && Math.abs(across) < pose.depth * 0.2) side = along < 0 ? 'west' : 'east';
             if (side) {
                 const height = groundHeight(wall.tile_x, wall.tile_y)
-                    + Number(wall.properties?.elevation || 0) + edge.height;
+                    + structureLevelOffset(wall) + Number(wall.properties?.elevation || 0) + edge.height;
                 const coordinate = side === 'north' || side === 'south' ? across : along;
                 const outer = coordinate + (side === 'north' || side === 'west' ? -1 : 1) * edge.depth / 2;
                 if (!sides.has(side) || height > sides.get(side).height) {
@@ -40,16 +44,18 @@ export function roofPlans(objects, groundHeight = () => 1) {
         const alongSpan = alongMax - alongMin;
         const acrossSpan = acrossMax - acrossMin;
         const acrossRidge = acrossSpan > alongSpan;
-        const width = Math.max(alongSpan, acrossSpan) + 0.48;
-        const depth = Math.min(alongSpan, acrossSpan) + 0.48;
+        const type = floor.properties?.roof_type === 'flat' ? 'flat' : 'gable';
+        const margin = type === 'flat' ? 0.02 : 0.48;
+        const width = Math.max(alongSpan, acrossSpan) + margin;
+        const depth = Math.min(alongSpan, acrossSpan) + margin;
         const centerAlong = (alongMin + alongMax) / 2;
         const centerAcross = (acrossMin + acrossMax) / 2;
-        return [{ floorId: floor.id,
+        return [{ floorId: floor.id, type,
             x: pose.x + centerAlong * pose.axis.x + centerAcross * pose.normal.x,
             z: pose.z + centerAlong * pose.axis.z + centerAcross * pose.normal.z,
             angle: pose.angle + (acrossRidge ? Math.PI / 2 : 0),
             width, depth, eaveY: Math.max(...[...sides.values()].map(side => side.height)) + 0.12,
-            rise: Math.max(0.5, Math.min(1.65, depth * 0.17)),
+            rise: type === 'flat' ? 0 : Math.max(0.5, Math.min(1.65, depth * 0.17)),
             color: floor.properties?.roof_color || '#575b52',
             gableColor: floor.properties?.gable_color
                 || sides.get(acrossRidge ? 'north' : 'west').color }];
@@ -107,6 +113,43 @@ export function createRoofGableGeometry(THREE, plan) {
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geometry.computeVertexNormals();
     return geometry;
+}
+
+export function createRoofVisual(THREE, plan, { roofTexture, wallTexture, gableColor, applySurfacePattern }) {
+    const material = new THREE.MeshStandardMaterial({
+        color: plan.color, roughness: 0.94, side: THREE.DoubleSide,
+    });
+    applySurfacePattern(material, roofTexture, 0.22, 'top');
+    const roof = new THREE.Group();
+    const roofGeometry = plan.type === 'flat'
+        ? new THREE.BoxGeometry(plan.width, 0.13, plan.depth).translate(0, -0.065, 0)
+        : createRoofGeometry(THREE, plan);
+    const roofFace = new THREE.Mesh(roofGeometry, material);
+    roof.add(roofFace);
+    let gable = null;
+    if (plan.type !== 'flat') {
+        const gableMaterial = new THREE.MeshStandardMaterial({
+            color: gableColor, roughness: 1, side: THREE.DoubleSide,
+        });
+        applySurfacePattern(gableMaterial, wallTexture, 0.25, 'sides');
+        gable = new THREE.Mesh(createRoofGableGeometry(THREE, plan), gableMaterial);
+        roof.add(gable);
+    }
+    const shadowCaster = new THREE.Mesh(roofGeometry,
+        new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, side: THREE.DoubleSide }));
+    shadowCaster.castShadow = true;
+    shadowCaster.raycast = () => {};
+    roof.add(shadowCaster);
+    roof.position.set(plan.x, plan.eaveY, plan.z);
+    roof.rotation.y = plan.angle;
+    roof.traverse(child => {
+        if (!child.isMesh) return;
+        child.receiveShadow = true;
+    });
+    roof.raycast = () => {};
+    roof.userData.roofPlan = plan;
+    roof.userData.visualMeshes = gable ? [roofFace, gable] : [roofFace];
+    return roof;
 }
 
 export function roofVisibleForCamera(plan, target, cameraDistance, enabled, editing, cameraPosition = null) {

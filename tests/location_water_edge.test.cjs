@@ -151,9 +151,337 @@ test('raised water has a sloping shore backed by a solid basin', async () => {
     assert.ok(heights.some(height => Math.abs(height - 0.606) < 0.000001));
     assert.ok(heights.some(height => Math.abs(height - 1.406) < 0.000001));
     const scene = read('locationScene.js');
-    assert.match(scene, /new THREE\.InstancedMesh\(geometry\.clone\(\), \[/);
+    assert.match(scene, /const waterBoxGeometry = geometry\.clone\(\)/);
+    assert.match(scene, /waterTileMesh = new THREE\.InstancedMesh\(waterBoxGeometry, \[/);
     assert.doesNotMatch(scene, /waterMaterial\.colorWrite = false/);
     assert.doesNotMatch(scene, /waterTileMesh\?\.material\.map/);
+});
+
+test('legacy dense banks remain available while local water keeps its side geometry', async () => {
+    const { buildRoundedWaterData } = await load('locationWaterEdge.js');
+    const basin = landHeight => {
+        const tiles = Array.from({ length: 3 }, () => Array.from({ length: 3 }, () => (
+            { terrain: 'grass', height: landHeight }
+        )));
+        tiles[1][1] = { terrain: 'water', height: 1 };
+        return buildRoundedWaterData(tiles);
+    };
+    const level = basin(1);
+    assert.ok(level.bank.some((y, index) => index % 3 === 1
+        && Math.abs(level.water[1] - y - 0.006) < 0.000001));
+    const slope = basin(1.4);
+    assert.ok(slope.bank.some((y, index) => index % 3 === 1 && y > slope.water[1]));
+    assert.ok(slope.bank.some((y, index) => index % 3 === 1 && y < slope.water[1]));
+
+    const scene = read('locationScene.js');
+    const waterBuild = scene.slice(scene.indexOf('function rebuildWaterSurfaceMesh()'),
+        scene.indexOf('export function getLocationGrassDiagnostics()'));
+    assert.match(waterBuild, /const waterMaterial = createWaterMaterial\(\)/);
+    assert.doesNotMatch(waterBuild, /waterMaterial\.polygonOffset/);
+    assert.doesNotMatch(waterBuild, /waterMaterial\.depthTest = false|waterMaterial\.depthWrite = false/);
+    assert.match(scene, /waterTileMesh = new THREE\.InstancedMesh\(waterBoxGeometry, \[\s*waterMaterial, waterMaterial, waterTopMaterial,\s*waterMaterial, waterMaterial, waterMaterial,/);
+    assert.match(scene, /waterTopMaterial = new THREE\.MeshBasicMaterial\(\{ colorWrite: false, depthWrite: false \}\)/);
+    assert.match(scene, /waterLevelForTile\(tile, waterKind\) - 0\.01/);
+    assert.match(waterBuild, /waterBankMesh = new THREE\.Mesh\(bankGeometry, bankMaterial\)/);
+    assert.match(waterBuild, /sandBankMesh = new THREE\.Mesh\(bankGeometry, bankMaterial\)/);
+});
+
+test('local shoreline ring covers every corner pattern without hidden water overlap', async () => {
+    const { buildRoundedWaterData, waterLevelForTile } = await load('locationWaterEdge.js');
+    const triangleArea = (positions, index) => Math.abs(
+        (positions[index + 3] - positions[index]) * (positions[index + 8] - positions[index + 2])
+        - (positions[index + 5] - positions[index + 2]) * (positions[index + 6] - positions[index])) / 2;
+    const strictlyInside = (px, pz, positions, index) => {
+        const ax = positions[index];
+        const az = positions[index + 2];
+        const bx = positions[index + 3];
+        const bz = positions[index + 5];
+        const cx = positions[index + 6];
+        const cz = positions[index + 8];
+        const denominator = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+        const a = ((bz - cz) * (px - cx) + (cx - bx) * (pz - cz)) / denominator;
+        const b = ((cz - az) * (px - cx) + (ax - cx) * (pz - cz)) / denominator;
+        return a > 0.000001 && b > 0.000001 && a + b < 0.999999;
+    };
+    for (let mask = 0; mask < 256; mask++) {
+        const tiles = Array.from({ length: 3 }, () => Array.from({ length: 3 }, () => (
+            { terrain: 'water', height: 1 }
+        )));
+        let bit = 0;
+        for (let z = 0; z < 3; z++) {
+            for (let x = 0; x < 3; x++) {
+                if (x === 1 && z === 1) continue;
+                if (mask & (1 << bit)) tiles[z][x] = { terrain: 'grass', height: 1.4 };
+                bit++;
+            }
+        }
+        const data = buildRoundedWaterData(tiles, 0.24, (x, z) => x === 1 && z === 1,
+            null, waterLevelForTile, { shorelineRing: true });
+        const waterArea = data.water.reduce((sum, _, index) =>
+            index % 9 === 0 ? sum + triangleArea(data.water, index) : sum, 0);
+        const bankArea = data.bank.reduce((sum, _, index) =>
+            index % 9 === 0 ? sum + triangleArea(data.bank, index) : sum, 0);
+        assert.ok(Math.abs(waterArea + bankArea - 1) < 0.000001, `gap or overlap: ${mask}`);
+        assert.ok(data.bank.length / 9 <= 64, `excessive shore triangles: ${mask}`);
+        for (let index = 0; index < data.bank.length; index += 9) {
+            assert.ok(triangleArea(data.bank, index) > 0.000001, `degenerate triangle: ${mask}`);
+            const points = [0, 3, 6].map(offset => ({
+                x: data.bank[index + offset], y: data.bank[index + offset + 1],
+                z: data.bank[index + offset + 2],
+            }));
+            const winding = (points[1].x - points[0].x) * (points[2].z - points[0].z)
+                - (points[1].z - points[0].z) * (points[2].x - points[0].x);
+            assert.ok(winding < 0, `reversed shore face: ${mask}`);
+            for (let edge = 0; edge < 3; edge++) {
+                const a = points[edge];
+                const b = points[(edge + 1) % 3];
+                assert.ok(Math.hypot(b.x - a.x, b.z - a.z) < 0.23,
+                    `oversized shore edge: ${mask}`);
+                assert.ok(Number.isFinite(a.y), `invalid shore height: ${mask}`);
+            }
+            const px = (data.bank[index] + data.bank[index + 3] + data.bank[index + 6]) / 3;
+            const pz = (data.bank[index + 2] + data.bank[index + 5] + data.bank[index + 8]) / 3;
+            for (let face = 0; face < data.water.length; face += 9) {
+                assert.equal(strictlyInside(px, pz, data.water, face), false,
+                    `bank triangle below water: ${mask}`);
+                for (const point of points) {
+                    assert.equal(strictlyInside(point.x, point.z, data.water, face), false,
+                        `shore vertex projects inside water: ${mask}`);
+                }
+            }
+        }
+    }
+    const scene = read('locationScene.js');
+    assert.match(scene, /buildRoundedWaterData\(waterTiles, 0\.24, undefined, null, waterLevelForTile, \{\s*shorelineRing: true,\s*landSurfaceHeightAt: createTerrainSurfaceHeightSampler\(waterTiles\)/);
+});
+
+test('adjacent water cells share one three-dimensional bank corner across uneven land', async () => {
+    const { buildRoundedWaterData, waterLevelForTile } = await load('locationWaterEdge.js');
+    const { createTerrainSurfaceHeightSampler } = await load('locationTerrain.js');
+    for (const kind of ['grass', 'sand']) {
+        const tiles = Array.from({ length: 3 }, (_, z) => Array.from({ length: 4 }, (_, x) => (
+            { terrain: kind, height: z === 0 && x === 1 ? 1.4 : z === 0 && x === 2 ? 0.6 : 1 }
+        )));
+        tiles[1][1] = { terrain: 'water', height: 1 };
+        tiles[1][2] = { terrain: 'water', height: 1 };
+        const landSurfaceHeightAt = createTerrainSurfaceHeightSampler(tiles);
+        const cornerHeights = cellX => {
+            const data = buildRoundedWaterData(tiles, 0.24,
+                (x, z) => x === cellX && z === 1, null, waterLevelForTile,
+                { shorelineRing: true, landSurfaceHeightAt });
+            const bank = kind === 'sand' ? data.sandBank : data.bank;
+            const heights = [];
+            for (let index = 0; index < bank.length; index += 3) {
+                const px = bank[index];
+                const pz = bank[index + 2];
+                if (pz === 1 && px > 1.05 && px < 2.95) {
+                    const expected = landSurfaceHeightAt(px, 0.99999) + 0.006;
+                    assert.ok(Math.abs(bank[index + 1] - expected) < 0.0001,
+                        `bank edge detaches from smoothed land: ${kind}`);
+                }
+                if (Math.abs(bank[index] - 2) < 0.000001
+                    && Math.abs(bank[index + 2] - 1) < 0.000001) {
+                    heights.push(bank[index + 1]);
+                }
+            }
+            return heights;
+        };
+        const left = cornerHeights(1);
+        const right = cornerHeights(2);
+        assert.ok(left.length > 0 && right.length > 0, kind);
+        for (const y of [...left, ...right]) assert.ok(Math.abs(y - 1.006) < 0.000001, kind);
+    }
+});
+
+test('neighboring water levels share a sloped three-dimensional edge without shoreline end caps', async () => {
+    const { buildRoundedWaterData, waterLevelForTile, waterExposedSideMask } = await load('locationWaterEdge.js');
+    const { createTerrainSurfaceHeightSampler } = await load('locationTerrain.js');
+    const tiles = Array.from({ length: 3 }, () => Array.from({ length: 4 }, (_, x) => (
+        { terrain: 'grass', height: [0.6, 1.8, 1.2, 0.8][x] }
+    )));
+    tiles[1][1] = { terrain: 'water', height: 1 };
+    tiles[1][2] = { terrain: 'water', height: 1.6 };
+    const landSurfaceHeightAt = createTerrainSurfaceHeightSampler(tiles);
+    const sharedEdges = [];
+    for (const cellX of [1, 2]) {
+        const data = buildRoundedWaterData(tiles, 0.24,
+            (x, z) => x === cellX && z === 1, null, waterLevelForTile,
+            { shorelineRing: true, landSurfaceHeightAt });
+        const level = waterLevelForTile(tiles[1][cellX], 'grass') + 0.012;
+        assert.ok(data.water.some((value, index) => index % 3 === 1
+            && Math.abs(value - level) < 1e-8), 'cell center retains its saved level');
+        for (let index = 0; index < data.water.length; index += 3) {
+            const px = data.water[index];
+            const py = data.water[index + 1];
+            const pz = data.water[index + 2];
+            if ((px === cellX + 0.5 && pz === 1.5) || Math.abs(px - 2) < 1e-8) continue;
+            assert.ok(data.bank.some((value, bankIndex) => bankIndex % 3 === 0
+                && Math.abs(value - px) < 1e-8
+                && Math.abs(data.bank[bankIndex + 1] - py) < 1e-8
+                && Math.abs(data.bank[bankIndex + 2] - pz) < 1e-8),
+            `shore detaches from water at ${px}, ${pz}`);
+        }
+        const edges = [];
+        for (let index = 0; index < data.water.length; index += 9) {
+            for (let side = 0; side < 3; side++) {
+                const a = index + side * 3;
+                const b = index + (side + 1) % 3 * 3;
+                if (Math.abs(data.water[a] - 2) < 1e-8
+                    && Math.abs(data.water[b] - 2) < 1e-8) {
+                    assert.ok(Math.abs(data.water[a + 1] - 1.312) < 1e-8);
+                    assert.ok(Math.abs(data.water[b + 1] - 1.312) < 1e-8);
+                    edges.push([data.water[a + 2], data.water[b + 2]].sort((a, b) => a - b));
+                }
+            }
+        }
+        edges.sort((a, b) => a[0] - b[0]);
+        assert.deepEqual(edges, [[1.075, 1.5], [1.5, 1.925]]);
+        sharedEdges.push(edges);
+        assert.ok(data.bank.length > 0);
+        for (let index = 0; index < data.bank.length; index += 9) {
+            const positions = data.bank;
+            const projectedArea = (positions[index + 3] - positions[index])
+                * (positions[index + 8] - positions[index + 2])
+                - (positions[index + 5] - positions[index + 2])
+                * (positions[index + 6] - positions[index]);
+            assert.ok(Math.abs(projectedArea) > 1e-8,
+                `stray vertical shoreline face beside water cell ${cellX}`);
+        }
+    }
+    assert.deepEqual(sharedEdges[0], sharedEdges[1]);
+    assert.equal(waterExposedSideMask(tiles, 1, 1) & 1, 0, 'east internal side hidden');
+    assert.equal(waterExposedSideMask(tiles, 2, 1) & 2, 0, 'west internal side hidden');
+    assert.equal(waterExposedSideMask(tiles, 1, 1) & 2, 2, 'land-facing side preserved');
+    assert.equal(waterExposedSideMask(tiles, 2, 1) & 1, 1, 'land-facing side preserved');
+});
+
+test('exterior water sides do not project above a lower sloped corner', async () => {
+    const { classifyWaterRegions, connectedWaterHeightAt, waterSideCornerDrops,
+        waterExposedSideMask } = await load('locationWaterEdge.js');
+    const tiles = Array.from({ length: 3 }, () => Array.from({ length: 4 }, () => (
+        { terrain: 'grass', height: 1 }
+    )));
+    tiles[1][1] = { terrain: 'water', height: 1 };
+    tiles[1][2] = { terrain: 'water', height: 1.6 };
+    const regions = classifyWaterRegions(tiles);
+    const highBoxTop = 1.59;
+    const high = waterSideCornerDrops(tiles, 2, 1, regions, highBoxTop);
+    const low = waterSideCornerDrops(tiles, 1, 1, regions, 0.99);
+    assert.ok(Math.abs(connectedWaterHeightAt(tiles, 2, 1, 2, 1, regions) - 1.3) < 1e-8);
+    assert.ok(Math.abs(highBoxTop * (1 - high[0]) - 1.312) < 1e-8);
+    assert.ok(Math.abs(highBoxTop * (1 - high[3]) - 1.312) < 1e-8);
+    assert.deepEqual([high[1], high[2]], [0, 0]);
+    assert.deepEqual(low, [0, 0, 0, 0]);
+    assert.equal(waterExposedSideMask(tiles, 2, 1) & 2, 0, 'inner side stays hidden');
+    assert.equal(waterExposedSideMask(tiles, 2, 1) & 8, 8, 'outer bank side stays visible');
+    tiles[1][2].height = 1;
+    assert.deepEqual(waterSideCornerDrops(tiles, 2, 1, regions, 0.99), [0, 0, 0, 0],
+        'level water keeps its original box sides');
+    const scene = read('locationScene.js');
+    assert.match(scene, /waterBoxGeometry\.setAttribute\('waterCornerDrops'/);
+    assert.match(scene, /transformed\.y -= cornerDrop/);
+    assert.match(scene, /waterSideCornerDrops\(currentLocationData\.tiles_data,/);
+});
+
+test('connected water levels meet at one corner height across four cells', async () => {
+    const { buildRoundedWaterData, waterExposedSideMask } = await load('locationWaterEdge.js');
+    const tiles = Array.from({ length: 4 }, () => Array.from({ length: 4 }, () => (
+        { terrain: 'grass', height: 1 }
+    )));
+    const levels = [[1, 1.4], [1.8, 2.2]];
+    for (let dz = 0; dz < 2; dz++) for (let dx = 0; dx < 2; dx++) {
+        tiles[1 + dz][1 + dx] = { terrain: 'water', height: levels[dz][dx] };
+    }
+    for (let dz = 0; dz < 2; dz++) for (let dx = 0; dx < 2; dx++) {
+        const x = 1 + dx;
+        const z = 1 + dz;
+        const data = buildRoundedWaterData(tiles, 0.24, (tx, tz) => tx === x && tz === z,
+            null, tile => tile.height, { shorelineRing: true });
+        const center = [];
+        for (let index = 0; index < data.water.length; index += 3) {
+            if (Math.abs(data.water[index] - 2) < 1e-8
+                && Math.abs(data.water[index + 2] - 2) < 1e-8) center.push(data.water[index + 1]);
+        }
+        assert.ok(center.length > 0, `missing shared corner for ${x},${z}`);
+        for (const height of center) assert.ok(Math.abs(height - 1.612) < 1e-8);
+        assert.ok(data.water.some((value, index) => index % 3 === 1
+            && Math.abs(value - levels[dz][dx] - 0.012) < 1e-8), 'center keeps its level');
+        const internalBits = (dx === 0 ? 1 : 2) | (dz === 0 ? 4 : 8);
+        assert.equal(waterExposedSideMask(tiles, x, z) & internalBits, 0);
+    }
+});
+
+test('diagonally touching but disconnected water cells keep separate levels', async () => {
+    const { buildRoundedWaterData, waterExposedSideMask } = await load('locationWaterEdge.js');
+    const tiles = Array.from({ length: 4 }, () => Array.from({ length: 4 }, () => (
+        { terrain: 'grass', height: 1 }
+    )));
+    tiles[1][1] = { terrain: 'water', height: 1 };
+    tiles[2][2] = { terrain: 'water', height: 1.8 };
+    for (const [x, z, level] of [[1, 1, 1], [2, 2, 1.8]]) {
+        const data = buildRoundedWaterData(tiles, 0.24, (tx, tz) => tx === x && tz === z,
+            null, tile => tile.height, { shorelineRing: true });
+        assert.ok(data.water.length > 0);
+        assert.ok(data.water.every((value, index) => index % 3 !== 1
+            || Math.abs(value - level - 0.012) < 1e-8));
+        assert.equal(waterExposedSideMask(tiles, x, z), 15, 'all four sides face land');
+    }
+});
+
+test('water side mask is per instance and refreshes with edited neighboring tiles', () => {
+    const scene = read('locationScene.js');
+    const build = scene.slice(scene.indexOf('const waterMaterial = new THREE.MeshStandardMaterial'),
+        scene.indexOf('tileCubes = [locationTileMesh, waterTileMesh]'));
+    assert.match(build, /attribute float waterSideMask/);
+    assert.match(build, /if \(sideBit > 0\.0[^\n]*discard/);
+    assert.match(build, /waterBoxGeometry\.setAttribute\('waterSideMask',\s*new THREE\.InstancedBufferAttribute/);
+    const update = scene.slice(scene.indexOf('function updateTileCubes(changed)'),
+        scene.indexOf('function refreshTerrainFoundation()'));
+    assert.match(update, /for \(let dz = -1; dz <= 1; dz\+\+\)/);
+    assert.match(update, /updateTileInstance\(index, nx, nz/);
+    assert.match(update, /getAttribute\('waterSideMask'\)\.needsUpdate = true/);
+    const instance = scene.slice(scene.indexOf('function updateTileInstance('),
+        scene.indexOf('function updateTileInstance(') + 3000);
+    assert.match(instance, /waterExposedSideMask\(currentLocationData\.tiles_data, x, z\)/);
+});
+
+test('diagonal land does not pull a shore triangle across two water neighbors', async () => {
+    const { buildRoundedWaterData, waterLevelForTile } = await load('locationWaterEdge.js');
+    const tiles = Array.from({ length: 3 }, () => Array.from({ length: 3 }, () => (
+        { terrain: 'water', height: 1 }
+    )));
+    tiles[0][2] = { terrain: 'grass', height: 1.8 };
+    tiles[2][1] = { terrain: 'grass', height: 1.2 };
+    const data = buildRoundedWaterData(tiles, 0.24, (x, z) => x === 1 && z === 1,
+        null, waterLevelForTile, { shorelineRing: true });
+    assert.ok(data.bank.length > 0);
+    for (let index = 0; index < data.bank.length; index += 9) {
+        const x = (data.bank[index] + data.bank[index + 3] + data.bank[index + 6]) / 3;
+        const z = (data.bank[index + 2] + data.bank[index + 5] + data.bank[index + 8]) / 3;
+        assert.ok(z > 1.5 || x < 1.5, 'shore triangle extends into the diagonal water corner');
+    }
+});
+
+test('local shore ring joins uneven grass and sand to water without changing neighboring tops', async () => {
+    const { buildRoundedWaterData, waterLevelForTile } = await load('locationWaterEdge.js');
+    for (const kind of ['grass', 'sand']) {
+        const tiles = Array.from({ length: 3 }, () => Array.from({ length: 4 }, () => (
+            { terrain: kind, height: 1.4 }
+        )));
+        tiles[1][1] = { terrain: 'water', height: 1 };
+        tiles[1][2] = { terrain: 'water', height: 1 };
+        const data = buildRoundedWaterData(tiles, 0.24, () => true,
+            null, waterLevelForTile, { shorelineRing: true });
+        const bank = kind === 'sand' ? data.sandBank : data.bank;
+        assert.ok(bank.length > 0);
+        const waterHeight = waterLevelForTile(tiles[1][1], kind) + 0.012;
+        assert.ok(bank.some((value, index) => index % 3 === 1
+            && Math.abs(value - waterHeight) < 0.000001));
+        assert.ok(bank.some((value, index) => index % 3 === 1 && value > waterHeight + 0.1));
+        assert.ok(data.water.every((value, index) => index % 3 !== 1
+            || Math.abs(value - waterHeight) < 0.000001));
+        assert.equal(data.water.length / 9, 24);
+    }
 });
 
 test('three water cells do not leave detached water patches over the land corner', async () => {

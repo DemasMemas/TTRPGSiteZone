@@ -64,6 +64,10 @@ export function setMapEditorAutoExpandEnabled(enabled) {
 
 export function expandMapToolsPanelOnToolChange(previousTool, nextTool) {
     if (!previousTool || previousTool === nextTool || !isMapEditorAutoExpandEnabled()) return;
+    expandMapToolsPanel();
+}
+
+export function expandMapToolsPanel() {
     const panel = document.getElementById('panel-tools');
     if (!panel?.classList.contains('collapsed')) return;
     panel.classList.remove('collapsed');
@@ -289,6 +293,20 @@ function handleKeyDown(e) {
         const target = e.target;
         const isInput = isTypingTarget(target);
         if (isInput) return;
+        if (Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
+        if (e.repeat && ['KeyQ', 'KeyE', 'KeyR'].includes(e.code)) return;
+        if ((e.altKey || e.ctrlKey || e.metaKey) && ['KeyQ', 'KeyE', 'KeyR'].includes(e.code)) return;
+        if (!modalOpen && !e.altKey && !e.ctrlKey && !e.metaKey
+            && ['KeyQ', 'KeyE'].includes(e.code)
+            && window.rotateLocationPlacement?.(e.code === 'KeyE' ? 1 : -1)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return;
+        }
+        if (window.isLocationEditorTransformActive?.() && e.code === 'KeyR') {
+            e.preventDefault();
+            return;
+        }
         // Alt
         if (e.key === 'Alt') {
             e.preventDefault();

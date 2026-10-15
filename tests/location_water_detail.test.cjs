@@ -62,7 +62,13 @@ test('swamp film is split into tonal islands rather than one flat decal', async 
             return this;
         }
     }
-    class Mesh { constructor(geometry, material) { this.geometry = geometry; this.material = material; } }
+    class Mesh {
+        constructor(geometry, material) {
+            this.geometry = geometry;
+            this.material = material;
+            this.userData = {};
+        }
+    }
     class InstancedMesh extends Mesh {
         constructor(geometry, material) { super(geometry, material); this.instanceMatrix = {}; this.instanceColor = {}; }
         setMatrixAt() {}
@@ -87,6 +93,7 @@ test('swamp film is split into tonal islands rather than one flat decal', async 
     const group = createWaterDetailGroup(THREE, tiles, regions);
     const film = group.children.find(child => child.constructor === Mesh);
     assert.ok(film);
+    assert.equal(film.userData.waterDetailKind, 'film');
     const patches = waterDetailPlacements(tiles, regions).film.length;
     assert.equal(film.geometry.attributes.position.array.length, patches * 3 * 9 * 9);
     const values = film.geometry.attributes.color.array;

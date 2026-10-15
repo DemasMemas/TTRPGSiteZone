@@ -173,8 +173,12 @@ body {
 }
 .scene-profile-button:disabled { opacity: .55; cursor: default; }
 .scene-profile-button:hover:not(:disabled) { border-color: #c3c18d; }
+.scene-surface-button { bottom: 58px; }
+.scene-surface-button[aria-pressed="true"] { border-color: #d1a879; }
+.scene-layer-button { bottom: 98px; }
+.scene-layer-button[aria-pressed="true"] { border-color: #d1a879; }
 .scene-profile-results {
-  bottom: 56px;
+  bottom: 136px;
   max-width: min(550px, calc(100vw - 36px));
   max-height: 45vh;
   overflow: auto;
@@ -203,6 +207,14 @@ body {
 /* Элементы интерфейса, которые должны получать клики */
 .ui-overlay > * {
   pointer-events: auto;
+}
+
+/* Global-map controls must not show through the local scene's canvas. */
+body.location-view-active .lobby-menu,
+body.location-view-active #settings-panel,
+body.location-view-active #tile-info,
+body.location-view-active .world-group-context-menu {
+  display: none !important;
 }
 
 /* ===== Кнопки ===== */
@@ -1435,6 +1447,50 @@ body.light-theme .lobby-time-field input[type="time"] {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.76rem;
+}
+.location-character-label {
+  max-width: 190px;
+  padding: 3px 6px 2px;
+  border: 1px solid rgba(153, 169, 151, 0.34);
+  border-left: 2px solid #879486;
+  border-radius: 4px;
+  background: rgba(17, 23, 20, 0.84);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.25);
+  color: #e2e8dd;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+.location-character-label__name,
+.location-character-label__badge {
+  overflow-wrap: anywhere;
+}
+.location-character-label__badge {
+  display: none;
+  margin-top: 2px;
+  padding: 1px 3px;
+  border-left: 1px solid #879486;
+  border-radius: 2px;
+  background: rgba(5, 9, 7, 0.32);
+  color: #bac6ba;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+.location-character-label__badge--danger {
+  border-left-color: #aa716a;
+  color: #dfb8ae;
+}
+.location-character-label__badge--warning {
+  border-left-color: #aa9566;
+  color: #dfd0a6;
+}
+.location-character-label__badge--anomaly {
+  border-left-color: #779680;
+  color: #bed2bf;
 }
 .map-editor-wheel {
   position: fixed;
