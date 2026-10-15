@@ -370,7 +370,7 @@ function handleKeyDown(e) {
             const locHeightSlider = document.getElementById('loc-edit-height');
             if (locHeightSlider) {
                 let current = parseFloat(locHeightSlider.value);
-                let newHeight = Math.min(3.0, Math.max(0.5, current + 0.1));
+                let newHeight = Math.min(3.0, Math.max(-3.0, current + 0.1));
                 newHeight = Math.round(newHeight * 10) / 10;
                 window.setTileHeightFromInput(newHeight);
             }
@@ -381,7 +381,7 @@ function handleKeyDown(e) {
             const locHeightSlider = document.getElementById('loc-edit-height');
             if (locHeightSlider) {
                 let current = parseFloat(locHeightSlider.value);
-                let newHeight = Math.min(3.0, Math.max(0.5, current - 0.1));
+                let newHeight = Math.min(3.0, Math.max(-3.0, current - 0.1));
                 newHeight = Math.round(newHeight * 10) / 10;
                 window.setTileHeightFromInput(newHeight);
             }

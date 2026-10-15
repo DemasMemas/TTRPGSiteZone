@@ -60,6 +60,45 @@ test('grass height sampler follows the rendered slope and caches its ring', asyn
     assert.ok(sample(0.75, 0.5) > 1 && sample(0.75, 0.5) < 2);
 });
 
+test('a trench at -3 keeps its top and walls below the old zero plane', async () => {
+    const { buildSmoothTerrainData, createTerrainSurfaceHeightSampler,
+        terrainFoundationHeight } = await load('locationTerrain.js');
+    const tiles = [[{ terrain: 'sand', height: 1 },
+        { terrain: 'sand', height: 0 }, { terrain: 'sand', height: -3 }]];
+    const foundation = terrainFoundationHeight(tiles);
+    assert.equal(foundation, -3.05);
+    const sample = createTerrainSurfaceHeightSampler(tiles);
+    assert.equal(sample(1.5, 0.5), 0);
+    assert.equal(sample(2.5, 0.5), -3);
+    assert.ok(sample(2, 0.5) < 0);
+    const mesh = buildSmoothTerrainData(tiles, () => true, foundation);
+    assert.ok(mesh.positions.some((value, index) => index % 3 === 1 && value === -3.05));
+    assert.ok(mesh.topByVertex.some((top, index) => top
+        && mesh.positions[index * 3 + 1] === -3));
+    assert.ok(mesh.positions.every(Number.isFinite));
+    assert.ok(Array.from(mesh.normals).every(Number.isFinite));
+    assert.equal(terrainFoundationHeight([[{ terrain: 'grass', height: 0.5 }]]), 0);
+    assert.equal(terrainFoundationHeight([[{ terrain: 'grass', height: null }]]), 0);
+    assert.equal(createTerrainSurfaceHeightSampler([[{ terrain: 'grass', height: null }]])(0.5, 0.5), 1);
+    tiles[0][1].height = 1;
+    tiles[0][2].height = 1;
+    assert.equal(terrainFoundationHeight(tiles), 0);
+    assert.equal(buildSmoothTerrainData(tiles).positions.length, 0);
+});
+
+test('local height controls and brush allow negative land without changing the global editor', () => {
+    const scene = read('locationScene.js');
+    const main = read('main.js');
+    const shortcuts = read('ui_interactions.js');
+    const lobby = fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8');
+    assert.match(scene, /Math\.max\(tile\.terrain === 'water' \? 0\.5 : -3\.0,/);
+    assert.match(scene, /refreshTerrainFoundation\(\)/);
+    assert.match(main, /id="loc-edit-height" min="-3\.0" max="3\.0"/);
+    assert.match(shortcuts, /Math\.max\(-3\.0, current - 0\.1\)/);
+    assert.match(lobby, /id="tile-height" min="0\.5" max="3\.0"/);
+    assert.match(lobby, /id="tile-edit-height" min="0\.5" max="3\.0"/);
+});
+
 test('steep hill rounds its crest without opening a gap at the shared edge', async () => {
     const { buildSmoothTerrainData, createTerrainSurfaceHeightSampler, buildFogSurfaceData } = await load('locationTerrain.js');
     const tiles = [[{ terrain: 'grass', height: 1 }, { terrain: 'grass', height: 3 }]];
@@ -290,7 +329,8 @@ test('flat terrain and water tiles fill their cells without permanent grid gaps'
     assert.match(scene, /const waterMaterial = new THREE\.MeshStandardMaterial\(\{ color: 0xffffff \}\)/);
     assert.match(scene, /WATER_SIDE_COLORS = \{ grass: 0x183c4a/);
     assert.match(scene, /new THREE\.InstancedMesh\(geometry\.clone\(\), \[/);
-    assert.match(scene, /Math\.max\(0\.05, waterLevelForTile\(tile, waterKind\) - 0\.01\) : height/);
+    assert.match(scene, /Math\.max\(0\.05, waterLevelForTile\(tile, waterKind\) - 0\.01\)/);
+    assert.match(scene, /Math\.max\(0\.05, height - terrainFoundationY\)/);
     assert.doesNotMatch(scene, /new THREE\.BoxGeometry\(0\.98, 1, 0\.98\)/);
 });
 

@@ -7,7 +7,14 @@ function landTile(tiles, x, z) {
 }
 
 function tileHeight(tiles, x, z) {
-    return Number(tiles[z][x].height) || 1;
+    const value = tiles[z][x].height;
+    const height = value == null ? NaN : Number(value);
+    return Number.isFinite(height) ? height : 1;
+}
+
+export function terrainFoundationHeight(tiles) {
+    return tiles.some(row => row.some(tile => tile.terrain !== 'water'
+        && tile.height != null && Number(tile.height) <= 0)) ? -3.05 : 0;
 }
 
 function canBlend(tiles, ax, az, bx, bz) {
@@ -318,7 +325,7 @@ export function buildFogSurfaceData(tiles) {
     return { positions, tileIndices };
 }
 
-export function buildSmoothTerrainData(tiles, includeTile = () => true) {
+export function buildSmoothTerrainData(tiles, includeTile = () => true, foundationY = 0) {
     const positions = [];
     const tileByFace = [];
     const tileByVertex = [];
@@ -331,7 +338,7 @@ export function buildSmoothTerrainData(tiles, includeTile = () => true) {
             const height = tileHeight(tiles, x, z);
             const ring = tileSurfaceRing(tiles, x, z);
             foundationByTile.set(`${x},${z}`,
-                Math.max(0.05, Math.min(height, ...ring.map(point => point[1])) - 0.035));
+                Math.max(foundationY + 0.05, Math.min(height, ...ring.map(point => point[1])) - 0.035));
             const triangle = (a, b, c, top = true) => {
                 positions.push(...a, ...b, ...c);
                 tileByFace.push({ x, z });
@@ -345,9 +352,9 @@ export function buildSmoothTerrainData(tiles, includeTile = () => true) {
                 const a = ring[side * 2];
                 const b = ring[(side * 2 + 1) % ring.length];
                 const c = ring[(side * 2 + 2) % ring.length];
-                const groundA = [a[0], 0, a[2]];
-                const groundB = [b[0], 0, b[2]];
-                const groundC = [c[0], 0, c[2]];
+                const groundA = [a[0], foundationY, a[2]];
+                const groundB = [b[0], foundationY, b[2]];
+                const groundC = [c[0], foundationY, c[2]];
                 triangle(a, groundA, b, false);
                 triangle(b, groundA, groundB, false);
                 triangle(b, groundB, c, false);

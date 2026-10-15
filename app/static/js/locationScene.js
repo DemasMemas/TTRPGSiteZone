@@ -19,7 +19,7 @@ import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { createWaterMaterial } from './waterSurface.js';
 import {
     buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData,
-    createTerrainSurfaceHeightSampler, isSmoothTerrainTile,
+    createTerrainSurfaceHeightSampler, isSmoothTerrainTile, terrainFoundationHeight,
     waterSurfaceAdjustments,
 } from './locationTerrain.js';
 import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting,
@@ -273,6 +273,7 @@ let locationObjectMeshes = [];
 let roofMeshes = [];
 let locationRoofsVisible = true;
 let groundPlaneMesh;
+let terrainFoundationY = 0;
 let characterModels = new Map();
 const characterVisibilityOverrides = new Map();
 let previewSprite = null;
@@ -573,7 +574,9 @@ function getTileHeight(tileX, tileZ) {
     if (tileZ < 0 || tileZ >= currentLocationData.tiles_data.length) return 1.0;
     const row = currentLocationData.tiles_data[tileZ];
     if (tileX < 0 || tileX >= row.length) return 1.0;
-    return row[tileX].height || 1.0;
+    const value = row[tileX].height;
+    const height = value == null ? NaN : Number(value);
+    return Number.isFinite(height) ? height : 1.0;
 }
 
 function disposeObject(obj) {
@@ -5115,7 +5118,8 @@ function rememberFogTile(x, y) {
     const tile = currentLocationData?.tiles_data?.[y]?.[x] || {};
     const next = {
         terrain: String(tile.terrain || 'grass'),
-        height: Number(tile.height) || 1,
+        height: tile.height != null && Number.isFinite(Number(tile.height))
+            ? Number(tile.height) : 1,
     };
     const previous = fogMemory.get(key);
     if (previous?.terrain === next.terrain && previous?.height === next.height) {
@@ -5286,7 +5290,10 @@ function getFogGhost(key, createGhost) {
 function createCharacterFogGhost(snapshot) {
     const ghost = setFogGhostAppearance(createMutantModel(snapshot.mutantType)
         || createCharacterModel(snapshot.ownerId));
-    ghost.position.set(snapshot.posX + 0.5, Number(snapshot.height) || 1, snapshot.posY + 0.5);
+    ghost.position.set(snapshot.posX + 0.5,
+        snapshot.height != null && Number.isFinite(Number(snapshot.height))
+            ? Number(snapshot.height) : 1,
+        snapshot.posY + 0.5);
     ghost.rotation.y = Math.atan2(Number(snapshot.facingX) || 0, Number(snapshot.facingY) || 1);
     applyFogGhostPosture(ghost, snapshot.posture, snapshot.proneOnBack);
     return ghost;
@@ -11639,6 +11646,7 @@ export function loadLocation(data) {
     locationObjectMeshes = [];
     darknessEditorOverlay = null;
     currentLocationData = data;
+    terrainFoundationY = terrainFoundationHeight(data.tiles_data);
     naturalGrassReported = false;
     selectedLocationAsset = null;
     editorSelection = null;
@@ -11707,7 +11715,7 @@ export function loadLocation(data) {
     const planeGeo = new THREE.PlaneGeometry(gridWidth, gridHeight);
     const groundPlane = new THREE.Mesh(planeGeo, planeMat);
     groundPlane.rotation.x = -Math.PI / 2;
-    groundPlane.position.set(centerX, -0.05, centerZ);
+    groundPlane.position.set(centerX, terrainFoundationY - 0.05, centerZ);
     scene.add(groundPlane);
     groundPlaneMesh = groundPlane;
 
@@ -11794,6 +11802,23 @@ function updateTileCube(x, z, tile, rebuildTerrain = true) {
     return needsRebuild;
 }
 
+function refreshTerrainFoundation() {
+    const nextFoundation = terrainFoundationHeight(currentLocationData.tiles_data);
+    if (nextFoundation === terrainFoundationY) return false;
+    terrainFoundationY = nextFoundation;
+    if (groundPlaneMesh) groundPlaneMesh.position.y = terrainFoundationY - 0.05;
+    if (!locationTileMesh || !waterTileMesh) return false;
+    const width = currentLocationData.grid_width;
+    for (let z = 0; z < currentLocationData.grid_height; z++) {
+        for (let x = 0; x < width; x++) {
+            updateTileInstance(z * width + x, x, z, currentLocationData.tiles_data[z][x]);
+        }
+    }
+    locationTileMesh.instanceMatrix.needsUpdate = true;
+    waterTileMesh.instanceMatrix.needsUpdate = true;
+    return true;
+}
+
 function updateSmoothTerrainColors(changedTiles = null) {
     if (!smoothTerrainMesh || !currentLocationData) return;
     const colors = smoothTerrainMesh.geometry.getAttribute('color');
@@ -11862,7 +11887,7 @@ function rebuildSmoothTerrainMesh() {
         disposeObject(smoothTerrainMesh);
         smoothTerrainMesh = null;
     }
-    const data = buildSmoothTerrainData(currentLocationData.tiles_data);
+    const data = buildSmoothTerrainData(currentLocationData.tiles_data, () => true, terrainFoundationY);
     tileCubes = [locationTileMesh, waterTileMesh];
     if (!data.positions.length) return;
     const geometry = new THREE.BufferGeometry();
@@ -12293,13 +12318,15 @@ function rebuildGrassDetailMesh() {
 }
 
 function updateTileInstance(instanceId, x, z, tile) {
-    const height = tile.height || 1.0;
+    const height = getTileHeight(x, z);
     const isWater = tile.terrain === 'water';
     const isSmooth = isSmoothTerrainTile(currentLocationData.tiles_data, x, z);
     const waterKind = waterRegions.get(`${x},${z}`) || 'grass';
     const renderedHeight = isWater
-        ? Math.max(0.05, waterLevelForTile(tile, waterKind) - 0.01) : height;
-    tileInstanceTransform.position.set(x + 0.5, renderedHeight / 2, z + 0.5);
+        ? Math.max(0.05, waterLevelForTile(tile, waterKind) - 0.01)
+        : Math.max(0.05, height - terrainFoundationY);
+    tileInstanceTransform.position.set(x + 0.5,
+        isWater ? renderedHeight / 2 : (height + terrainFoundationY) / 2, z + 0.5);
     tileInstanceTransform.scale.set(1, renderedHeight, 1);
     tileInstanceTransform.updateMatrix();
     const activeMesh = isWater ? waterTileMesh : locationTileMesh;
@@ -12320,7 +12347,7 @@ function updateTileInstance(instanceId, x, z, tile) {
 function rebuildTileObjects(tileX, tileZ) {
     if (!currentLocationData) return;
     const tile = currentLocationData.tiles_data[tileZ][tileX];
-    const tileHeight = tile.height || 1.0;
+    const tileHeight = getTileHeight(tileX, tileZ);
     const worldX = tileX + 0.5;
     const worldZ = tileZ + 0.5;
 
@@ -12434,6 +12461,15 @@ function rebuildTileObjects(tileX, tileZ) {
 }
 
 // ========== Обновления из сокета ==========
+function moveTileDecorWithTerrain(tileX, tileZ, heightDelta) {
+    if (!heightDelta) return;
+    for (const mesh of objectMeshes) {
+        if (mesh.userData?.tileX === tileX && mesh.userData?.tileZ === tileZ) {
+            mesh.position.y += heightDelta;
+        }
+    }
+}
+
 export function applyLocationTilesUpdate(locationId, updates) {
     if (getCurrentLocationId() !== locationId) return;
     if (!currentLocationData) return;
@@ -12463,6 +12499,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
         rebuildTileObjects(upd.x, upd.z);
         updateLocationObjectHeight(upd.x, upd.z);
     }
+    terrainNeedsRebuild = refreshTerrainFoundation() || terrainNeedsRebuild;
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
     if (gridNeedsRebuild) {
         if (updates.some(update => update.terrain !== undefined
@@ -12498,10 +12535,12 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             const z = centerZ + dz;
             if (x < 0 || x >= currentLocationData.grid_width || z < 0 || z >= currentLocationData.grid_height) continue;
             const tile = tiles[z][x];
+            const previousHeight = getTileHeight(x, z);
             let needUpdate = false;
             if (updates.terrain !== undefined && tile.terrain !== updates.terrain) {
                 tile.terrain = updates.terrain;
                 if (tile.terrain !== 'grass') delete tile.grass_subtype;
+                if (tile.terrain === 'water' && previousHeight < 0.5) tile.height = 0.5;
                 needUpdate = true;
             }
             if (updates.grass_subtype !== undefined && tile.terrain === 'grass'
@@ -12509,9 +12548,16 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 tile.grass_subtype = updates.grass_subtype;
                 needUpdate = true;
             }
-            if (updates.height !== undefined && tile.height !== updates.height) {
-                tile.height = Math.min(3.0, Math.max(0.5, updates.height));
-                needUpdate = true;
+            if (updates.height !== undefined) {
+                const requestedHeight = Number(updates.height);
+                if (Number.isFinite(requestedHeight)) {
+                    const height = Math.min(3.0, Math.max(tile.terrain === 'water' ? 0.5 : -3.0,
+                        requestedHeight));
+                    if (tile.height !== height) {
+                        tile.height = height;
+                        needUpdate = true;
+                    }
+                }
             }
             if (updates.radiation !== undefined && tile.radiation !== updates.radiation) {
                 tile.radiation = Math.min(10, Math.max(0, updates.radiation));
@@ -12562,7 +12608,12 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                             && ['campfire', 'anomaly'].includes(mesh.userData?.objType));
                 }
                 terrainNeedsRebuild = updateTileCube(x, z, tile, false) || terrainNeedsRebuild;
-                if (updates.height !== undefined) updateLocationObjectHeight(x, z);
+                if (tile.height !== previousHeight) {
+                    updateLocationObjectHeight(x, z);
+                    if (updates.objects === undefined && !updates.addObject) {
+                        moveTileDecorWithTerrain(x, z, tile.height - previousHeight);
+                    }
+                }
                 if (updates.objects !== undefined || updates.addObject) {
                     rebuildTileObjects(x, z);
                 }
@@ -12574,15 +12625,17 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     if (updates.terrain !== undefined) {
         const changedByTile = new Map(changed.map(item => [`${item.x},${item.z}`, item]));
         for (const { x, z, height } of waterSurfaceAdjustments(tiles, new Set(changedByTile.keys()))) {
-            tiles[z][x].height = height;
+            const previousHeight = getTileHeight(x, z);
+            tiles[z][x].height = Math.max(0.5, height);
             lightChanged = true;
             terrainNeedsRebuild = updateTileCube(x, z, tiles[z][x], false) || terrainNeedsRebuild;
             updateLocationObjectHeight(x, z);
+            moveTileDecorWithTerrain(x, z, tiles[z][x].height - previousHeight);
             const cell = changedByTile.get(`${x},${z}`);
-            if (cell) cell.height = height;
+            if (cell) cell.height = tiles[z][x].height;
             else {
                 const added = { x, z, terrain: tiles[z][x].terrain,
-                    grass_subtype: tiles[z][x].grass_subtype || null, height,
+                    grass_subtype: tiles[z][x].grass_subtype || null, height: tiles[z][x].height,
                     objects: tiles[z][x].objects, radiation: tiles[z][x].radiation };
                 changed.push(added);
                 changedByTile.set(`${x},${z}`, added);
@@ -12590,6 +12643,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         }
     }
     if (changed.length === 0) return;
+    terrainNeedsRebuild = refreshTerrainFoundation() || terrainNeedsRebuild;
     if (terrainNeedsRebuild) rebuildSmoothTerrainMesh();
     if (updates.terrain !== undefined || updates.height !== undefined
         || updates.grass_subtype !== undefined) {
@@ -13198,7 +13252,7 @@ export function setupLocationEditing() {
             `;
             locInfo.style.display = 'block';
             if (!lastHighlightCoords || lastHighlightCoords.x !== x || lastHighlightCoords.z !== z) {
-                updateHighlight(x, z, tile.height || 1.0);
+                updateHighlight(x, z, getTileHeight(x, z));
                 lastHighlightCoords = { x, z };
             }
             hoveredTileCoords = { x, z };
@@ -13402,7 +13456,7 @@ export function setupLocationEditing() {
             const tileZ = Math.floor(point.z);
             if (tileX >= 0 && tileX < currentLocationData.grid_width && tileZ >= 0 && tileZ < currentLocationData.grid_height) {
                 const tile = currentLocationData.tiles_data[tileZ][tileX];
-                const height = tile.height || 1.0;
+                const height = getTileHeight(tileX, tileZ);
                 if (!previewSprite) previewSprite = createPreviewSprite();
                 previewSprite.position.set(tileX + 0.5, height + 0.5, tileZ + 0.5);
                 previewSprite.visible = true;
@@ -13752,10 +13806,6 @@ export function setLocationGrassSubtype(value) {
 }
 export function setLocationBrushHeight(h) {
     currentBrushHeight = h;
-    const heightSlider = document.getElementById('tile-height');
-    const heightSpan = document.getElementById('tile-height-value');
-    if (heightSlider) heightSlider.value = h;
-    if (heightSpan) heightSpan.textContent = h.toFixed(1);
     const locHeightSlider = document.getElementById('loc-edit-height');
     const locHeightSpan = document.getElementById('loc-height-value');
     if (locHeightSlider) locHeightSlider.value = h;

@@ -151,7 +151,7 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
         const source = assets[kind];
         const geometry = source.geometry.clone();
         // Instance coordinates are chunk-local, so one conservative bound works for every chunk.
-        geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(6, 1.5, 6), 9.5);
+        geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(6, 0, 6), 9.5);
         const material = source.material.clone();
         const chunks = new Map();
         for (const plant of plants) {

@@ -162,10 +162,6 @@ window.setBrushRadiusFromInput = function(value) {
 window.setTileHeightFromInput = function(value) {
     if (window.isLocationActive) {
         setLocationBrushHeight(parseFloat(value));
-        const heightSpan = document.getElementById('tile-height-value');
-        const heightSlider = document.getElementById('tile-height');
-        if (heightSpan) heightSpan.textContent = parseFloat(value).toFixed(1);
-        if (heightSlider) heightSlider.value = value;
     } else {
         originalSetTileHeightFromInput(value);
     }
@@ -328,7 +324,7 @@ window.enterLocation = async function(locationId) {
                         </div>
                         <div style="display: flex; align-items: center; gap: 5px;">
                             <span>Высота:</span>
-                            <input type="range" id="loc-edit-height" min="0.5" max="3.0" step="0.1" value="1.0">
+                            <input type="range" id="loc-edit-height" min="-3.0" max="3.0" step="0.1" value="1.0">
                             <span id="loc-height-value">1.0</span>
                         </div>
                         <label style="display: flex; align-items: center; gap: 5px;">
