@@ -411,6 +411,69 @@ test('connected water levels meet at one corner height across four cells', async
     }
 });
 
+test('one swamp and three water cells close their shared corner in 3D', async () => {
+    const { buildRoundedWaterData, connectedWaterHeightAt, waterLevelForTile } = await load('locationWaterEdge.js');
+    const { createTerrainSurfaceHeightSampler, isSmoothTerrainTile } = await load('locationTerrain.js');
+    const cells = [[1, 1], [2, 1], [1, 2], [2, 2]];
+    for (let landIndex = 0; landIndex < cells.length; landIndex++) {
+        for (const levels of [[1, 1, 1], [0.8, 1.3, 1.8]]) {
+            const tiles = Array.from({ length: 4 }, () => Array.from({ length: 4 }, () => (
+                { terrain: 'water', height: 1 }
+            )));
+            let levelIndex = 0;
+            const [landX, landZ] = cells[landIndex];
+            tiles[landZ][landX] = { terrain: 'swamp', height: 2 };
+            cells.forEach(([x, z], index) => {
+                if (index !== landIndex) tiles[z][x] = {
+                    terrain: 'water', height: levels[levelIndex++],
+                };
+            });
+            assert.equal(isSmoothTerrainTile(tiles, landX, landZ), false);
+            const landSurfaceHeightAt = createTerrainSurfaceHeightSampler(tiles);
+            const data = buildRoundedWaterData(tiles, 0.24, () => true,
+                null, waterLevelForTile, {
+                    shorelineRing: true,
+                    landSurfaceHeightAt,
+                });
+            const diagonalX = landX === 1 ? 2 : 1;
+            const diagonalZ = landZ === 1 ? 2 : 1;
+            const dx = diagonalX === 2 ? 1 : -1;
+            const dz = diagonalZ === 2 ? 1 : -1;
+            const cornerY = landSurfaceHeightAt(
+                landX === 1 ? 1.99999 : 2.00001,
+                landZ === 1 ? 1.99999 : 2.00001) + 0.006;
+            const waterAt = (x, z) => connectedWaterHeightAt(tiles,
+                diagonalX, diagonalZ, x, z, data.regions, waterLevelForTile) + 0.012;
+            const expected = [[2, cornerY, 2],
+                [2 + dx * 0.075, waterAt(2 + dx * 0.075, 2), 2],
+                [2, waterAt(2, 2 + dz * 0.075), 2 + dz * 0.075]];
+            const vertexKey = point => point.map(value => value.toFixed(5)).join(',');
+            const cap = expected.map(vertexKey).sort().join('|');
+            const bankFaces = [];
+            for (let index = 0; index < data.bank.length; index += 9) {
+                const face = [0, 3, 6].map(offset => data.bank.slice(index + offset, index + offset + 3));
+                bankFaces.push(face);
+                const planarArea = (face[1][0] - face[0][0]) * (face[2][2] - face[0][2])
+                    - (face[1][2] - face[0][2]) * (face[2][0] - face[0][0]);
+                assert.ok(Math.abs(planarArea) > 1e-8, 'no overlapping vertical cap');
+            }
+            assert.ok(bankFaces.some(face => face.map(vertexKey).sort().join('|') === cap),
+                `missing bank corner cap at rotation ${landIndex}, levels ${levels}`);
+            for (const cornerEdge of [expected[1], expected[2]]) {
+                const endpoints = [vertexKey(expected[0]), vertexKey(cornerEdge)];
+                assert.equal(bankFaces.filter(face => endpoints.every(key => face.some(point => vertexKey(point) === key))).length,
+                    2, 'corner cap must share its full 3D edge with the adjacent shore');
+                assert.ok(data.water.some((_, index) => index % 3 === 0
+                    && vertexKey(data.water.slice(index, index + 3)) === vertexKey(cornerEdge)),
+                'corner cap must meet the sloped water surface at the same 3D vertex');
+            }
+            assert.ok(!data.water.some((value, index) => index % 3 === 0
+                && Math.abs(value - 2) < 1e-8 && Math.abs(data.water[index + 2] - 2) < 1e-8),
+            'water must not overlap the bank cap at the land corner');
+        }
+    }
+});
+
 test('diagonally touching but disconnected water cells keep separate levels', async () => {
     const { buildRoundedWaterData, waterExposedSideMask } = await load('locationWaterEdge.js');
     const tiles = Array.from({ length: 4 }, () => Array.from({ length: 4 }, () => (
@@ -455,11 +518,19 @@ test('diagonal land does not pull a shore triangle across two water neighbors', 
     const data = buildRoundedWaterData(tiles, 0.24, (x, z) => x === 1 && z === 1,
         null, waterLevelForTile, { shorelineRing: true });
     assert.ok(data.bank.length > 0);
+    let cornerCaps = 0;
     for (let index = 0; index < data.bank.length; index += 9) {
         const x = (data.bank[index] + data.bank[index + 3] + data.bank[index + 6]) / 3;
         const z = (data.bank[index + 2] + data.bank[index + 5] + data.bank[index + 8]) / 3;
-        assert.ok(z > 1.5 || x < 1.5, 'shore triangle extends into the diagonal water corner');
+        if (z > 1.5 || x < 1.5) continue;
+        cornerCaps++;
+        for (const offset of [0, 3, 6]) {
+            assert.ok(data.bank[index + offset] >= 1.925 - 1e-8
+                && data.bank[index + offset + 2] <= 1.075 + 1e-8,
+            'shore triangle extends beyond the short diagonal corner cap');
+        }
     }
+    assert.equal(cornerCaps, 1, 'only the local diagonal corner cap may enter this water quadrant');
 });
 
 test('local shore ring joins uneven grass and sand to water without changing neighboring tops', async () => {

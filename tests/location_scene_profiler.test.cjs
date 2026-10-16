@@ -89,11 +89,12 @@ test('textureless surface probe swaps only targeted materials and restores exact
     const elements = [];
     const material = (extras = {}) => ({ side: 2, depthTest: true, depthWrite: true,
         polygonOffset: true, polygonOffsetFactor: 0, polygonOffsetUnits: -1, ...extras });
-    const mesh = (original, object = null) => ({ isMesh: true, material: original,
+    const mesh = (original, object = null) => ({ isMesh: true, visible: true, material: original,
         userData: { locationObject: object }, traverse(callback) { callback(this); } });
     const ground = mesh(material({ map: { id: 'ground' }, onBeforeCompile() {} }));
     const water = mesh(material({ map: { id: 'water' } }));
     const bank = mesh(material({ map: { id: 'bank' } }));
+    const sandBank = mesh(material({ map: { id: 'sand-bank' } }));
     const earth = mesh(material({ map: { id: 'earth' } }), { type: 'floor', properties: { asset_id: 'earth' } });
     const house = mesh(material({ map: { id: 'wood' } }), { type: 'floor', properties: { asset_id: 'wood' } });
     const unrelated = mesh(earth.material, { type: 'wall' });
@@ -108,9 +109,16 @@ test('textureless surface probe swaps only targeted materials and restores exact
         container: { append() {} },
         THREE: { MeshStandardMaterial: class {
             constructor(options) { Object.assign(this, options); this.dispose = () => { this.disposed = true; }; }
+        }, MeshBasicMaterial: class {
+            constructor(options) { Object.assign(this, options); this.unlit = true;
+                this.dispose = () => { this.disposed = true; }; }
         } },
         renderer: { isUnavailableRenderer: false },
-        terrainSurfaceMesh: ground, waterSurfaceMesh: water, waterBankMesh: bank,
+        terrainSurfaceMesh: ground, waterSurfaceMesh: water, waterBankMesh: bank, sandBankMesh: sandBank,
+        locationTileMesh: null, smoothTerrainMesh: null, groundPlaneMesh: null, waterTileMesh: null,
+        waterDetailGroup: null, grassDetailGroup: null, objectMeshes: [],
+        fogOverlayMeshes: new Map(), fogMemoryGhosts: new Map(),
+        darknessEditorOverlay: null, locationGridMesh: null,
         locationObjectMeshes: [earth, house, unrelated],
         structureLevel: () => 0,
         visualAssetForLocationObject: (_type, properties) => ({
@@ -140,6 +148,19 @@ test('textureless surface probe swaps only targeted materials and restores exact
     elements[1].listeners.click();
     profile.resetSurfaceProbe();
     assert.equal(ground.material, originals[0]);
+    for (let stage = 0; stage < 5; stage++) elements[2].listeners.click();
+    const originalSandBank = sandBank.material;
+    elements[1].listeners.click();
+    assert.equal(bank.material.color, 0xff00ff);
+    assert.equal(sandBank.material.color, 0x00ffff);
+    assert.equal(bank.material.unlit, true);
+    assert.equal(sandBank.material.unlit, true);
+    assert.equal(bank.material.fog, false);
+    assert.equal(bank.material.depthTest, true);
+    assert.equal(sandBank.material.depthWrite, true);
+    elements[1].listeners.click();
+    assert.equal(bank.material, originals[2]);
+    assert.equal(sandBank.material, originalSandBank);
     profile.destroy();
 });
 

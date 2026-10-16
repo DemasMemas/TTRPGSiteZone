@@ -6934,11 +6934,11 @@ function createLocationProfileControl(container) {
         surfaceButton.textContent = 'Без текстур поверхности';
         surfaceButton.setAttribute('aria-pressed', 'false');
     }
-    function replaceSurfaceMaterials(root, color) {
+    function replaceSurfaceMaterials(root, color, unlit = false) {
         root?.traverse(mesh => {
             if (!mesh.isMesh || !mesh.material) return;
             const original = mesh.material;
-            const flat = material => new THREE.MeshStandardMaterial({
+            const flat = material => new (unlit ? THREE.MeshBasicMaterial : THREE.MeshStandardMaterial)({
                 color, roughness: 1, metalness: 0, side: material.side,
                 depthTest: material.depthTest, depthWrite: material.depthWrite,
                 depthFunc: material.depthFunc, colorWrite: material.colorWrite,
@@ -6946,7 +6946,7 @@ function createLocationProfileControl(container) {
                 polygonOffsetFactor: material.polygonOffsetFactor,
                 polygonOffsetUnits: material.polygonOffsetUnits,
                 transparent: material.transparent, opacity: material.opacity,
-                fog: material.fog, toneMapped: material.toneMapped,
+                fog: unlit ? false : material.fog, toneMapped: unlit ? false : material.toneMapped,
             });
             const replacement = Array.isArray(original) ? original.map(flat) : flat(original);
             mesh.material = replacement;
@@ -6961,9 +6961,11 @@ function createLocationProfileControl(container) {
         const groundMap = terrainSurfaceMesh?.material?.map;
         const waterMap = waterSurfaceMesh?.material?.map;
         let pbrMap = null;
+        const identifyBanks = layerStage === 5;
         restoreFloorDepthProbe();
         replaceSurfaceMaterials(terrainSurfaceMesh, 0x7b856b);
-        replaceSurfaceMaterials(waterBankMesh, 0x9b876a);
+        replaceSurfaceMaterials(waterBankMesh, identifyBanks ? 0xff00ff : 0x9b876a, identifyBanks);
+        if (identifyBanks) replaceSurfaceMaterials(sandBankMesh, 0x00ffff, true);
         replaceSurfaceMaterials(waterSurfaceMesh, 0x4e91a2);
         for (const mesh of groundPbrFloors()) {
             mesh.traverse(child => {

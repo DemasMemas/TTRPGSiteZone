@@ -165,37 +165,54 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
             const west = isLand(x - 1, z);
             const corners = [
                 {
-                    first: west, second: north, at: [x, z],
+                    first: west, second: north, at: [x, z], diagonal: [x - 1, z - 1],
                     firstOnly: [x + strip, z], secondOnly: [x, z + strip], diagonalLand: isLand(x - 1, z - 1),
                     arc: [[x + strip, z + r], [x + r - diagonal, z + r - diagonal], [x + r, z + strip]],
                     edge: [x + 0.5, z + (north ? strip + 0.025 * Math.sin(x * 4.3 + z * 1.7) : 0)],
                 },
                 {
-                    first: north, second: east, at: [x + 1, z],
+                    first: north, second: east, at: [x + 1, z], diagonal: [x + 1, z - 1],
                     firstOnly: [x + 1, z + strip], secondOnly: [x + 1 - strip, z], diagonalLand: isLand(x + 1, z - 1),
                     arc: [[x + 1 - r, z + strip], [x + 1 - r + diagonal, z + r - diagonal], [x + 1 - strip, z + r]],
                     edge: [x + 1 - (east ? strip + 0.025 * Math.sin(x * 3.1 + z * 5.1) : 0), z + 0.5],
                 },
                 {
-                    first: east, second: south, at: [x + 1, z + 1],
+                    first: east, second: south, at: [x + 1, z + 1], diagonal: [x + 1, z + 1],
                     firstOnly: [x + 1 - strip, z + 1], secondOnly: [x + 1, z + 1 - strip], diagonalLand: isLand(x + 1, z + 1),
                     arc: [[x + 1 - strip, z + 1 - r], [x + 1 - r + diagonal, z + 1 - r + diagonal], [x + 1 - r, z + 1 - strip]],
                     edge: [x + 0.5, z + 1 - (south ? strip + 0.025 * Math.sin(x * 4.3 + (z + 1) * 1.7) : 0)],
                 },
                 {
-                    first: south, second: west, at: [x, z + 1],
+                    first: south, second: west, at: [x, z + 1], diagonal: [x - 1, z + 1],
                     firstOnly: [x, z + 1 - strip], secondOnly: [x + strip, z + 1], diagonalLand: isLand(x - 1, z + 1),
                     arc: [[x + r, z + 1 - strip], [x + r - diagonal, z + 1 - r + diagonal], [x + strip, z + 1 - r]],
                     edge: [x + (west ? strip + 0.025 * Math.sin((x - 1) * 3.1 + z * 5.1) : 0), z + 0.5],
                 },
             ];
             const outline = [];
+            const waterOutline = [];
+            const diagonalCorners = [];
             for (const corner of corners) {
-                if (corner.first && corner.second) outline.push(...corner.arc);
-                else if (corner.diagonalLand && corner.first) outline.push(corner.firstOnly);
-                else if (corner.diagonalLand && corner.second) outline.push(corner.secondOnly);
-                else outline.push(corner.at);
+                let points;
+                let diagonalOnly = false;
+                const diagonalWater = shorelineRing
+                    && tiles[corner.diagonal[1]]?.[corner.diagonal[0]]?.terrain === 'water';
+                if (corner.first && corner.second) points = corner.arc;
+                else if (shorelineRing && corner.diagonalLand && !corner.first && !corner.second) {
+                    // Keep the ordinary ring out of this corner; its water triangle is replaced by a cap.
+                    points = [corner.at];
+                    waterOutline.push(corner.secondOnly, corner.firstOnly);
+                    diagonalCorners.push(corner);
+                    diagonalOnly = true;
+                } else if (corner.first && (corner.diagonalLand || diagonalWater)) {
+                    points = [corner.firstOnly];
+                } else if (corner.second && (corner.diagonalLand || diagonalWater)) {
+                    points = [corner.secondOnly];
+                } else points = [corner.at];
+                outline.push(...points);
+                if (!diagonalOnly) waterOutline.push(...points);
                 outline.push(corner.edge);
+                waterOutline.push(corner.edge);
             }
             const shore = [
                 { x, z: z - 1, distance: (u, v) => v },
@@ -244,8 +261,11 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
                     const centerZ = z + 0.5;
                     const edgePoint = (u, v) => {
                         const point = bankPoint(u, v);
-                        point.y = (sharedShoreHeight(point.x, point.z)
-                            ?? (waterHeightAt(point.x, point.z) + 0.006)) + 0.006;
+                        const meetsWater = outline.some(([px, pz]) =>
+                            Math.abs(px - point.x) < 1e-8 && Math.abs(pz - point.z) < 1e-8);
+                        point.y = meetsWater ? waterHeightAt(point.x, point.z) + 0.012
+                            : (sharedShoreHeight(point.x, point.z)
+                                ?? (waterHeightAt(point.x, point.z) + 0.006)) + 0.006;
                         return point;
                     };
                     const angleOf = ([px, pz]) => Math.atan2(pz - centerZ, px - centerX);
@@ -320,11 +340,33 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
                     }
                 }
             }
+            if (shorelineRing) {
+                for (const corner of diagonalCorners) {
+                    const land = tiles[corner.diagonal[1]][corner.diagonal[0]];
+                    const shoreY = sharedShoreHeight(...corner.at);
+                    if (shoreY == null) continue;
+                    const tint = LAND_COLORS[land.terrain] || LAND_COLORS.grass;
+                    const point = ([px, pz], y, color) => ({
+                        x: px, y, z: pz, color, baseColor: tint,
+                    });
+                    const waterTint = kind === 'sand' ? [0.61, 0.53, 0.35] : [0.73, 0.85, 0.87];
+                    const landTint = kind === 'sand' ? [0.83, 0.73, 0.47] : [1, 1, 1];
+                    const a = point(corner.at, shoreY + 0.006, landTint);
+                    const b = point(corner.firstOnly,
+                        waterHeightAt(...corner.firstOnly) + 0.012, waterTint);
+                    const c = point(corner.secondOnly,
+                        waterHeightAt(...corner.secondOnly) + 0.012, waterTint);
+                    const target = kind === 'sand'
+                        ? [sandBank, sandBankColors, sandBankUvs] : [bank, bankColors, bankUvs];
+                    pushBankTriangle(...target, a, b, c, tiles[z].length, tiles.length,
+                        kind === 'sand' ? null : bankBaseColors);
+                }
+            }
             const center = [x + 0.5, z + 0.5];
-            for (let index = 0; index < outline.length; index++) {
+            for (let index = 0; index < waterOutline.length; index++) {
                 if (shorelineRing) {
-                    const a = outline[index];
-                    const b = outline[(index + 1) % outline.length];
+                    const a = waterOutline[index];
+                    const b = waterOutline[(index + 1) % waterOutline.length];
                     const points = [
                         [center[0], height + 0.012, center[1]],
                         [a[0], waterHeightAt(a[0], a[1]) + 0.012, a[1]],
@@ -335,7 +377,8 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
                         - (second[0] - first[0]) * (third[2] - first[2]);
                     for (const point of cross >= 0 ? points : [first, third, second]) water.push(...point);
                 } else {
-                    pushTriangle(water, center, outline[index], outline[(index + 1) % outline.length], height + 0.012);
+                    pushTriangle(water, center, waterOutline[index],
+                        waterOutline[(index + 1) % waterOutline.length], height + 0.012);
                 }
                 for (let vertex = 0; vertex < 3; vertex++) waterColors.push(...WATER_TINTS[kind]);
             }
