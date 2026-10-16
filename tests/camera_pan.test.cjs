@@ -55,5 +55,5 @@ test('range sliders do not seize movement keys while text fields still do', asyn
     assert.equal(isTypingTarget(select('other-select')), true);
     assert.match(read('lobby3d.js'), /isTypingTarget\(e\.target\)/);
     assert.match(read('ui_interactions.js'), /const isInput = isTypingTarget\(target\)/);
-    assert.match(read('mapEditorQuickMenu.js'), /if \(isTypingTarget\(event\.target\)\) return/);
+    assert.match(read('mapEditorQuickMenu.js'), /if \(isTypingTarget\(event\.target\)\s*\|\|[^\n]*modal[^\n]*\) return/);
 });

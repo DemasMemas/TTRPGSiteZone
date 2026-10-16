@@ -61,10 +61,11 @@ test('darkness brush paints and erases square areas without leaving the map', as
 
 test('sunlight and local lights cast shadows while a cutaway roof remains a caster', () => {
     const scene = read('locationScene.js');
+    const roof = read('locationRoof.js');
     assert.match(scene, /locationDirectionalLight\.castShadow = true/);
-    assert.match(scene, /shadowCaster\.castShadow = true/);
-    assert.match(scene, /roof\.userData\.visualMeshes = \[roofFace, gable\]/);
-    assert.match(scene, /child\.castShadow = obj\.type !== 'floor'/);
+    assert.match(roof, /shadowCaster\.castShadow = true/);
+    assert.match(roof, /roof\.userData\.visualMeshes = gable \? \[roofFace, gable\] : \[roofFace\]/);
+    assert.match(scene, /child\.castShadow = obj\.type !== 'floor' && !child\.userData\.fireFlame/);
     assert.match(scene, /child\.receiveShadow = true/);
     assert.match(scene, /light\.castShadow = true/);
 });

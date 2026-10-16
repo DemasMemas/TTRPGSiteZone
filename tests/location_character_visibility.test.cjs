@@ -60,7 +60,10 @@ test('hidden or camouflaged characters are not visible through fog memory', () =
 
 test('location labels keep a dark surface while owner and team colors stay narrow accents', () => {
     const entry = { teamBadge: { style: {}, textContent: '' }, ownerId: 7,
-        model: { traverse() {} }, label: { element: { style: { backgroundColor: 'rgba(17, 23, 20, 0.84)' } } } };
+        model: { traverse() {} }, label: { element: { style: {
+            backgroundColor: 'rgba(17, 23, 20, 0.84)',
+            setProperty(name, value) { this[name] = value; },
+        } } } };
     const context = vm.createContext({
         getCharacterModelEntry: () => entry,
         characterModels: new Map([[1, entry]]),
@@ -71,10 +74,63 @@ test('location labels keep a dark surface while owner and team colors stay narro
     assert.equal(entry.teamBadge.style.borderLeftColor, '#00ff00');
     assert.equal(entry.teamBadge.style.backgroundColor, undefined);
     assert.equal(entry.teamBadge.style.display, 'block');
+    assert.equal(entry.label.element.style['--character-affiliation'], '#00ff00');
     vm.runInContext(section('export function refreshUserColor(', 'export function applyCharacterPostureVisual('), context);
     context.refreshUserColor(7);
     assert.equal(entry.label.element.style.borderLeftColor, '#ff0000');
     assert.equal(entry.label.element.style.backgroundColor, 'rgba(17, 23, 20, 0.84)');
     assert.match(style, /\.location-character-label\s*\{[^}]*background: rgba\(17, 23, 20, 0\.84\)/);
     assert.match(scene, /div\.className = 'location-character-label'/);
+});
+
+test('character labels switch from full to name to marker with hysteresis and selection override', () => {
+    const changes = [];
+    const classes = new Set();
+    const element = { classList: { toggle(name, enabled) {
+        changes.push([name, enabled]);
+        if (enabled) classes.add(name);
+        else classes.delete(name);
+    } } };
+    const entry = { label: { position: { distance: 8 }, element } };
+    const context = vm.createContext({
+        camera: { position: { distanceTo(position) { return position.distance; } } },
+        characterModels: new Map([[1, entry]]),
+        window: { currentLocationCharacterId: null },
+        hoveredCharacterId: null, dragCharacter: null, gmVisionCharacterId: null,
+    });
+    vm.runInContext(section('const CHARACTER_LABEL_NEAR_DISTANCE =', '// ========== Добавление персонажа'), context);
+    const update = () => context.updateCharacterLabelDistances();
+    update();
+    assert.equal(entry.labelState, 'full');
+    entry.label.position.distance = 27;
+    update();
+    assert.equal(entry.labelState, 'compact');
+    assert.equal(classes.has('location-character-label--compact'), true);
+    const before = changes.length;
+    update();
+    assert.equal(changes.length, before);
+    entry.label.position.distance = 50;
+    update();
+    assert.equal(entry.labelState, 'marker');
+    assert.equal(classes.has('location-character-label--marker'), true);
+    context.window.currentLocationCharacterId = 1;
+    update();
+    assert.equal(entry.labelState, 'full');
+    context.window.currentLocationCharacterId = null;
+    update();
+    assert.equal(entry.labelState, 'marker');
+    entry.label.position.distance = 39;
+    update();
+    assert.equal(entry.labelState, 'marker');
+    entry.label.position.distance = 37;
+    update();
+    assert.equal(entry.labelState, 'compact');
+    entry.label.position.distance = 20;
+    update();
+    assert.equal(entry.labelState, 'compact');
+    entry.label.position.distance = 15;
+    update();
+    assert.equal(entry.labelState, 'full');
+    assert.match(style, /\.location-character-label--marker \.location-character-label__name\s*\{\s*display: none/);
+    assert.match(style, /\.location-character-label--compact \.location-character-label__badge/);
 });

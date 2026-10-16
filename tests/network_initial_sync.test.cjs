@@ -119,6 +119,8 @@ test('chunk loading shares an in-flight request and limits parallel HTTP work', 
         chunksMap,
         performance: { now: () => 10, mark() {}, measure() {} },
         waitForWorldTerrainRefresh: async () => {},
+        loadGrassGroundPixels: async () => {},
+        setWorldGrassGroundPixelsEnabled() {},
         console: { info() {}, warn() {} },
         async fetchChunkBatch(range) {
             active += 1;

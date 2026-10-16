@@ -26,6 +26,7 @@ function frameHarness(local) {
         updateLocationCameraMovement: mark('camera'), updateGlobalCameraMovement: mark('camera'),
         flushPendingTerrainRefresh: mark('terrainRefresh'),
         updateAnomalyRenderLights: mark('anomalyLights'), locationProfiler: null,
+        updateCharacterLabelDistances: mark('labelDistance'),
         updateRoofVisibility: mark('roofs'),
         updateChunkVisibility: mark('chunks'), updateRain: mark('rain'),
         refreshWorldShadows: mark('shadows'),
@@ -116,6 +117,8 @@ for (const local of [false, true]) {
         assert.ok(calls.some(call => call[0] === 'render'));
         assert.ok(calls.some(call => call[0] === 'fps'));
         if (local) {
+            assert.ok(calls.findIndex(call => call[0] === 'labelDistance')
+                < calls.findIndex(call => call[0] === 'labels'));
             assert.ok(calls.some(call => call[0] === 'labels'));
             assert.ok(calls.findIndex(call => call[0] === 'terrainRefresh')
                 < calls.findIndex(call => call[0] === 'render'));

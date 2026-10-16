@@ -101,6 +101,7 @@ test('fire placement preview follows the cursor without rebuilding its model', a
             editorRotateMode: false, editorResizeMode: false, editorSelections: [], editorSelection: null,
             editorMoveMode: false, editorMovePreviewPoint: null, editorRotateAngle: 0,
             editorResizeAxis: null, editorResizeDimensions: null, editorResizeSymmetric: false,
+            editorResizeElevation: null, editorResizeAnchor: null,
             brushObjectRotation: 0, selectedLocationAsset: asset,
             structureRotation: 0, structureWidth: 1, structureDepth: 1, structureHeight: 1,
             structureColor: '#fff', window: { locationEditMode: true, locationEditorTool: 'assets' },

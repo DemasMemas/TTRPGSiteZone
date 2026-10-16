@@ -102,7 +102,7 @@ test('asset library offers structures, decor and preset lamps without a lamp lis
     assert.doesNotMatch(editor, /data-add-light|location-lighting-sources/);
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
     assert.match(scene, /placeSelectedLocationAsset\(hoveredTileCoords\.x, hoveredTileCoords\.z\)/);
-    assert.match(scene, /commitEditorAssetMove\(point\?\.x \?\? hoveredTileCoords\.x \+ 0\.5/);
+    assert.match(scene, /if \(point\) commitEditorAssetMove\(point\.x, point\.z\)/);
     assert.match(scene, /beginRotateSelectedLocationAsset/);
 });
 
@@ -129,6 +129,8 @@ test('legacy decor angle control displays a wall poster direction without clampi
     const context = vm.createContext({
         brushObjectRotation: 0,
         document: { getElementById: id => id === 'loc-obj-rotation' ? input : span },
+        syncLocationPlacementAngle() {},
+        updateBuildPreview() {},
     });
     vm.runInContext(scene.slice(start, end).replace('export ', ''), context);
     context.setLocationBrushObjectRotation(-90);
@@ -216,6 +218,7 @@ test('structure rotation and elevation save in Three.js coordinates', async () =
         window: { currentLobbyId: 19 },
         Server: { updateLocationObject: async (_lobby, _id, payload) => { saved = payload; return source; } },
         bearingToObjectRotation: bearing => -bearing * Math.PI / 180,
+        structureLevel: () => 0,
         clampAssetElevation: value => Math.max(0, Math.min(10, Number(value) || 0)),
         updateLocationObject() {},
         notifyEditorSelection() {},

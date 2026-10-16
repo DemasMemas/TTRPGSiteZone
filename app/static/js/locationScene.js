@@ -218,7 +218,6 @@ let locationDarknessTexture = null;
 let activeLightingProfile = null;
 let selectedLocationAsset = null;
 let editorSelection = null;
-let floorDepthProbe = null;
 let editorMoveMode = false;
 let editorMovePreviewPoint = null;
 let editorRotateMode = false;
@@ -4875,6 +4874,43 @@ function characterLabelOffset(entry) {
         : entry.posture === 'prone' ? 0.95 : entry.posture === 'sitting' ? 1.25 : 1.55;
 }
 
+const CHARACTER_LABEL_NEAR_DISTANCE = 18;
+const CHARACTER_LABEL_FAR_DISTANCE = 40;
+const CHARACTER_LABEL_HYSTERESIS = 2.5;
+
+function characterLabelState(distance, previous, selected = false) {
+    if (selected) return 'full';
+    if (!previous) return distance < CHARACTER_LABEL_NEAR_DISTANCE ? 'full'
+        : distance < CHARACTER_LABEL_FAR_DISTANCE ? 'compact' : 'marker';
+    if (previous === 'full' && distance > CHARACTER_LABEL_NEAR_DISTANCE + CHARACTER_LABEL_HYSTERESIS) {
+        previous = 'compact';
+    } else if (previous === 'marker' && distance < CHARACTER_LABEL_FAR_DISTANCE - CHARACTER_LABEL_HYSTERESIS) {
+        previous = 'compact';
+    }
+    if (previous === 'compact' && distance > CHARACTER_LABEL_FAR_DISTANCE + CHARACTER_LABEL_HYSTERESIS) {
+        return 'marker';
+    }
+    if (previous === 'compact' && distance < CHARACTER_LABEL_NEAR_DISTANCE - CHARACTER_LABEL_HYSTERESIS) {
+        return 'full';
+    }
+    return previous;
+}
+
+function updateCharacterLabelDistances() {
+    if (!camera) return;
+    for (const [id, entry] of characterModels) {
+        const selected = Number(id) === Number(window.currentLocationCharacterId)
+            || Number(id) === Number(hoveredCharacterId)
+            || Number(id) === Number(dragCharacter?.characterId)
+            || Number(id) === Number(gmVisionCharacterId);
+        const state = characterLabelState(camera.position.distanceTo(entry.label.position), entry.labelState, selected);
+        if (state === entry.labelState) continue;
+        entry.labelState = state;
+        entry.label.element.classList.toggle('location-character-label--compact', state === 'compact');
+        entry.label.element.classList.toggle('location-character-label--marker', state === 'marker');
+    }
+}
+
 // ========== Добавление персонажа ==========
 function normalizeTeamColor(value) {
     const color = String(value || '').trim();
@@ -4886,6 +4922,7 @@ function updateCharacterTeamVisual(characterId, teamName, teamColor) {
     if (!entry) return;
     entry.teamName = String(teamName || '').trim() || null;
     entry.teamColor = normalizeTeamColor(teamColor);
+    entry.label.element.style.setProperty('--character-affiliation', entry.teamColor || getUserColorHex(entry.ownerId));
     const badge = entry.teamBadge;
     if (!badge) return;
     if (!entry.teamName) {
@@ -4921,6 +4958,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     const colorHex = getUserColorHex(colorUserId);
     div.className = 'location-character-label';
     div.style.borderLeftColor = colorHex;
+    div.style.setProperty('--character-affiliation', colorHex);
     const nameLine = document.createElement('div');
     nameLine.className = 'location-character-label__name';
     nameLine.textContent = name;
@@ -5468,7 +5506,6 @@ function clearFogOverlay() {
 }
 
 function updateFogOverlay(active, sources) {
-    locationProfiler?.resetLayerProbe();
     if (!active) {
         fogOverlayMeshes.forEach(mesh => { mesh.visible = false; });
         return;
@@ -5781,6 +5818,7 @@ export function refreshUserColor(userId) {
         const labelElement = entry.label?.element;
         if (labelElement) {
             labelElement.style.borderLeftColor = colorHex;
+            if (!entry.teamColor) labelElement.style.setProperty('--character-affiliation', colorHex);
         }
     });
 }
@@ -6900,94 +6938,10 @@ function createLocationProfileControl(container) {
     button.type = 'button';
     button.className = 'scene-profile-button';
     button.textContent = 'Профиль сцены';
-    const surfaceButton = document.createElement('button');
-    surfaceButton.type = 'button';
-    surfaceButton.className = 'scene-profile-button scene-surface-button';
-    surfaceButton.textContent = 'Без текстур поверхности';
-    surfaceButton.setAttribute('aria-pressed', 'false');
-    const layerButton = document.createElement('button');
-    layerButton.type = 'button';
-    layerButton.className = 'scene-profile-button scene-layer-button';
-    layerButton.textContent = 'Слои: все';
-    layerButton.title = 'Последовательно показывает группы поверхностей; после последней возвращает всю сцену';
-    layerButton.setAttribute('aria-pressed', 'false');
     const panel = document.createElement('pre');
     panel.className = 'scene-profile-results';
     panel.hidden = true;
-    container.append(button, surfaceButton, layerButton, panel);
-
-    let surfaceMaterials = [];
-    const groundPbrFloors = () => locationObjectMeshes.filter(mesh => {
-        const object = mesh.userData.locationObject;
-        if (object?.type !== 'floor' || structureLevel(object) !== 0) return false;
-        const asset = visualAssetForLocationObject('floor', object.properties);
-        return asset?.visual?.renderMode === 'pbr' && asset.id !== 'art_aged_wood';
-    });
-    function restoreSurfaceProbe() {
-        if (!surfaceMaterials.length) return;
-        restoreFloorDepthProbe();
-        for (const { mesh, original, replacement } of surfaceMaterials) {
-            mesh.material = original;
-            for (const material of Array.isArray(replacement) ? replacement : [replacement]) material.dispose();
-        }
-        surfaceMaterials = [];
-        surfaceButton.textContent = 'Без текстур поверхности';
-        surfaceButton.setAttribute('aria-pressed', 'false');
-    }
-    function replaceSurfaceMaterials(root, color, unlit = false) {
-        root?.traverse(mesh => {
-            if (!mesh.isMesh || !mesh.material) return;
-            const original = mesh.material;
-            const flat = material => new (unlit ? THREE.MeshBasicMaterial : THREE.MeshStandardMaterial)({
-                color, roughness: 1, metalness: 0, side: material.side,
-                depthTest: material.depthTest, depthWrite: material.depthWrite,
-                depthFunc: material.depthFunc, colorWrite: material.colorWrite,
-                polygonOffset: material.polygonOffset,
-                polygonOffsetFactor: material.polygonOffsetFactor,
-                polygonOffsetUnits: material.polygonOffsetUnits,
-                transparent: material.transparent, opacity: material.opacity,
-                fog: unlit ? false : material.fog, toneMapped: unlit ? false : material.toneMapped,
-            });
-            const replacement = Array.isArray(original) ? original.map(flat) : flat(original);
-            mesh.material = replacement;
-            surfaceMaterials.push({ mesh, original, replacement });
-        });
-    }
-    surfaceButton.addEventListener('click', () => {
-        if (surfaceMaterials.length) {
-            restoreSurfaceProbe();
-            return;
-        }
-        const groundMap = terrainSurfaceMesh?.material?.map;
-        const waterMap = waterSurfaceMesh?.material?.map;
-        let pbrMap = null;
-        const identifyBanks = layerStage === 5;
-        restoreFloorDepthProbe();
-        replaceSurfaceMaterials(terrainSurfaceMesh, 0x7b856b);
-        replaceSurfaceMaterials(waterBankMesh, identifyBanks ? 0xff00ff : 0x9b876a, identifyBanks);
-        if (identifyBanks) replaceSurfaceMaterials(sandBankMesh, 0x00ffff, true);
-        replaceSurfaceMaterials(waterSurfaceMesh, 0x4e91a2);
-        for (const mesh of groundPbrFloors()) {
-            mesh.traverse(child => {
-                if (child.isMesh && child.material?.map) pbrMap ??= child.material.map;
-            });
-            replaceSurfaceMaterials(mesh, 0xc48b58);
-        }
-        if (!surfaceMaterials.length) return;
-        const context = renderer.getContext?.();
-        const attributes = context?.getContextAttributes?.();
-        const filterName = filter => filter === THREE.LinearMipmapLinearFilter
-            ? 'LinearMipmapLinear' : filter === THREE.LinearFilter ? 'Linear' : String(filter);
-        const textureInfo = (name, texture) => texture
-            ? `${name}: minFilter=${filterName(texture.minFilter)}, mipmaps=${texture.generateMipmaps}, anisotropy=${texture.anisotropy}`
-            : `${name}: текстура пока не загружена`;
-        surfaceButton.title = [
-            `WebGL${renderer.capabilities?.isWebGL2 ? '2' : '1'}, antialias=${attributes?.antialias ?? '?'}, DPR=${renderer.getPixelRatio?.() ?? '?'}`,
-            textureInfo('Грунт', groundMap), textureInfo('Вода', waterMap), textureInfo('PBR', pbrMap),
-        ].join('\n');
-        surfaceButton.textContent = 'Вернуть текстуры поверхности';
-        surfaceButton.setAttribute('aria-pressed', 'true');
-    });
+    container.append(button, panel);
 
     let skipLabels = false;
     let grass = null;
@@ -6997,57 +6951,6 @@ function createLocationProfileControl(container) {
     let lights = null;
     let lightsWereVisible = false;
     let shadowsWereEnabled = false;
-    const layerNames = [
-        'только верхний грунт', '+ нижний рельеф', '+ поверхность воды', '+ боковины воды',
-        '+ берега', '+ водные плёнки', '+ водный декор', '+ PBR-покрытия',
-        '+ трава и декор', '+ тайловые объекты', '+ туман и сетка',
-    ];
-    let layerStage = 0;
-    const layerVisibility = new Map();
-    function restoreLayerProbe() {
-        if (!layerStage) return;
-        for (const [mesh, visible] of layerVisibility) mesh.visible = visible;
-        layerVisibility.clear();
-        layerStage = 0;
-        layerButton.textContent = 'Слои: все';
-        layerButton.setAttribute('aria-pressed', 'false');
-    }
-    function applyLayerProbe() {
-        const groups = [
-            [terrainSurfaceMesh],
-            [locationTileMesh, smoothTerrainMesh, groundPlaneMesh],
-            [waterSurfaceMesh],
-            [waterTileMesh],
-            [waterBankMesh, sandBankMesh],
-            waterDetailGroup?.children.filter(mesh => mesh.userData.waterDetailKind === 'film') || [],
-            waterDetailGroup?.children.filter(mesh => mesh.userData.waterDetailKind !== 'film') || [],
-            groundPbrFloors(),
-            [grassDetailGroup],
-            objectMeshes,
-            [...fogOverlayMeshes.values(), ...fogMemoryGhosts.values(), darknessEditorOverlay, locationGridMesh],
-        ];
-        groups.forEach((meshes, index) => meshes.forEach(mesh => {
-            if (!mesh) return;
-            if (!layerVisibility.has(mesh)) layerVisibility.set(mesh, mesh.visible);
-            mesh.visible = layerVisibility.get(mesh) && index < layerStage;
-        }));
-    }
-    layerButton.addEventListener('click', () => {
-        if (profiler.running) {
-            profiler.stop();
-            button.textContent = 'Профиль сцены';
-        }
-        if (layerStage === layerNames.length) {
-            restoreLayerProbe();
-            return;
-        }
-        if (!terrainSurfaceMesh) return;
-        if (!layerStage) restoreFloorDepthProbe();
-        layerStage++;
-        applyLayerProbe();
-        layerButton.textContent = `Слои ${layerStage}/${layerNames.length}: ${layerNames[layerStage - 1]}`;
-        layerButton.setAttribute('aria-pressed', 'true');
-    });
     const phases = [
         { name: 'Полная сцена', apply() {}, restore() {} },
         { name: 'Без травы и декора почвы', apply() {
@@ -7100,8 +7003,6 @@ function createLocationProfileControl(container) {
         },
     });
     button.disabled = Boolean(renderer.isUnavailableRenderer);
-    surfaceButton.disabled = Boolean(renderer.isUnavailableRenderer);
-    layerButton.disabled = Boolean(renderer.isUnavailableRenderer);
     panel.title = 'Нажмите, чтобы закрыть результат';
     panel.addEventListener('click', () => { if (!profiler.running) panel.hidden = true; });
     button.addEventListener('click', () => {
@@ -7111,14 +7012,11 @@ function createLocationProfileControl(container) {
             panel.textContent = 'Замер остановлен, настройки сцены восстановлены.';
             return;
         }
-        restoreLayerProbe();
         button.textContent = 'Остановить замер';
         profiler.start(performance.now());
     });
     return {
         get skipLabels() { return skipLabels; },
-        resetSurfaceProbe: restoreSurfaceProbe,
-        resetLayerProbe: restoreLayerProbe,
         frame(now, metrics) { profiler.frame(now, metrics); },
         stop() {
             if (!profiler.running) return;
@@ -7128,9 +7026,7 @@ function createLocationProfileControl(container) {
         },
         destroy() {
             profiler.stop();
-            restoreLayerProbe();
-            restoreSurfaceProbe();
-            button.remove(); surfaceButton.remove(); layerButton.remove(); panel.remove();
+            button.remove(); panel.remove();
         },
     };
 }
@@ -7237,7 +7133,10 @@ export function initLocationScene(containerId) {
             if (!renderer.isUnavailableRenderer) locationFpsCounter.frame(frameTime);
             else locationFpsCounter.pause();
         }
-        if (labelRenderer && !locationProfiler?.skipLabels) labelRenderer.render(scene, camera);
+        if (labelRenderer && !locationProfiler?.skipLabels) {
+            updateCharacterLabelDistances();
+            labelRenderer.render(scene, camera);
+        }
         if (renderer && !renderer.isUnavailableRenderer) {
             const finishedAt = performance.now();
             const cpuMs = finishedAt - frameWorkStartedAt;
@@ -10048,7 +9947,6 @@ function tintLocationMesh(mesh, factor) {
 }
 
 function refreshDarknessEditorOverlay(darkTiles = activeLightingProfile?.dark_tiles || []) {
-    locationProfiler?.resetLayerProbe();
     if (darknessEditorOverlay) {
         scene?.remove(darknessEditorOverlay);
         disposeObject(darknessEditorOverlay);
@@ -10152,8 +10050,6 @@ function refreshLocationDarkness(profile = activeLightingProfile, lightOnly = fa
 }
 
 function addLocationObjectMesh(obj, refreshFog = true) {
-    locationProfiler?.resetSurfaceProbe();
-    locationProfiler?.resetLayerProbe();
     if (locationObjectMeshes.some(mesh => mesh.userData.locationObjectId === obj.id)) return;
     const mesh = createLocationObjectMesh(obj);
     tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
@@ -10165,9 +10061,6 @@ function addLocationObjectMesh(obj, refreshFog = true) {
 function removeLocationObjectMesh(objectId, refreshFog = true) {
     const mesh = locationObjectMeshes.find(item => Number(item.userData.locationObjectId) === Number(objectId));
     if (!mesh) return;
-    locationProfiler?.resetSurfaceProbe();
-    locationProfiler?.resetLayerProbe();
-    if (floorDepthProbe?.mesh === mesh) restoreFloorDepthProbe();
     scene.remove(mesh);
     disposeLocationObject(mesh);
     locationObjectMeshes = locationObjectMeshes.filter(item => item !== mesh);
@@ -10199,8 +10092,6 @@ function updateRoofVisibility() {
 }
 
 function rebuildLocationRoofs() {
-    locationProfiler?.resetSurfaceProbe();
-    locationProfiler?.resetLayerProbe();
     for (const roof of roofMeshes) {
         const upperFloor = roof.userData.cutawayFloorMesh;
         if (upperFloor) upperFloor.visible = !upperFloor.userData.locationObject?.properties?.gm_hidden || window.isGM;
@@ -10250,9 +10141,6 @@ function rebuildLocationRoofs() {
 
 function refreshArchitecturalMeshes() {
     if (!scene || !currentLocationData) return;
-    locationProfiler?.resetSurfaceProbe();
-    locationProfiler?.resetLayerProbe();
-    restoreFloorDepthProbe();
     for (let index = 0; index < locationObjectMeshes.length; index++) {
         const oldMesh = locationObjectMeshes[index];
         const source = (currentLocationData.objects || []).find(item => item.id === oldMesh.userData.locationObjectId);
@@ -11229,40 +11117,7 @@ export function getSelectedLocationEditorAsset() {
         hidden: Boolean(editorSelection.kind === 'structure' ? source?.properties?.gm_hidden : source?.gm_hidden) } : null;
 }
 
-function restoreFloorDepthProbe() {
-    if (!floorDepthProbe) return;
-    for (const [material, depthTest] of floorDepthProbe.materialStates) material.depthTest = depthTest;
-    floorDepthProbe = null;
-    showNotification('F8: depthTest пола восстановлен', 'system');
-}
-
-function toggleFloorDepthProbe() {
-    if (floorDepthProbe) {
-        restoreFloorDepthProbe();
-        return;
-    }
-    const source = getSelectedEditorSource();
-    if (editorSelections.length !== 1 || editorSelection?.kind !== 'structure' || source?.type !== 'floor') return;
-    const mesh = locationObjectMeshes.find(item => item.userData.locationObjectId === source.id);
-    if (!mesh) return;
-    const materialStates = new Map();
-    mesh.traverse(child => {
-        if (!child.isMesh) return;
-        for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
-            if (material && !materialStates.has(material)) materialStates.set(material, material.depthTest);
-        }
-    });
-    if (!materialStates.size) return;
-    // Floor materials are per-object; PBR textures may be shared and are not changed.
-    for (const material of materialStates.keys()) material.depthTest = false;
-    floorDepthProbe = { mesh, materialStates };
-    showNotification('F8: depthTest пола отключён (временно)', 'system');
-}
-
 function notifyEditorSelection() {
-    if (floorDepthProbe && (editorSelection?.kind !== 'structure'
-        || editorSelection.id !== floorDepthProbe.mesh.userData.locationObjectId
-        || editorSelections.length !== 1)) restoreFloorDepthProbe();
     window.dispatchEvent(new CustomEvent('location-editor-selection', {
         detail: getSelectedLocationEditorAsset(),
     }));
@@ -12245,9 +12100,6 @@ async function placeSelectedLocationAsset(x, z) {
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
     locationProfiler?.stop();
-    locationProfiler?.resetSurfaceProbe();
-    locationProfiler?.resetLayerProbe();
-    restoreFloorDepthProbe();
     clearFogOverlay();
     clearFogMemoryGhosts();
     tileCubes = [];
@@ -12573,7 +12425,6 @@ function updateLocationGridColors(changedTiles = null) {
 }
 
 function rebuildLocationGrid() {
-    locationProfiler?.resetLayerProbe();
     if (locationGridMesh) {
         scene.remove(locationGridMesh);
         disposeObject(locationGridMesh);
@@ -12612,7 +12463,6 @@ function rebuildLocationGrid() {
 }
 
 function rebuildSmoothTerrainMesh(reuseMaterial = false) {
-    locationProfiler?.resetLayerProbe();
     const reusableMesh = reuseMaterial ? smoothTerrainMesh : null;
     if (smoothTerrainMesh && !reusableMesh) {
         scene.remove(smoothTerrainMesh);
@@ -12710,8 +12560,6 @@ function ensureTerrainGrassDetail() {
 }
 
 function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = false) {
-    locationProfiler?.resetSurfaceProbe();
-    locationProfiler?.resetLayerProbe();
     const reusableMesh = preserveTexture && reuseMaterial ? terrainSurfaceMesh : null;
     if (terrainSurfaceMesh && !reusableMesh) {
         scene.remove(terrainSurfaceMesh);
@@ -12843,8 +12691,6 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
 }
 
 function rebuildWaterSurfaceMesh() {
-    locationProfiler?.resetSurfaceProbe();
-    locationProfiler?.resetLayerProbe();
     if (waterSurfaceMesh) {
         scene.remove(waterSurfaceMesh);
         waterSurfaceMesh.material.map?.dispose();
@@ -13019,7 +12865,6 @@ export function getLocationGrassDiagnostics() {
 }
 
 function rebuildGrassDetailMesh() {
-    locationProfiler?.resetLayerProbe();
     if (grassDetailGroup) {
         scene.remove(grassDetailGroup);
         disposeObject(grassDetailGroup);
@@ -13139,7 +12984,6 @@ function updateTileInstance(instanceId, x, z, tile) {
 }
 
 function rebuildTileObjects(tileX, tileZ) {
-    locationProfiler?.resetLayerProbe();
     if (!currentLocationData) return;
     const tile = currentLocationData.tiles_data[tileZ][tileX];
     const tileHeight = getTileHeight(tileX, tileZ);
@@ -13890,15 +13734,6 @@ function setupCharacterDragging() {
     const onKeyDown = (e) => {
         if (isKeyboardInputTarget(e.target)
             || Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
-        if (e.code === 'F8' && window.isGM && window.locationEditMode
-            && !editorMoveMode && !editorRotateMode && !editorResizeMode
-            && !e.altKey && !e.ctrlKey && !e.metaKey
-            && editorSelection?.kind === 'structure' && getSelectedEditorSource()?.type === 'floor') {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            if (!e.repeat) toggleFloorDepthProbe();
-            return;
-        }
         if (editorRotateMode && editorGroupRotatePivot
             && ['ControlLeft', 'ControlRight'].includes(e.code) && !editorGroupRotateWithPivot) {
             editorGroupRotateWithPivot = true;
@@ -14940,7 +14775,6 @@ export function addLocationRoofButton() {
 }
 
 export function destroyLocationScene() {
-    restoreFloorDepthProbe();
     pendingTerrainRefresh = null;
     locationProfiler?.destroy();
     locationProfiler = null;

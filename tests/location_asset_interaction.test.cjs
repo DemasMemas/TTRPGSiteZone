@@ -69,6 +69,7 @@ test('location editor routes R to resize selected assets and keeps eraser fallba
 
 test('resize preview changes one axis and saves only after the click', async () => {
     const scene = read('locationScene.js');
+    const transforms = await import(`data:text/javascript;base64,${Buffer.from(read('locationAssetTransforms.js')).toString('base64')}`);
     const start = scene.indexOf('function updateEditorResizePreview(');
     const end = scene.indexOf('async function commitEditorAssetRotation()', start);
     let saves = 0;
@@ -76,27 +77,39 @@ test('resize preview changes one axis and saves only after the click', async () 
         editorResizeMode: true, editorResizeAxis: 'width',
         editorResizeDimensions: { width: 2, depth: 1, height: 1 },
         editorResizeBaseDimensions: { width: 2, depth: 1, height: 1 },
-        editorResizeAnchor: null,
+        editorResizeBaseCenter: { x: 2, z: 3 },
+        editorResizeElevation: 0,
+        editorResizeSymmetric: false, editorResizeSnapped: false,
+        editorResizeDragPointerId: 1,
+        editorResizeAnchor: {
+            volume: true, axis: 'width', sign: 1, startX: 0, startY: 0,
+            screenAxisX: 1, screenAxisY: 0,
+            baseDimensions: { width: 2, depth: 1, height: 1 },
+            baseCenter: { x: 2, z: 3 }, baseElevation: 0,
+        },
         getSelectedLocationEditorAsset: () => ({ kind: 'structure', x: 2, z: 3, rotation: 0, elevation: 0 }),
-        getPointerWorldPoint: x => ({ x, z: 3.5 }),
-        getTileHeight: () => 1,
-        bearingToObjectRotation: () => 0,
-        resizedAxis: value => Math.round(value * 100) / 100,
+        getSelectedEditorSource: () => ({ type: 'wall' }),
+        projectedAxisDrag: (_sx, _sy, x) => x,
+        volumeResize: transforms.volumeResize,
         notifyEditorResize() {}, updateBuildPreview() {},
-        updateSelectedLocationAssetDetails: async details => { saves++; return details.dimensions.width === 4; },
+        updateSelectedLocationAssetDetails: async details => {
+            saves++;
+            assert.equal(details.x, 3);
+            return details.dimensions.width === 4;
+        },
         cancelLocationAssetResize() { this.cancelled = true; },
     });
     vm.runInContext(scene.slice(start, end), context);
-    context.updateEditorResizePreview(3.5, 100);
-    context.updateEditorResizePreview(4.5, 100);
+    context.updateEditorResizePreview(2, 0);
     assert.equal(context.editorResizeDimensions.width, 4);
     assert.equal(context.editorResizeDimensions.depth, 1);
     assert.equal(saves, 0);
     await context.commitEditorAssetResize();
     assert.equal(saves, 1);
+    assert.equal(context.editorResizeMode, true);
 });
 
-test('R starts with uniform preview across all three axes', () => {
+test('R keeps uniform preview for decor while structure resizing uses face handles', () => {
     const scene = read('locationScene.js');
     assert.match(scene, /editorResizeAxis = 'all';[\s\S]*?editorResizeDimensions = \{ \.\.\.selection\.dimensions \}/);
     const start = scene.indexOf('function updateEditorResizePreview(');
@@ -105,8 +118,8 @@ test('R starts with uniform preview across all three axes', () => {
     const context = vm.createContext({
         editorResizeMode: true, editorResizeAxis: 'all',
         editorResizeDimensions: { ...dimensions }, editorResizeBaseDimensions: { ...dimensions },
-        editorResizeAnchor: null,
-        getSelectedLocationEditorAsset: () => ({ x: 2, z: 3 }),
+        editorResizeAnchor: null, editorResizeSymmetric: false,
+        getSelectedLocationEditorAsset: () => ({ kind: 'decor', x: 2, z: 3 }),
         resizedUniformDimensions: (base, factor) => Object.fromEntries(
             Object.entries(base).map(([axis, value]) => [axis, value * factor]),
         ),
@@ -136,7 +149,8 @@ test('local water has a solid backing and surface grid fits both map dimensions'
     const world = read('lobby3d.js');
     assert.match(local, /const waterMaterial = new THREE\.MeshStandardMaterial\(\{ color: 0xffffff \}\)/);
     assert.match(local, /WATER_SIDE_COLORS = \{ grass: 0x183c4a/);
-    assert.match(local, /new THREE\.InstancedMesh\(geometry\.clone\(\), \[/);
+    assert.match(local, /new THREE\.InstancedMesh\(waterBoxGeometry, \[/);
+    assert.match(local, /waterBoxGeometry\.setAttribute\('waterSideMask'/);
     assert.match(local, /waterMaterial, waterMaterial, waterTopMaterial/);
     assert.match(world, /const waterMat = createWaterMaterial\(\)/);
     assert.match(local, /buildTerrainGridData\(currentLocationData\.tiles_data, uncovered\)/);
