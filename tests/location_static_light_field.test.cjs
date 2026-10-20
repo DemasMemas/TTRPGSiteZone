@@ -217,9 +217,11 @@ test('material hook preserves PBR maps, shader hooks and program sharing', async
     assert.equal(shader.uniforms.staticLightFieldEnabled.value, 0);
 });
 
-test('game scene keeps the field opt-in and freezes selected point slots', () => {
+test('game scene enables directional lighting on load and freezes selected point slots', () => {
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
     assert.match(scene, /let locationStaticLightField = null/);
+    assert.match(scene, /createLocationDirectionalLightField\(THREE, currentLocationData,/);
+    assert.match(scene, /updateLampRenderLights\(performance\.now\(\), 1, true\);\s*setLocationStaticLightFieldEnabled\(true\);/);
     assert.match(scene, /setLocationStaticLightFieldEnabled\(!locationStaticLightField\)/);
     assert.match(scene, /staticFieldPointSlots = activeStaticLightFieldPointSlots/);
     assert.match(scene, /selected\.pointShadow = staticFieldPointSlots\.pointShadow/);

@@ -46,9 +46,9 @@ import { generatedFloorBlueprint, houseBuildingId, houseFootprint, planResidenti
 import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
     updateLocationTerrainPixels } from './locationTerrainTexture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
-import { createLocationDirectionalLightField as createLocationStaticLightField,
-    LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER as LOCATION_STATIC_FIELD_SAMPLES_PER_METER
-} from './locationDirectionalLightField.js';
+import { activeStaticLightFieldPointSlots, activeStaticLightFieldSpotSlots,
+    createLocationDirectionalLightField,
+    remapStaticLightFieldSlots, LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER } from './locationStaticLightField.js';
 import { applySurfaceDarkness, writeDarknessPixels } from './locationDarknessSurface.js';
 import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
 import { createGrassDetailGroup } from './locationGrassDetail.js';
@@ -223,6 +223,7 @@ let lampRenderSelected = new Set();
 let lastLampRenderUpdateAt = -Infinity;
 let locationStaticLightField = null;
 let staticFieldPointSlots = null;
+let staticFieldSpotSlots = null;
 let locationStaticLightFieldButton = null;
 let locationStaticLightFieldRefreshTimer = null;
 let staticFieldFirstFrame = null;
@@ -5081,7 +5082,6 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     tintLocationMesh(model, darknessFactorAt(posX, posY));
     model.userData.characterId = characterId;
     model.userData.ownerId = colorUserId;
-    attachLocationLightFieldMaterials(model, 0);
     scene.add(model);
 
     const div = document.createElement('div');
@@ -7110,9 +7110,19 @@ function createLocationProfileControl(container) {
     const panel = document.createElement('pre');
     panel.className = 'scene-profile-results';
     panel.hidden = true;
+    locationStaticLightFieldButton = document.createElement('button');
+    locationStaticLightFieldButton.type = 'button';
+    locationStaticLightFieldButton.className = 'scene-profile-button';
+    locationStaticLightFieldButton.style.right = '155px';
     copyButton.style.bottom = '58px';
     panel.style.bottom = '98px';
-    container.append(button, copyButton, panel);
+    locationStaticLightFieldButton.title = 'Эксперимент: световое поле вместо точечных ламп (повторное нажатие вернёт прежний свет)';
+    locationStaticLightFieldButton.addEventListener('click', () => {
+        const enabled = setLocationStaticLightFieldEnabled(!locationStaticLightField);
+        showNotification(enabled ? 'Световое поле включено' : 'Обычное освещение восстановлено');
+    });
+    setStaticLightFieldButtonState();
+    container.append(button, locationStaticLightFieldButton, copyButton, panel);
     let reportText = '';
 
     let skipLabels = false;
@@ -10049,7 +10059,6 @@ function createLocationObjectMesh(obj, forPreview = false) {
                 child.receiveShadow = !forPreview;
             });
             group.add(model);
-            if (!forPreview) attachLocationLightFieldMaterials(model, structureLevel(obj));
             if (forPreview) fadeEditorPreview(model);
             if (properties.gm_hidden && window.isGM) makeGmHiddenGhost(model);
             else if (!forPreview) tintLocationMesh(model, darknessFactorAt(group.position.x, group.position.z));
@@ -10060,7 +10069,18 @@ function createLocationObjectMesh(obj, forPreview = false) {
             }
         });
     }
-    if (!forPreview) attachLocationLightFieldMaterials(group, structureLevel(obj));
+    if (!forPreview && locationStaticLightField && ['floor', 'wall'].includes(obj.type)) {
+        const seen = new Set();
+        group.traverse(child => {
+            if (!child.isMesh) return;
+            for (const childMaterial of Array.isArray(child.material) ? child.material : [child.material]) {
+                if (childMaterial && !seen.has(childMaterial)) {
+                    seen.add(childMaterial);
+                    locationStaticLightField.attach(childMaterial, structureLevel(obj));
+                }
+            }
+        });
+    }
     return group;
 }
 
@@ -10154,36 +10174,23 @@ function getLocationEmissiveSources() {
     return [...getLocationFireSources(), ...getAnomalyLightSources(currentLocationData?.tiles_data)];
 }
 
-function visitLocationLightFieldMaterials(root, level, callback, seen = new Set()) {
-    root?.traverse(child => {
+function forEachStaticLightFieldMaterial(callback) {
+    const seen = new Set();
+    const visit = (root, level) => root?.traverse(child => {
         if (!child.isMesh) return;
         for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
-            if (!material?.isMeshStandardMaterial || seen.has(material)) continue;
+            if (!material || seen.has(material)) continue;
             seen.add(material);
             callback(material, level);
         }
     });
-}
-
-function attachLocationLightFieldMaterials(root, level = 0) {
-    if (!locationStaticLightField) return;
-    visitLocationLightFieldMaterials(root, level, (material, floor) =>
-        locationStaticLightField.attach(material, floor));
-}
-
-function forEachStaticLightFieldMaterial(callback) {
-    const seen = new Set();
-    const visit = (root, level = 0) =>
-        visitLocationLightFieldMaterials(root, level, callback, seen);
     visit(terrainSurfaceMesh, 0);
-    visit(smoothTerrainMesh, 0);
-    visit(locationTileMesh, 0);
     for (const root of locationObjectMeshes) {
-        visit(root, structureLevel(root.userData.locationObject));
+        const object = root.userData.locationObject;
+        if (object?.type === 'floor' || object?.type === 'wall') {
+            visit(root, structureLevel(object));
+        }
     }
-    for (const root of objectMeshes) visit(root, 0);
-    for (const entry of characterModels.values()) visit(entry.model, 0);
-    for (const roof of roofMeshes) visit(roof, Number(roof.userData?.lightFieldLevel || 0));
 }
 
 function setStaticLightFieldButtonState() {
@@ -10195,7 +10202,8 @@ function setStaticLightFieldButtonState() {
 }
 
 function staticFieldDynamicIds() {
-    return new Set(Object.values(staticFieldPointSlots || {}).flat().filter(index => index != null));
+    return new Set([...Object.values(staticFieldPointSlots || {}).flat(),
+        ...Object.values(staticFieldSpotSlots || {}).flat()].filter(index => index != null));
 }
 
 function refreshStaticLightField() {
@@ -10203,8 +10211,9 @@ function refreshStaticLightField() {
     try {
         if (!locationStaticLightField.update(currentLocationData, lampRenderSources,
             staticFieldDynamicIds())) {
-            const replacement = createLocationStaticLightField(THREE, currentLocationData,
-                lampRenderSources, getTileHeight, staticFieldDynamicIds());
+            const replacement = createLocationDirectionalLightField(THREE, currentLocationData,
+                lampRenderSources, getTileHeight, staticFieldDynamicIds(),
+                renderer.capabilities.maxTextureSize);
             forEachStaticLightFieldMaterial(material => locationStaticLightField.detach(material));
             locationStaticLightField.dispose();
             locationStaticLightField = replacement;
@@ -10245,6 +10254,7 @@ export function setLocationStaticLightFieldEnabled(enabled) {
             locationStaticLightField.dispose();
             locationStaticLightField = null;
             staticFieldPointSlots = null;
+            staticFieldSpotSlots = null;
             updateLampRenderLights(performance.now(), 1, true);
             staticFieldFirstFrame = { enabled: false, at: performance.now() };
             staticFieldLastToggleWork = { enabled: false, hooksMs,
@@ -10261,9 +10271,9 @@ export function setLocationStaticLightFieldEnabled(enabled) {
     const atlasPlanes = levels * 3 * 6;
     const atlasColumns = Math.ceil(Math.sqrt(atlasPlanes));
     const atlasRows = Math.ceil(atlasPlanes / atlasColumns);
-    if (Math.ceil(currentLocationData.grid_height * LOCATION_STATIC_FIELD_SAMPLES_PER_METER)
+    if (Math.ceil(currentLocationData.grid_height * LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER)
         * atlasRows > renderer.capabilities.maxTextureSize
-        || Math.ceil(currentLocationData.grid_width * LOCATION_STATIC_FIELD_SAMPLES_PER_METER)
+        || Math.ceil(currentLocationData.grid_width * LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER)
             * atlasColumns > renderer.capabilities.maxTextureSize) {
         showNotification('Световое поле не помещается в текстуру этой видеокарты', 'system');
         return false;
@@ -10271,22 +10281,21 @@ export function setLocationStaticLightFieldEnabled(enabled) {
     try {
         const startedAt = performance.now();
         const programsBefore = renderer.info?.programs?.length || 0;
-        // Every stationary point lamp is baked into the directional field.
-        staticFieldPointSlots = {
-            pointShadow: lampRenderSlots.pointShadow.map(() => null),
-            pointSimple: lampRenderSlots.pointSimple.map(() => null),
-        };
-        for (const role of ['pointShadow', 'pointSimple']) {
+        staticFieldPointSlots = activeStaticLightFieldPointSlots(lampRenderSlots, lampRenderSources);
+        staticFieldSpotSlots = activeStaticLightFieldSpotSlots(lampRenderSlots, lampRenderSources);
+        for (const role of ['pointShadow', 'pointSimple', 'spotShadow', 'spotSimple']) {
+            const frozen = role.startsWith('point') ? staticFieldPointSlots : staticFieldSpotSlots;
             lampRenderSlots[role].forEach((light, index) => {
-                if (staticFieldPointSlots[role][index] != null) return;
+                if (frozen[role][index] != null) return;
                 light.intensity = 0;
                 light.userData.lampRenderSourceIndex = null;
                 light.userData.lampDesiredSourceIndex = null;
                 light.shadow.autoUpdate = false;
             });
         }
-        locationStaticLightField = createLocationStaticLightField(THREE, currentLocationData,
-            lampRenderSources, getTileHeight, staticFieldDynamicIds());
+        locationStaticLightField = createLocationDirectionalLightField(THREE, currentLocationData,
+            lampRenderSources, getTileHeight, staticFieldDynamicIds(),
+            renderer.capabilities.maxTextureSize);
         const fieldMs = performance.now() - startedAt;
         const hooksStartedAt = performance.now();
         forEachStaticLightFieldMaterial((material, level) =>
@@ -10306,6 +10315,7 @@ export function setLocationStaticLightFieldEnabled(enabled) {
         console.error('Static light field unavailable; keeping standard lighting', error);
         setLocationStaticLightFieldEnabled(false);
         staticFieldPointSlots = null;
+        staticFieldSpotSlots = null;
         showNotification('Не удалось включить световое поле', 'system');
         return false;
     }
@@ -10314,7 +10324,7 @@ export function setLocationStaticLightFieldEnabled(enabled) {
 export function getLocationStaticLightFieldDiagnostics() {
     let materialCount = 0;
     if (locationStaticLightField) forEachStaticLightFieldMaterial(material => {
-        if (material.userData.staticLightFieldPrototype) materialCount++;
+        if (material.userData.directionalLightFieldPrototype) materialCount++;
     });
     const dynamicIds = staticFieldDynamicIds();
     const lampRoutes = lampRenderSources.map((source, index) => {
@@ -10371,10 +10381,8 @@ const lampLightSphere = new THREE.Sphere();
 function createLampRenderPool() {
     const group = new THREE.Group();
     const slots = {};
-    for (const [role, budget] of Object.entries(LOCATION_LAMP_RENDER_BUDGET)) {
+    for (const [role, count] of Object.entries(LOCATION_LAMP_RENDER_BUDGET)) {
         const isSpot = role.startsWith('spot');
-        // No runtime PointLight slots for placed stationary point lamps.
-        const count = isSpot ? budget : 0;
         const castsShadow = role.endsWith('Shadow');
         slots[role] = Array.from({ length: count }, () => {
             const light = isSpot
@@ -10417,9 +10425,10 @@ function setLampRenderLight(light, source, x = source.x, y = source.y, z = sourc
 function setLampSlotTargets(selected) {
     for (const [role, slots] of Object.entries(lampRenderSlots)) {
         if (!Array.isArray(slots)) continue;
-        if (staticFieldPointSlots && role.startsWith('point')) {
+        const frozen = role.startsWith('point') ? staticFieldPointSlots : staticFieldSpotSlots;
+        if (frozen) {
             slots.forEach((light, index) => {
-                light.userData.lampDesiredSourceIndex = staticFieldPointSlots[role][index];
+                light.userData.lampDesiredSourceIndex = frozen[role][index];
             });
             continue;
         }
@@ -10461,6 +10470,10 @@ function updateLampRenderLights(now = performance.now(), deltaSeconds = 0, force
         if (staticFieldPointSlots) {
             selected.pointShadow = staticFieldPointSlots.pointShadow.filter(index => index != null);
             selected.pointSimple = staticFieldPointSlots.pointSimple.filter(index => index != null);
+        }
+        if (staticFieldSpotSlots) {
+            selected.spotShadow = staticFieldSpotSlots.spotShadow.filter(index => index != null);
+            selected.spotSimple = staticFieldSpotSlots.spotSimple.filter(index => index != null);
         }
         lampRenderSelected = new Set(Object.values(selected).flat());
         setLampSlotTargets(selected);
@@ -10737,8 +10750,6 @@ function rebuildLocationRoofs() {
             && structureLevel(lower) < structureLevel(floor))) {
             roof.userData.cutawayFloorMesh = floorMeshes.get(plan.floorId) || null;
         }
-        roof.userData.lightFieldLevel = floor ? structureLevel(floor) : 0;
-        attachLocationLightFieldMaterials(roof, roof.userData.lightFieldLevel);
         scene.add(roof);
         roofMeshes.push(roof);
     }
@@ -11731,6 +11742,7 @@ export function applyLocationLighting(settings, persist = true, origin = 'direct
         lampTrace.timings.reusedLampFixtures = reusableLampFixtures.size;
         lampTrace.timings.createdLampFixtures = (profile.local_lights || []).length - reusableLampFixtures.size;
     }
+    const previousFieldSourceList = lampRenderSources;
     const previousFieldSources = locationStaticLightField ? JSON.stringify(lampRenderSources) : null;
     if (locationLightGroup) {
         scene.remove(locationLightGroup);
@@ -11824,6 +11836,24 @@ export function applyLocationLighting(settings, persist = true, origin = 'direct
     }
     lastAnomalyLightUpdateAt = -Infinity;
     if (locationStaticLightField && previousFieldSources !== JSON.stringify(lampRenderSources)) {
+        const previousSlots = { ...staticFieldPointSlots, ...staticFieldSpotSlots };
+        const nextSlots = remapStaticLightFieldSlots(previousSlots,
+            previousFieldSourceList, lampRenderSources);
+        for (const role of ['pointShadow', 'pointSimple', 'spotShadow', 'spotSimple']) {
+            lampRenderSlots[role].forEach((light, index) => {
+                const before = previousSlots[role][index];
+                const after = nextSlots[role][index];
+                if (before == null || after == null || light.userData.lampRenderSourceIndex !== before
+                    || JSON.stringify(previousFieldSourceList[before])
+                        !== JSON.stringify(lampRenderSources[after])) return;
+                light.userData.lampRenderSourceIndex = after;
+                light.userData.lampDesiredSourceIndex = after;
+            });
+        }
+        staticFieldPointSlots = { pointShadow: nextSlots.pointShadow,
+            pointSimple: nextSlots.pointSimple };
+        staticFieldSpotSlots = { spotShadow: nextSlots.spotShadow,
+            spotSimple: nextSlots.spotSimple };
         refreshStaticLightField();
     }
     scene.add(locationLightGroup);
@@ -13255,7 +13285,6 @@ export function loadLocation(data) {
     rebuildLocationRoofs();
     markLoadStage('objectsAndRoofsMs');
     applyLocationLighting();
-    setLocationStaticLightFieldEnabled(true);
     markLoadStage('lightingMs');
     applyFogOfWar();
     markLoadStage('fogMs');
@@ -13265,6 +13294,8 @@ export function loadLocation(data) {
     camera.position.set(centerX, distance * 0.6, centerZ + distance);
     controls.target.set(centerX, 0, centerZ);
     controls.update();
+    updateLampRenderLights(performance.now(), 1, true);
+    setLocationStaticLightFieldEnabled(true);
 
     if (highlightBox && !scene.children.includes(highlightBox)) scene.add(highlightBox);
     markLoadStage('cameraMs');
@@ -13514,7 +13545,6 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
     smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
     smoothTerrainMesh.receiveShadow = true;
     updateSmoothTerrainColors();
-    attachLocationLightFieldMaterials(smoothTerrainMesh, 0);
     scene.add(smoothTerrainMesh);
     tileCubes.push(smoothTerrainMesh);
 }
@@ -14077,7 +14107,6 @@ function rebuildTileObjects(tileX, tileZ) {
         applyDecorSize(mesh, obj, obj.type);
         if (!isAnomalyEffect) mesh.position.y += yOffset * (mesh.scale.y - 1);
         if (obj.gm_hidden && window.isGM) makeGmHiddenGhost(mesh);
-        attachLocationLightFieldMaterials(mesh, 0);
         scene.add(mesh);
         objectMeshes.push(mesh);
         if (isAnomalyEffect) anomalyEffectMeshes.push(mesh);

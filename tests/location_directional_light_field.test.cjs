@@ -84,6 +84,24 @@ test('levels isolate sources and dynamic-source IDs are excluded from the static
     assert.deepEqual(stats.lampStats.map(item => item.route), ['dynamic', 'field']);
 });
 
+test('stationary spotlight illuminates its cone, not the rear or the space behind a wall', async () => {
+    const { createDirectionalLightField } = await prototype;
+    const field = createDirectionalLightField({ width: 8, height: 8,
+        levels: [{ id: 0, y: 0 }] });
+    const spot = lamp({ id: 'spot', kind: 'spot', x: 2.25, y: 1.4, z: 3.25,
+        height: 2, azimuth: 0 });
+    const up = { x: 0, y: 1, z: 0 };
+    field.rebuild({ lamps: [spot] });
+    assert.ok(field.sample(4.25, 0, 3.25, up)[0] > 0);
+    assert.deepEqual(field.sample(0.25, 0, 3.25, up), [0, 0, 0]);
+    assert.deepEqual(field.sample(2.25, 0, 5.25, up), [0, 0, 0]);
+    field.rebuild({ lamps: [spot], walls: [{ level: 0, x1: 3.5, x2: 3.5,
+        z1: 0, z2: 8, bottomY: 0, topY: 3 }] });
+    assert.deepEqual(field.sample(4.25, 0, 3.25, up), [0, 0, 0]);
+    field.rebuild({ lamps: [spot], dynamicLightIds: new Set(['spot']) });
+    assert.deepEqual(field.sample(4.25, 0, 3.25, up), [0, 0, 0]);
+});
+
 test('one packed texture, linear RGBM superposition and material lifecycle', async () => {
     const { createDirectionalLightField, createDirectionalLightFieldTexture,
         applyDirectionalLightFieldMaterial, removeDirectionalLightFieldMaterial } = await prototype;
@@ -99,10 +117,13 @@ test('one packed texture, linear RGBM superposition and material lifecycle', asy
     const THREE = { DataTexture: class {
         constructor(data, width, height) { Object.assign(this, { data, width, height }); }
         dispose() { this.disposed = true; }
-    }, RGBAFormat: 1, NearestFilter: 2, ClampToEdgeWrapping: 3 };
+    }, RGBAFormat: 1, LinearFilter: 2, ClampToEdgeWrapping: 3 };
     const texture = createDirectionalLightFieldTexture(THREE, field);
     assert.equal(texture.width, field.textureWidth);
     assert.equal(texture.height, field.textureHeight);
+    assert.equal(texture.minFilter, THREE.LinearFilter);
+    assert.equal(texture.magFilter, THREE.LinearFilter);
+    assert.equal(texture.generateMipmaps, false);
     const maps = { map: {}, normalMap: {}, roughnessMap: {}, emissiveMap: {} };
     const oldCompile = () => {};
     const physical = { isMeshStandardMaterial: true, isMeshPhysicalMaterial: true,
@@ -114,6 +135,9 @@ test('one packed texture, linear RGBM superposition and material lifecycle', asy
         fragmentShader: '#include <common>\n#include <lights_fragment_end>' };
     physical.onBeforeCompile(shader);
     assert.match(shader.fragmentShader, /inverseTransformDirection\(normal, viewMatrix\)/);
+    assert.match(shader.fragmentShader, /vec2 cell = clamp\(position \* directionalFieldSamplesPerMeter - vec2\(0\.5\),/);
+    assert.match(shader.fragmentShader, /directionalFieldGrid - vec2\(1\.0\)\)/);
+    assert.doesNotMatch(shader.fragmentShader, /floor\(position \* directionalFieldSamplesPerMeter\)/);
     assert.match(shader.fragmentShader, /fieldIrradiance \*= PI/);
     assert.equal(shader.uniforms.directionalFieldLevel.value, 1);
     assert.equal(shader.uniforms.directionalFieldMap.value, texture);
@@ -164,7 +188,7 @@ test('rotated face uses its world normal and non-integer dimensions use fixed ce
         fragmentShader: '#include <common>\n#include <lights_fragment_end>' };
     material.onBeforeCompile(shader);
     assert.equal(shader.uniforms.directionalFieldSamplesPerMeter.value, 3);
-    assert.match(shader.fragmentShader, /floor\(position \* directionalFieldSamplesPerMeter\)/);
+    assert.match(shader.fragmentShader, /vec2 cell = clamp\(position \* directionalFieldSamplesPerMeter - vec2\(0\.5\),/);
     assert.equal(material.customProgramCacheKey(), 'base:directional-field-v1');
     removeDirectionalLightFieldMaterial(material);
     assert.equal(material.customProgramCacheKey(), 'base');

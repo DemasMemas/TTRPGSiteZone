@@ -2,8 +2,12 @@ import { STOREY_HEIGHT, doorOnWall, floorVisualPose, structureLevel, structureLe
     structurePose, wallVisualPlan } from './locationArchitecture.js';
 import { createStaticLightField, createStaticLightFieldTexture,
     applyStaticLightFieldMaterial, removeStaticLightFieldMaterial } from './locationStaticLightFieldPrototype.js';
+import { createDirectionalLightField, createDirectionalLightFieldTexture,
+    applyDirectionalLightFieldMaterial, removeDirectionalLightFieldMaterial } from './locationDirectionalLightFieldPrototype.js';
 
 export const LOCATION_STATIC_FIELD_SAMPLES_PER_METER = 4;
+export const LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER = 2;
+const MAX_DIRECTIONAL_FIELD_BYTES = 128 * 1024 * 1024;
 
 export function activeStaticLightFieldPointSlots(slots, sources) {
     const used = new Set();
@@ -13,6 +17,21 @@ export function activeStaticLightFieldPointSlots(slots, sources) {
             if (index == null || !(light.intensity > 0.02) || used.has(index)
                 || !(Number(sources[index]?.intensity) > 0)
                 || sources[index]?.kind === 'spot') return null;
+            used.add(index);
+            return index;
+        })]));
+}
+
+export function activeStaticLightFieldSpotSlots(slots, sources) {
+    const used = new Set();
+    return Object.fromEntries(['spotShadow', 'spotSimple'].map(role => [role,
+        (slots[role] || []).map(light => {
+            // A shadowless SpotLight can illuminate through walls; bake it instead.
+            if (role === 'spotSimple') return null;
+            const index = light.userData.lampRenderSourceIndex;
+            if (index == null || !(light.intensity > 0.02) || used.has(index)
+                || !(Number(sources[index]?.intensity) > 0)
+                || sources[index]?.kind !== 'spot') return null;
             used.add(index);
             return index;
         })]));
@@ -41,7 +60,7 @@ function insideFloor(x, z, pose) {
         && Math.abs(dx * pose.normal.x + dz * pose.normal.z) <= pose.depth / 2;
 }
 
-export function locationStaticLightFieldInputs(data, sources, tileHeightAt) {
+export function locationStaticLightFieldInputs(data, sources, tileHeightAt, includeSpots = false) {
     const objects = data.objects || [];
     const floors = objects.filter(object => object.type === 'floor').map(object => ({
         level: structureLevel(object), pose: floorVisualPose(object, objects),
@@ -59,7 +78,7 @@ export function locationStaticLightFieldInputs(data, sources, tileHeightAt) {
         return tileHeightAt(Math.floor(x), Math.floor(z)) + level * STOREY_HEIGHT;
     };
     const lamps = sources.flatMap((source, index) => {
-        if (source.kind === 'spot') return [];
+        if (source.kind === 'spot' && !includeSpots) return [];
         const containing = floors.filter(floor => insideFloor(source.x, source.z, floor.pose)
             && source.y >= floor.y + 0.1).sort((a, b) => b.y - a.y);
         return [{ ...source, id: index, level: containing[0]?.level || 0 }];
@@ -146,6 +165,52 @@ export function createLocationStaticLightField(THREE, data, sources, tileHeightA
             applyStaticLightFieldMaterial(material, texture, field, level);
         },
         detach(material) { removeStaticLightFieldMaterial(material); },
+        dispose() { texture.dispose(); },
+    };
+}
+
+export function createLocationDirectionalLightField(THREE, data, sources, tileHeightAt,
+    dynamicLightIds = new Set(), maxTextureSize = Infinity) {
+    const startedAt = performance.now();
+    const inputs = locationStaticLightFieldInputs(data, sources, tileHeightAt, true);
+    const samplesPerMeter = LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER;
+    const planes = inputs.levels.length * 3 * 6;
+    const atlasColumns = Math.ceil(Math.sqrt(planes));
+    const atlasRows = Math.ceil(planes / atlasColumns);
+    const atlasCells = Math.ceil(inputs.width * samplesPerMeter) * atlasColumns
+        * Math.ceil(inputs.height * samplesPerMeter) * atlasRows;
+    if (Math.ceil(inputs.width * samplesPerMeter) * atlasColumns > maxTextureSize
+        || Math.ceil(inputs.height * samplesPerMeter) * atlasRows > maxTextureSize
+        || atlasCells * 16 > MAX_DIRECTIONAL_FIELD_BYTES) {
+        throw new Error('Directional light field exceeds the texture or memory limit');
+    }
+    const prepareMs = performance.now() - startedAt;
+    const field = createDirectionalLightField({ width: inputs.width, height: inputs.height,
+        levels: inputs.levels, samplesPerMeter });
+    const stats = { ...field.rebuild({ lamps: inputs.lamps, walls: inputs.walls,
+        dynamicLightIds }), prepareMs, totalMs: performance.now() - startedAt };
+    const texture = createDirectionalLightFieldTexture(THREE, field);
+    return {
+        directional: true, field, texture, stats, inputs,
+        update(nextData, nextSources, nextDynamicIds = new Set()) {
+            const updateStartedAt = performance.now();
+            const next = locationStaticLightFieldInputs(nextData, nextSources, tileHeightAt, true);
+            if (next.width !== field.width || next.height !== field.height
+                || next.levels.length !== field.levels.length
+                || next.levels.some((level, index) => level.id !== field.levels[index].id
+                    || level.y !== field.levels[index].y)) return false;
+            this.inputs = next;
+            this.stats = { ...field.rebuild({ lamps: next.lamps, walls: next.walls,
+                dynamicLightIds: nextDynamicIds }), totalMs: performance.now() - updateStartedAt };
+            texture.needsUpdate = true;
+            return true;
+        },
+        attach(material, level) {
+            if (!material?.isMeshStandardMaterial
+                || material.userData.directionalLightFieldPrototype) return;
+            applyDirectionalLightFieldMaterial(material, texture, field, level);
+        },
+        detach(material) { removeDirectionalLightFieldMaterial(material); },
         dispose() { texture.dispose(); },
     };
 }

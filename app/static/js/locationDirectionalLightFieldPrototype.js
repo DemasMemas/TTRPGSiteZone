@@ -60,6 +60,14 @@ export function createDirectionalLightField({ width, height, levels, samplesPerM
                 lampStats[lampIndex].route = 'invalid';
                 return;
             }
+            const isSpot = lamp.kind === 'spot';
+            const azimuth = Number(lamp.azimuth || 0) * Math.PI / 180;
+            const drop = Math.min(3, Number(lamp.height || 0));
+            const axisLength = Math.hypot(5, drop);
+            const spotAxis = isSpot ? [5 * Math.cos(azimuth) / axisLength,
+                -drop / axisLength, 5 * Math.sin(azimuth) / axisLength] : null;
+            const coneCos = Math.cos(Math.PI / 5);
+            const penumbraCos = Math.cos(Math.PI / 5 * (1 - 0.55));
             const color = rgb(lamp.color);
             const nearbyWalls = walls.filter(wall => Number(wall.level) === Number(lamp.level)
                 && Math.min(wall.x1, wall.x2) <= x + radius
@@ -82,12 +90,21 @@ export function createDirectionalLightField({ width, height, levels, samplesPerM
                         const vz = z - worldZ;
                         const distance = Math.hypot(vx, vy, vz);
                         if (distance >= radius) continue;
+                        let coneWeight = 1;
+                        if (isSpot && distance > 1e-6) {
+                            const cosine = (-vx * spotAxis[0] - vy * spotAxis[1]
+                                - vz * spotAxis[2]) / distance;
+                            if (cosine <= coneCos) continue;
+                            const blend = clamp((cosine - coneCos) / (penumbraCos - coneCos), 0, 1);
+                            coneWeight = blend * blend * (3 - 2 * blend);
+                        }
                         if (nearbyWalls.some(wall => wallCrossesRay(x, z, y,
                             worldX, worldZ, sampleY, wall))) {
                             blockedSamples++;
                             continue;
                         }
-                        const strength = Number(lamp.intensity) * (1 - distance / radius) ** 2;
+                        const strength = Number(lamp.intensity) * coneWeight
+                            * (1 - distance / radius) ** 2;
                         const directions = distance < 1e-6
                             ? [1, 1, 1, 1, 1, 1]
                             : [Math.max(vx, 0), Math.max(-vx, 0),
@@ -168,7 +185,7 @@ export function createDirectionalLightField({ width, height, levels, samplesPerM
 export function createDirectionalLightFieldTexture(THREE, field) {
     const texture = new THREE.DataTexture(field.pixels, field.textureWidth,
         field.textureHeight, THREE.RGBAFormat);
-    texture.minFilter = texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = texture.magFilter = THREE.LinearFilter;
     texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.generateMipmaps = false;
     texture.unpackAlignment = 1;
@@ -242,8 +259,8 @@ export function applyDirectionalLightFieldMaterial(material, texture, field, lev
                     vec3 fieldNormal = inverseTransformDirection(normal, viewMatrix);
                     vec2 position = clamp(vDirectionalFieldWorldPosition.xz,
                         vec2(0.0), directionalFieldSize - vec2(0.0001));
-                    vec2 cell = min(floor(position * directionalFieldSamplesPerMeter),
-                        directionalFieldGrid - vec2(1.0));
+                    vec2 cell = clamp(position * directionalFieldSamplesPerMeter - vec2(0.5),
+                        vec2(0.0), directionalFieldGrid - vec2(1.0));
                     float relativeY = vDirectionalFieldWorldPosition.y - directionalFieldBaseY;
                     float lower = clamp(floor(relativeY / 1.4), 0.0, 1.0);
                     float blend = clamp((relativeY - lower * 1.4) / 1.4, 0.0, 1.0);

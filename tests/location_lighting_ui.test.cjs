@@ -197,6 +197,7 @@ test('lamp slots stay fixed through 1, 3, 4, 6, 10 and 20 sources and deletion',
             ...slots.spotShadow, ...slots.spotSimple],
         lampRenderSelected: new Set(), lastLampRenderUpdateAt: -Infinity,
         locationStaticLightField: null, staticFieldPointSlots: null,
+        staticFieldSpotSlots: null,
         selectLocationLampRenderSources, buildPreviewMesh: null,
     });
     vm.runInContext(scene.slice(start, end), context);
@@ -249,6 +250,16 @@ test('lamp slots stay fixed through 1, 3, 4, 6, 10 and 20 sources and deletion',
     context.controls.target.x = 100;
     context.updateLampRenderLights(31200, 0.2, true);
     assert.equal(slots.pointShadow[0].userData.lampDesiredSourceIndex, 0);
+    context.lampRenderSources = [1, 4, 8].map(x => ({ kind: 'spot', x, y: 2,
+        z: 0, height: 2, azimuth: 0, intensity: 2, distance: 7, color: '#ffffff' }));
+    context.staticFieldPointSlots = null;
+    context.staticFieldSpotSlots = { spotShadow: [0], spotSimple: [null] };
+    for (const x of [0, 7, 100]) {
+        context.controls.target.x = x;
+        context.updateLampRenderLights(31400 + x, 0.2, true);
+        assert.equal(slots.spotShadow[0].userData.lampDesiredSourceIndex, 0);
+        assert.equal(slots.spotSimple[0].userData.lampDesiredSourceIndex, null);
+    }
 });
 
 test('late echo from an older lamp save cannot replace a newer applied save', async () => {
