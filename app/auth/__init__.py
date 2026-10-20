@@ -40,6 +40,15 @@ def profile():
     schema = UserProfileSchema()
     return jsonify(schema.dump(user)), 200
 
+
+@auth_bp.route('/refresh', methods=['POST'])
+@jwt_required()
+def refresh():
+    user = db.session.get(User, int(get_jwt_identity()))
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    return jsonify({'access_token': create_access_token(identity=str(user.id))}), 200
+
 @auth_bp.route('/color', methods=['PATCH'])
 @jwt_required()
 def update_color():

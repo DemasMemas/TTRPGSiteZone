@@ -69,6 +69,15 @@ function startNetworkMonitor() {
 export function initSocket(lobbyId, token) {
     currentLobbyId = lobbyId;
     socket = io();
+    const originalEmit = socket.emit.bind(socket);
+    socket.emit = (event, ...args) => {
+        if (args[0] && typeof args[0] === 'object'
+            && Object.prototype.hasOwnProperty.call(args[0], 'token')) {
+            const currentToken = window.authSession?.getToken();
+            if (currentToken) args[0] = { ...args[0], token: currentToken };
+        }
+        return originalEmit(event, ...args);
+    };
 
     socket.on('connect', () => {
         updateNetworkStatus('connecting');

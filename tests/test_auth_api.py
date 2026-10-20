@@ -1,3 +1,7 @@
+from datetime import timedelta
+
+from flask_jwt_extended import create_access_token, decode_token
+
 from app.extensions import db
 from app.models import User
 
@@ -19,6 +23,33 @@ def test_protected_profile_rejects_anonymous_request(client):
     response = client.get("/auth/profile")
 
     assert response.status_code == 401
+
+
+def test_access_token_renews_for_thirty_minutes(client, create_user, auth_headers):
+    user = create_user("renewal-user")
+    original = decode_token(user["token"])
+
+    response = client.post("/auth/refresh", headers=auth_headers(user))
+
+    assert response.status_code == 200
+    renewed = decode_token(response.get_json()["access_token"])
+    assert original["exp"] - original["iat"] == 30 * 60
+    assert renewed["exp"] - renewed["iat"] == 30 * 60
+    assert renewed["sub"] == original["sub"]
+    assert renewed["jti"] != original["jti"]
+
+
+def test_refresh_rejects_expired_and_missing_token(app, client, create_user):
+    user = create_user("expired-user")
+    with app.app_context():
+        expired = create_access_token(
+            identity=str(user["id"]), expires_delta=timedelta(seconds=-1)
+        )
+
+    assert client.post("/auth/refresh").status_code == 401
+    assert client.post(
+        "/auth/refresh", headers={"Authorization": f"Bearer {expired}"}
+    ).status_code == 401
 
 
 def test_login_rejects_wrong_password(client, create_user):

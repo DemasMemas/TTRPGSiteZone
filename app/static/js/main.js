@@ -119,7 +119,7 @@ if (savedLocationCharacterId > 0) {
     window.currentLocationCharacterId = savedLocationCharacterId;
 }
 
-if (!token) {
+if (!token || window.authSession?.isExpired()) {
     showNotification('Вы не авторизованы');
     window.location.href = '/';
 }

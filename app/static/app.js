@@ -108,7 +108,7 @@ function logout() {
 
 async function loadApp() {
     const token = localStorage.getItem('access_token');
-    if (!token) {
+    if (!token || window.authSession?.isExpired()) {
         logout();
         return;
     }

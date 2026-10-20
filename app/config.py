@@ -17,7 +17,7 @@ class Config:
     LOG_BACKUP_COUNT = 3
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     JSON_AS_ASCII = False
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=4)
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=30)
 
 
 class DevelopmentConfig(Config):
