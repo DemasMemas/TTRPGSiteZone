@@ -9,32 +9,14 @@ export const LOCATION_STATIC_FIELD_SAMPLES_PER_METER = 4;
 export const LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER = 2;
 const MAX_DIRECTIONAL_FIELD_BYTES = 128 * 1024 * 1024;
 
-export function activeStaticLightFieldPointSlots(slots, sources) {
-    const used = new Set();
+export function activeStaticLightFieldPointSlots(slots) {
     return Object.fromEntries(['pointShadow', 'pointSimple'].map(role => [role,
-        (slots[role] || []).map(light => {
-            const index = light.userData.lampRenderSourceIndex;
-            if (index == null || !(light.intensity > 0.02) || used.has(index)
-                || !(Number(sources[index]?.intensity) > 0)
-                || sources[index]?.kind === 'spot') return null;
-            used.add(index);
-            return index;
-        })]));
+        (slots[role] || []).map(() => null)]));
 }
 
-export function activeStaticLightFieldSpotSlots(slots, sources) {
-    const used = new Set();
+export function activeStaticLightFieldSpotSlots(slots) {
     return Object.fromEntries(['spotShadow', 'spotSimple'].map(role => [role,
-        (slots[role] || []).map(light => {
-            // A shadowless SpotLight can illuminate through walls; bake it instead.
-            if (role === 'spotSimple') return null;
-            const index = light.userData.lampRenderSourceIndex;
-            if (index == null || !(light.intensity > 0.02) || used.has(index)
-                || !(Number(sources[index]?.intensity) > 0)
-                || sources[index]?.kind !== 'spot') return null;
-            used.add(index);
-            return index;
-        })]));
+        (slots[role] || []).map(() => null)]));
 }
 
 export function remapStaticLightFieldSlots(slots, before, after) {

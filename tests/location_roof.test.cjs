@@ -54,6 +54,7 @@ test('roof geometry has two sloping faces and camera cutaway preserves outside v
     const plan = roofPlans(room())[0];
     class BufferGeometry {
         setAttribute(name, value) { this[name] = value; }
+        getAttribute(name) { return this[name]; }
         computeVertexNormals() {}
     }
     class Float32BufferAttribute {
@@ -85,12 +86,13 @@ test('roof geometry has two sloping faces and camera cutaway preserves outside v
     assert.equal(roofVisibleForCamera(plan, { x: 50, z: 50 }, 30, true, true), false);
 });
 
-test('roof visual keeps shared shadow geometry, materials, normals and disposal ownership', async () => {
+test('roof shadow includes gable caps without an extra shadow draw', async () => {
     const { roofPlans, createRoofVisual } = await load();
     const plan = roofPlans(room())[0];
     const patterns = [];
     class BufferGeometry {
         setAttribute(name, value) { this[name] = value; }
+        getAttribute(name) { return this[name]; }
         computeVertexNormals() { this.normalsComputed = true; }
     }
     class Float32BufferAttribute {
@@ -129,10 +131,39 @@ test('roof visual keeps shared shadow geometry, materials, normals and disposal 
         applySurfacePattern: (...args) => patterns.push(args),
     });
     const [face, gable, shadow] = roof.children;
-    assert.equal(face.geometry, shadow.geometry);
+    assert.notEqual(face.geometry, shadow.geometry);
     assert.notEqual(gable.geometry, face.geometry);
     assert.equal(face.geometry.normalsComputed, true);
     assert.equal(gable.geometry.normalsComputed, true);
+    assert.equal(shadow.geometry.normalsComputed, true);
+    const roofPositions = face.geometry.getAttribute('position').array;
+    const gablePositions = gable.geometry.getAttribute('position').array;
+    const shadowPositions = shadow.geometry.getAttribute('position').array;
+    assert.equal(shadowPositions.length, roofPositions.length + gablePositions.length);
+    for (let index = 0; index < gablePositions.length; index++) {
+        assert.ok(Math.abs(shadowPositions[roofPositions.length + index] - gablePositions[index]) < 1e-5);
+    }
+    const gableX = (plan.width - 0.48) / 2;
+    const sampleY = (plan.rise - 0.12) / 2;
+    const coversGableCenter = positions => {
+        const cross = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1])
+            - (b[1] - a[1]) * (c[0] - a[0]);
+        const point = [sampleY, 0];
+        for (let index = 0; index < positions.length; index += 9) {
+            const vertices = [0, 3, 6].map(offset => [positions[index + offset + 1],
+                positions[index + offset + 2]]);
+            if ([0, 3, 6].some(offset =>
+                Math.abs(positions[index + offset] - gableX) > 1e-5)) continue;
+            const area = cross(vertices[0], vertices[1], vertices[2]);
+            if (Math.abs(area) < 1e-6) continue;
+            const signs = [cross(vertices[0], vertices[1], point),
+                cross(vertices[1], vertices[2], point), cross(vertices[2], vertices[0], point)];
+            if (signs.every(value => value >= -1e-5) || signs.every(value => value <= 1e-5)) return true;
+        }
+        return false;
+    };
+    assert.equal(coversGableCenter(roofPositions), false);
+    assert.equal(coversGableCenter(shadowPositions), true);
     assert.equal(face.material.color, plan.color);
     assert.equal(face.material.roughness, 0.94);
     assert.equal(gable.material.color, '#aabbcc');
@@ -142,6 +173,7 @@ test('roof visual keeps shared shadow geometry, materials, normals and disposal 
         [gable.material, wallTexture, 0.25, 'sides'],
     ]);
     assert.equal(shadow.castShadow, true);
+    assert.equal(roof.children.filter(child => child.castShadow).length, 1);
     assert.equal(shadow.material.colorWrite, false);
     assert.equal(shadow.material.depthWrite, false);
     assert.ok(roof.children.every(child => child.receiveShadow));
@@ -275,7 +307,7 @@ test('small and large roofs cut away at comparable framing, and enclosed floors 
     assert.match(sceneSource, /height - FLOOR_SURFACE_OFFSET/);
 });
 
-test('two-storey cutaway hides only its upper floor and restores the roof shadow', async () => {
+test('near roof cuts away while distant roof remains complete on any viewed floor', async () => {
     const { roofVisibleForCamera } = await load();
     const start = sceneSource.indexOf('function updateRoofVisibility()');
     const end = sceneSource.indexOf('function rebuildLocationRoofs()', start);
@@ -289,27 +321,30 @@ test('two-storey cutaway hides only its upper floor and restores the roof shadow
     const face = { visible: true };
     const shadow = { visible: true, castShadow: true };
     const roof = { userData: { roofPlan: { x: 5, z: 5, angle: 0, width: 6, depth: 5,
-        eaveY: 5, rise: 1 }, visualMeshes: [face], cutawayFloorMesh: upperFloor },
+        eaveY: 5, rise: 1 }, floorLevel: 1, visualMeshes: [face], cutawayFloorMesh: upperFloor },
     children: [face, shadow] };
+    const view = { minLevel: 0, maxLevel: 1, distant: false, plan: roof.userData.roofPlan };
+    let visibilityUpdates = 0;
     const context = vm.createContext({
         camera: { position: { x: 5, y: 8, z: 5,
             distanceTo(target) { return Math.hypot(this.x - target.x, this.y - target.y, this.z - target.z); } } },
         controls: { target: { x: 5, y: 0, z: 5 } }, roofMeshes: [roof],
-        roofVisibleForCamera, locationRoofsVisible: true, editMode: false,
-        window: { isGM: true }, document: { getElementById: () => ({ value: '0' }) },
-        structureLevel: object => Number(object.properties.level || 0),
+        roofVisibleForCamera, locationRoofsVisible: true, editMode: false, locationViewLevel: 0,
+        locationBuildingViewsDirty: false, getLocationBuildingViews: () => new Map([['house-a', view]]),
+        applyFogOfWar: () => visibilityUpdates++, updateLocationLampFixtureFloors() {},
+        lampRenderSources: [],
     });
     vm.runInContext(sceneSource.slice(start, end), context);
     context.updateRoofVisibility();
     assert.equal(face.visible, false);
     assert.equal(shadow.visible, false);
-    assert.equal(upperFloor.visible, false);
+    assert.equal(upperFloor.visible, true);
     assert.equal(lowerFloor.visible, true);
 
     context.camera.position.x = 9;
     context.camera.position.z = 8;
     context.updateRoofVisibility();
-    assert.equal(upperFloor.visible, false);
+    assert.equal(upperFloor.visible, true);
     assert.equal(lowerFloor.visible, true);
 
     context.camera.position.x = 10;
@@ -322,19 +357,25 @@ test('two-storey cutaway hides only its upper floor and restores the roof shadow
     context.camera.position.x = 40;
     context.updateRoofVisibility();
     assert.equal(face.visible, true);
+    assert.equal(view.distant, true);
+    assert.equal(visibilityUpdates, 1);
+    assert.equal(shadow.visible, true);
+    context.locationViewLevel = 1;
+    context.updateRoofVisibility();
+    assert.equal(face.visible, true);
     assert.equal(shadow.visible, true);
     assert.equal(upperFloor.visible, true);
     assert.equal(lowerFloor.visible, true);
 
     context.editMode = true;
     context.updateRoofVisibility();
-    assert.equal(upperFloor.visible, false);
-    context.document.getElementById = () => ({ value: '1' });
-    context.updateRoofVisibility();
     assert.equal(upperFloor.visible, true);
+    assert.equal(face.visible, true);
+    assert.equal(shadow.visible, true);
     context.editMode = false;
     context.locationRoofsVisible = false;
     context.updateRoofVisibility();
+    assert.equal(face.visible, false);
     assert.equal(upperFloor.visible, true);
     assert.equal(shadow.visible, false);
     assert.equal(lowerFloor.visible, true);

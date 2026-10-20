@@ -221,6 +221,8 @@ test('upper-storey hover projects onto the active level while ground decor stays
     assert.deepEqual(planes, [3.4, 3.4]);
     projectedPoint = { x: 12, z: 4 };
     assert.equal(context.hoveredEditorTile(10, 20, { x: 1, z: 1 }), null);
+    context.selectedLocationAsset = { kind: 'lamp' };
+    assert.equal(context.editorHoverLevelOffset(), 2.4);
     context.selectedLocationAsset = { kind: 'decor' };
     assert.equal(context.editorHoverLevelOffset(), 0);
     assert.deepEqual({ ...context.hoveredEditorTile(10, 20, { x: 1, z: 1 }) }, { x: 1, z: 1 });

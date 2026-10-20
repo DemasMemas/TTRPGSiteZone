@@ -38,7 +38,8 @@ import {
 } from './locationAssetTransforms.js';
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
 import { doorOnWall, doorFrameStyle, doorTrimLayout, floorEntrancePoint, floorFitPlan, floorVisualPose,
-    houseWallWear, nextStoreyFloors, structureBuildingId, structureLevel, structureLevelOffset, structurePose,
+    houseWallWear, nextStoreyFloors, STOREY_HEIGHT, structureBuildingId, structureLevel,
+    structureLevelOffset, structurePose,
     wallVisualPlan } from './locationArchitecture.js';
 import { applyInteriorFloorShade, createRoofVisual, roofPlans, roofVisibleForCamera } from './locationRoof.js';
 import { generatedFloorBlueprint, houseBuildingId, houseFootprint, planResidentialHouse,
@@ -398,6 +399,9 @@ let combatAreaMeshes = [];
 let locationObjectMeshes = [];
 let roofMeshes = [];
 let locationRoofsVisible = true;
+let locationViewLevel = 0;
+let locationBuildingViews = new Map();
+let locationBuildingViewsDirty = true;
 let groundPlaneMesh;
 let terrainFoundationY = 0;
 let pendingTerrainRefresh = null;
@@ -426,6 +430,7 @@ let brushObjectRotation = 0;
 let raycaster = new THREE.Raycaster();
 let mouse = new THREE.Vector2();
 let hoveredTileCoords = null;
+let hoveredPointerClient = null;
 let pendingCharacterPlacement = null;
 let pendingCharacterPlacementQueue = [];
 let highlightBox = null;
@@ -5720,10 +5725,16 @@ function applyFogOfWar() {
         const hidden = entry.gmHidden || entry.camouflaged;
         const visible = (globalThis.window?.isGM && hidden)
             || (!hidden && (!active || isCharacterVisibleToPlayer(entry, sources)));
-        entry.model.visible = visible;
-        entry.label.visible = visible;
+        const onViewedFloor = locationLevelVisible(0, null, entry.model.position.x, entry.model.position.z);
+        entry.model.visible = visible && onViewedFloor;
+        entry.label.visible = visible && onViewedFloor;
     });
     objectMeshes.forEach((mesh) => {
+        if (!locationLevelVisible(decorDisplayLevel(mesh.userData?.sourceObject), null,
+            mesh.position.x, mesh.position.z)) {
+            mesh.visible = false;
+            return;
+        }
         if (mesh.userData?.sourceObject?.gm_hidden) {
             mesh.visible = Boolean(window.isGM);
             return;
@@ -5743,6 +5754,11 @@ function applyFogOfWar() {
     });
     locationObjectMeshes.forEach((mesh) => {
         const object = mesh.userData?.locationObject || {};
+        if (!locationLevelVisible(structureLevel(object), structureBuildingId(object),
+            mesh.position.x, mesh.position.z)) {
+            mesh.visible = false;
+            return;
+        }
         if (object.properties?.gm_hidden) {
             mesh.visible = Boolean(window.isGM);
             return;
@@ -9743,6 +9759,55 @@ function getStructurePlacementProperties() {
     return { building_id: String(buildingId || '').trim(), level: level === '1' ? 1 : 0 };
 }
 
+function wallBulbMountAt(x, z, level, elevation, dimensions, maxDistance = 0.9) {
+    let nearest = null;
+    for (const wall of currentLocationData?.objects || []) {
+        if (wall.type !== 'wall' || structureLevel(wall) !== level) continue;
+        const pose = structurePose(wall);
+        const dx = x - pose.x;
+        const dz = z - pose.z;
+        const along = dx * pose.axis.x + dz * pose.axis.z;
+        const across = dx * pose.normal.x + dz * pose.normal.z;
+        if (Math.abs(along) > pose.width / 2 + maxDistance + 0.7
+            || Math.abs(across) > maxDistance + pose.depth / 2 + dimensions.depth) continue;
+        const { spans } = wallVisualPlan(wall, currentLocationData.objects);
+        const side = across < 0 ? -1 : 1;
+        // The model's mounting plate sits behind its origin on local -Z.
+        const mountOffset = pose.depth / 2 + dimensions.depth * 0.38 + 0.055 / 2;
+        for (const span of spans) {
+            if (span.end - span.start < dimensions.width) continue;
+            const onWall = Math.max(span.start + dimensions.width / 2,
+                Math.min(span.end - dimensions.width / 2, along));
+            if (Math.abs(onWall - along) > 0.35) continue;
+            const mountX = pose.x + onWall * pose.axis.x + side * mountOffset * pose.normal.x;
+            const mountZ = pose.z + onWall * pose.axis.z + side * mountOffset * pose.normal.z;
+            const tileX = Math.floor(mountX);
+            const tileZ = Math.floor(mountZ);
+            if (tileX < 0 || tileZ < 0 || tileX >= currentLocationData.grid_width
+                || tileZ >= currentLocationData.grid_height) continue;
+            const relativeY = getTileHeight(tileX, tileZ) + elevation
+                - getTileHeight(wall.tile_x, wall.tile_y) - Number(wall.properties?.elevation || 0);
+            if (relativeY - dimensions.height / 2 < span.bottom - 0.01
+                || relativeY + dimensions.height / 2 > span.top + 0.01) continue;
+            const distance = Math.hypot(mountX - x, mountZ - z);
+            if (distance > maxDistance || (nearest && distance >= nearest.distance)) continue;
+            nearest = { x: mountX, z: mountZ, tileX, tileZ, distance,
+                rotation: pose.angle + (side < 0 ? Math.PI : 0),
+                buildingId: structureBuildingId(wall) };
+        }
+    }
+    return nearest;
+}
+
+function wallBulbPlacement(x, z, asset, client = hoveredPointerClient) {
+    const level = getStructurePlacementProperties().level;
+    const point = client ? getPointerWorldPoint(client.x, client.y,
+        getTileHeight(x, z) + structureLevelOffset({ properties: { level } })) : null;
+    const dimensions = assetDimensions(asset, 'structure', asset.id);
+    return wallBulbMountAt(point?.x ?? x + 0.5, point?.z ?? z + 0.5,
+        level, clampAssetElevation(asset.elevation), dimensions);
+}
+
 function editorHoverLevelOffset() {
     if (!window.locationEditMode) return 0;
     if (editorMoveMode && editorSelection?.kind === 'structure') {
@@ -9750,7 +9815,7 @@ function editorHoverLevelOffset() {
     }
     const tool = window.locationEditorTool;
     if (tool === 'select' && editorSelection && editorSelection.kind !== 'structure') return 0;
-    if (tool !== 'select' && !(tool === 'assets' && selectedLocationAsset?.kind === 'structure')
+    if (tool !== 'select' && !(tool === 'assets' && ['structure', 'lamp'].includes(selectedLocationAsset?.kind))
         && !(tool !== 'assets' && buildMode === 'structure')) return 0;
     return structureLevelOffset({ properties: getStructurePlacementProperties() });
 }
@@ -10115,6 +10180,21 @@ function getLocationFireSources() {
     return sources;
 }
 
+function getLocationStaticFieldSources() {
+    const objectSources = (currentLocationData?.objects || []).flatMap(object => {
+        const source = fireLightSource(object) || electricFixtureLightSource(object);
+        if (!source) return [];
+        return [{ ...source, kind: 'point',
+            y: getTileHeight(source.tileX, source.tileZ)
+                + structureLevelOffset(object) + source.height }];
+    });
+    const decorSources = getLocationDecorFireSources().map(source => ({
+        ...source, kind: 'point',
+        y: getTileHeight(source.tileX, source.tileZ) + source.height,
+    }));
+    return [...lampRenderSources, ...objectSources, ...decorSources];
+}
+
 function isObjectLightSource(object) {
     return isFireObject(object) || isElectricFixture(object);
 }
@@ -10126,6 +10206,7 @@ function createFirePointLight(source, objectId = null) {
         source?.distance || 6, 2);
     light.userData.fireObjectId = objectId;
     light.userData.firePoolLight = true;
+    light.visible = !locationStaticLightField;
     if (source) light.position.set(source.x,
         getTileHeight(source.tileX, source.tileZ) + source.height, source.z);
     // Point-light shadows render the entire scene six times per flame.
@@ -10149,6 +10230,7 @@ function syncFireObjectLight(object, objectId = object?.id, refreshDarkness = tr
                 refreshLocationDarkness(activeLightingProfile, true);
             }
         }
+        queueStaticLightFieldRefresh();
         return;
     }
     const light = existing || locationLightGroup.children.find(child => child.userData.firePoolLight
@@ -10159,6 +10241,8 @@ function syncFireObjectLight(object, objectId = object?.id, refreshDarkness = tr
     light.intensity = source.intensity;
     light.distance = source.distance;
     light.color.set(source.color);
+    light.visible = !locationStaticLightField;
+    queueStaticLightFieldRefresh();
     if (refreshDarkness && activeLightingProfile?.dark_tiles?.length) {
         refreshLocationDarkness(activeLightingProfile, true);
     }
@@ -10228,13 +10312,19 @@ function staticFieldDynamicIds() {
         ...Object.values(staticFieldSpotSlots || {}).flat()].filter(index => index != null));
 }
 
+function setStaticObjectRenderLightsEnabled(enabled) {
+    for (const light of locationLightGroup?.children || []) {
+        if (light.userData.firePoolLight || light.userData.decorFireLight) light.visible = enabled;
+    }
+}
+
 function refreshStaticLightField() {
     if (!locationStaticLightField || !currentLocationData) return;
     try {
-        if (!locationStaticLightField.update(currentLocationData, lampRenderSources,
+        if (!locationStaticLightField.update(currentLocationData, getLocationStaticFieldSources(),
             staticFieldDynamicIds())) {
             const replacement = createLocationDirectionalLightField(THREE, currentLocationData,
-                lampRenderSources, getTileHeight, staticFieldDynamicIds(),
+                getLocationStaticFieldSources(), getTileHeight, staticFieldDynamicIds(),
                 renderer.capabilities.maxTextureSize);
             forEachStaticLightFieldMaterial(material => locationStaticLightField.detach(material));
             locationStaticLightField.dispose();
@@ -10277,6 +10367,7 @@ export function setLocationStaticLightFieldEnabled(enabled) {
             locationStaticLightField = null;
             staticFieldPointSlots = null;
             staticFieldSpotSlots = null;
+            setStaticObjectRenderLightsEnabled(true);
             updateLampRenderLights(performance.now(), 1, true);
             staticFieldFirstFrame = { enabled: false, at: performance.now() };
             staticFieldLastToggleWork = { enabled: false, hooksMs,
@@ -10316,8 +10407,9 @@ export function setLocationStaticLightFieldEnabled(enabled) {
             });
         }
         locationStaticLightField = createLocationDirectionalLightField(THREE, currentLocationData,
-            lampRenderSources, getTileHeight, staticFieldDynamicIds(),
+            getLocationStaticFieldSources(), getTileHeight, staticFieldDynamicIds(),
             renderer.capabilities.maxTextureSize);
+        setStaticObjectRenderLightsEnabled(false);
         const fieldMs = performance.now() - startedAt;
         const hooksStartedAt = performance.now();
         forEachStaticLightFieldMaterial((material, level) =>
@@ -10338,6 +10430,8 @@ export function setLocationStaticLightFieldEnabled(enabled) {
         setLocationStaticLightFieldEnabled(false);
         staticFieldPointSlots = null;
         staticFieldSpotSlots = null;
+        setStaticObjectRenderLightsEnabled(true);
+        updateLampRenderLights(performance.now(), 1, true);
         showNotification('Не удалось включить световое поле', 'system');
         return false;
     }
@@ -10690,10 +10784,14 @@ function refreshLocationDarkness(profile = activeLightingProfile, lightOnly = fa
 
 function addLocationObjectMesh(obj, refreshFog = true) {
     if (locationObjectMeshes.some(mesh => mesh.userData.locationObjectId === obj.id)) return;
+    locationBuildingViewsDirty = true;
     const mesh = createLocationObjectMesh(obj);
     tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
     scene.add(mesh);
     locationObjectMeshes.push(mesh);
+    mesh.visible = locationLevelVisible(structureLevel(obj), structureBuildingId(obj),
+        mesh.position.x, mesh.position.z);
+    refreshLocationFloorMenu();
     if (refreshFog) applyFogOfWar();
 }
 
@@ -10703,6 +10801,7 @@ function removeLocationObjectMesh(objectId, refreshFog = true) {
     scene.remove(mesh);
     disposeLocationObject(mesh);
     locationObjectMeshes = locationObjectMeshes.filter(item => item !== mesh);
+    locationBuildingViewsDirty = true;
     if (refreshFog) applyFogOfWar();
 }
 
@@ -10711,29 +10810,177 @@ function replaceLocationObjectMesh(object, refreshFog = true) {
     addLocationObjectMesh(object, refreshFog);
 }
 
+function decorDisplayLevel(object) {
+    const explicit = Number(object?.level);
+    return object?.level != null && Number.isInteger(explicit) && explicit >= 0
+        ? explicit : Math.max(0, Math.floor((Number(object?.elevation) || 0) / STOREY_HEIGHT));
+}
+
+function getLocationBuildingViews() {
+    if (!locationBuildingViewsDirty) return locationBuildingViews;
+    const views = new Map();
+    const objects = currentLocationData?.objects || [];
+    const byId = new Map(objects.map(object => [String(object.id), object]));
+    for (const object of objects) {
+        const id = structureBuildingId(object);
+        if (!id || !['floor', 'wall', 'door', 'window'].includes(object.type)) continue;
+        const level = structureLevel(object);
+        const view = views.get(id) || { minLevel: level, maxLevel: level, plan: null, planLevel: -1,
+            distant: true };
+        view.minLevel = Math.min(view.minLevel, level);
+        view.maxLevel = Math.max(view.maxLevel, level);
+        if (object.type === 'floor' && level >= view.planLevel) {
+            const pose = structurePose(object);
+            view.plan = { x: pose.x, z: pose.z, angle: pose.angle, width: pose.width,
+                depth: pose.depth, eaveY: getTileHeight(object.tile_x, object.tile_y)
+                    + structureLevelOffset(object) + pose.height, rise: 0 };
+            view.planLevel = level;
+        }
+        views.set(id, view);
+    }
+    for (const roof of roofMeshes) {
+        const floor = byId.get(String(roof.userData.roofPlan?.floorId));
+        const id = structureBuildingId(floor);
+        const view = views.get(id);
+        if (view) view.plan = roof.userData.roofPlan;
+    }
+    if (camera && controls) {
+        const distance = camera.position.distanceTo(controls.target);
+        for (const view of views.values()) {
+            if (view.plan) view.distant = roofVisibleForCamera(view.plan, controls.target,
+                distance, true, false, camera.position);
+        }
+    }
+    locationBuildingViews = views;
+    locationBuildingViewsDirty = false;
+    return views;
+}
+
+function locationBuildingAt(x, z) {
+    let nearest = null;
+    let area = Infinity;
+    for (const view of getLocationBuildingViews().values()) {
+        const plan = view.plan;
+        if (!plan) continue;
+        const dx = x - plan.x;
+        const dz = z - plan.z;
+        const along = dx * Math.cos(plan.angle) - dz * Math.sin(plan.angle);
+        const across = dx * Math.sin(plan.angle) + dz * Math.cos(plan.angle);
+        if (Math.abs(along) > plan.width / 2 || Math.abs(across) > plan.depth / 2) continue;
+        if (plan.width * plan.depth < area) {
+            nearest = view;
+            area = plan.width * plan.depth;
+        }
+    }
+    return nearest;
+}
+
+function locationLevelVisible(level, buildingId, x, z) {
+    const view = (buildingId && getLocationBuildingViews().get(buildingId)) || locationBuildingAt(x, z);
+    return !view || view.maxLevel === view.minLevel || view.distant || level <= locationViewLevel;
+}
+
+function lampDisplayLevel(source) {
+    const explicit = Number(source?.level);
+    if (source?.level != null && Number.isInteger(explicit) && explicit >= 0) return explicit;
+    // Saved lamps have an absolute height, usually near the ceiling of their own storey.
+    return Math.max(0, Math.floor(((Number(source?.height) || 0) - STOREY_HEIGHT / 2) / STOREY_HEIGHT));
+}
+
+function locationFloorCount() {
+    let highest = 0;
+    for (const object of currentLocationData?.objects || []) highest = Math.max(highest, structureLevel(object));
+    for (const light of currentLocationData?.lighting?.local_lights || []) {
+        highest = Math.max(highest, lampDisplayLevel(light));
+    }
+    for (const row of currentLocationData?.tiles_data || []) {
+        for (const tile of row) {
+            for (const object of tile.objects || []) {
+                highest = Math.max(highest, decorDisplayLevel(object));
+            }
+        }
+    }
+    return Math.max(highest + 1, globalThis.window?.isGM ? 2 : 1);
+}
+
+function refreshLocationFloorMenu() {
+    const menu = document.getElementById('location-floor-menu');
+    if (!menu) return;
+    const select = menu.querySelector('select');
+    const count = locationFloorCount();
+    if (locationViewLevel >= count) {
+        setLocationViewLevel(count - 1);
+        return;
+    }
+    if (select.options.length !== count) {
+        select.replaceChildren(...Array.from({ length: count }, (_, level) =>
+            new Option(`${level + 1} этаж`, String(level))));
+    }
+    select.value = String(locationViewLevel);
+    menu.querySelector('[data-floor-down]').disabled = locationViewLevel === 0;
+    menu.querySelector('[data-floor-up]').disabled = locationViewLevel >= count - 1;
+}
+
+function updateLocationLampFixtureFloors(sources = currentLocationData?.lighting?.local_lights || []) {
+    for (const fixture of locationLightGroup?.children || []) {
+        const index = fixture.userData?.locationLampIndex;
+        if (!Number.isInteger(index)) continue;
+        const source = sources[index];
+        fixture.visible = Boolean(source)
+            && locationLevelVisible(lampDisplayLevel(source), null, Number(source.x), Number(source.z));
+    }
+}
+
+export function getLocationViewLevel() { return locationViewLevel; }
+
+export function setLocationViewLevel(level) {
+    const next = Math.max(0, Math.min(locationFloorCount() - 1, Number(level) || 0));
+    if (next === locationViewLevel) return;
+    locationViewLevel = next;
+    if (editorSelection) clearEditorSelection();
+    const placementLevel = document.getElementById('loc-structure-level');
+    if (placementLevel && [...placementLevel.options].some(option => option.value === String(next))
+        && placementLevel.value !== String(next)) {
+        placementLevel.value = String(next);
+        placementLevel.dispatchEvent(new Event('change'));
+    }
+    updateRoofVisibility();
+    applyFogOfWar();
+    updateLocationLampFixtureFloors(lampRenderSources);
+    refreshLocationFloorMenu();
+}
+
 function updateRoofVisibility() {
-    if (!camera || !controls || !roofMeshes.length) return;
+    if (!camera || !controls) return;
     const distance = camera.position.distanceTo(controls.target);
-    const editedLevel = editMode ? Number(document.getElementById('loc-structure-level')?.value || 0) : 0;
+    const wasDirty = locationBuildingViewsDirty;
+    const views = getLocationBuildingViews();
+    let floorVisibilityChanged = wasDirty;
+    for (const view of views.values()) {
+        if (view.maxLevel === view.minLevel || !view.plan) continue;
+        const distant = roofVisibleForCamera(view.plan, controls.target,
+            distance, true, false, camera.position);
+        if (distant !== view.distant) {
+            view.distant = distant;
+            floorVisibilityChanged = true;
+        }
+    }
     for (const roof of roofMeshes) {
         const visible = roofVisibleForCamera(roof.userData.roofPlan, controls.target,
-            distance, locationRoofsVisible, editMode, camera.position);
+            distance, locationRoofsVisible, false, camera.position);
         for (const child of roof.userData.visualMeshes) child.visible = visible;
-        const upperFloor = roof.userData.cutawayFloorMesh;
-        if (upperFloor) {
+        if (roof.userData.cutawayFloorMesh) {
             for (const child of roof.children) if (child.castShadow) child.visible = visible;
-            const hiddenByEditor = editMode && editedLevel < structureLevel(upperFloor.userData.locationObject);
-            const hiddenByCamera = !editMode && locationRoofsVisible && !visible;
-            const gmHidden = upperFloor.userData.locationObject?.properties?.gm_hidden && !window.isGM;
-            upperFloor.visible = !gmHidden && !hiddenByEditor && !hiddenByCamera;
         }
+    }
+    if (floorVisibilityChanged) {
+        applyFogOfWar();
+        updateLocationLampFixtureFloors(lampRenderSources);
     }
 }
 
 function rebuildLocationRoofs() {
     for (const roof of roofMeshes) {
-        const upperFloor = roof.userData.cutawayFloorMesh;
-        if (upperFloor) upperFloor.visible = !upperFloor.userData.locationObject?.properties?.gm_hidden || window.isGM;
         scene?.remove(roof);
         disposeLocationObject(roof);
     }
@@ -10772,9 +11019,11 @@ function rebuildLocationRoofs() {
             && structureLevel(lower) < structureLevel(floor))) {
             roof.userData.cutawayFloorMesh = floorMeshes.get(plan.floorId) || null;
         }
+        roof.userData.floorLevel = structureLevel(floor);
         scene.add(roof);
         roofMeshes.push(roof);
     }
+    locationBuildingViewsDirty = true;
     updateRoofVisibility();
 }
 
@@ -11251,6 +11500,9 @@ function updateBuildPreview() {
         && ['door', 'window'].includes(placementForLocationAsset(source).type);
     const movableStructurePreview = placingAsset && !editingSelection && source?.kind === 'structure'
         && !openingPlacementPreview;
+    const wallBulbPreview = movableStructurePreview && source.id === 'wall_bulb';
+    const wallMount = wallBulbPreview ? wallBulbPlacement(x, z, source) : null;
+    if (wallBulbPreview && !wallMount) { clearBuildPreview(); return; }
     const mountOffsetX = !editingSelection ? Math.sin(structureRotation) * Number(source?.offsetZ || 0) : 0;
     const mountOffsetZ = !editingSelection ? Math.cos(structureRotation) * Number(source?.offsetZ || 0) : 0;
     const previewKey = [window.locationEditorTool, movableStructurePreview ? 'structure' : x,
@@ -11270,9 +11522,12 @@ function updateBuildPreview() {
         if (movableStructurePreview) {
             const floorOffset = placementForLocationAsset(source).type === 'floor'
                 ? structureHeight - FLOOR_SURFACE_OFFSET : 0;
-            buildPreviewMesh.position.set(x + 0.5 + mountOffsetX,
-                getTileHeight(x, z) + structureLevelOffset({ properties: placementProperties })
-                    + clampAssetElevation(source.elevation) - floorOffset, z + 0.5 + mountOffsetZ);
+            buildPreviewMesh.position.set(wallMount?.x ?? x + 0.5 + mountOffsetX,
+                getTileHeight(wallMount?.tileX ?? x, wallMount?.tileZ ?? z)
+                    + structureLevelOffset({ properties: placementProperties })
+                    + clampAssetElevation(source.elevation) - floorOffset,
+                wallMount?.z ?? z + 0.5 + mountOffsetZ);
+            if (wallMount) buildPreviewMesh.rotation.y = wallMount.rotation;
         }
         return;
     }
@@ -11297,14 +11552,16 @@ function updateBuildPreview() {
                         offset_x: editorMovePreviewPoint.x - x - 0.5,
                         offset_z: editorMovePreviewPoint.z - z - 0.5 },
                 } : source) : {
-                type: placementForLocationAsset(source).type, tile_x: x, tile_y: z,
+                type: placementForLocationAsset(source).type,
+                tile_x: wallMount?.tileX ?? x, tile_y: wallMount?.tileZ ?? z,
                 properties: {
                     ...placementProperties,
                     dimensions: { width: structureWidth, depth: structureDepth, height: structureHeight },
                     color: structureColor,
-                    rotation: structureRotation,
-                    offset_x: mountOffsetX,
-                    offset_z: mountOffsetZ,
+                    ...(wallMount?.buildingId ? { building_id: wallMount.buildingId } : {}),
+                    rotation: wallMount?.rotation ?? structureRotation,
+                    offset_x: wallMount ? wallMount.x - wallMount.tileX - 0.5 : mountOffsetX,
+                    offset_z: wallMount ? wallMount.z - wallMount.tileZ - 0.5 : mountOffsetZ,
                     elevation: clampAssetElevation(source.elevation),
                     ...(placementForLocationAsset(source).visualAsset ? { visual_asset: source.id } : {}),
                     ...(isFireObject({ type: source.id }) ? { is_lit: true } : {}),
@@ -11322,7 +11579,8 @@ function updateBuildPreview() {
             buildPreviewMesh = createEditorLampPreview(lampPreview);
             buildPreviewMesh.position.set(
                 editorResizeMode ? Number(source.x) : editorMovePreviewPoint?.x ?? x + 0.5,
-                getTileHeight(x, z) + Number(source.height),
+                getTileHeight(x, z) + Number(source.height)
+                    + (!editingSelection ? structureLevelOffset({ properties: placementProperties }) : 0),
                 editorResizeMode ? Number(source.z) : editorMovePreviewPoint?.z ?? z + 0.5,
             );
         } else {
@@ -11343,11 +11601,11 @@ function updateBuildPreview() {
         }
         if (kind === 'structure') buildPreviewMesh.position.set(
             (editorMoveMode || editorResizeMode) && source.type === 'floor' ? buildPreviewMesh.position.x
-                : editorMovePreviewPoint?.x ?? resizeCenter?.x
+                : wallMount?.x ?? editorMovePreviewPoint?.x ?? resizeCenter?.x
                     ?? x + 0.5 + Number(source.properties?.offset_x || 0) + mountOffsetX,
-            getTileHeight(x, z),
+            getTileHeight(wallMount?.tileX ?? x, wallMount?.tileZ ?? z),
             (editorMoveMode || editorResizeMode) && source.type === 'floor' ? buildPreviewMesh.position.z
-                : editorMovePreviewPoint?.z ?? resizeCenter?.z
+                : wallMount?.z ?? editorMovePreviewPoint?.z ?? resizeCenter?.z
                     ?? z + 0.5 + Number(source.properties?.offset_z || 0) + mountOffsetZ,
         );
         if (kind === 'structure') {
@@ -11358,6 +11616,7 @@ function updateBuildPreview() {
                 ? structureLevelOffset(source) : structureLevelOffset({ properties: placementProperties }))
                 + (editorResizeMode ? editorResizeElevation
                     : clampAssetElevation(source.properties?.elevation ?? source.elevation)) - floorOffset;
+            if (wallMount) buildPreviewMesh.rotation.y = wallMount.rotation;
         }
         if (editorRotateMode) {
             buildPreviewMesh.rotation.y = bearingToObjectRotation(editorRotateAngle);
@@ -11412,13 +11671,20 @@ function updateBuildPreview() {
     scene.add(mesh);
 }
 
-async function placeStructureAtTile(x, z) {
+async function placeStructureAtTile(x, z, client = null) {
     if (!window.currentLobbyId || !currentLocationId) return;
     const dimensions = getStructureDimensions();
     const placement = window.locationEditorTool === 'assets' && selectedLocationAsset?.id === structurePreset
         ? placementForLocationAsset(selectedLocationAsset) : { type: structurePreset, visualAsset: null };
     const placedType = placement.type;
+    const wallMount = placedType === 'wall_bulb' && selectedLocationAsset?.kind === 'structure'
+        ? wallBulbPlacement(x, z, selectedLocationAsset, client) : null;
+    if (placedType === 'wall_bulb' && !wallMount) {
+        showNotification('Для настенной лампы выберите место у сплошной стены этого этажа', 'system');
+        return;
+    }
     const building = getStructurePlacementProperties();
+    if (wallMount?.buildingId) building.building_id = wallMount.buildingId;
     if (building.level > 0 && !building.building_id) {
         showNotification('Укажите ID здания для второго этажа', 'system');
         return;
@@ -11432,17 +11698,19 @@ async function placeStructureAtTile(x, z) {
         const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, {
             name: placedType,
             type: placedType,
-            tile_x: x,
-            tile_y: z,
+            tile_x: wallMount?.tileX ?? x,
+            tile_y: wallMount?.tileZ ?? z,
             properties: {
                 ...building,
                 dimensions,
                 ...(placedType === 'floor' ? { roof_type: roofType === 'flat' ? 'flat' : 'gable' } : {}),
                 color: structureColor,
                 ...(placement.visualAsset ? { visual_asset: placement.visualAsset } : {}),
-                rotation: structureRotation,
-                offset_x: Math.sin(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
-                offset_z: Math.cos(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
+                rotation: wallMount?.rotation ?? structureRotation,
+                offset_x: wallMount ? wallMount.x - wallMount.tileX - 0.5
+                    : Math.sin(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
+                offset_z: wallMount ? wallMount.z - wallMount.tileZ - 0.5
+                    : Math.cos(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
                 elevation: window.locationEditorTool === 'assets'
                     ? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
                 cover_class: selectedCoverClass,
@@ -11507,6 +11775,8 @@ async function removeStructuresAtTile(x, z, radius = 0) {
         }
     });
     if (!removedAny) return;
+    locationBuildingViewsDirty = true;
+    refreshLocationFloorMenu();
     if (removedFloor) rebuildGrassDetailMesh();
     if (removedArchitecture) {
         refreshArchitecturalMeshes();
@@ -11623,6 +11893,8 @@ export function removeLocationObject(objectId) {
     if (Number(containerInteractionState?.objectId) === Number(objectId)) closeContainerInteractionMenu();
     removeLocationObjectMesh(objectId, false);
     currentLocationData.objects = (currentLocationData.objects || []).filter(object => Number(object.id) !== Number(objectId));
+    locationBuildingViewsDirty = true;
+    refreshLocationFloorMenu();
     if (removed?.type === 'floor') { rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
     if (['wall', 'door', 'window'].includes(removed?.type)) refreshArchitecturalMeshes();
     const fire = isObjectLightSource(removed);
@@ -11843,6 +12115,8 @@ export function applyLocationLighting(settings, persist = true, origin = 'direct
         light.castShadow = source.castsShadow !== false;
         light.shadow.mapSize.set(256, 256);
         light.shadow.radius = 2;
+        light.userData.decorFireLight = true;
+        light.visible = !locationStaticLightField;
         locationLightGroup.add(light);
     }
     anomalyRenderSources = getAnomalyLightSources(currentLocationData?.tiles_data).map(source => ({
@@ -11879,6 +12153,8 @@ export function applyLocationLighting(settings, persist = true, origin = 'direct
         refreshStaticLightField();
     }
     scene.add(locationLightGroup);
+    updateLocationLampFixtureFloors(profile.local_lights || []);
+    refreshLocationFloorMenu();
     updateLampRenderLights(performance.now(), 0, true);
     updateAnomalyRenderLights(performance.now(), true);
     const darknessStartedAt = lampTrace ? performance.now() : 0;
@@ -12380,7 +12656,10 @@ function sendDecorTileUpdates(positions) {
         updates,
     });
     positions.forEach(({ x, z }) => rebuildTileObjects(x, z));
-    if (lightChanged) applyLocationLighting();
+    if (lightChanged) {
+        applyLocationLighting();
+        queueStaticLightFieldRefresh();
+    }
     applyFogOfWar();
     updateEditorSelectionVisual();
     notifyEditorSelection();
@@ -13075,11 +13354,11 @@ async function commitEditorAssetMove(x, z) {
     updateBuildPreview();
 }
 
-async function placeSelectedLocationAsset(x, z) {
+async function placeSelectedLocationAsset(x, z, client = null) {
     const asset = selectedLocationAsset;
     if (!asset) return;
     if (asset.kind === 'structure') {
-        const object = await placeStructureAtTile(x, z);
+        const object = await placeStructureAtTile(x, z, client);
         if (object) {
             editorSelection = { kind: 'structure', id: object.id };
             editorSelections = [editorSelection];
@@ -13102,8 +13381,15 @@ async function placeSelectedLocationAsset(x, z) {
         return;
     }
     const lights = [...(currentLocationData.lighting?.local_lights || [])];
+    const level = getStructurePlacementProperties().level;
+    const height = Number(asset.height) + structureLevelOffset({ properties: { level } });
+    if (!Number.isFinite(height) || height > 10) {
+        showNotification('Высота источника должна быть не более 10 м от земли', 'system');
+        return;
+    }
     lights.push({
-        x: x + 0.5, z: z + 0.5, height: asset.height,
+        x: x + 0.5, z: z + 0.5,
+        height,
         color: asset.color, intensity: asset.intensity, distance: asset.distance,
         kind: asset.lightKind || 'point', azimuth: Number(asset.azimuth || 0),
         dimensions: assetDimensions(asset, 'lamp', asset.lightKind || 'point'),
@@ -13137,6 +13423,10 @@ export function loadLocation(data) {
     locationObjectMeshes = [];
     darknessEditorOverlay = null;
     currentLocationData = data;
+    locationViewLevel = 0;
+    locationBuildingViews = new Map();
+    locationBuildingViewsDirty = true;
+    document.getElementById('location-floor-menu')?.remove();
     pendingTerrainRefresh = null;
     terrainFoundationY = terrainFoundationHeight(data.tiles_data);
     naturalGrassReported = false;
@@ -13431,7 +13721,10 @@ function flushPendingTerrainRefresh() {
     if (work.grass) rebuildGrassDetailMesh();
     if (work.roofs) rebuildLocationRoofs();
     if (work.fogGeometry) clearFogOverlay();
-    if (work.lighting) applyLocationLighting();
+    if (work.lighting) {
+        applyLocationLighting();
+        queueStaticLightFieldRefresh();
+    }
     else if (work.fog) applyFogOfWar();
     if (work.height) queueStaticLightFieldRefresh();
     if (work.selection && editorSelection) updateEditorSelectionVisual();
@@ -14137,6 +14430,7 @@ function rebuildTileObjects(tileX, tileZ) {
         if (!isAnomalyEffect) mesh.position.y += yOffset * (mesh.scale.y - 1);
         if (obj.gm_hidden && window.isGM) makeGmHiddenGhost(mesh);
         if (!isAnomalyEffect) attachStaticLightFieldToRoot(mesh, 0);
+        mesh.visible = locationLevelVisible(decorDisplayLevel(obj), null, mesh.position.x, mesh.position.z);
         scene.add(mesh);
         objectMeshes.push(mesh);
         if (isAnomalyEffect) anomalyEffectMeshes.push(mesh);
@@ -14150,6 +14444,7 @@ function rebuildTileObjects(tileX, tileZ) {
             tintLocationMesh(mesh, darknessFactorAt(mesh.position.x, mesh.position.z));
         }
     }
+    refreshLocationFloorMenu();
 }
 
 // ========== Обновления из сокета ==========
@@ -15005,6 +15300,7 @@ export function setupLocationEditing() {
                 locInfo.style.display = 'none';
                 hideHighlight();
                 hoveredTileCoords = null;
+                hoveredPointerClient = null;
                 if (editorMoveMode) editorMovePreviewPoint = null;
                 lastHighlightCoords = null;
                 clearBuildPreview();
@@ -15044,6 +15340,7 @@ export function setupLocationEditing() {
                 lastHighlightCoords = { x, z, level: highlightLevel, surfaceX, surfaceZ };
             }
             hoveredTileCoords = { x, z };
+            hoveredPointerClient = { x: e.clientX, y: e.clientY };
             if (editorMoveMode && e.target === canvas && !(e.buttons & 2)) {
                 if (movePoint) {
                     editorMovePreviewPoint = movePoint;
@@ -15058,6 +15355,7 @@ export function setupLocationEditing() {
             locInfo.style.display = 'none';
             hideHighlight();
             hoveredTileCoords = null;
+            hoveredPointerClient = null;
             lastHighlightCoords = null;
             clearBuildPreview();
         }
@@ -15079,6 +15377,7 @@ export function setupLocationEditing() {
 
     const onPointerDown = (e) => {
         if (!locationActive) return;
+        if (document.activeElement?.closest?.('#location-floor-menu')) document.activeElement.blur();
         if (e.button !== 0) return;
         if (e.target !== canvas) return;
         if (window.locationEditMode && editorResizeMode && editorSelection?.kind === 'structure') {
@@ -15190,7 +15489,8 @@ export function setupLocationEditing() {
             }
             e.preventDefault();
             e.stopImmediatePropagation();
-            placeSelectedLocationAsset(hoveredTileCoords.x, hoveredTileCoords.z);
+            placeSelectedLocationAsset(hoveredTileCoords.x, hoveredTileCoords.z,
+                { x: e.clientX, y: e.clientY });
             return;
         }
         if (window.locationEditorTool === 'light' && !e.altKey && !e.shiftKey) {
@@ -15880,6 +16180,48 @@ export function addLocationRoofButton() {
     return btn;
 }
 
+export function addLocationFloorMenu() {
+    document.getElementById('location-floor-menu')?.remove();
+    const menu = document.createElement('div');
+    menu.id = 'location-floor-menu';
+    menu.className = 'location-floor-menu';
+    const label = document.createElement('label');
+    label.textContent = 'Этаж ';
+    const select = document.createElement('select');
+    select.className = 'form-control';
+    select.setAttribute('aria-label', 'Отображаемый этаж');
+    select.onchange = () => {
+        setLocationViewLevel(select.value);
+        select.blur();
+    };
+    label.appendChild(select);
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.textContent = '−';
+    down.dataset.floorDown = '';
+    down.setAttribute('aria-label', 'Этаж ниже');
+    down.onclick = () => {
+        setLocationViewLevel(locationViewLevel - 1);
+        down.blur();
+    };
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.textContent = '+';
+    up.dataset.floorUp = '';
+    up.setAttribute('aria-label', 'Этаж выше');
+    up.onclick = () => {
+        setLocationViewLevel(locationViewLevel + 1);
+        up.blur();
+    };
+    menu.append(down, label, up);
+    document.getElementById('location-container').appendChild(menu);
+    refreshLocationFloorMenu();
+    updateRoofVisibility();
+    applyFogOfWar();
+    updateLocationLampFixtureFloors(lampRenderSources);
+    return menu;
+}
+
 export function destroyLocationScene() {
     lampLightingEchoes.reset();
     lampEditTrace = null;
@@ -16108,6 +16450,7 @@ export function destroyLocationScene() {
     combatHud = null;
     clearBuildPreview();
     hoveredTileCoords = null;
+    hoveredPointerClient = null;
     lastHighlightCoords = null;
     processedTilesForObjects.clear();
     structureDeletionInFlight.clear();

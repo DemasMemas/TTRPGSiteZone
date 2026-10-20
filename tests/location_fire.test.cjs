@@ -151,7 +151,8 @@ test('fire light stays in the scene after deletion and is reused on the next pla
         }
     }
     const context = vm.createContext({
-        THREE: { PointLight }, locationLightGroup: group,
+        THREE: { PointLight }, locationLightGroup: group, locationStaticLightField: null,
+        queueStaticLightFieldRefresh() {},
         fireLightSource: object => object ? { x: 1, z: 1, tileX: 0, tileZ: 0,
             height: 0.5, color: '#fff', intensity: 2, distance: 4 } : null,
         electricFixtureLightSource: () => null,
@@ -167,6 +168,12 @@ test('fire light stays in the scene after deletion and is reused on the next pla
     assert.equal(group.children.length, 1);
     assert.equal(group.children[0], first);
     assert.equal(first.userData.fireObjectId, 2);
+    context.locationStaticLightField = {};
+    context.syncFireObjectLight({ id: 2 }, 2);
+    assert.equal(first.visible, false, 'the field replaces the stationary PointLight');
+    context.locationStaticLightField = null;
+    context.syncFireObjectLight({ id: 2 }, 2);
+    assert.equal(first.visible, true, 'legacy light returns when the field is disabled');
 });
 
 test('socket echo and POST response add one fire only once', () => {

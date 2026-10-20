@@ -25,6 +25,7 @@ import { createLocationLightingEditor } from './locationLightingEditor.js';
 import { LOCATION_ASSETS } from './locationAssetCatalog.js';
 import { assetDimensions, validAssetDimensions } from './locationAssetDimensions.js';
 import { clampAssetElevation } from './locationAssetTransforms.js';
+import { STOREY_HEIGHT } from './locationArchitecture.js';
 import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
 fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
@@ -35,7 +36,8 @@ import {
     updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
     loadCombatStartRequests, handleCombatStartRequest, handleCombatStartRequestResolved,
     addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible,
-    addLocationGridButton, addLocationRoofButton, destroyLocationScene,
+    addLocationGridButton, addLocationRoofButton, addLocationFloorMenu,
+    getLocationViewLevel, setLocationViewLevel, destroyLocationScene,
     setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationGrassSubtype,
     setLocationEraserMode, setLocationEditMode,
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
@@ -288,6 +290,7 @@ window.enterLocation = async function(locationId) {
         loadLocation(data);
         addLocationRoofButton();
         addLocationGridButton();
+        addLocationFloorMenu();
 
         setLocationBrushRadius(window.brushRadius);
         setLocationBrushHeight(window.tileHeight);
@@ -385,7 +388,7 @@ window.enterLocation = async function(locationId) {
                             <button type="button" id="loc-structure-new-building">Новое здание</button>
                             <button type="button" id="loc-restore-generated-floor" hidden>Восстановить пол дома</button>
                             <input id="loc-structure-building-id" type="hidden" value="${editorBuildingId}">
-                            <label>Этаж <select id="loc-structure-level" class="form-control" style="width:auto;"><option value="0">1</option><option value="1">2</option></select></label>
+                            <label>Этаж размещения <select id="loc-structure-level" class="form-control" style="width:auto;"><option value="0">1</option><option value="1">2</option></select></label>
                             <label id="loc-structure-roof-type-field" style="display:none;">Крыша <select id="loc-structure-roof-type" class="form-control" style="width:auto;"><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
                             <label id="loc-structure-rotation-field">Поворот, ° <input id="loc-structure-rotation" class="form-control" type="number" min="0" max="359" step="15" value="0" style="width:72px;" title="Q / E: поворот на 15°"></label>
                             <label>Класс укрытия <select id="loc-structure-cover-class" class="form-control" style="width:auto;">
@@ -578,7 +581,7 @@ window.enterLocation = async function(locationId) {
                     <div class="location-asset-grid"></div>
                     <div class="location-asset-placement" hidden>
                         <span data-placement-name></span>
-                        <label>Высота от земли, м
+                        <label><span data-placement-height-label>Высота от земли, м</span>
                             <input class="form-control" type="number" data-placement-height min="0" max="10" step="0.1">
                         </label>
                         <div class="location-asset-dimensions" data-placement-size>
@@ -589,7 +592,7 @@ window.enterLocation = async function(locationId) {
                         <label data-placement-building-field style="display:none;">Здание <select class="form-control" data-placement-building></select></label>
                         <button type="button" data-placement-new-building style="display:none;">Новое здание</button>
                         <input type="hidden" data-placement-building-id value="${editorBuildingId}">
-                        <label data-placement-level-field style="display:none;">Этаж <select class="form-control" data-placement-level><option value="0">1</option><option value="1">2</option></select></label>
+                        <label data-placement-level-field style="display:none;">Этаж размещения <select class="form-control" data-placement-level><option value="0">1</option><option value="1">2</option></select></label>
                         <label data-placement-roof-type-field style="display:none;">Крыша <select class="form-control" data-placement-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
                         <span data-placement-angle style="display:none;">Поворот: 0° · Q/E: 15°</span>
                         <span class="location-asset-placement-hint">Наведите на карту и кликните для размещения · ПКМ: отмена</span>
@@ -632,10 +635,15 @@ window.enterLocation = async function(locationId) {
                     assetPlacement.querySelector('[data-placement-name]').textContent = activeAsset.label;
                     placementHeight.value = activeAsset.kind === 'lamp'
                         ? activeAsset.height : activeAsset.elevation ?? 0;
+                    placementHeight.max = activeAsset.kind === 'lamp'
+                        ? String(10 - activeLevel * STOREY_HEIGHT) : '10';
+                    assetPlacement.querySelector('[data-placement-height-label]').textContent = activeAsset.kind === 'lamp'
+                        ? 'Высота над полом этажа, м' : 'Высота от уровня этажа, м';
                     assetPlacement.querySelector('[data-placement-size]').hidden = activeAsset.id?.startsWith('anomaly_');
                     assetPlacement.querySelector('[data-placement-building-field]').style.display = activeAsset.kind === 'structure' ? '' : 'none';
                     assetPlacement.querySelector('[data-placement-new-building]').style.display = activeAsset.kind === 'structure' ? '' : 'none';
-                    assetPlacement.querySelector('[data-placement-level-field]').style.display = activeAsset.kind === 'structure' ? '' : 'none';
+                    assetPlacement.querySelector('[data-placement-level-field]').style.display =
+                        ['structure', 'lamp'].includes(activeAsset.kind) ? '' : 'none';
                     assetPlacement.querySelector('[data-placement-roof-type-field]').style.display = activeAsset.id === 'floor' ? '' : 'none';
                     assetPlacement.querySelector('[data-placement-angle]').style.display = activeAsset.kind === 'structure'
                         || activeAsset.kind === 'decor' || activeAsset.lightKind === 'spot' ? '' : 'none';
@@ -660,7 +668,7 @@ window.enterLocation = async function(locationId) {
                 });
                 placementHeight.addEventListener('change', () => {
                     if (!activeAsset) return;
-                    const value = clampAssetElevation(placementHeight.value);
+                    const value = Math.min(Number(placementHeight.max), clampAssetElevation(placementHeight.value));
                     placementHeight.value = value;
                     if (activeAsset.kind === 'lamp') activeAsset.height = value;
                     else activeAsset.elevation = value;
@@ -715,7 +723,7 @@ window.enterLocation = async function(locationId) {
                     renderPlacementSettings();
                 };
                 let activeBuildingId = editorBuildingId;
-                let activeLevel = 0;
+                let activeLevel = Math.min(1, getLocationViewLevel());
                 const buildingSelectors = [document.getElementById('loc-structure-building'),
                     assetPlacement.querySelector('[data-placement-building]')];
                 const buildingFields = [document.getElementById('loc-structure-building-id'),
@@ -739,6 +747,14 @@ window.enterLocation = async function(locationId) {
                     activeBuildingId = id || '';
                     activeLevel = level === 1 ? 1 : 0;
                     renderBuildingControls();
+                    if (activeAsset?.kind === 'lamp') {
+                        const maxHeight = 10 - activeLevel * STOREY_HEIGHT;
+                        if (activeAsset.height > maxHeight) {
+                            activeAsset.height = maxHeight;
+                            setLocationAssetElevation(maxHeight);
+                        }
+                    }
+                    renderPlacementSettings();
                     refreshLocationBuildPreview();
                 };
                 for (const select of buildingSelectors) select.onchange = () => setActiveBuilding(select.value);
@@ -747,7 +763,10 @@ window.enterLocation = async function(locationId) {
                     button.onclick = () => setActiveBuilding(
                         `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`, 0);
                 }
-                for (const input of levelFields) input.onchange = () => setActiveBuilding(activeBuildingId, Number(input.value));
+                for (const input of levelFields) input.onchange = () => {
+                    setActiveBuilding(activeBuildingId, Number(input.value));
+                    setLocationViewLevel(Number(input.value));
+                };
                 document.getElementById('loc-restore-generated-floor').onclick = async event => {
                     const button = event.currentTarget;
                     button.disabled = true;
@@ -1312,6 +1331,7 @@ window.exitLocation = function() {
     if (editBtn) editBtn.remove();
     document.getElementById('location-grid-btn')?.remove();
     document.getElementById('location-roof-btn')?.remove();
+    document.getElementById('location-floor-menu')?.remove();
     document.getElementById('location-view-toggle-group')?.remove();
 
     // Восстанавливаем оригинальную панель инструментов (для глобальной карты)

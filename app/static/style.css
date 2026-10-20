@@ -272,6 +272,48 @@ body {
 }
 .scene-profile-results[hidden] { display: none; }
 
+.location-floor-menu {
+  position: absolute;
+  right: 320px;
+  bottom: 18px;
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid rgba(185, 185, 148, .45);
+  border-radius: 7px;
+  background: rgba(10, 16, 13, .92);
+  color: #e5e2c6;
+  font: 12px 'Segoe UI', Tahoma, sans-serif;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+}
+.location-floor-menu label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.location-floor-menu select {
+  width: auto;
+  min-width: 75px;
+  padding: 5px 6px;
+  border: 1px solid rgba(185, 185, 148, .45);
+  border-radius: 5px;
+  background: #19231d;
+  color: #e5e2c6;
+  font: 12px 'Segoe UI', Tahoma, sans-serif;
+}
+.location-floor-menu button {
+  min-width: 28px;
+  height: 28px;
+  border: 1px solid rgba(185, 185, 148, .45);
+  border-radius: 5px;
+  background: #304c3a;
+  color: #f0f5ef;
+  font: 700 17px 'Segoe UI', Tahoma, sans-serif;
+  cursor: pointer;
+}
+.location-floor-menu button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 680px) {
+  .location-floor-menu { right: 18px; bottom: 104px; }
+}
+
 /* Слой интерфейса поверх 3D */
 .ui-overlay {
   position: relative;

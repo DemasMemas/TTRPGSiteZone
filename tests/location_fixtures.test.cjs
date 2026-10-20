@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const importSource = source => import(`data:text/javascript,${encodeURIComponent(source)}`);
@@ -86,4 +87,87 @@ test('electric fixtures have visible solid models in both switch states', async 
     assert.match(scene, /isObjectLightSource\(object\)/);
     assert.match(scene, /electric: isElectricFixture\(source\)/);
     assert.match(read('main.js'), /selection\.electric\s*\? \(selection\.isLit \? 'Выключить' : 'Включить'\)/);
+});
+
+test('wall bulb mounting plate meets solid wall faces on the selected storey', async () => {
+    const scene = read('locationScene.js');
+    const start = scene.indexOf('function wallBulbMountAt(');
+    const end = scene.indexOf('function wallBulbPlacement(', start);
+    assert.ok(start >= 0 && end > start);
+    const { wallVisualPlan, structurePose, structureLevel, structureBuildingId } =
+        await importSource(read('locationArchitecture.js'));
+    const wall = { id: 1, type: 'wall', tile_x: 5, tile_y: 5, properties: {
+        building_id: 'house', level: 0, rotation: 0,
+        dimensions: { width: 4, depth: 0.2, height: 2.4 },
+    } };
+    const data = { grid_width: 12, grid_height: 12, objects: [wall] };
+    const context = vm.createContext({ currentLocationData: data,
+        wallVisualPlan, structurePose, structureLevel, structureBuildingId, getTileHeight: () => 0 });
+    vm.runInContext(scene.slice(start, end), context);
+    const dimensions = { width: 0.38, depth: 0.4, height: 0.36 };
+    const front = context.wallBulbMountAt(5.5, 5.75, 0, 1.8, dimensions);
+    assert.ok(front);
+    assert.ok(Math.abs(front.z - (5.6 + 0.4 * 0.38 + 0.055 / 2)) < 1e-6);
+    assert.equal(front.rotation, 0);
+    assert.equal(front.buildingId, 'house');
+    const back = context.wallBulbMountAt(5.5, 5.25, 0, 1.8, dimensions);
+    assert.ok(back);
+    assert.ok(Math.abs(back.z - (5.4 - 0.4 * 0.38 - 0.055 / 2)) < 1e-6);
+    assert.equal(back.rotation, Math.PI);
+    assert.equal(context.wallBulbMountAt(5.5, 5.75, 1, 1.8, dimensions), null);
+    assert.equal(context.wallBulbMountAt(8, 8, 0, 1.8, dimensions), null);
+    wall.properties.rotation = Math.PI / 2;
+    const rotated = context.wallBulbMountAt(5.75, 5.5, 0, 1.8, dimensions);
+    assert.ok(rotated);
+    assert.ok(Math.abs(rotated.x - (5.6 + 0.4 * 0.38 + 0.055 / 2)) < 1e-6);
+    wall.properties.rotation = 0;
+    data.objects.push({ id: 2, type: 'door', tile_x: 5, tile_y: 5, properties: {
+        building_id: 'house', level: 0, rotation: 0,
+        dimensions: { width: 1, depth: 0.18, height: 2 },
+    } });
+    assert.equal(context.wallBulbMountAt(5.5, 5.75, 0, 1.8, dimensions), null);
+});
+
+test('placing a wall bulb saves the snapped pose and rejects an unmatched wall', async () => {
+    const scene = read('locationScene.js');
+    const start = scene.indexOf('async function placeStructureAtTile(');
+    const end = scene.indexOf('async function removeStructuresAtTile(', start);
+    assert.ok(start >= 0 && end > start);
+    const saved = [];
+    const notices = [];
+    const mount = { x: 5.5, z: 5.78, tileX: 5, tileZ: 5,
+        rotation: Math.PI, buildingId: 'house' };
+    const context = vm.createContext({
+        window: { currentLobbyId: 19, locationEditorTool: 'assets' },
+        currentLocationId: 23,
+        structurePreset: 'wall_bulb', structureColor: '#ffe2aa', structureRotation: 0,
+        selectedLocationAsset: { kind: 'structure', id: 'wall_bulb', elevation: 1.8 },
+        getStructureDimensions: () => ({ width: 0.38, depth: 0.4, height: 0.36 }),
+        placementForLocationAsset: () => ({ type: 'wall_bulb' }),
+        wallBulbPlacement: () => mount,
+        getStructurePlacementProperties: () => ({ level: 1, building_id: '' }),
+        document: { querySelector: () => null, getElementById: () => ({ value: 'medium' }) },
+        COVER_CLASS_DEFAULTS: { medium: { maxHp: 10, protection: 1 } },
+        Server: { async createLocationObject(_lobbyId, _locationId, object) {
+            saved.push(object); return { id: 42, ...object };
+        } },
+        addLocationObject() {}, clampAssetElevation: Number,
+        THROWABLE_OBJECT_WEIGHTS: {}, objectInteractions: {}, interactionRequirements: {},
+        isFireObject: () => false, isElectricFixture: () => true,
+        isObjectLightSource: () => true,
+        showNotification: message => notices.push(message),
+    });
+    vm.runInContext(scene.slice(start, end), context);
+    await context.placeStructureAtTile(4, 5, { x: 100, y: 100 });
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].tile_x, 5);
+    assert.equal(saved[0].tile_y, 5);
+    assert.equal(saved[0].properties.building_id, 'house');
+    assert.equal(saved[0].properties.level, 1);
+    assert.equal(saved[0].properties.rotation, Math.PI);
+    assert.ok(Math.abs(saved[0].properties.offset_z - 0.28) < 1e-6);
+    context.wallBulbPlacement = () => null;
+    await context.placeStructureAtTile(4, 5, { x: 100, y: 100 });
+    assert.equal(saved.length, 1);
+    assert.equal(notices.length, 1);
 });

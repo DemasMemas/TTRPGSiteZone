@@ -135,7 +135,18 @@ export function createRoofVisual(THREE, plan, { roofTexture, wallTexture, gableC
         gable = new THREE.Mesh(createRoofGableGeometry(THREE, plan), gableMaterial);
         roof.add(gable);
     }
-    const shadowCaster = new THREE.Mesh(roofGeometry,
+    let shadowGeometry = roofGeometry;
+    if (gable) {
+        const roofPositions = roofGeometry.getAttribute('position').array;
+        const gablePositions = gable.geometry.getAttribute('position').array;
+        const positions = new Float32Array(roofPositions.length + gablePositions.length);
+        positions.set(roofPositions);
+        positions.set(gablePositions, roofPositions.length);
+        shadowGeometry = new THREE.BufferGeometry();
+        shadowGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        shadowGeometry.computeVertexNormals();
+    }
+    const shadowCaster = new THREE.Mesh(shadowGeometry,
         new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, side: THREE.DoubleSide }));
     shadowCaster.castShadow = true;
     shadowCaster.raycast = () => {};

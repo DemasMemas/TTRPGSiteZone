@@ -453,7 +453,7 @@ test('asset library offers structures, decor and preset lamps without a lamp lis
     const editor = fs.readFileSync(path.join(__dirname, '../app/static/js/locationLightingEditor.js'), 'utf8');
     assert.doesNotMatch(editor, /data-add-light|location-lighting-sources/);
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
-    assert.match(scene, /placeSelectedLocationAsset\(hoveredTileCoords\.x, hoveredTileCoords\.z\)/);
+    assert.match(scene, /placeSelectedLocationAsset\(hoveredTileCoords\.x, hoveredTileCoords\.z,/);
     assert.match(scene, /if \(point\) commitEditorAssetMove\(point\.x, point\.z\)/);
     assert.match(scene, /beginRotateSelectedLocationAsset/);
 });
@@ -588,7 +588,7 @@ test('structure rotation and elevation save in Three.js coordinates', async () =
 
 test('clicking a tile places the chosen lamp at its center', async () => {
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
-    const start = scene.indexOf('async function placeSelectedLocationAsset(x, z)');
+    const start = scene.indexOf('async function placeSelectedLocationAsset(');
     const end = scene.indexOf('export function loadLocation(data)', start);
     assert.ok(start >= 0 && end > start);
     const saved = [];
@@ -598,6 +598,9 @@ test('clicking a tile places the chosen lamp at its center', async () => {
             color: '#ffd090', intensity: 2.5, distance: 8,
         },
         currentLocationData: { lighting: { local_lights: [] } },
+        level: 0,
+        getStructurePlacementProperties: () => ({ level: context.level }),
+        structureLevelOffset: object => object.properties.level * 2.4,
         assetDimensions: () => ({ width: 0.36, depth: 0.36, height: 0.36 }),
         persistLocationLights: async lights => { saved.push(lights); return true; },
         editorSelection: null,
@@ -610,8 +613,12 @@ test('clicking a tile places the chosen lamp at its center', async () => {
     assert.equal(saved[0][0].x, 3.5);
     assert.equal(saved[0][0].z, 4.5);
     assert.equal(saved[0][0].kind, 'point');
+    assert.equal(saved[0][0].height, 2.2);
     assert.deepEqual(JSON.parse(JSON.stringify(saved[0][0].dimensions)), {
         width: 0.36, depth: 0.36, height: 0.36,
     });
     assert.equal(context.editorSelection.index, 0);
+    context.level = 1;
+    await context.placeSelectedLocationAsset(3, 4);
+    assert.equal(saved[1][0].height, 4.6);
 });
