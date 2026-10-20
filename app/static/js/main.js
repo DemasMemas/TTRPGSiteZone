@@ -227,10 +227,21 @@ initMapEditorQuickMenu({
 let currentLocationData = null;
 
 function resumeWorldMapLoad() {
-    loadAllChunks().then(() => {
-        if (!window.isLocationActive) return refreshWorldTravel();
-        return null;
-    }).catch(error => console.error('World map load failed', error));
+    const loadingToken = showSceneLoading('world');
+    (async () => {
+        await loadAllChunks();
+        if (window.worldLoadMetrics?.pausedForLocation && !window.isLocationActive) {
+            await loadAllChunks();
+        }
+        if (window.isLocationActive) return;
+        if (!window.worldLoadMetrics?.complete) throw new Error('World map load incomplete');
+        finishSceneLoading(loadingToken);
+        Promise.resolve().then(refreshWorldTravel).catch(error =>
+            console.error('World travel refresh failed', error));
+    })().catch(error => {
+        console.error('World map load failed', error);
+        failSceneLoading(loadingToken, 'Не удалось загрузить карту мира.');
+    });
 }
 
 function setLocationViewActive(active) {
@@ -240,6 +251,7 @@ function setLocationViewActive(active) {
 }
 
 window.enterLocation = async function(locationId) {
+    const loadingToken = showSceneLoading('location');
     closeMapEditorQuickMenu();
     if (window._locationEventCleanup) {
         window._locationEventCleanup();
@@ -260,6 +272,7 @@ window.enterLocation = async function(locationId) {
 
         const requestStartedAt = performance.now();
         const data = await Server.getLocationDetail(currentLobbyId, locationId);
+        if (!isCurrentSceneLoading(loadingToken)) return;
         const networkMs = performance.now() - requestStartedAt;
         currentLocationData = data;
         setCurrentLocationId(locationId);
@@ -292,6 +305,7 @@ window.enterLocation = async function(locationId) {
 
         if (window.isGM) {
             const locationWorldRules = await Server.getWorldRules(currentLobbyId).catch(() => ({ anomalies: [] }));
+            if (!isCurrentSceneLoading(loadingToken)) return;
             window.locationAnomalyCatalog = locationWorldRules.anomalies || [];
             // Кнопки удаления и редактирования параметров
             addDeleteLocationButton(async () => { await deleteCurrentLocation(locationId); });
@@ -1240,7 +1254,10 @@ window.enterLocation = async function(locationId) {
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) toolsPanel.style.display = 'none';
         }
+        finishSceneLoading(loadingToken);
     } catch (err) {
+        if (!isCurrentSceneLoading(loadingToken)) return;
+        failSceneLoading(loadingToken, 'Не удалось загрузить подлокацию.');
         showNotification(err.message);
     }
 };
@@ -1916,6 +1933,45 @@ window.setCurrentTileTypeFromUI = function(value) {
     }
 };
 
+let sceneLoadingGeneration = 0;
+
+function isCurrentSceneLoading(token) {
+    return token === sceneLoadingGeneration;
+}
+
+function showSceneLoading(sceneType) {
+    const token = ++sceneLoadingGeneration;
+    const screen = document.getElementById('scene-loading-screen');
+    if (!screen) return token;
+    screen.classList.remove('is-hidden', 'is-error');
+    document.getElementById('scene-loading-title').textContent =
+        sceneType === 'location' ? 'Подлокация' : 'Карта мира';
+    document.getElementById('scene-loading-detail').textContent = sceneType === 'location'
+        ? 'Разворачиваем рельеф, объекты и освещение.'
+        : 'Загружаем сектора и собираем поверхность.';
+    document.getElementById('scene-loading-retry').hidden = true;
+    return token;
+}
+
+function finishSceneLoading(token) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (isCurrentSceneLoading(token)) {
+            document.getElementById('scene-loading-screen')?.classList.add('is-hidden');
+        }
+    }));
+}
+
+function failSceneLoading(token, message) {
+    if (!isCurrentSceneLoading(token)) return;
+    const screen = document.getElementById('scene-loading-screen');
+    if (!screen) return;
+    screen.classList.remove('is-hidden');
+    screen.classList.add('is-error');
+    document.getElementById('scene-loading-title').textContent = 'Ошибка загрузки';
+    document.getElementById('scene-loading-detail').textContent = message;
+    document.getElementById('scene-loading-retry').hidden = false;
+}
+
 function escapeHtml(unsafe) {
     if (!unsafe) return '';
     return String(unsafe)
@@ -1928,9 +1984,16 @@ function escapeHtml(unsafe) {
 
 // Загружаем данные при старте
 (async function init() {
-    await loadLobbyInfo();
-    await loadLobbyCharacters();
-    initHotkeys();
+    const startupToken = showSceneLoading(directLocationId ? 'location' : 'world');
+    try {
+        await loadLobbyInfo();
+        await loadLobbyCharacters();
+        initHotkeys();
+    } catch (error) {
+        console.error('Lobby initialization failed', error);
+        failSceneLoading(startupToken, 'Не удалось подготовить комнату.');
+        return;
+    }
     if (directLocationId) {
         await window.enterLocation(directLocationId);
         window.locationDirectOpenPending = false;

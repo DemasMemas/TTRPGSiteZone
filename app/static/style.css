@@ -122,6 +122,91 @@ body {
 }
 
 /* Контейнер для канваса */
+.scene-loading-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse at 54% 42%, rgba(59, 75, 49, .22), transparent 55%),
+    linear-gradient(rgba(163, 155, 113, .035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(163, 155, 113, .035) 1px, transparent 1px),
+    #0b100d;
+  background-size: auto, 56px 56px, 56px 56px, auto;
+  color: #e8e4d5;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity .3s ease, visibility .3s ease;
+}
+.scene-loading-screen.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.scene-loading-card {
+  width: min(450px, 100%);
+  padding: clamp(24px, 6vw, 42px);
+  border: 1px solid rgba(179, 166, 115, .27);
+  background: rgba(11, 16, 13, .84);
+  box-shadow: 0 25px 80px rgba(0, 0, 0, .36);
+}
+.scene-loading-mark,
+.scene-loading-footnote {
+  display: block;
+  color: #aaa889;
+  font: 11px/1.4 Consolas, monospace;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+}
+.scene-loading-rule {
+  display: block;
+  width: 46px;
+  height: 2px;
+  margin: 22px 0 26px;
+  background: #b5a873;
+}
+.scene-loading-card h1 {
+  font: 400 clamp(32px, 6vw, 45px)/1.05 Georgia, serif;
+  letter-spacing: -.03em;
+}
+.scene-loading-card p {
+  min-height: 3em;
+  margin-top: 14px;
+  color: #bcb9a7;
+  font: 14px/1.5 Georgia, serif;
+}
+.scene-loading-track {
+  height: 2px;
+  margin: 30px 0 13px;
+  overflow: hidden;
+  background: rgba(181, 168, 115, .2);
+}
+.scene-loading-track span {
+  display: block;
+  width: 34%;
+  height: 100%;
+  background: #c8bb81;
+  animation: scene-loading-sweep 1.8s ease-in-out infinite alternate;
+}
+.scene-loading-screen.is-error .scene-loading-track span { animation: none; width: 100%; background: #a36958; }
+.scene-loading-screen #scene-loading-retry {
+  margin-top: 22px;
+  padding: 9px 15px;
+  border: 1px solid #9d956e;
+  background: #24291e;
+  color: #e8e4d5;
+  font: 12px Consolas, monospace;
+  cursor: pointer;
+}
+.scene-loading-screen #scene-loading-retry[hidden] { display: none; }
+@keyframes scene-loading-sweep { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+@media (prefers-reduced-motion: reduce) {
+  .scene-loading-screen { transition: none; }
+  .scene-loading-track span { animation: none; width: 100%; }
+}
+
 #canvas-container {
   position: fixed;
   top: 0;
