@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
+const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8')
+    .replace(/\r\n/g, '\n');
 
 test('GM hidden models use a translucent non-shadow-casting appearance', () => {
     const start = scene.indexOf('function makeGmHiddenGhost(root)');

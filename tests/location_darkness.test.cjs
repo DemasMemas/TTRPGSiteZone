@@ -67,7 +67,7 @@ test('sunlight and local lights cast shadows while a cutaway roof remains a cast
     assert.match(roof, /roof\.userData\.visualMeshes = gable \? \[roofFace, gable\] : \[roofFace\]/);
     assert.match(scene, /child\.castShadow = obj\.type !== 'floor' && !child\.userData\.fireFlame/);
     assert.match(scene, /child\.receiveShadow = true/);
-    assert.match(scene, /light\.castShadow = true/);
+    assert.match(scene, /const castsShadow = role\.endsWith\('Shadow'\);[\s\S]*?light\.castShadow = castsShadow/);
 });
 
 test('editor forwards painted cells to lighting save and map pointer handling', () => {

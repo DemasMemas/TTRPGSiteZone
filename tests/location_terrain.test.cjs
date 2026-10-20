@@ -178,9 +178,9 @@ test('a changed height also refreshes neighboring tile geometry', () => {
 
 test('fast brush movement fills intermediate cells and combines work before rendering', () => {
     const scene = read('locationScene.js');
-    const source = scene.match(/function brushStrokeTiles\([\s\S]*?\n}\n\nfunction setupCharacterDragging/);
+    const source = scene.match(/function brushStrokeTiles\([\s\S]*?\r?\n}\r?\n\r?\nfunction setupCharacterDragging/);
     assert.ok(source);
-    const line = new Function(`${source[0].replace(/\n\nfunction setupCharacterDragging$/, '')}; return brushStrokeTiles;`)();
+    const line = new Function(`${source[0].replace(/\r?\n\r?\nfunction setupCharacterDragging$/, '')}; return brushStrokeTiles;`)();
     assert.deepEqual(line(2, 2, 5, 2), [[2, 2], [3, 2], [4, 2], [5, 2]]);
     assert.deepEqual(line(2, 2, 2, 5), [[2, 2], [2, 3], [2, 4], [2, 5]]);
     assert.equal(line(1, 1, 4, 3).length, 4);

@@ -5080,6 +5080,7 @@ export function addCharacterToLocation(characterId, name, ownerId, ownerName, po
     const tileHeight = getTileHeight(posX, posY);
     model.position.set(posX + 0.5, tileHeight, posY + 0.5);
     tintLocationMesh(model, darknessFactorAt(posX, posY));
+    attachStaticLightFieldToRoot(model, 0);
     model.userData.characterId = characterId;
     model.userData.ownerId = colorUserId;
     scene.add(model);
@@ -9813,6 +9814,26 @@ function editorMovePointerPoint(clientX, clientY, coords) {
 
 const FLOOR_SURFACE_OFFSET = 0.035;
 
+function usesStaticLightField(object) {
+    return Boolean(object?.type);
+}
+
+function attachStaticLightFieldToRoot(root, level) {
+    // The field occludes walls, not ceilings; interior lamps must not light roof faces.
+    if (!locationStaticLightField
+        || root?.userData?.roofPlan
+        || !locationStaticLightField.field.levels.some(item => item.id === level)) return;
+    const seen = new Set();
+    root.traverse(child => {
+        if (!child.isMesh || child.userData.fireFlame) return;
+        for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
+            if (!material || seen.has(material)) continue;
+            seen.add(material);
+            locationStaticLightField.attach(material, level);
+        }
+    });
+}
+
 function quietHouseColor(color, type) {
     const result = new THREE.Color(color || (type === 'wall' ? '#80786c' : '#776d5d'));
     const hsl = result.getHSL({ h: 0, s: 0, l: 0 });
@@ -10062,6 +10083,9 @@ function createLocationObjectMesh(obj, forPreview = false) {
             if (forPreview) fadeEditorPreview(model);
             if (properties.gm_hidden && window.isGM) makeGmHiddenGhost(model);
             else if (!forPreview) tintLocationMesh(model, darknessFactorAt(group.position.x, group.position.z));
+            if (!forPreview && usesStaticLightField(obj)) {
+                attachStaticLightFieldToRoot(model, structureLevel(obj));
+            }
         }, error => {
             group.userData.assetLoadError = true;
             if (!forPreview) {
@@ -10069,17 +10093,8 @@ function createLocationObjectMesh(obj, forPreview = false) {
             }
         });
     }
-    if (!forPreview && locationStaticLightField && ['floor', 'wall'].includes(obj.type)) {
-        const seen = new Set();
-        group.traverse(child => {
-            if (!child.isMesh) return;
-            for (const childMaterial of Array.isArray(child.material) ? child.material : [child.material]) {
-                if (childMaterial && !seen.has(childMaterial)) {
-                    seen.add(childMaterial);
-                    locationStaticLightField.attach(childMaterial, structureLevel(obj));
-                }
-            }
-        });
+    if (!forPreview && usesStaticLightField(obj)) {
+        attachStaticLightFieldToRoot(group, structureLevel(obj));
     }
     return group;
 }
@@ -10177,20 +10192,27 @@ function getLocationEmissiveSources() {
 function forEachStaticLightFieldMaterial(callback) {
     const seen = new Set();
     const visit = (root, level) => root?.traverse(child => {
-        if (!child.isMesh) return;
+        if (!child.isMesh || child.userData.fireFlame) return;
         for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
             if (!material || seen.has(material)) continue;
             seen.add(material);
             callback(material, level);
         }
     });
-    visit(terrainSurfaceMesh, 0);
+    for (const root of [locationTileMesh, waterTileMesh, smoothTerrainMesh, terrainSurfaceMesh,
+        waterSurfaceMesh, waterBankMesh, sandBankMesh, waterDetailGroup, grassDetailGroup]) {
+        visit(root, 0);
+    }
     for (const root of locationObjectMeshes) {
         const object = root.userData.locationObject;
-        if (object?.type === 'floor' || object?.type === 'wall') {
+        if (usesStaticLightField(object)) {
             visit(root, structureLevel(object));
         }
     }
+    for (const root of objectMeshes) {
+        if (!anomalyEffectMeshes.includes(root)) visit(root, 0);
+    }
+    for (const entry of characterModels.values()) visit(entry.model, 0);
 }
 
 function setStaticLightFieldButtonState() {
@@ -13545,6 +13567,7 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
     smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
     smoothTerrainMesh.receiveShadow = true;
     updateSmoothTerrainColors();
+    attachStaticLightFieldToRoot(smoothTerrainMesh, 0);
     scene.add(smoothTerrainMesh);
     tileCubes.push(smoothTerrainMesh);
 }
@@ -13771,6 +13794,7 @@ function rebuildWaterSurfaceMesh() {
     waterSurfaceMesh.raycast = () => {};
     waterSurfaceMesh.castShadow = false;
     waterSurfaceMesh.receiveShadow = false;
+    attachStaticLightFieldToRoot(waterSurfaceMesh, 0);
     scene.add(waterSurfaceMesh);
     if (data.bank.length) {
         const bankGeometry = new THREE.BufferGeometry();
@@ -13786,6 +13810,7 @@ function rebuildWaterSurfaceMesh() {
         waterBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
         waterBankMesh.raycast = () => {};
         waterBankMesh.receiveShadow = true;
+        attachStaticLightFieldToRoot(waterBankMesh, 0);
         scene.add(waterBankMesh);
     }
     if (data.sandBank.length) {
@@ -13801,9 +13826,11 @@ function rebuildWaterSurfaceMesh() {
         sandBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
         sandBankMesh.raycast = () => {};
         sandBankMesh.receiveShadow = true;
+        attachStaticLightFieldToRoot(sandBankMesh, 0);
         scene.add(sandBankMesh);
     }
     waterDetailGroup = createWaterDetailGroup(THREE, currentLocationData.tiles_data, waterRegions);
+    attachStaticLightFieldToRoot(waterDetailGroup, 0);
     scene.add(waterDetailGroup);
 }
 
@@ -13951,6 +13978,7 @@ function rebuildGrassDetailMesh() {
         naturalGrassBuild.triangles.total = naturalGrassBuild.triangles.medium01
             + naturalGrassBuild.triangles.understory;
     }
+    attachStaticLightFieldToRoot(grassDetailGroup, 0);
     scene.add(grassDetailGroup);
     if (naturalGrassAssets && !naturalGrassReported) {
         console.info('[game grass] scene:', {
@@ -14018,6 +14046,7 @@ function rebuildTileObjects(tileX, tileZ) {
         const mesh = objectMeshes[i];
         if (mesh.userData && mesh.userData.tileX === tileX && mesh.userData.tileZ === tileZ) {
             scene.remove(mesh);
+            disposeObject(mesh);
             toRemove.push(mesh);
         }
     }
@@ -14107,6 +14136,7 @@ function rebuildTileObjects(tileX, tileZ) {
         applyDecorSize(mesh, obj, obj.type);
         if (!isAnomalyEffect) mesh.position.y += yOffset * (mesh.scale.y - 1);
         if (obj.gm_hidden && window.isGM) makeGmHiddenGhost(mesh);
+        if (!isAnomalyEffect) attachStaticLightFieldToRoot(mesh, 0);
         scene.add(mesh);
         objectMeshes.push(mesh);
         if (isAnomalyEffect) anomalyEffectMeshes.push(mesh);

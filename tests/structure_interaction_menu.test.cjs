@@ -44,8 +44,9 @@ test('leaving a model does not close the interaction menu, and selecting an acti
 });
 
 test('hovering another valid target swaps the open interaction menu', () => {
-    const start = source.indexOf('    const onMouseMove = (e) => {', source.indexOf('// mousemove для подсветки'));
-    const end = source.indexOf("    canvas.addEventListener('mousemove', onMouseMove);", start);
+    const start = source.indexOf('    const onMouseMove = (e) => {',
+        source.indexOf('function setupCharacterDragging()'));
+    const end = source.indexOf('    const onMouseMoveProfiled = (event) => {', start);
     assert.ok(start >= 0 && end > start);
     const opened = [];
     const context = vm.createContext({

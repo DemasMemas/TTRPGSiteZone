@@ -210,3 +210,26 @@ test('rebuilding anomaly tile retains its effect model instead of replacing it w
     assert.equal(context.anomalyEffectMeshes[0], effect);
     assert.equal(effect.position.y, -2);
 });
+
+test('rebuilding a decor tile releases the removed mesh once', () => {
+    const source = read('locationScene.js');
+    const start = source.indexOf('function rebuildTileObjects(tileX, tileZ)');
+    const end = source.indexOf('function moveTileDecorWithTerrain(', start);
+    assert.ok(start >= 0 && end > start);
+    const old = { userData: { tileX: 0, tileZ: 0 } };
+    const removed = [];
+    const disposed = [];
+    const context = vm.createContext({
+        currentLocationData: { tiles_data: [[{ height: 0, objects: [] }]] },
+        getTileHeight: () => 0,
+        objectMeshes: [old], anomalyEffectMeshes: [],
+        scene: { remove: mesh => removed.push(mesh) },
+        disposeObject: mesh => disposed.push(mesh),
+    });
+    vm.runInContext(source.slice(start, end), context);
+    context.rebuildTileObjects(0, 0);
+    context.rebuildTileObjects(0, 0);
+    assert.deepEqual(removed, [old]);
+    assert.deepEqual(disposed, [old]);
+    assert.equal(context.objectMeshes.length, 0);
+});

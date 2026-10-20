@@ -23,6 +23,87 @@ const integrationSource = fs.readFileSync(path.join(__dirname,
 const integration = import(`data:text/javascript;base64,${Buffer.from(integrationSource).toString('base64')}`);
 const prototype = import(prototypeUrl);
 
+test('game field covers scene materials at their level and restores them on disable', () => {
+    const scene = fs.readFileSync(path.join(__dirname,
+        '../app/static/js/locationScene.js'), 'utf8');
+    const helpers = scene.slice(scene.indexOf('const FLOOR_SURFACE_OFFSET'),
+        scene.indexOf('function quietHouseColor'));
+    const visit = scene.slice(scene.indexOf('function forEachStaticLightFieldMaterial'),
+        scene.indexOf('function setStaticLightFieldButtonState'));
+    const material = () => ({ userData: {} });
+    const sharedChairMaterial = material();
+    const chair = { isMesh: true, userData: {}, material: sharedChairMaterial };
+    const chairRoot = { userData: { locationObject: { type: 'chair', properties: { level: 1 } } },
+        traverse(callback) { callback(chair); callback({ isMesh: true, userData: {}, material: sharedChairMaterial }); } };
+    const crateMaterial = material();
+    const crateRoot = { userData: { locationObject: { type: 'box', properties: { level: 0 } } },
+        traverse(callback) { callback({ isMesh: true, userData: {}, material: [crateMaterial] }); } };
+    const excludedMaterial = material();
+    const lampRoot = { userData: { locationObject: { type: 'ceiling_bulb' } },
+        traverse(callback) { callback({ isMesh: true, userData: {}, material: excludedMaterial }); } };
+    const rootWith = value => ({ userData: {},
+        traverse(callback) { callback({ isMesh: true, userData: {}, material: value }); } });
+    const groundMaterial = material();
+    const waterMaterial = material();
+    const grassMaterial = material();
+    const bankMaterial = material();
+    const decorMaterial = material();
+    const anomalyMaterial = material();
+    const roofMaterial = material();
+    const characterMaterial = material();
+    const terrainSurfaceMesh = rootWith(groundMaterial);
+    const waterSurfaceMesh = rootWith(waterMaterial);
+    const waterBankMesh = rootWith(bankMaterial);
+    const grassDetailGroup = rootWith(grassMaterial);
+    const decorRoot = rootWith(decorMaterial);
+    const anomalyRoot = rootWith(anomalyMaterial);
+    const roofRoot = rootWith(roofMaterial);
+    roofRoot.userData.roofPlan = { floorId: 1 };
+    const attached = [];
+    const controller = { field: { levels: [{ id: 0 }, { id: 1 }] },
+        attach(value, level) { value.userData.fieldLevel = level; attached.push(value); },
+        detach(value) { delete value.userData.fieldLevel; } };
+    const context = { locationStaticLightField: controller,
+        locationTileMesh: null, waterTileMesh: null, smoothTerrainMesh: null,
+        terrainSurfaceMesh, waterSurfaceMesh, waterBankMesh, sandBankMesh: null,
+        waterDetailGroup: null, grassDetailGroup,
+        locationObjectMeshes: [chairRoot, crateRoot, lampRoot],
+        objectMeshes: [decorRoot, anomalyRoot], anomalyEffectMeshes: [anomalyRoot],
+        roofMeshes: [roofRoot], characterModels: new Map([[1, { model: rootWith(characterMaterial) }]]),
+        structureLevel: object => object.properties?.level || 0 };
+    const api = vm.runInNewContext(`${helpers}\n${visit}\n({ usesStaticLightField,
+        attachStaticLightFieldToRoot, forEachStaticLightFieldMaterial })`, context);
+    assert.equal(api.usesStaticLightField({ type: 'shelf' }), true);
+    assert.equal(api.usesStaticLightField({ type: 'ceiling_bulb' }), true);
+    api.attachStaticLightFieldToRoot(chairRoot, 1);
+    api.attachStaticLightFieldToRoot(crateRoot, 0);
+    api.attachStaticLightFieldToRoot(roofRoot, 1);
+    assert.equal(attached.length, 2, 'shared furniture material is attached once');
+    assert.equal(sharedChairMaterial.userData.fieldLevel, 1);
+    assert.equal(crateMaterial.userData.fieldLevel, 0);
+    const visited = new Map();
+    api.forEachStaticLightFieldMaterial((value, level) => visited.set(value, level));
+    for (const value of [groundMaterial, waterMaterial, bankMaterial, grassMaterial,
+        decorMaterial, characterMaterial, crateMaterial, excludedMaterial]) {
+        assert.equal(visited.get(value), 0);
+    }
+    assert.equal(visited.has(roofMaterial), false, 'interior field does not light roofs');
+    assert.equal(visited.get(sharedChairMaterial), 1);
+    assert.equal(visited.has(anomalyMaterial), false);
+    api.forEachStaticLightFieldMaterial(value => controller.detach(value));
+    assert.equal(sharedChairMaterial.userData.fieldLevel, undefined);
+    assert.equal(crateMaterial.userData.fieldLevel, undefined);
+    assert.equal(excludedMaterial.userData.fieldLevel, undefined);
+    context.locationStaticLightField = null;
+    api.attachStaticLightFieldToRoot(chairRoot, 1);
+    assert.equal(attached.length, 2, 'disabled field does not attach to late furniture');
+    const lateMaterial = material();
+    const lateModel = rootWith(lateMaterial);
+    context.locationStaticLightField = controller;
+    api.attachStaticLightFieldToRoot(lateModel, 0);
+    assert.equal(attached.at(-1), lateMaterial);
+});
+
 function wall(angle = -Math.PI / 2) {
     return { id: 1, type: 'wall', tile_x: 5, tile_y: 3,
         properties: { building_id: 'house', level: 0, rotation: angle,
