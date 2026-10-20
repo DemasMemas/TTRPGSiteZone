@@ -408,6 +408,7 @@ test('Volume Scale preview tracks the captured face and Esc discards unsaved dim
             screenAxisX: 40, screenAxisY: 0,
             baseDimensions: { width: 3, depth: 0.2, height: 2.4 },
             baseCenter: { x: 5, z: 7 }, baseElevation: 0.4 },
+        renderer: { domElement: { hasPointerCapture: () => false } },
         getSelectedLocationEditorAsset: () => selection,
         getSelectedEditorSource: () => ({ type: 'wall' }),
         volumeResize, projectedAxisDrag,
@@ -421,11 +422,38 @@ test('Volume Scale preview tracks the captured face and Esc discards unsaved dim
     assert.equal(context.editorResizeDimensions.width, 5);
     assert.equal(context.editorResizeCenter(selection).x, 5);
     assert.equal(updates, 2);
-    vm.runInContext(section('export function cancelLocationAssetResize()', 'function clearEditorSelection()'), context);
+    vm.runInContext(section('export function cancelLocationAssetResize(', 'function clearEditorSelection()'), context);
     assert.equal(context.cancelLocationAssetResize(), true);
     assert.equal(context.editorResizeMode, false);
     assert.equal(context.editorResizeDimensions, null);
     assert.equal(context.editorResizeElevation, null);
+});
+
+test('switching R to Eraser cancels the drag, releases capture and leaves Esc available', () => {
+    const released = [];
+    let previews = 0;
+    const context = vm.createContext({
+        editorResizeMode: true, editorResizeDragPointerId: 9,
+        editorResizeDimensions: { width: 4, depth: 0.2, height: 2.4 },
+        editorResizeBaseDimensions: { width: 3, depth: 0.2, height: 2.4 },
+        editorResizeAnchor: { volume: true, baseDimensions: { width: 3, depth: 0.2, height: 2.4 } },
+        editorResizeElevation: 0.4, editorResizeSymmetric: true, editorResizeSnapped: true,
+        renderer: { domElement: { hasPointerCapture: id => id === 9,
+            releasePointerCapture: id => released.push(id) } },
+        notifyEditorResize() {}, updateBuildPreview() { previews++; },
+    });
+    vm.runInContext(section('export function cancelLocationAssetResize(', 'function clearEditorSelection()'), context);
+    assert.equal(context.cancelLocationAssetResize(false), true);
+    assert.deepEqual(released, [9]);
+    assert.equal(context.editorResizeMode, false);
+    assert.equal(context.editorResizeDragPointerId, null);
+    assert.equal(context.editorResizeSymmetric, false);
+    assert.equal(previews, 0);
+    assert.equal(context.cancelLocationAssetResize(false), false);
+    const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
+    assert.match(main, /const selectLocationTool = tool => \{[\s\S]*?cancelLocationAssetResize\(false\);[\s\S]*?window\.locationEditorTool = tool;/);
+    assert.match(main, /setLocationEraserMode\(tool === 'erase'\)/);
+    assert.match(scene, /if \(editorResizeMode\) \{\s*e\.preventDefault\(\);\s*if \(!cancelCurrentAssetResizeDrag\(\)\) cancelLocationAssetResize\(\);/);
 });
 
 test('canceling one Volume Scale drag restores its starting size without exiting the tool', () => {
@@ -507,7 +535,7 @@ test('shift-click adds and removes objects without discarding the rest', () => {
     assert.deepEqual(Array.from(context.editorSelections, item => item.id), [3]);
 });
 
-test('right click cancels a selected asset or placement before opening a context menu', () => {
+test('stationary right click clears selection with any tool before canceling placement', () => {
     const calls = [];
     const window = {
         isGM: true, locationEditMode: true, locationEditorTool: 'assets',
@@ -517,21 +545,27 @@ test('right click cancels a selected asset or placement before opening a context
         window, selectedLocationAsset: { id: 'tree' },
         editorSelections: [{ kind: 'structure', id: 1 }],
         clearLocationAssetPreset() { calls.push('preset fallback'); },
-        clearEditorSelection() { calls.push('selection'); },
+        clearEditorSelection() { calls.push('selection'); context.editorSelections = []; },
         updateBuildPreview() { calls.push('preview'); },
     });
     vm.runInContext(section('function cancelLocationEditorContextAction(',
         'function updateEditorSelectionVisual('), context);
     assert.equal(context.cancelLocationEditorContextAction(), true);
-    assert.deepEqual(calls, ['placement']);
-    window.locationEditorTool = 'select';
+    assert.deepEqual(calls, ['selection', 'preview']);
     assert.equal(context.cancelLocationEditorContextAction(), true);
-    assert.deepEqual(calls, ['placement', 'selection', 'preview']);
-    context.editorSelections = [];
+    assert.deepEqual(calls, ['selection', 'preview', 'placement']);
+    window.locationEditorTool = 'erase';
+    context.editorSelections = [{ kind: 'structure', id: 2 }];
+    assert.equal(context.cancelLocationEditorContextAction(), true);
+    assert.deepEqual(calls, ['selection', 'preview', 'placement', 'selection', 'preview']);
     assert.equal(context.cancelLocationEditorContextAction(), false);
+    window.locationEditorTool = 'light';
+    context.editorSelections = [{ kind: 'lamp', index: 0 }];
+    assert.equal(context.cancelLocationEditorContextAction(), true);
     window.locationEditMode = false;
     context.editorSelections = [{ kind: 'structure', id: 1 }];
     assert.equal(context.cancelLocationEditorContextAction(), false);
+    assert.match(scene, /if \(cameraDragMenuGuard\.shouldSuppressMenu\(\)\) return;\s*if \(cancelLocationEditorContextAction\(\)\) return;/);
     assert.match(scene, /if \(cancelLocationEditorContextAction\(\)\) return;/);
     assert.match(main, /window\.cancelLocationAssetPlacement = \(\) => \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\);\s*renderAssetCards\(\);\s*renderPlacementSettings\(\);/);
 });
@@ -543,7 +577,9 @@ test('canceling placement clears the structure ghost and does not recreate a cub
         window: { locationEditMode: true, locationEditorTool: 'assets' },
         selectedLocationAsset: { id: 'crate', kind: 'structure' },
         buildMode: 'structure', brushObjectMode: true,
+        houseDrawMode: false,
         buildPreviewMesh: null, buildPreviewKey: null,
+        lampEditTrace: null,
         scene: { add() { adds++; } }, hoveredTileCoords: { x: 2, z: 3 },
         editorRotateMode: false, editorMoveMode: false, editorResizeMode: false,
         editorSelections: [], editorMovePreviewPoint: null,
@@ -767,6 +803,7 @@ test('group ghost geometry is reused while cursor moves', () => {
         window: { locationEditMode: true, locationEditorTool: 'select' },
         scene: { add() { adds++; } }, hoveredTileCoords: { x: 2, z: 2 },
         editorRotateMode: false, editorMoveMode: true,
+        houseDrawMode: false,
         editorSelections: [{ kind: 'decor', x: 1, z: 1, index: 0 }, { kind: 'lamp', index: 0 }],
         editorMovePreviewPoint: { x: 2.5, z: 2.5 },
         buildPreviewMesh: null, buildPreviewKey: null,
@@ -883,6 +920,7 @@ test('group rotation preview includes every ghost even when the last selection i
         editorSelections: [{ kind: 'structure', id: 1 }, { kind: 'lamp', index: 0 }],
         editorGroupRotatePivot: { x: 2, z: 2 }, editorRotateAngle: 90, editorGroupRotateWithPivot: true,
         editorMoveMode: false, hoveredTileCoords: { x: 2, z: 2 },
+        houseDrawMode: false,
         window: { locationEditMode: true, locationEditorTool: 'select' },
         scene: { add() {} }, currentLocationData: { grid_width: 10, grid_height: 10 },
         buildPreviewMesh: null, buildPreviewKey: null,

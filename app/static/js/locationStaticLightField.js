@@ -1,0 +1,151 @@
+import { STOREY_HEIGHT, doorOnWall, floorVisualPose, structureLevel, structureLevelOffset,
+    structurePose, wallVisualPlan } from './locationArchitecture.js';
+import { createStaticLightField, createStaticLightFieldTexture,
+    applyStaticLightFieldMaterial, removeStaticLightFieldMaterial } from './locationStaticLightFieldPrototype.js';
+
+export const LOCATION_STATIC_FIELD_SAMPLES_PER_METER = 4;
+
+export function activeStaticLightFieldPointSlots(slots, sources) {
+    const used = new Set();
+    return Object.fromEntries(['pointShadow', 'pointSimple'].map(role => [role,
+        (slots[role] || []).map(light => {
+            const index = light.userData.lampRenderSourceIndex;
+            if (index == null || !(light.intensity > 0.02) || used.has(index)
+                || !(Number(sources[index]?.intensity) > 0)
+                || sources[index]?.kind === 'spot') return null;
+            used.add(index);
+            return index;
+        })]));
+}
+
+export function remapStaticLightFieldSlots(slots, before, after) {
+    const used = new Set();
+    const signatures = after.map(source => JSON.stringify(source));
+    return Object.fromEntries(Object.entries(slots).map(([role, indices]) => [role,
+        indices.map(index => {
+            if (index == null || !before[index]) return null;
+            const signature = JSON.stringify(before[index]);
+            let next = signatures.findIndex((candidate, position) =>
+                candidate === signature && !used.has(position));
+            if (next < 0 && before.length === after.length && after[index]
+                && after[index].kind === before[index].kind && !used.has(index)) next = index;
+            if (next >= 0) used.add(next);
+            return next >= 0 ? next : null;
+        })]));
+}
+
+function insideFloor(x, z, pose) {
+    const dx = x - pose.x;
+    const dz = z - pose.z;
+    return Math.abs(dx * pose.axis.x + dz * pose.axis.z) <= pose.width / 2
+        && Math.abs(dx * pose.normal.x + dz * pose.normal.z) <= pose.depth / 2;
+}
+
+export function locationStaticLightFieldInputs(data, sources, tileHeightAt) {
+    const objects = data.objects || [];
+    const floors = objects.filter(object => object.type === 'floor').map(object => ({
+        level: structureLevel(object), pose: floorVisualPose(object, objects),
+        y: tileHeightAt(object.tile_x, object.tile_y) + structureLevelOffset(object)
+            + Number(object.properties?.elevation || 0) + 0.035,
+    }));
+    const maxLevel = Math.max(0, ...objects.filter(object =>
+        ['wall', 'floor'].includes(object.type)).map(structureLevel));
+    const levels = Array.from({ length: maxLevel + 1 }, (_, id) => ({ id, y: id * STOREY_HEIGHT }));
+    const surfaceHeightAt = (x, z, level) => {
+        if (level > 0) {
+            const floor = floors.find(item => item.level === level && insideFloor(x, z, item.pose));
+            if (floor) return floor.y;
+        }
+        return tileHeightAt(Math.floor(x), Math.floor(z)) + level * STOREY_HEIGHT;
+    };
+    const lamps = sources.flatMap((source, index) => {
+        if (source.kind === 'spot') return [];
+        const containing = floors.filter(floor => insideFloor(source.x, source.z, floor.pose)
+            && source.y >= floor.y + 0.1).sort((a, b) => b.y - a.y);
+        return [{ ...source, id: index, level: containing[0]?.level || 0 }];
+    });
+    const walls = [];
+    const wallMountedDoors = new Set();
+    for (const wall of objects) {
+        if (wall.type !== 'wall') continue;
+        const { pose, spans } = wallVisualPlan(wall, objects);
+        const level = structureLevel(wall);
+        const baseY = tileHeightAt(wall.tile_x, wall.tile_y) + structureLevelOffset(wall)
+            + Number(wall.properties?.elevation || 0);
+        const add = (start, end, bottom, top) => {
+            if (end - start <= 0.01 || top - bottom <= 0.01) return;
+            walls.push({ level,
+                x1: pose.x + start * pose.axis.x, z1: pose.z + start * pose.axis.z,
+                x2: pose.x + end * pose.axis.x, z2: pose.z + end * pose.axis.z,
+                bottomY: baseY + bottom, topY: baseY + top });
+        };
+        for (const span of spans) add(span.start, span.end, span.bottom, span.top);
+        for (const portal of objects) {
+            if (portal.type !== 'door' || portal.properties?.is_open) continue;
+            const opening = doorOnWall(portal, wall);
+            if (opening) {
+                wallMountedDoors.add(portal);
+                add(opening.along - opening.width / 2,
+                    opening.along + opening.width / 2, opening.bottom,
+                    opening.bottom + opening.height);
+            }
+        }
+    }
+    for (const door of objects) {
+        if (door.type !== 'door' || door.properties?.is_open || wallMountedDoors.has(door)) continue;
+        const pose = structurePose(door);
+        const baseY = tileHeightAt(door.tile_x, door.tile_y) + structureLevelOffset(door)
+            + Number(door.properties?.elevation || 0);
+        walls.push({ level: structureLevel(door),
+            x1: pose.x - pose.axis.x * pose.width / 2,
+            z1: pose.z - pose.axis.z * pose.width / 2,
+            x2: pose.x + pose.axis.x * pose.width / 2,
+            z2: pose.z + pose.axis.z * pose.width / 2,
+            bottomY: baseY, topY: baseY + pose.height });
+    }
+    return { width: data.grid_width, height: data.grid_height,
+        levels, surfaceHeightAt, lamps, walls,
+        samplesPerMeter: LOCATION_STATIC_FIELD_SAMPLES_PER_METER };
+}
+
+export function createLocationStaticLightField(THREE, data, sources, tileHeightAt,
+    dynamicLightIds = new Set()) {
+    const startedAt = performance.now();
+    const inputs = locationStaticLightFieldInputs(data, sources, tileHeightAt);
+    const prepareMs = performance.now() - startedAt;
+    let currentInputs = inputs;
+    const field = createStaticLightField({ ...inputs,
+        surfaceHeightAt: (x, z, level) => currentInputs.surfaceHeightAt(x, z, level) });
+    const stats = { ...field.rebuild({ lamps: inputs.lamps, walls: inputs.walls,
+        dynamicLightIds }),
+        prepareMs, totalMs: performance.now() - startedAt };
+    const textureStartedAt = performance.now();
+    const texture = createStaticLightFieldTexture(THREE, field);
+    stats.textureMs = performance.now() - textureStartedAt;
+    stats.totalMs = performance.now() - startedAt;
+    return {
+        field, texture, stats, inputs,
+        update(nextData, nextSources, nextDynamicIds = new Set()) {
+            const updateStartedAt = performance.now();
+            const next = locationStaticLightFieldInputs(nextData, nextSources, tileHeightAt);
+            const prepareMs = performance.now() - updateStartedAt;
+            if (next.width !== field.width || next.height !== field.height
+                || next.levels.length !== field.levels.length) return false;
+            currentInputs = next;
+            this.inputs = next;
+            this.stats = { ...field.rebuild({ lamps: next.lamps, walls: next.walls,
+                dynamicLightIds: nextDynamicIds }),
+                prepareMs };
+            this.stats.totalMs = performance.now() - updateStartedAt;
+            texture.needsUpdate = true;
+            return true;
+        },
+        attach(material, level) {
+            if (!material?.isMeshStandardMaterial
+                || material.userData.staticLightFieldPrototype) return;
+            applyStaticLightFieldMaterial(material, texture, field, level);
+        },
+        detach(material) { removeStaticLightFieldMaterial(material); },
+        dispose() { texture.dispose(); },
+    };
+}

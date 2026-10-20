@@ -11,6 +11,100 @@ export const DEFAULT_LOCATION_LIGHTING = Object.freeze({
     dark_tiles: [],
 });
 
+// Render slots are independent of the number of editable/saved lamps.
+export const LOCATION_LAMP_RENDER_BUDGET = Object.freeze({
+    pointShadow: 2, pointSimple: 4, spotShadow: 1, spotSimple: 1,
+});
+
+export function selectLocationLampRenderSources(sources, target, affectsView, previous = new Set(),
+    previousShadow = new Set(), budget = LOCATION_LAMP_RENDER_BUDGET) {
+    const ranked = sources.map((source, index) => {
+        if (!(Number(source.intensity) > 0) || !affectsView(source)) return null;
+        const distance = Math.hypot(Number(source.x) - target.x, Number(source.z) - target.z);
+        return { index, score: distance - (previous.has(index) ? 2 : 0)
+            - (previousShadow.has(index) ? 1 : 0) };
+    }).filter(Boolean).sort((left, right) => left.score - right.score || left.index - right.index);
+    const points = ranked.filter(item => sources[item.index].kind !== 'spot').map(item => item.index);
+    const spots = ranked.filter(item => sources[item.index].kind === 'spot').map(item => item.index);
+    return {
+        pointShadow: points.slice(0, budget.pointShadow),
+        pointSimple: points.slice(budget.pointShadow, budget.pointShadow + budget.pointSimple),
+        spotShadow: spots.slice(0, budget.spotShadow),
+        spotSimple: spots.slice(budget.spotShadow, budget.spotShadow + budget.spotSimple),
+    };
+}
+
+export function sameLocationLightingSettings(left, right) {
+    if (!left || !right) return false;
+    const a = { ...DEFAULT_LOCATION_LIGHTING, ...left };
+    const b = { ...DEFAULT_LOCATION_LIGHTING, ...right };
+    const numberEqual = (first, second) => Number.isFinite(Number(first))
+        && Number.isFinite(Number(second)) && Math.abs(Number(first) - Number(second)) < 0.00051;
+    const colorEqual = (first, second) => String(first).toLowerCase() === String(second).toLowerCase();
+    if (a.mode !== b.mode) return false;
+    for (const key of ['ambient_color', 'directional_color', 'background_color']) {
+        if (!colorEqual(a[key], b[key])) return false;
+    }
+    for (const key of ['ambient_intensity', 'directional_intensity',
+        'directional_azimuth', 'directional_elevation']) {
+        if (!numberEqual(a[key], b[key])) return false;
+    }
+    if (a.dark_tiles.length !== b.dark_tiles.length || a.local_lights.length !== b.local_lights.length) return false;
+    for (let index = 0; index < a.dark_tiles.length; index++) {
+        if (a.dark_tiles[index].x !== b.dark_tiles[index].x
+            || a.dark_tiles[index].z !== b.dark_tiles[index].z) return false;
+    }
+    for (let index = 0; index < a.local_lights.length; index++) {
+        const source = a.local_lights[index];
+        const saved = b.local_lights[index];
+        if ((source.kind || 'point') !== (saved.kind || 'point')
+            || Boolean(source.gm_hidden) !== Boolean(saved.gm_hidden)
+            || !colorEqual(source.color, saved.color)) return false;
+        for (const key of ['x', 'z', 'height', 'intensity', 'distance', 'azimuth']) {
+            if (!numberEqual(source[key] ?? 0, saved[key] ?? 0)) return false;
+        }
+        if (Boolean(source.dimensions) !== Boolean(saved.dimensions)) return false;
+        if (source.dimensions) {
+            for (const key of ['width', 'depth', 'height']) {
+                if (!numberEqual(source.dimensions[key], saved.dimensions[key])) return false;
+            }
+        }
+    }
+    return true;
+}
+
+export function createLocationLightingEchoTracker() {
+    let entries = [];
+    let generation = 0;
+    let lastApplied = 0;
+    return {
+        begin(locationId, settings) {
+            const entry = { locationId: String(locationId),
+                settings: JSON.parse(JSON.stringify(settings)), generation: ++generation, applied: false };
+            entries.push(entry);
+            if (entries.length > 16) entries.shift();
+            return entry;
+        },
+        socket(locationId, settings) {
+            const entry = [...entries].reverse().find(item => item.locationId === String(locationId)
+                && sameLocationLightingSettings(item.settings, settings));
+            if (!entry) return true;
+            if (entry.applied || entry.generation < lastApplied) return false;
+            entry.applied = true;
+            lastApplied = entry.generation;
+            return true;
+        },
+        rest(entry) {
+            if (!entries.includes(entry) || entry.applied || entry.generation < lastApplied) return false;
+            entry.applied = true;
+            lastApplied = entry.generation;
+            return true;
+        },
+        fail(entry) { entries = entries.filter(item => item !== entry); },
+        reset() { entries = []; generation = 0; lastApplied = 0; },
+    };
+}
+
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const smoothstep = (start, end, value) => {
     const t = clamp((value - start) / (end - start), 0, 1);

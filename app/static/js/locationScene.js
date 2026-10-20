@@ -22,8 +22,9 @@ import {
     createTerrainSurfaceHeightSampler, isSmoothTerrainTile, terrainFoundationHeight,
     waterSurfaceAdjustments,
 } from './locationTerrain.js';
-import { DEFAULT_LOCATION_LIGHTING, resolveLocationLighting,
-    resolveLocationVisualPreset } from './locationLighting.js';
+import { createLocationLightingEchoTracker, DEFAULT_LOCATION_LIGHTING, resolveLocationLighting,
+    resolveLocationVisualPreset, LOCATION_LAMP_RENDER_BUDGET,
+    selectLocationLampRenderSources } from './locationLighting.js';
 import { findLocationAsset } from './locationAssetCatalog.js';
 import { placementForLocationAsset, visualAssetForLocationObject } from './locationAssetVariants.js';
 import {
@@ -36,13 +37,17 @@ import {
     projectedAxisDrag, rotatePointAround, volumeResize,
 } from './locationAssetTransforms.js';
 import { createSecondaryDragGuard } from './locationEditorPointer.js';
-import { doorOnWall, doorFrameStyle, doorTrimLayout, floorEntrancePoint, floorVisualPose,
-    houseWallWear, nextStoreyFloors, structureBuildingId, structureLevel, structureLevelOffset,
+import { doorOnWall, doorFrameStyle, doorTrimLayout, floorEntrancePoint, floorFitPlan, floorVisualPose,
+    houseWallWear, nextStoreyFloors, structureBuildingId, structureLevel, structureLevelOffset, structurePose,
     wallVisualPlan } from './locationArchitecture.js';
 import { applyInteriorFloorShade, createRoofVisual, roofPlans, roofVisibleForCamera } from './locationRoof.js';
+import { generatedFloorBlueprint, houseBuildingId, houseFootprint, planResidentialHouse,
+    restorableGeneratedFloor } from './locationHouseGenerator.js';
 import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
     updateLocationTerrainPixels } from './locationTerrainTexture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
+import { activeStaticLightFieldPointSlots, createLocationStaticLightField, remapStaticLightFieldSlots,
+    LOCATION_STATIC_FIELD_SAMPLES_PER_METER } from './locationStaticLightField.js';
 import { applySurfaceDarkness, writeDarknessPixels } from './locationDarknessSurface.js';
 import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
 import { createGrassDetailGroup } from './locationGrassDetail.js';
@@ -59,7 +64,7 @@ import { animateFireObjectModels, createFireObjectModel, fireLightSource, getFir
 import { createElectricFixtureModel, electricFixtureLightSource, isElectricFixture } from './locationFixtures.js';
 import { getAnomalyLightSources } from './locationAnomalyLight.js';
 import { MAX_ANOMALY_RENDER_LIGHTS, selectAnomalyRenderLights } from './locationAnomalyRenderLights.js';
-import { createSceneProfiler } from './sceneProfiler.js';
+import { copySceneProfileReport, createPointerProfile, createSceneProfiler } from './sceneProfiler.js';
 import { isWorldDarkTime } from './darknessRules.js';
 import {
     assetDimensions, baseAssetDimensions, resizedAxis, resizedUniformDimensions, validAssetDimensions,
@@ -209,10 +214,25 @@ let locationDirectionalLight = null;
 let locationLightingPreset = 'current';
 let resolvedLightingProfile = null;
 let locationLightGroup = null;
+let lampRenderGroup = null;
+let lampRenderSlots = null;
+let lampRenderLights = [];
+let lampRenderSources = [];
+let lampRenderSelected = new Set();
+let lastLampRenderUpdateAt = -Infinity;
+let locationStaticLightField = null;
+let staticFieldPointSlots = null;
+let locationStaticLightFieldButton = null;
+let locationStaticLightFieldRefreshTimer = null;
+let staticFieldFirstFrame = null;
+let staticFieldLastToggleFrame = null;
+let staticFieldLastToggleWork = null;
 let anomalyRenderSources = [];
 let anomalyRenderPool = [];
 let lastAnomalyLightUpdateAt = -Infinity;
 let locationProfiler = null;
+let locationLoadTrace = null;
+let locationPointerProfile = null;
 let locationDarknessFactors = null;
 let locationDarknessTexture = null;
 let activeLightingProfile = null;
@@ -241,6 +261,100 @@ const cameraDragMenuGuard = createSecondaryDragGuard();
 let editorSelectionRing = null;
 let editorSelections = [];
 let lampEditPending = false;
+let lampEditTrace = null;
+const lampLightingEchoes = createLocationLightingEchoTracker();
+
+function localLightRenderCounts() {
+    const counts = { active: 0, pointSlots: 0, spotSlots: 0,
+        shadowCasters: 0, shadowViews: 0, preview: 0, previewPointSlots: 0, previewSpotSlots: 0 };
+    locationLightGroup?.traverseVisible(child => {
+        if (!child.isLight) return;
+        if (child.isPointLight) counts.pointSlots++;
+        if (child.isSpotLight) counts.spotSlots++;
+        if (Number(child.intensity) > 0) counts.active++;
+        if (child.userData?.lampPreviewSlot) {
+            if (child.isPointLight) counts.previewPointSlots++;
+            if (child.isSpotLight) counts.previewSpotSlots++;
+            if (Number(child.intensity) > 0) counts.preview++;
+        }
+        if (child.castShadow) {
+            counts.shadowCasters++;
+            counts.shadowViews += child.isPointLight ? 6 : 1;
+        }
+    });
+    buildPreviewMesh?.traverseVisible(child => {
+        if (!child.isLight) return;
+        if (child.isPointLight) counts.previewPointSlots++;
+        if (child.isSpotLight) counts.previewSpotSlots++;
+        if (Number(child.intensity) > 0) counts.preview++;
+    });
+    return counts;
+}
+
+function beginLampEditTrace(action) {
+    const trace = {
+        action, startedAt: performance.now(), timings: {},
+        restSettled: action === 'select' || action === 'socket',
+        lightsBefore: currentLocationData?.lighting?.local_lights?.length || 0,
+        renderLightsBefore: localLightRenderCounts(),
+        lightRootsBefore: locationLightGroup?.children.length || 0,
+        gpuBefore: {
+            geometries: renderer?.info?.memory?.geometries || 0,
+            textures: renderer?.info?.memory?.textures || 0,
+        },
+        programsBefore: renderer?.info?.programs?.length || 0,
+    };
+    lampEditTrace = trace;
+    return trace;
+}
+
+function markLampEditReady(trace) {
+    if (lampEditTrace !== trace || trace.readyAt) return;
+    trace.readyAt = performance.now();
+    trace.hiddenAtReady = document.hidden;
+    setTimeout(() => {
+        if (lampEditTrace === trace) trace.timings.timerAfterReadyMs =
+            +(performance.now() - trace.readyAt).toFixed(1);
+    }, 0);
+}
+
+function reportLampEditTrace(trace) {
+    if (lampEditTrace !== trace || !trace.restSettled || !trace.frameCaptured) return;
+    lampEditTrace = null;
+    console.info('[Лампа: профиль операции]', {
+        action: trace.action,
+        totalUntilFrameMs: +(trace.frameFinishedAt - trace.startedAt).toFixed(1),
+        totalOperationMs: +(performance.now() - trace.startedAt).toFixed(1),
+        waitForFrameMs: +(trace.frameStartedAt - trace.readyAt).toFixed(1),
+        hiddenAtReady: trace.hiddenAtReady,
+        hiddenAtFrame: document.hidden,
+        renderCallMs: +trace.renderMs.toFixed(1),
+        frameCpuMs: +trace.frameMs.toFixed(1),
+        lightsBefore: trace.lightsBefore,
+        lightsAfter: currentLocationData?.lighting?.local_lights?.length || 0,
+        renderLightsBefore: trace.renderLightsBefore,
+        renderLightsAfter: localLightRenderCounts(),
+        lightRootsBefore: trace.lightRootsBefore,
+        lightRootsAfter: locationLightGroup?.children.length || 0,
+        gpuBefore: trace.gpuBefore,
+        gpuAfter: {
+            geometries: renderer?.info?.memory?.geometries || 0,
+            textures: renderer?.info?.memory?.textures || 0,
+        },
+        programsBefore: trace.programsBefore,
+        programsAfter: renderer?.info?.programs?.length || 0,
+        ...trace.timings,
+    });
+}
+
+function finishLampEditTrace(trace, renderMs, frameMs) {
+    if (lampEditTrace !== trace || trace.frameCaptured) return;
+    trace.frameCaptured = true;
+    trace.renderMs = renderMs;
+    trace.frameMs = frameMs;
+    trace.frameFinishedAt = performance.now();
+    reportLampEditTrace(trace);
+}
 let tileCubes = [];
 let locationTileMesh = null;
 let waterTileMesh = null;
@@ -468,6 +582,14 @@ let structureColor = '#8b6b4f';
 let structureRotation = 0;
 let buildPreviewMesh = null;
 let buildPreviewKey = null;
+let houseDrawMode = false;
+let houseDrawStart = null;
+let houseDrawEnd = null;
+let houseDrawPointerId = null;
+let houseOutlineMesh = null;
+let houseCreationPending = false;
+let houseFloorRestorePending = false;
+let houseSceneEpoch = 0;
 const structureDeletionInFlight = new Set();
 let pendingObjectMoveId = null;
 let hoveredStructureObjectId = null;
@@ -1302,7 +1424,7 @@ function getCharacterAtScreen(clientX, clientY) {
     characterModels.forEach((entry) => {
         if (entry.model.visible) models.push(entry.model);
     });
-    const intersects = raycaster.intersectObjects(models, true);
+    const intersects = profiledLocationRaycast(models, true, 'character');
     if (intersects.length > 0) {
         let obj = intersects[0].object;
         while (obj) {
@@ -3882,7 +4004,7 @@ function getLocationTileAtScreen(clientX, clientY) {
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
-    const hit = raycaster.intersectObjects(tileCubes)[0];
+    const hit = profiledLocationRaycast(tileCubes, false, 'surface')[0];
     const coords = hitTileCoords(hit);
     return coords ? { x: coords.x, y: coords.z } : null;
 }
@@ -3890,6 +4012,12 @@ function getLocationTileAtScreen(clientX, clientY) {
 function hitTileCoords(hit) {
     return hit?.object?.userData?.tileByInstance?.[hit.instanceId]
         || hit?.object?.userData?.tileByFace?.[hit.faceIndex] || null;
+}
+
+function profiledLocationRaycast(candidates, recursive = false, kind = 'editor') {
+    if (!locationPointerProfile) return raycaster.intersectObjects(candidates, recursive);
+    return locationPointerProfile.raycast(kind, candidates,
+        () => raycaster.intersectObjects(candidates, recursive));
 }
 
 function showFacingPaymentSelection(characterId, targetX, targetY, isCombatActive) {
@@ -6933,15 +7061,67 @@ export function getCombatState() {
 }
 
 // ========== Инициализация сцены ==========
+function locationBuildingProfileStats() {
+    const objects = currentLocationData?.objects || [];
+    const generatedIds = new Set(objects.filter(object => object.type === 'floor'
+        && object.properties?.generation_seed !== undefined)
+        .map(object => structureBuildingId(object)).filter(Boolean));
+    const houseObjects = objects.filter(object => generatedIds.has(structureBuildingId(object)));
+    const architectureObjects = objects.filter(object => ['floor', 'wall', 'door', 'window'].includes(object.type));
+    const houseRoots = locationObjectMeshes.filter(mesh =>
+        generatedIds.has(structureBuildingId(mesh.userData.locationObject)));
+    const houseRoofs = roofMeshes.filter(mesh => {
+        const floor = objects.find(object => object.id === mesh.userData.roofPlan?.floorId);
+        return floor && generatedIds.has(structureBuildingId(floor));
+    });
+    let houseMeshes = 0;
+    let houseShadowCasters = 0;
+    for (const root of [...houseRoots, ...houseRoofs]) {
+        root.traverse(child => {
+            if (!child.isMesh) return;
+            houseMeshes++;
+            if (child.castShadow && child.visible) houseShadowCasters++;
+        });
+    }
+    let visibleShadowCasters = 0;
+    scene?.traverseVisible(child => { if (child.isMesh && child.castShadow) visibleShadowCasters++; });
+    return {
+        houses: generatedIds.size, houseObjects: houseObjects.length,
+        architectureObjects: architectureObjects.length, houseMeshes, houseShadowCasters,
+        visibleShadowCasters, roofRoots: roofMeshes.length,
+        pickRoots: locationObjectMeshes.length + objectMeshes.length + (locationLightGroup?.children.length || 0),
+        geometries: renderer.info?.memory?.geometries || 0,
+        textures: renderer.info?.memory?.textures || 0,
+    };
+}
+
 function createLocationProfileControl(container) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'scene-profile-button';
     button.textContent = 'Профиль сцены';
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'scene-profile-button scene-profile-copy-button';
+    copyButton.textContent = 'Скопировать отчёт';
+    copyButton.hidden = true;
     const panel = document.createElement('pre');
     panel.className = 'scene-profile-results';
     panel.hidden = true;
-    container.append(button, panel);
+    locationStaticLightFieldButton = document.createElement('button');
+    locationStaticLightFieldButton.type = 'button';
+    locationStaticLightFieldButton.className = 'scene-profile-button';
+    locationStaticLightFieldButton.style.right = '155px';
+    copyButton.style.bottom = '58px';
+    panel.style.bottom = '98px';
+    locationStaticLightFieldButton.title = 'Эксперимент: световое поле вместо точечных ламп (повторное нажатие вернёт прежний свет)';
+    locationStaticLightFieldButton.addEventListener('click', () => {
+        const enabled = setLocationStaticLightFieldEnabled(!locationStaticLightField);
+        showNotification(enabled ? 'Световое поле включено' : 'Обычное освещение восстановлено');
+    });
+    setStaticLightFieldButtonState();
+    container.append(button, locationStaticLightFieldButton, copyButton, panel);
+    let reportText = '';
 
     let skipLabels = false;
     let grass = null;
@@ -6950,6 +7130,7 @@ function createLocationProfileControl(container) {
     let anomalyLightVisibility = [];
     let lights = null;
     let lightsWereVisible = false;
+    let staticFieldControls = [];
     let shadowsWereEnabled = false;
     const phases = [
         { name: 'Полная сцена', apply() {}, restore() {} },
@@ -6970,7 +7151,19 @@ function createLocationProfileControl(container) {
             lights = locationLightGroup;
             lightsWereVisible = lights?.visible;
             if (lights) lights.visible = false;
-        }, restore() { if (lights) lights.visible = lightsWereVisible; } },
+            staticFieldControls = [];
+            if (locationStaticLightField) forEachStaticLightFieldMaterial(material => {
+                const control = material.userData.staticLightFieldPrototype?.enabled;
+                if (control) {
+                    staticFieldControls.push([control, control.value]);
+                    control.value = 0;
+                }
+            });
+        }, restore() {
+            if (lights) lights.visible = lightsWereVisible;
+            for (const [control, value] of staticFieldControls) control.value = value;
+            staticFieldControls = [];
+        } },
         { name: 'Без теней', apply() {
             shadowsWereEnabled = renderer.shadowMap.enabled;
             renderer.shadowMap.enabled = false;
@@ -6983,52 +7176,86 @@ function createLocationProfileControl(container) {
     const profiler = createSceneProfiler({ phases,
         onProgress(name, index, total) {
             panel.hidden = false;
-            panel.textContent = `Замер ${index}/${total}: ${name}\nДержите камеру неподвижно; каждый режим прогревается.`;
+            panel.textContent = `Замер ${index}/${total}: ${name}\nДля покоя держите камеру неподвижно; для движения повторите замер с одинаковой траекторией. Каждый режим прогревается.`;
         },
         onComplete(results) {
+            locationPointerProfile = null;
             button.textContent = 'Профиль сцены';
+            const stats = locationBuildingProfileStats();
             panel.textContent = [
-                'Реальная подлокация (FPS / p95 кадра / CPU / draw calls)',
+                'Реальная подлокация (FPS / кадр средний / p95 / p99 / CPU кадра / draw calls / triangles)',
                 ...results.map(result => {
                     const pause = result.longFrames
                         ? `; долгих пауз ${result.longFrames} (макс ${Math.round(result.longestFrameMs)}мс)` : '';
                     if (!result.valid) return `${result.name}: нет устойчивого замера${pause}`;
-                    return `${result.name}: ${result.fps.toFixed(1)} / ${result.frameP95Ms.toFixed(1)}мс / ${result.cpuMs.toFixed(1)}мс / ${Math.round(result.calls)}${pause}`;
+                    return `${result.name}: ${result.fps.toFixed(1)} / ${result.frameMs.toFixed(1)} / ${result.frameP95Ms.toFixed(1)} / ${result.frameP99Ms.toFixed(1)}мс / ${result.cpuMs.toFixed(1)}мс / ${Math.round(result.calls)} / ${Math.round(result.triangles)}; движение камеры ${Math.round(result.movingFrameShare * 100)}%${pause}`;
+                }),
+                `Дома: ${stats.houses}; объекты домов: ${stats.houseObjects}; строительные объекты: ${stats.architectureObjects}; меши домов: ${stats.houseMeshes}; кандидаты в тени домов: ${stats.houseShadowCasters}`,
+                `Все видимые кандидаты в тени: ${stats.visibleShadowCasters}; корни raycasting редактора: ${stats.pickRoots}; крыши: ${stats.roofRoots}; WebGL geometries: ${stats.geometries}; textures: ${stats.textures}`,
+                ...results.filter(result => result.valid).map(result =>
+                    `${result.name}, главный поток: обновления ${result.sceneUpdateMs.toFixed(2)}мс (крыши ${result.roofVisibilityMs.toFixed(2)}), WebGL вызов ${result.renderSubmitMs.toFixed(2)}, подписи ${result.labelsMs.toFixed(2)}`),
+                ...results.filter(result => result.valid).map(result => {
+                    const p = result.pointer;
+                    return `${result.name}, курсор: pointer ${p.pointerEvents}, canvas ${p.canvasMouseEvents}, попаданий в тайл ${p.tileHits}, редактор ${p.editorEvents}; обработчики ${p.pointerHandlerMs.toFixed(1)} + ${p.characterHandlerMs.toFixed(1)}мс; DOM ${p.domWrites}/${p.domMs.toFixed(1)}мс, подсветка ${p.highlightUpdates}/${p.highlightMs.toFixed(1)}мс; raycast ${p.raycastCalls} вызовов, ${p.raycastCandidates} корней, ${p.raycastMs.toFixed(1)}мс (рельеф ${p.surfaceRaycasts}/${p.surfaceCandidates}/${p.surfaceMs.toFixed(1)}мс; персонажи ${p.characterRaycasts}/${p.characterCandidates}/${p.characterMs.toFixed(1)}мс; строения ${p.structureRaycasts}/${p.structureCandidates}/${p.structureMs.toFixed(1)}мс; редактор ${p.editorRaycasts}/${p.editorCandidates}/${p.editorMs.toFixed(1)}мс). Время обработчиков включает raycast; корни не равны треугольникам.`;
                 }),
                 `Травинки: ${grassDetailGroup?.userData.detailCounts?.tufts || 0}; эффекты аномалий: ${anomalyEffectMeshes.length}`,
                 `Огни аномалий: ${anomalyRenderSources.length} (рендерятся до ${anomalyRenderPool.length}); DPR: ${renderer.getPixelRatio().toFixed(2)}`,
                 'Сравнивайте режимы с полной сценой; абсолютный FPS ограничен экраном.',
             ].join('\n');
+            reportText = panel.textContent;
+            copyButton.hidden = false;
             console.table(results);
         },
     });
     button.disabled = Boolean(renderer.isUnavailableRenderer);
-    panel.title = 'Нажмите, чтобы закрыть результат';
-    panel.addEventListener('click', () => { if (!profiler.running) panel.hidden = true; });
+    panel.title = 'Выделите текст или нажмите «Скопировать отчёт»';
+    copyButton.addEventListener('click', async () => {
+        const copied = await copySceneProfileReport(reportText, navigator.clipboard, document);
+        showNotification(copied ? 'Отчёт скопирован' : 'Не удалось скопировать отчёт');
+    });
     button.addEventListener('click', () => {
         if (profiler.running) {
             profiler.stop();
+            locationPointerProfile = null;
+            reportText = '';
+            copyButton.hidden = true;
             button.textContent = 'Профиль сцены';
             panel.textContent = 'Замер остановлен, настройки сцены восстановлены.';
             return;
         }
         button.textContent = 'Остановить замер';
+        reportText = '';
+        copyButton.hidden = true;
+        locationPointerProfile = createPointerProfile();
         profiler.start(performance.now());
     });
     return {
+        get running() { return profiler.running; },
         get skipLabels() { return skipLabels; },
         frame(now, metrics) { profiler.frame(now, metrics); },
         stop() {
             if (!profiler.running) return;
             profiler.stop();
+            locationPointerProfile = null;
+            reportText = '';
+            copyButton.hidden = true;
             button.textContent = 'Профиль сцены';
             panel.textContent = 'Замер прерван изменением сцены; настройки восстановлены.';
         },
         destroy() {
             profiler.stop();
-            button.remove(); panel.remove();
+            locationPointerProfile = null;
+            button.remove(); locationStaticLightFieldButton?.remove();
+            locationStaticLightFieldButton = null;
+            copyButton.remove(); panel.remove();
         },
     };
+}
+
+export function startLocationLoadDiagnostics(networkMs, initMs) {
+    locationLoadTrace = { networkMs: +networkMs.toFixed(1), initMs: +initMs.toFixed(1),
+        stages: {}, frames: [] };
+    window.getLocationLoadDiagnostics = () => JSON.parse(JSON.stringify(locationLoadTrace));
 }
 
 export function initLocationScene(containerId) {
@@ -7106,6 +7333,7 @@ export function initLocationScene(containerId) {
     let locationFrameWorkMs = 0;
     let locationSampleFrames = 0;
     let locationSampleAt = previousFrameTime;
+    let previousProfileCamera = null;
     function animate(frameTime = performance.now()) {
         animationFrameId = requestAnimationFrame(animate);
         const deltaSeconds = Math.min(0.1, Math.max(0, (frameTime - previousFrameTime) / 1000));
@@ -7119,20 +7347,50 @@ export function initLocationScene(containerId) {
             return;
         }
         const frameWorkStartedAt = performance.now();
+        const lampTrace = lampEditTrace?.readyAt && !lampEditTrace.frameCaptured ? lampEditTrace : null;
+        const loadFrame = locationLoadTrace?.loadedAt && locationLoadTrace.frames.length < 5
+            ? locationLoadTrace : null;
+        if (lampTrace) lampTrace.frameStartedAt = frameWorkStartedAt;
+        const profiling = locationProfiler?.running;
+        const cameraPose = profiling && camera && controls
+            ? [camera.position.x, camera.position.y, camera.position.z,
+                controls.target.x, controls.target.y, controls.target.z] : null;
+        const cameraMoved = Boolean(cameraPose && previousProfileCamera
+            && cameraPose.some((value, index) => Math.abs(value - previousProfileCamera[index]) > 0.0001));
+        previousProfileCamera = cameraPose;
         flushPendingTerrainRefresh();
         updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
         updateAnomalyRenderLights(frameTime);
+        updateLampRenderLights(frameTime, deltaSeconds);
+        const roofStartedAt = profiling ? performance.now() : 0;
         updateRoofVisibility();
+        const roofVisibilityMs = profiling ? performance.now() - roofStartedAt : 0;
         animateAnomalyEffects(anomalyEffectMeshes, performance.now());
         animateFireObjectModels(locationObjectMeshes, frameTime);
         animateFireObjectModels(objectMeshes, frameTime);
         waterSurfaceMesh?.material.map?.offset.set((frameTime * 0.000002) % 1, (frameTime * 0.000001) % 1);
+        const renderStartedAt = profiling || lampTrace || loadFrame || staticFieldFirstFrame
+            ? performance.now() : 0;
+        let renderFinishedAt = 0;
         if (renderer && scene && camera) {
             renderer.render(scene, camera);
+            renderFinishedAt = profiling || lampTrace || loadFrame || staticFieldFirstFrame
+                ? performance.now() : 0;
+            if (staticFieldFirstFrame) {
+                staticFieldLastToggleFrame = {
+                    enabled: staticFieldFirstFrame.enabled,
+                    waitForFrameMs: +(frameWorkStartedAt - staticFieldFirstFrame.at).toFixed(1),
+                    renderCallMs: +(renderFinishedAt - renderStartedAt).toFixed(1),
+                    frameCpuMs: +(renderFinishedAt - frameWorkStartedAt).toFixed(1),
+                    programsAfter: renderer.info.programs?.length || 0,
+                };
+                staticFieldFirstFrame = null;
+            }
             if (!renderer.isUnavailableRenderer) locationFpsCounter.frame(frameTime);
             else locationFpsCounter.pause();
         }
+        const labelsStartedAt = profiling ? performance.now() : 0;
         if (labelRenderer && !locationProfiler?.skipLabels) {
             updateCharacterLabelDistances();
             labelRenderer.render(scene, camera);
@@ -7145,7 +7403,22 @@ export function initLocationScene(containerId) {
             const info = renderer.info?.render;
             locationProfiler?.frame(finishedAt, {
                 cpuMs, calls: info?.calls || 0, triangles: info?.triangles || 0,
+                sceneUpdateMs: profiling ? renderStartedAt - frameWorkStartedAt : 0,
+                roofVisibilityMs,
+                renderSubmitMs: profiling ? renderFinishedAt - renderStartedAt : 0,
+                labelsMs: profiling ? finishedAt - labelsStartedAt : 0,
+                cameraMoved,
+                pointer: locationPointerProfile?.drain(),
             });
+            if (lampTrace) finishLampEditTrace(lampTrace,
+                renderFinishedAt - renderStartedAt, finishedAt - frameWorkStartedAt);
+            if (loadFrame) {
+                loadFrame.frames.push({ waitMs: +(frameWorkStartedAt - (loadFrame.lastFrameAt || loadFrame.loadedAt)).toFixed(1),
+                    cpuMs: +cpuMs.toFixed(1), renderMs: +(renderFinishedAt - renderStartedAt).toFixed(1),
+                    programs: renderer.info?.programs?.length || 0,
+                    calls: info?.calls || 0, triangles: info?.triangles || 0 });
+                loadFrame.lastFrameAt = frameWorkStartedAt;
+            }
             if (frameTime - locationSampleAt >= 1000) {
                 if (info) locationFpsCounter.setDetails(
                     `calls ${info.calls} | tris ${Math.round(info.triangles / 1000)}k | CPU ${(locationFrameWorkMs / locationSampleFrames).toFixed(1)}ms`
@@ -7216,7 +7489,7 @@ function getLocationObjectAtScreen(clientX, clientY) {
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
-    const hit = raycaster.intersectObjects(locationObjectMeshes.filter(mesh => mesh.visible), true)[0];
+    const hit = profiledLocationRaycast(locationObjectMeshes.filter(mesh => mesh.visible), true, 'structure')[0];
     if (!hit) return null;
     let mesh = hit.object;
     while (mesh && !mesh.userData.locationObjectId) mesh = mesh.parent;
@@ -9794,6 +10067,18 @@ function createLocationObjectMesh(obj, forPreview = false) {
             }
         });
     }
+    if (!forPreview && locationStaticLightField && ['floor', 'wall'].includes(obj.type)) {
+        const seen = new Set();
+        group.traverse(child => {
+            if (!child.isMesh) return;
+            for (const childMaterial of Array.isArray(child.material) ? child.material : [child.material]) {
+                if (childMaterial && !seen.has(childMaterial)) {
+                    seen.add(childMaterial);
+                    locationStaticLightField.attach(childMaterial, structureLevel(obj));
+                }
+            }
+        });
+    }
     return group;
 }
 
@@ -9887,9 +10172,323 @@ function getLocationEmissiveSources() {
     return [...getLocationFireSources(), ...getAnomalyLightSources(currentLocationData?.tiles_data)];
 }
 
+function forEachStaticLightFieldMaterial(callback) {
+    const seen = new Set();
+    const visit = (root, level) => root?.traverse(child => {
+        if (!child.isMesh) return;
+        for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
+            if (!material || seen.has(material)) continue;
+            seen.add(material);
+            callback(material, level);
+        }
+    });
+    visit(terrainSurfaceMesh, 0);
+    for (const root of locationObjectMeshes) {
+        const object = root.userData.locationObject;
+        if (object?.type === 'floor' || object?.type === 'wall') {
+            visit(root, structureLevel(object));
+        }
+    }
+}
+
+function setStaticLightFieldButtonState() {
+    if (locationStaticLightFieldButton) {
+        locationStaticLightFieldButton.textContent = locationStaticLightField
+            ? 'Световое поле: вкл' : 'Световое поле: выкл';
+        locationStaticLightFieldButton.setAttribute('aria-pressed', String(Boolean(locationStaticLightField)));
+    }
+}
+
+function staticFieldDynamicIds() {
+    return new Set(Object.values(staticFieldPointSlots || {}).flat().filter(index => index != null));
+}
+
+function refreshStaticLightField() {
+    if (!locationStaticLightField || !currentLocationData) return;
+    try {
+        if (!locationStaticLightField.update(currentLocationData, lampRenderSources,
+            staticFieldDynamicIds())) {
+            const replacement = createLocationStaticLightField(THREE, currentLocationData,
+                lampRenderSources, getTileHeight, staticFieldDynamicIds());
+            forEachStaticLightFieldMaterial(material => locationStaticLightField.detach(material));
+            locationStaticLightField.dispose();
+            locationStaticLightField = replacement;
+            forEachStaticLightFieldMaterial((material, level) => replacement.attach(material, level));
+        }
+    } catch (error) {
+        console.error('Static light field refresh failed; restoring standard lighting', error);
+        setLocationStaticLightFieldEnabled(false);
+        showNotification('Световое поле отключено после ошибки обновления', 'system');
+    }
+}
+
+function queueStaticLightFieldRefresh() {
+    if (!locationStaticLightField || locationStaticLightFieldRefreshTimer != null) return;
+    locationStaticLightFieldRefreshTimer = setTimeout(() => {
+        locationStaticLightFieldRefreshTimer = null;
+        refreshStaticLightField();
+    }, 50);
+}
+
+export function setLocationStaticLightFieldEnabled(enabled) {
+    const modeChanged = Boolean(enabled) !== Boolean(locationStaticLightField);
+    if (modeChanged) {
+        locationProfiler?.stop();
+        staticFieldLastToggleFrame = null;
+    }
+    if (!enabled) {
+        const startedAt = performance.now();
+        const programsBefore = renderer?.info?.programs?.length || 0;
+        if (locationStaticLightFieldRefreshTimer != null) {
+            clearTimeout(locationStaticLightFieldRefreshTimer);
+            locationStaticLightFieldRefreshTimer = null;
+        }
+        if (locationStaticLightField) {
+            const hooksStartedAt = performance.now();
+            forEachStaticLightFieldMaterial(material => locationStaticLightField.detach(material));
+            const hooksMs = performance.now() - hooksStartedAt;
+            locationStaticLightField.dispose();
+            locationStaticLightField = null;
+            staticFieldPointSlots = null;
+            updateLampRenderLights(performance.now(), 1, true);
+            staticFieldFirstFrame = { enabled: false, at: performance.now() };
+            staticFieldLastToggleWork = { enabled: false, hooksMs,
+                totalJsMs: performance.now() - startedAt, programsBefore };
+        }
+        setStaticLightFieldButtonState();
+        return false;
+    }
+    if (locationStaticLightField) return true;
+    if (!scene || !currentLocationData || !renderer || renderer.isUnavailableRenderer
+        || !lampRenderSlots) return false;
+    const levels = Math.max(0, ...(currentLocationData.objects || [])
+        .filter(object => ['wall', 'floor'].includes(object.type)).map(structureLevel)) + 1;
+    if (currentLocationData.grid_height * LOCATION_STATIC_FIELD_SAMPLES_PER_METER
+        * levels * 2 > renderer.capabilities.maxTextureSize
+        || currentLocationData.grid_width * LOCATION_STATIC_FIELD_SAMPLES_PER_METER
+            > renderer.capabilities.maxTextureSize) {
+        showNotification('Световое поле не помещается в текстуру этой видеокарты', 'system');
+        return false;
+    }
+    try {
+        const startedAt = performance.now();
+        const programsBefore = renderer.info?.programs?.length || 0;
+        staticFieldPointSlots = activeStaticLightFieldPointSlots(lampRenderSlots, lampRenderSources);
+        for (const role of ['pointShadow', 'pointSimple']) {
+            lampRenderSlots[role].forEach((light, index) => {
+                if (staticFieldPointSlots[role][index] != null) return;
+                light.intensity = 0;
+                light.userData.lampRenderSourceIndex = null;
+                light.userData.lampDesiredSourceIndex = null;
+                light.shadow.autoUpdate = false;
+            });
+        }
+        locationStaticLightField = createLocationStaticLightField(THREE, currentLocationData,
+            lampRenderSources, getTileHeight, staticFieldDynamicIds());
+        const fieldMs = performance.now() - startedAt;
+        const hooksStartedAt = performance.now();
+        forEachStaticLightFieldMaterial((material, level) =>
+            locationStaticLightField.attach(material, level));
+        const hooksMs = performance.now() - hooksStartedAt;
+        const slotsStartedAt = performance.now();
+        updateLampRenderLights(performance.now(), 1, true);
+        const slotsMs = performance.now() - slotsStartedAt;
+        locationStaticLightField.stats.enableMs = performance.now() - startedAt;
+        staticFieldLastToggleWork = { enabled: true, fieldMs, hooksMs, slotsMs,
+            totalJsMs: performance.now() - startedAt, programsBefore };
+        staticFieldFirstFrame = { enabled: true, at: performance.now() };
+        setStaticLightFieldButtonState();
+        console.info('[Световое поле]', getLocationStaticLightFieldDiagnostics());
+        return true;
+    } catch (error) {
+        console.error('Static light field unavailable; keeping standard lighting', error);
+        setLocationStaticLightFieldEnabled(false);
+        staticFieldPointSlots = null;
+        showNotification('Не удалось включить световое поле', 'system');
+        return false;
+    }
+}
+
+export function getLocationStaticLightFieldDiagnostics() {
+    let materialCount = 0;
+    if (locationStaticLightField) forEachStaticLightFieldMaterial(material => {
+        if (material.userData.staticLightFieldPrototype) materialCount++;
+    });
+    const dynamicIds = staticFieldDynamicIds();
+    const lampRoutes = lampRenderSources.map((source, index) => {
+        const active = Number(source.intensity) > 0;
+        const rendered = lampRenderLights.some(light =>
+            light.userData.lampRenderSourceIndex === index && light.intensity > 0.02);
+        const fieldLamp = locationStaticLightField?.inputs.lamps.find(lamp => lamp.id === index);
+        const fieldStats = locationStaticLightField?.stats.lampStats?.find(lamp => lamp.id === index);
+        const inField = Boolean(fieldLamp && active && !dynamicIds.has(index));
+        return { index, kind: source.kind || 'point', x: source.x, z: source.z,
+            y: source.y, height: source.height, level: fieldLamp?.level ?? null,
+            intensity: source.intensity, distance: source.distance,
+            fieldContributions: fieldStats?.contributions ?? null,
+            fieldBlockedCells: fieldStats?.blockedCells ?? null,
+            route: !active ? 'off' : inField ? 'field'
+                : rendered ? 'dynamic' : !locationStaticLightField ? 'outside-dynamic-pool'
+                    : source.kind === 'spot' ? 'unrendered-spot' : 'missing',
+            fieldAtLamp: inField ? locationStaticLightField.field.sample(
+                Number(source.x), Number(source.z), fieldLamp.level) : null };
+    });
+    return {
+        enabled: Boolean(locationStaticLightField),
+        ...locationStaticLightField?.stats,
+        materialCount,
+        fieldSize: locationStaticLightField ? [locationStaticLightField.field.columns,
+            locationStaticLightField.texture.image.height] : null,
+        dynamicPointIds: [...dynamicIds],
+        lampRoutes,
+        placedPointLights: lampRenderSources.filter(source => source.kind !== 'spot').length,
+        placedSpotLights: lampRenderSources.filter(source => source.kind === 'spot').length,
+        fieldBytes: locationStaticLightField?.stats.fieldBytes || 0,
+        textureBytes: locationStaticLightField?.field.pixels.byteLength || 0,
+        programs: renderer?.info.programs?.length || 0,
+        geometries: renderer?.info.memory?.geometries || 0,
+        textures: renderer?.info.memory?.textures || 0,
+        drawCalls: renderer?.info.render?.calls || 0,
+        triangles: renderer?.info.render?.triangles || 0,
+        lastToggleFrame: staticFieldLastToggleFrame,
+        lastToggleWork: staticFieldLastToggleWork,
+    };
+}
+
+window.setLocationStaticLightFieldEnabled = setLocationStaticLightFieldEnabled;
+window.getLocationStaticLightFieldDiagnostics = getLocationStaticLightFieldDiagnostics;
+
 const anomalyLightFrustum = new THREE.Frustum();
 const anomalyLightViewMatrix = new THREE.Matrix4();
 const anomalyLightSphere = new THREE.Sphere();
+const lampLightFrustum = new THREE.Frustum();
+const lampLightViewMatrix = new THREE.Matrix4();
+const lampLightSphere = new THREE.Sphere();
+
+function createLampRenderPool() {
+    const group = new THREE.Group();
+    const slots = {};
+    for (const [role, count] of Object.entries(LOCATION_LAMP_RENDER_BUDGET)) {
+        const isSpot = role.startsWith('spot');
+        const castsShadow = role.endsWith('Shadow');
+        slots[role] = Array.from({ length: count }, () => {
+            const light = isSpot
+                ? new THREE.SpotLight('#ffffff', 0, 7, Math.PI / 5, 0.55, 2)
+                : new THREE.PointLight('#ffffff', 0, 7, 2);
+            light.castShadow = castsShadow;
+            light.shadow.mapSize.set(512, 512);
+            light.shadow.radius = 2;
+            light.shadow.autoUpdate = false;
+            light.shadow.needsUpdate = false;
+            light.userData.lampRenderSourceIndex = null;
+            light.userData.lampDesiredSourceIndex = null;
+            group.add(light);
+            if (isSpot) group.add(light.target);
+            return light;
+        });
+    }
+    slots.previewPoint = new THREE.PointLight('#ffffff', 0, 7, 2);
+    slots.previewSpot = new THREE.SpotLight('#ffffff', 0, 7, Math.PI / 5, 0.55, 2);
+    for (const light of [slots.previewPoint, slots.previewSpot]) {
+        light.userData.lampPreviewSlot = true;
+        group.add(light);
+    }
+    group.add(slots.previewSpot.target);
+    return { group, slots };
+}
+
+function setLampRenderLight(light, source, x = source.x, y = source.y, z = source.z) {
+    light.color.set(source.color);
+    light.distance = Number(source.distance);
+    light.position.set(Number(x), Number(y), Number(z));
+    if (light.isSpotLight) {
+        const azimuth = Number(source.azimuth || 0) * Math.PI / 180;
+        light.target.position.set(light.position.x + Math.cos(azimuth) * 5,
+            light.position.y - Math.min(3, Number(source.height)),
+            light.position.z + Math.sin(azimuth) * 5);
+    }
+}
+
+function setLampSlotTargets(selected) {
+    for (const [role, slots] of Object.entries(lampRenderSlots)) {
+        if (!Array.isArray(slots)) continue;
+        if (staticFieldPointSlots && role.startsWith('point')) {
+            slots.forEach((light, index) => {
+                light.userData.lampDesiredSourceIndex = staticFieldPointSlots[role][index];
+            });
+            continue;
+        }
+        const remaining = [...selected[role]];
+        const previousTargets = slots.map(light => light.userData.lampDesiredSourceIndex);
+        for (const light of slots) light.userData.lampDesiredSourceIndex = null;
+        for (const light of slots) {
+            const index = remaining.indexOf(light.userData.lampRenderSourceIndex);
+            if (index < 0) continue;
+            light.userData.lampDesiredSourceIndex = remaining.splice(index, 1)[0];
+        }
+        for (const [slotIndex, light] of slots.entries()) {
+            if (light.userData.lampDesiredSourceIndex != null) continue;
+            const index = remaining.indexOf(previousTargets[slotIndex]);
+            if (index < 0) continue;
+            light.userData.lampDesiredSourceIndex = remaining.splice(index, 1)[0];
+        }
+        for (const light of slots) {
+            if (light.userData.lampDesiredSourceIndex != null) continue;
+            light.userData.lampDesiredSourceIndex = remaining.shift() ?? null;
+        }
+    }
+}
+
+function updateLampRenderLights(now = performance.now(), deltaSeconds = 0, force = false) {
+    if (!lampRenderSlots || !camera || !controls) return;
+    if (force || now - lastLampRenderUpdateAt >= 150) {
+        lastLampRenderUpdateAt = now;
+        camera.updateMatrixWorld();
+        lampLightViewMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        lampLightFrustum.setFromProjectionMatrix(lampLightViewMatrix);
+        const selected = selectLocationLampRenderSources(lampRenderSources, controls.target, source => {
+            lampLightSphere.center.set(source.x, source.y, source.z);
+            lampLightSphere.radius = Math.max(0.1, Number(source.distance));
+            return lampLightFrustum.intersectsSphere(lampLightSphere);
+        }, lampRenderSelected,
+        new Set([...lampRenderSlots.pointShadow, ...lampRenderSlots.spotShadow]
+            .map(light => light.userData.lampDesiredSourceIndex).filter(index => index != null)));
+        if (staticFieldPointSlots) {
+            selected.pointShadow = staticFieldPointSlots.pointShadow.filter(index => index != null);
+            selected.pointSimple = staticFieldPointSlots.pointSimple.filter(index => index != null);
+        }
+        lampRenderSelected = new Set(Object.values(selected).flat());
+        setLampSlotTargets(selected);
+    }
+    for (const light of lampRenderLights) {
+        const desired = light.userData.lampDesiredSourceIndex;
+        if (light.userData.lampRenderSourceIndex !== desired) {
+            light.intensity *= Math.exp(-18 * deltaSeconds);
+            if (light.intensity <= 0.02) {
+                light.intensity = 0;
+                light.userData.lampRenderSourceIndex = desired;
+                light.shadow.autoUpdate = desired != null && light.castShadow;
+                if (light.shadow.autoUpdate) light.shadow.needsUpdate = true;
+            }
+        }
+        const source = light.userData.lampRenderSourceIndex === desired
+            ? lampRenderSources[desired] : null;
+        if (!source) continue;
+        setLampRenderLight(light, source);
+        const sameSourceElsewhere = lampRenderLights.reduce((total, other) => total + (
+            other !== light && other.userData.lampRenderSourceIndex === desired ? other.intensity : 0), 0);
+        const targetIntensity = Math.max(0, Number(source.intensity) - sameSourceElsewhere);
+        light.intensity += (targetIntensity - light.intensity)
+            * (1 - Math.exp(-14 * deltaSeconds));
+    }
+    const preview = buildPreviewMesh?.userData.lampPreviewSource;
+    for (const light of [lampRenderSlots.previewPoint, lampRenderSlots.previewSpot]) {
+        const active = preview && (light.isSpotLight === (preview.kind === 'spot' || preview.lightKind === 'spot'));
+        light.intensity = active ? Math.min(Number(preview.intensity || 2), 2) : 0;
+        if (active) setLampRenderLight(light, preview,
+            buildPreviewMesh.position.x, buildPreviewMesh.position.y, buildPreviewMesh.position.z);
+    }
+}
 
 function updateAnomalyRenderLights(now = performance.now(), force = false) {
     if (!camera || !controls || !anomalyRenderPool.length || (!force && now - lastAnomalyLightUpdateAt < 150)) return;
@@ -10180,6 +10779,143 @@ function clearBuildPreview() {
     buildPreviewMesh = null;
 }
 
+function clearHouseOutline() {
+    if (!houseOutlineMesh) return;
+    scene?.remove(houseOutlineMesh);
+    houseOutlineMesh.geometry.dispose();
+    houseOutlineMesh.material.dispose();
+    houseOutlineMesh = null;
+}
+
+function updateHouseOutline() {
+    clearHouseOutline();
+    if (!scene || !houseDrawStart || !houseDrawEnd || !currentLocationData) return;
+    const { minX, minZ, width, depth } = houseFootprint(
+        houseDrawStart.x, houseDrawStart.z, houseDrawEnd.x, houseDrawEnd.z);
+    const heightAt = (x, z) => getTileHeight(
+        Math.min(currentLocationData.grid_width - 1, x),
+        Math.min(currentLocationData.grid_height - 1, z)) + 0.08;
+    const corners = [[minX, minZ], [minX + width, minZ],
+        [minX + width, minZ + depth], [minX, minZ + depth]];
+    const geometry = new THREE.BufferGeometry().setFromPoints(
+        corners.map(([x, z]) => new THREE.Vector3(x, heightAt(x, z), z)));
+    houseOutlineMesh = new THREE.LineLoop(geometry,
+        new THREE.LineBasicMaterial({ color: 0xd9b975, depthTest: false }));
+    houseOutlineMesh.renderOrder = 50;
+    houseOutlineMesh.raycast = () => {};
+    scene.add(houseOutlineMesh);
+}
+
+export function setLocationHouseDrawMode(enabled) {
+    houseDrawMode = Boolean(enabled);
+    houseDrawStart = null;
+    houseDrawEnd = null;
+    houseDrawPointerId = null;
+    clearHouseOutline();
+    if (houseDrawMode) {
+        cancelLocationAssetResize();
+        editorMoveMode = false;
+        editorRotateMode = false;
+        editorMovePreviewPoint = null;
+        clearBuildPreview();
+    }
+    else updateBuildPreview();
+    return houseDrawMode;
+}
+
+async function createResidentialHouse(start, end) {
+    if (houseCreationPending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return;
+    const lobbyId = window.currentLobbyId;
+    const locationId = currentLocationId;
+    const sceneEpoch = houseSceneEpoch;
+    const footprint = houseFootprint(start.x, start.z, end.x, end.z);
+    const { minX, minZ, width, depth } = footprint;
+    const seed = document.querySelector('[data-house-seed]')?.value || '0';
+    const buildingId = houseBuildingId(locationId, footprint, seed);
+    const plan = planResidentialHouse({ ...footprint, seed, buildingId, assetById: findLocationAsset });
+    if (plan.error) return showNotification(plan.error, 'system');
+    if (minX < 0 || minZ < 0 || minX + width > currentLocationData.grid_width
+        || minZ + depth > currentLocationData.grid_height) {
+        return showNotification('Контур дома выходит за границы локации', 'system');
+    }
+    if ((currentLocationData.objects || []).some(object => {
+        if (structureBuildingId(object) === buildingId) return true;
+        if (object.type !== 'floor') return false;
+        const pose = structurePose(object);
+        const radiusX = (Math.abs(Math.cos(pose.angle)) * pose.width
+            + Math.abs(Math.sin(pose.angle)) * pose.depth) / 2;
+        const radiusZ = (Math.abs(Math.sin(pose.angle)) * pose.width
+            + Math.abs(Math.cos(pose.angle)) * pose.depth) / 2;
+        return pose.x + radiusX > minX && pose.x - radiusX < minX + width
+            && pose.z + radiusZ > minZ && pose.z - radiusZ < minZ + depth;
+    })) return showNotification('На этом месте уже есть пол или здание', 'system');
+    let lowest = Infinity;
+    let highest = -Infinity;
+    for (let z = minZ; z < minZ + depth; z++) {
+        for (let x = minX; x < minX + width; x++) {
+            const height = getTileHeight(x, z);
+            lowest = Math.min(lowest, height);
+            highest = Math.max(highest, height);
+        }
+    }
+    if (highest - lowest > 0.25) {
+        return showNotification('Для дома нужен ровный участок: перепад не более 0,25 м', 'system');
+    }
+    houseCreationPending = true;
+    showNotification('Создаётся дом; дождитесь завершения сохранения', 'system');
+    try {
+        for (const spec of plan.objects) {
+            if (sceneEpoch !== houseSceneEpoch) throw new Error('Создание дома прервано при выходе из локации');
+            const object = await Server.createLocationObject(lobbyId, locationId, spec);
+            if (sceneEpoch !== houseSceneEpoch) throw new Error('Создание дома прервано при выходе из локации');
+            addLocationObject(object);
+        }
+        window.dispatchEvent(new CustomEvent('location-editor-active-building',
+            { detail: { buildingId, level: 0 } }));
+        showNotification(`Дом создан: ${plan.rooms.map(room => room.name).join(', ')}`, 'success');
+    } catch (error) {
+        let remaining = 0;
+        try {
+            const fresh = await Server.getLocationDetail(lobbyId, locationId);
+            const generated = (fresh.objects || []).filter(object => structureBuildingId(object) === buildingId);
+            for (const object of generated) {
+                try {
+                    await Server.deleteLocationObject(lobbyId, object.id);
+                    if (sceneEpoch === houseSceneEpoch) removeLocationObject(object.id);
+                } catch { remaining++; }
+            }
+        } catch { remaining = -1; }
+        showNotification(remaining
+            ? 'Не удалось завершить дом; проверьте оставшиеся элементы этого здания'
+            : error.message || 'Не удалось создать дом; изменения отменены', 'system');
+    } finally {
+        houseCreationPending = false;
+    }
+}
+
+export function canRestoreGeneratedLocationFloor(buildingId, level = 0) {
+    return Boolean(restorableGeneratedFloor(currentLocationData?.objects, buildingId, level));
+}
+
+export async function restoreGeneratedLocationFloor(buildingId, level = 0) {
+    if (houseFloorRestorePending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return false;
+    const spec = restorableGeneratedFloor(currentLocationData.objects, buildingId, level);
+    if (!spec) return false;
+    houseFloorRestorePending = true;
+    const sceneEpoch = houseSceneEpoch;
+    try {
+        const restored = await Server.createLocationObject(window.currentLobbyId, currentLocationId, spec);
+        if (sceneEpoch === houseSceneEpoch) addLocationObject(restored);
+        showNotification('Пол дома восстановлен', 'success');
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось восстановить пол дома', 'system');
+        return false;
+    } finally {
+        houseFloorRestorePending = false;
+    }
+}
+
 function createPosterMesh(color) {
     const group = new THREE.Group();
     const frame = new THREE.Mesh(
@@ -10251,20 +10987,14 @@ function createEditorLampPreview(source, includeLight = true) {
     const dimensions = assetDimensions(source, 'lamp', isSpot ? 'spot' : 'point');
     fixture.scale.set(dimensions.width / base.width, dimensions.height / base.height, dimensions.depth / base.depth);
     group.add(fixture);
+    if (includeLight) group.userData.lampPreviewSource = source;
     if (!includeLight) return group;
-    const previewIntensity = Math.min(Number(source.intensity || 2), 2);
-    const distance = Number(source.distance || 7);
     if (isSpot) {
-        const light = new THREE.SpotLight(source.color, previewIntensity, distance, Math.PI / 5, 0.55, 2);
         const azimuth = Number(source.azimuth || 0) * Math.PI / 180;
-        light.target.position.set(Math.cos(azimuth) * 5, -Math.min(3, Number(source.height)), Math.sin(azimuth) * 5);
-        group.add(light, light.target);
         group.add(new THREE.ArrowHelper(
             new THREE.Vector3(Math.cos(azimuth), 0, Math.sin(azimuth)),
             new THREE.Vector3(), 0.9, source.color, 0.22, 0.13,
         ));
-    } else {
-        group.add(new THREE.PointLight(source.color, previewIntensity, distance, 2));
     }
     return group;
 }
@@ -10388,6 +11118,10 @@ function addEditorVolumeGizmo(preview, center) {
 }
 
 function updateBuildPreview() {
+    if (houseDrawMode && window.locationEditorTool === 'assets') {
+        clearBuildPreview();
+        return;
+    }
     if (editorRotateMode && editorSelections.length === 1 && editorSelection?.kind === 'lamp') {
         clearBuildPreview();
         return;
@@ -10502,6 +11236,9 @@ function updateBuildPreview() {
         }
         return;
     }
+    const delayedLampPreview = lampEditTrace?.stage === 'waiting-preview' && source?.kind === 'lamp'
+        ? lampEditTrace : null;
+    const previewStartedAt = delayedLampPreview ? performance.now() : 0;
     clearBuildPreview();
     buildPreviewKey = previewKey;
     if (editingSelection || placingAsset) {
@@ -10612,6 +11349,12 @@ function updateBuildPreview() {
         }
         if (editorResizeMode && kind === 'structure') addEditorVolumeGizmo(buildPreviewMesh, resizeCenter);
         scene.add(buildPreviewMesh);
+        if (delayedLampPreview && lampEditTrace === delayedLampPreview) {
+            delayedLampPreview.timings.previewOnHoverMs = +(performance.now() - previewStartedAt).toFixed(1);
+            delayedLampPreview.timings.previewLightCreated = Number(Boolean(
+                buildPreviewMesh.userData.lampPreviewSource && lampRenderSlots));
+            markLampEditReady(delayedLampPreview);
+        }
         return;
     }
     if (buildMode !== 'structure' || window.locationEditorTool === 'assets') return;
@@ -10829,6 +11572,7 @@ export function addLocationObject(object) {
     }
     invalidateMovementMapCache();
     if (['wall', 'door', 'window', 'floor'].includes(object.type)) notifyEditorBuildingsChanged();
+    if (['wall', 'door', 'window', 'floor'].includes(object.type)) queueStaticLightFieldRefresh();
 }
 
 window.addLocationObject = addLocationObject;
@@ -10846,6 +11590,7 @@ export function removeLocationObject(objectId) {
     invalidateMovementMapCache();
     if (!fire || ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive())) applyFogOfWar();
     if (['wall', 'door', 'window', 'floor'].includes(removed?.type)) notifyEditorBuildingsChanged();
+    if (['wall', 'door', 'window', 'floor'].includes(removed?.type)) queueStaticLightFieldRefresh();
 }
 
 window.removeLocationObject = removeLocationObject;
@@ -10879,6 +11624,8 @@ export function updateLocationObject(object) {
         containerInteractionRefresh?.(object);
     }
     if (['wall', 'door', 'window', 'floor'].includes(object.type)) notifyEditorBuildingsChanged();
+    if (['wall', 'door', 'window', 'floor'].includes(object.type)
+        || ['wall', 'door', 'window', 'floor'].includes(previous?.type)) queueStaticLightFieldRefresh();
 }
 
 window.updateLocationObject = updateLocationObject;
@@ -10906,9 +11653,37 @@ export function getLocationLightingPreset() {
     return locationLightingPreset;
 }
 
-export function applyLocationLighting(settings, persist = true) {
+function takeReusableLampFixtures(group, sources) {
+    const reusable = new Map();
+    if (!group) return reusable;
+    for (const fixture of [...group.children]) {
+        const index = fixture.userData.locationLampIndex;
+        if (!Number.isInteger(index) || !sources[index]
+            || fixture.userData.lampSourceKey !== JSON.stringify(sources[index])) continue;
+        group.remove(fixture);
+        reusable.set(index, fixture);
+    }
+    return reusable;
+}
+
+export function applyLocationLighting(settings, persist = true, origin = 'direct') {
+    if (!scene || !currentLocationData || !locationAmbientLight || !locationDirectionalLight) {
+        if (settings && persist && currentLocationData) currentLocationData.lighting = settings;
+        return;
+    }
+    if (origin === 'socket' && settings && !lampLightingEchoes.socket(currentLocationId, settings)) {
+        currentLocationData.lighting = settings;
+        if (lampEditTrace) lampEditTrace.timings.duplicateSkipped =
+            (lampEditTrace.timings.duplicateSkipped || 0) + 1;
+        updateEditorSelectionVisual();
+        return;
+    }
+    const lampTrace = origin === 'socket'
+        ? lampEditTrace || beginLampEditTrace('socket')
+        : lampEditTrace?.stage === 'lighting' ? lampEditTrace : null;
     if (settings && persist && currentLocationData) currentLocationData.lighting = settings;
-    if (!scene || !currentLocationData || !locationAmbientLight || !locationDirectionalLight) return;
+    const lightingStartedAt = lampTrace ? performance.now() : 0;
+    if (lampTrace) lampTrace.timings.lightingApplyCount = (lampTrace.timings.lightingApplyCount || 0) + 1;
     locationProfiler?.stop();
     const cloudSetting = window.weatherSettings?.sun;
     const clarity = cloudSetting?.enabled ? Number(cloudSetting.intensity) : 1;
@@ -10942,33 +11717,50 @@ export function applyLocationLighting(settings, persist = true) {
     shadowCamera.updateProjectionMatrix();
     scene.background.set(profile.background_color);
 
+    const rebuildStartedAt = lampTrace ? performance.now() : 0;
+    const reusableLampFixtures = takeReusableLampFixtures(locationLightGroup, profile.local_lights || []);
+    if (lampRenderGroup?.parent) lampRenderGroup.parent.remove(lampRenderGroup);
+    if (lampTrace) {
+        lampTrace.timings.reusedLampFixtures = reusableLampFixtures.size;
+        lampTrace.timings.createdLampFixtures = (profile.local_lights || []).length - reusableLampFixtures.size;
+    }
+    const previousFieldSourceList = lampRenderSources;
+    const previousFieldSources = locationStaticLightField ? JSON.stringify(lampRenderSources) : null;
     if (locationLightGroup) {
         scene.remove(locationLightGroup);
         disposeObject(locationLightGroup);
     }
     locationLightGroup = new THREE.Group();
+    if (!lampRenderGroup) {
+        const pool = createLampRenderPool();
+        lampRenderGroup = pool.group;
+        lampRenderSlots = pool.slots;
+        lampRenderLights = Object.values(pool.slots).filter(Array.isArray).flat();
+    }
+    locationLightGroup.add(lampRenderGroup);
+    lampRenderSources = [];
     for (const [index, source] of (profile.local_lights || []).entries()) {
         const x = Number(source.x);
         const z = Number(source.z);
         const tileX = Math.max(0, Math.min(currentLocationData.grid_width - 1, Math.floor(x)));
         const tileZ = Math.max(0, Math.min(currentLocationData.grid_height - 1, Math.floor(z)));
         const y = getTileHeight(tileX, tileZ) + Number(source.height);
+        lampRenderSources.push({ ...source, y });
+        const reusableFixture = reusableLampFixtures.get(index);
+        if (reusableFixture) {
+            reusableFixture.position.set(x, y, z);
+            for (const child of reusableFixture.children) {
+                if (child.userData.locationLampBulb) child.visible = Boolean(window.isGM && (editMode || source.gm_hidden));
+                else if (child.isMesh) child.visible = Boolean(window.isGM && editMode);
+            }
+            locationLightGroup.add(reusableFixture);
+            continue;
+        }
         const fixture = new THREE.Group();
         fixture.userData.locationLampIndex = index;
+        fixture.userData.lampSourceKey = JSON.stringify(source);
         fixture.position.set(x, y, z);
         const isSpot = source.kind === 'spot';
-        const light = isSpot
-            ? new THREE.SpotLight(source.color, Number(source.intensity), Number(source.distance), Math.PI / 5, 0.55, 2)
-            : new THREE.PointLight(source.color, Number(source.intensity), Number(source.distance), 2);
-        light.castShadow = true;
-        light.shadow.mapSize.set(512, 512);
-        light.shadow.radius = 2;
-        fixture.add(light);
-        if (isSpot) {
-            const azimuth = Number(source.azimuth || 0) * Math.PI / 180;
-            light.target.position.set(Math.cos(azimuth) * 5, -Math.min(3, Number(source.height)), Math.sin(azimuth) * 5);
-            fixture.add(light.target);
-        }
         const bulb = new THREE.Mesh(
             isSpot ? new THREE.ConeGeometry(0.2, 0.34, 12) : new THREE.SphereGeometry(0.18, 12, 8),
             new THREE.MeshStandardMaterial({ color: source.color, emissive: source.color, emissiveIntensity: 0.5 }),
@@ -11025,10 +11817,43 @@ export function applyLocationLighting(settings, persist = true) {
         locationLightGroup.add(light);
     }
     lastAnomalyLightUpdateAt = -Infinity;
+    if (locationStaticLightField && previousFieldSources !== JSON.stringify(lampRenderSources)) {
+        const previousSlots = staticFieldPointSlots;
+        const nextSlots = remapStaticLightFieldSlots(previousSlots,
+            previousFieldSourceList, lampRenderSources);
+        for (const role of ['pointShadow', 'pointSimple']) {
+            lampRenderSlots[role].forEach((light, index) => {
+                const before = previousSlots[role][index];
+                const after = nextSlots[role][index];
+                if (before == null || after == null || light.userData.lampRenderSourceIndex !== before
+                    || JSON.stringify(previousFieldSourceList[before])
+                        !== JSON.stringify(lampRenderSources[after])) return;
+                light.userData.lampRenderSourceIndex = after;
+                light.userData.lampDesiredSourceIndex = after;
+            });
+        }
+        staticFieldPointSlots = nextSlots;
+        refreshStaticLightField();
+    }
     scene.add(locationLightGroup);
+    updateLampRenderLights(performance.now(), 0, true);
     updateAnomalyRenderLights(performance.now(), true);
+    const darknessStartedAt = lampTrace ? performance.now() : 0;
     refreshLocationDarkness(profile);
+    if (lampTrace) {
+        lampTrace.timings.lightingSetupMs = +(lampTrace.timings.lightingSetupMs || 0)
+            + +(rebuildStartedAt - lightingStartedAt).toFixed(1);
+        lampTrace.timings.rebuildLightGroupMs = +(lampTrace.timings.rebuildLightGroupMs || 0)
+            + +(darknessStartedAt - rebuildStartedAt).toFixed(1);
+        lampTrace.timings.darknessRefreshMs = +(lampTrace.timings.darknessRefreshMs || 0)
+            + +(performance.now() - darknessStartedAt).toFixed(1);
+    }
     updateEditorSelectionVisual(settings && !persist ? settings : null);
+    if (lampTrace && origin === 'socket') {
+        lampTrace.timings.socketApplyMs = +(lampTrace.timings.socketApplyMs || 0)
+            + +(performance.now() - lightingStartedAt).toFixed(1);
+        markLampEditReady(lampTrace);
+    }
 }
 
 function getEditorSource(selection) {
@@ -11135,6 +11960,48 @@ function notifyEditorBuildingsChanged() {
 
 const pendingUpperFloors = new Set();
 
+export function getSelectedLocationFloorFit() {
+    const floor = getSelectedEditorSource();
+    if (editorSelections.length !== 1 || editorSelection?.kind !== 'structure' || floor?.type !== 'floor') {
+        return { error: 'Выберите один строительный пол' };
+    }
+    return floorFitPlan(floor, currentLocationData?.objects,
+        generatedFloorBlueprint(currentLocationData?.objects,
+            structureBuildingId(floor), structureLevel(floor)));
+}
+
+export async function fitSelectedLocationFloorToBuilding() {
+    const plan = getSelectedLocationFloorFit();
+    if (plan.error) {
+        showNotification(plan.error, 'system');
+        return false;
+    }
+    const floor = getSelectedEditorSource();
+    const { x, z, angle, width, depth } = plan.pose;
+    if (!window.confirm(`Подогнать выбранный пол под контур здания (${width.toFixed(1)} × ${depth.toFixed(1)} м)?`)) return false;
+    const tileX = Math.floor(x);
+    const tileZ = Math.floor(z);
+    if (tileX < 0 || tileZ < 0 || tileX >= currentLocationData.grid_width
+        || tileZ >= currentLocationData.grid_height) return false;
+    try {
+        const updated = await Server.updateLocationObject(window.currentLobbyId, floor.id, {
+            tile_x: tileX, tile_y: tileZ,
+            properties: {
+                offset_x: x - tileX - 0.5, offset_z: z - tileZ - 0.5,
+                rotation: angle,
+                dimensions: { ...floor.properties?.dimensions, width, depth,
+                    height: structurePose(floor).height },
+            },
+        });
+        updateLocationObject(updated);
+        notifyEditorSelection();
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось подогнать пол', 'system');
+        return false;
+    }
+}
+
 export async function addFloorAboveSelectedLocationAsset() {
     const source = getSelectedEditorSource();
     const plan = nextStoreyFloors(source, currentLocationData?.objects);
@@ -11178,17 +12045,22 @@ function notifyEditorResize() {
     }));
 }
 
-export function cancelLocationAssetResize() {
+export function cancelLocationAssetResize(refreshPreview = true) {
     if (!editorResizeMode) return false;
+    const canvas = renderer?.domElement;
+    if (editorResizeDragPointerId !== null && canvas?.hasPointerCapture?.(editorResizeDragPointerId)) {
+        canvas.releasePointerCapture(editorResizeDragPointerId);
+    }
     editorResizeMode = false;
     editorResizeDimensions = null;
     editorResizeBaseDimensions = null;
     editorResizeAnchor = null;
     editorResizeElevation = null;
     editorResizeDragPointerId = null;
+    editorResizeSymmetric = false;
     editorResizeSnapped = false;
     notifyEditorResize();
-    updateBuildPreview();
+    if (refreshPreview) updateBuildPreview();
     return true;
 }
 
@@ -11235,14 +12107,14 @@ function clearEditorSelection() {
 
 function cancelLocationEditorContextAction() {
     if (!window.isGM || !window.locationEditMode) return false;
+    if (editorSelections.length) {
+        clearEditorSelection();
+        updateBuildPreview();
+        return true;
+    }
     if (window.locationEditorTool === 'assets' && selectedLocationAsset) {
         if (window.cancelLocationAssetPlacement) window.cancelLocationAssetPlacement();
         else clearLocationAssetPreset();
-        return true;
-    }
-    if (window.locationEditorTool === 'select' && editorSelections.length) {
-        clearEditorSelection();
-        updateBuildPreview();
         return true;
     }
     return false;
@@ -11290,29 +12162,85 @@ function updateEditorSelectionVisual(lightingOverride = null) {
     scene.add(editorSelectionRing);
 }
 
+function visibleEditorHit(hit) {
+    for (let item = hit.object; item && item !== scene; item = item.parent) {
+        if (!item.visible) return false;
+        if (item.isMesh && item.material) {
+            const materials = Array.isArray(item.material) ? item.material : [item.material];
+            if (materials.every(material => material.visible === false)) return false;
+        }
+    }
+    return true;
+}
+
+function projectedEditorLamp(clientX, clientY, rect, maxDistance) {
+    if (!locationLightGroup?.visible) return null;
+    let nearest = null;
+    for (const fixture of locationLightGroup?.children || []) {
+        const index = fixture.userData?.locationLampIndex;
+        if (!Number.isInteger(index) || !fixture.visible
+            || !currentLocationData?.lighting?.local_lights?.[index]
+            || !fixture.children.some(child => child.userData.locationLampBulb && child.visible)) continue;
+        const position = fixture.getWorldPosition(new THREE.Vector3());
+        const distance = raycaster.ray.origin.distanceTo(position);
+        if (distance >= maxDistance) continue;
+        const projected = position.project(camera);
+        if (projected.z < -1 || projected.z > 1) continue;
+        const screenX = rect.left + (projected.x + 1) * rect.width / 2;
+        const screenY = rect.top + (1 - projected.y) * rect.height / 2;
+        const pixels = Math.hypot(clientX - screenX, clientY - screenY);
+        if (pixels > 14) continue;
+        const candidate = { selection: { kind: 'lamp', index }, pixels, distance };
+        if (roofBlocksEditorLamp(candidate)) continue;
+        if (!nearest || pixels < nearest.pixels || (pixels === nearest.pixels && distance < nearest.distance)) {
+            nearest = candidate;
+        }
+    }
+    return nearest;
+}
+
+function roofBlocksEditorLamp(lamp) {
+    return roofMeshes.length > 0 && profiledLocationRaycast(roofMeshes, true, 'editor')
+        .some(hit => visibleEditorHit(hit) && hit.distance < lamp.distance);
+}
+
 function pickEditorAsset(clientX, clientY) {
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
     const meshes = [...locationObjectMeshes, ...objectMeshes, ...(locationLightGroup?.children || [])];
-    for (const hit of raycaster.intersectObjects(meshes, true)) {
+    for (const hit of profiledLocationRaycast(meshes, true, 'editor')) {
+        if (!visibleEditorHit(hit)) continue;
         let item = hit.object;
+        let selection = null;
         while (item && item !== scene) {
-            if (item.userData?.locationObjectId) return { kind: 'structure', id: item.userData.locationObjectId };
+            if (item.userData?.locationObjectId) {
+                selection = { kind: 'structure', id: item.userData.locationObjectId };
+                break;
+            }
             if (Number.isInteger(item.userData?.locationLampIndex)) {
-                return { kind: 'lamp', index: item.userData.locationLampIndex };
+                if (!roofBlocksEditorLamp(hit)) return { kind: 'lamp', index: item.userData.locationLampIndex };
+                break;
             }
             if (item.userData?.sourceObject) {
                 const x = item.userData.tileX;
                 const z = item.userData.tileZ;
                 const index = currentLocationData.tiles_data[z][x].objects.indexOf(item.userData.sourceObject);
-                if (index >= 0) return { kind: 'decor', x, z, index };
+                if (index >= 0) {
+                    selection = { kind: 'decor', x, z, index };
+                    break;
+                }
             }
             item = item.parent;
         }
+        if (!selection) continue;
+        const lamp = projectedEditorLamp(clientX, clientY, rect, hit.distance);
+        if (lamp) return lamp.selection;
+        return selection;
     }
-    return null;
+    const lamp = projectedEditorLamp(clientX, clientY, rect, Infinity);
+    return lamp?.selection || null;
 }
 
 function sameEditorSelection(a, b) {
@@ -11348,20 +12276,46 @@ function selectEditorAsset(clientX, clientY, additive = false) {
     return Boolean(picked);
 }
 
-async function persistLocationLights(lights) {
+async function persistLocationLights(lights, action = 'edit') {
     if (lampEditPending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return false;
     lampEditPending = true;
+    const savedLocationId = currentLocationId;
+    const trace = beginLampEditTrace(action);
     const lighting = {
         ...DEFAULT_LOCATION_LIGHTING,
         ...(currentLocationData.lighting || {}),
         local_lights: lights,
     };
+    const echo = lampLightingEchoes.begin(currentLocationId, lighting);
     try {
+        const requestStartedAt = performance.now();
         await Server.updateLocation(window.currentLobbyId, currentLocationId, { lighting });
-        applyLocationLighting(lighting);
+        if (String(currentLocationId) !== String(savedLocationId) || !currentLocationData) {
+            lampLightingEchoes.fail(echo);
+            if (lampEditTrace === trace) lampEditTrace = null;
+            return false;
+        }
+        trace.timings.serverAwaitMs = +(performance.now() - requestStartedAt).toFixed(1);
+        const requestPath = `/lobbies/${window.currentLobbyId}/locations/${currentLocationId}`;
+        const requestTiming = (performance.getEntriesByType?.('resource') || [])
+            .filter(entry => entry.name.endsWith(requestPath) && entry.startTime >= requestStartedAt - 1).at(-1);
+        if (requestTiming) {
+            trace.timings.networkMs = +(requestTiming.responseEnd - requestTiming.startTime).toFixed(1);
+            trace.timings.afterNetworkMs = +(performance.now() - requestTiming.responseEnd).toFixed(1);
+        }
+        trace.stage = 'lighting';
+        const applyStartedAt = performance.now();
+        if (lampLightingEchoes.rest(echo)) applyLocationLighting(lighting);
+        else trace.timings.duplicateSkipped = (trace.timings.duplicateSkipped || 0) + 1;
         notifyEditorSelection();
+        trace.timings.clientApplyMs = +(performance.now() - applyStartedAt).toFixed(1);
+        markLampEditReady(trace);
+        trace.restSettled = true;
+        reportLampEditTrace(trace);
         return true;
     } catch (error) {
+        lampLightingEchoes.fail(echo);
+        if (lampEditTrace === trace) lampEditTrace = null;
         showNotification(error.message || 'Не удалось сохранить светильник', 'system');
         return false;
     } finally {
@@ -11392,6 +12346,8 @@ function sendDecorTileUpdates(positions) {
 export function setLocationAssetPreset(assetId) {
     selectedLocationAsset = typeof assetId === 'object' ? assetId : findLocationAsset(assetId);
     if (!selectedLocationAsset) return;
+    const lampTrace = selectedLocationAsset.kind === 'lamp' ? beginLampEditTrace('select') : null;
+    const handlerStartedAt = lampTrace ? performance.now() : 0;
     if (selectedLocationAsset.kind === 'structure') {
         structurePreset = selectedLocationAsset.id;
         const dimensions = assetDimensions(selectedLocationAsset, 'structure', selectedLocationAsset.id);
@@ -11415,6 +12371,13 @@ export function setLocationAssetPreset(assetId) {
     }
     syncLocationPlacementAngle();
     updateBuildPreview();
+    if (lampTrace) {
+        lampTrace.timings.selectionHandlerMs = +(performance.now() - handlerStartedAt).toFixed(1);
+        lampTrace.timings.previewLightCreated = Number(Boolean(
+            buildPreviewMesh?.userData.lampPreviewSource && lampRenderSlots));
+        if (lampTrace.timings.previewLightCreated) markLampEditReady(lampTrace);
+        else lampTrace.stage = 'waiting-preview';
+    }
 }
 
 export function setLocationAssetElevation(value) {
@@ -11536,7 +12499,20 @@ export function setLocationAssetResizeAxis(axis) {
     return true;
 }
 
+function confirmFloorDeletion(selections) {
+    const floors = selections.filter(selection => {
+        if (selection.kind !== 'structure') return false;
+        const source = getEditorSource(selection);
+        return source?.type === 'floor';
+    });
+    return !floors.length || window.confirm(floors.length === 1
+        ? 'Удалить выбранный пол? Вместе с ним может исчезнуть крыша; отменить удаление после сохранения нельзя.'
+        : `Удалить выбранные полы (${floors.length})? Вместе с ними могут исчезнуть крыши.`);
+}
+
 export async function deleteSelectedLocationAsset() {
+    const selectionsToDelete = editorSelections.length ? editorSelections : editorSelection ? [editorSelection] : [];
+    if (!confirmFloorDeletion(selectionsToDelete)) return;
     if (editorSelections.length > 1) {
         const selections = [...editorSelections];
         const structures = selections.filter(item => item.kind === 'structure');
@@ -11546,7 +12522,7 @@ export async function deleteSelectedLocationAsset() {
         const failed = [];
         if (lamps.length) {
             const indices = new Set(lamps.map(item => item.index));
-            if (!await persistLocationLights(currentLocationData.lighting.local_lights.filter((_, index) => !indices.has(index)))) return;
+            if (!await persistLocationLights(currentLocationData.lighting.local_lights.filter((_, index) => !indices.has(index)), 'delete')) return;
         }
         for (const selection of structures) {
             const source = getEditorSource(selection);
@@ -11580,7 +12556,7 @@ export async function deleteSelectedLocationAsset() {
     if (editorSelection.kind === 'lamp') {
         const lights = [...currentLocationData.lighting.local_lights];
         lights.splice(editorSelection.index, 1);
-        if (!await persistLocationLights(lights)) return;
+        if (!await persistLocationLights(lights, 'delete')) return;
     } else if (editorSelection.kind === 'structure') {
         try {
             await Server.deleteLocationObject(window.currentLobbyId, source.id);
@@ -12089,7 +13065,7 @@ async function placeSelectedLocationAsset(x, z) {
         kind: asset.lightKind || 'point', azimuth: Number(asset.azimuth || 0),
         dimensions: assetDimensions(asset, 'lamp', asset.lightKind || 'point'),
     });
-    if (await persistLocationLights(lights)) {
+    if (await persistLocationLights(lights, 'place')) {
         editorSelection = { kind: 'lamp', index: lights.length - 1 };
         editorSelections = [editorSelection];
         updateEditorSelectionVisual();
@@ -12099,6 +13075,16 @@ async function placeSelectedLocationAsset(x, z) {
 
 // ========== Загрузка данных локации ==========
 export function loadLocation(data) {
+    setLocationStaticLightFieldEnabled(false);
+    staticFieldFirstFrame = null;
+    staticFieldLastToggleFrame = null;
+    staticFieldLastToggleWork = null;
+    let loadStageAt = performance.now();
+    const markLoadStage = name => {
+        if (locationLoadTrace) locationLoadTrace.stages[name] = +(performance.now() - loadStageAt).toFixed(1);
+        loadStageAt = performance.now();
+    };
+    lampLightingEchoes.reset();
     locationProfiler?.stop();
     clearFogOverlay();
     clearFogMemoryGhosts();
@@ -12157,6 +13143,7 @@ export function loadLocation(data) {
     clearUnusedLocationModels();
     grassDetailGroup = null;
     clearAllCharacters();
+    markLoadStage('resetMs');
 
     const gridWidth = data.grid_width;
     const gridHeight = data.grid_height;
@@ -12254,11 +13241,13 @@ export function loadLocation(data) {
     waterTileMesh.geometry.getAttribute('waterCornerDrops').needsUpdate = true;
     tileCubes = [locationTileMesh, waterTileMesh];
     scene.add(locationTileMesh, waterTileMesh);
+    markLoadStage('tileMeshesMs');
     rebuildSmoothTerrainMesh();
     rebuildLocationTerrainSurface();
     rebuildWaterSurfaceMesh();
     rebuildLocationGrid();
     rebuildGrassDetailMesh();
+    markLoadStage('terrainAndTexturesMs');
 
     // Объекты на тайлах
     for (let y = 0; y < data.tiles_data.length; y++) {
@@ -12266,14 +13255,18 @@ export function loadLocation(data) {
             if (data.tiles_data[y][x].objects?.length) rebuildTileObjects(x, y);
         }
     }
+    markLoadStage('decorMs');
 
     // Отдельные объекты
     if (data.objects && data.objects.length) {
         data.objects.forEach(object => addLocationObjectMesh(object, false));
     }
     rebuildLocationRoofs();
+    markLoadStage('objectsAndRoofsMs');
     applyLocationLighting();
+    markLoadStage('lightingMs');
     applyFogOfWar();
+    markLoadStage('fogMs');
 
     // Камера
     const distance = Math.max(gridWidth, gridHeight) * 0.8;
@@ -12282,6 +13275,11 @@ export function loadLocation(data) {
     controls.update();
 
     if (highlightBox && !scene.children.includes(highlightBox)) scene.add(highlightBox);
+    markLoadStage('cameraMs');
+    if (locationLoadTrace) {
+        locationLoadTrace.loadMs = +Object.values(locationLoadTrace.stages).reduce((sum, ms) => sum + ms, 0).toFixed(1);
+        locationLoadTrace.loadedAt = performance.now();
+    }
 }
 
 // ========== Обновление тайлов ==========
@@ -12390,6 +13388,7 @@ function flushPendingTerrainRefresh() {
     if (work.fogGeometry) clearFogOverlay();
     if (work.lighting) applyLocationLighting();
     else if (work.fog) applyFogOfWar();
+    if (work.height) queueStaticLightFieldRefresh();
     if (work.selection && editorSelection) updateEditorSelectionVisual();
     if (work.height) characterModels.forEach(entry => {
         const height = getTileHeight(entry.posX, entry.posY);
@@ -12684,6 +13683,7 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
     });
     applySurfaceDarkness(material, locationDarknessTexture,
         new THREE.Vector2(width, height), null, ensureTerrainGrassDetail());
+    if (locationStaticLightField) locationStaticLightField.attach(material, 0);
     terrainSurfaceMesh = new THREE.Mesh(geometry, material);
     terrainSurfaceMesh.raycast = () => {};
     terrainSurfaceMesh.receiveShadow = true;
@@ -13371,7 +14371,7 @@ function setupCharacterDragging() {
         characterModels.forEach((entry) => {
         if (entry.model.visible) models.push(entry.model);
         });
-        const intersects = raycaster.intersectObjects(models, true);
+        const intersects = profiledLocationRaycast(models, true, 'character');
         if (intersects.length > 0) {
             let obj = intersects[0].object;
             while (obj) {
@@ -13475,8 +14475,14 @@ function setupCharacterDragging() {
             }
         }
     };
-    canvas.addEventListener('mousemove', onMouseMove);
-    handlers.canvas.mousemove = onMouseMove;
+    const onMouseMoveProfiled = (event) => {
+        const profile = locationPointerProfile;
+        if (!profile) return onMouseMove(event);
+        profile.count('canvasMouseEvents');
+        return profile.measure('characterHandlerMs', () => onMouseMove(event));
+    };
+    canvas.addEventListener('mousemove', onMouseMoveProfiled);
+    handlers.canvas.mousemove = onMouseMoveProfiled;
 
     // pointerdown - начало перетаскивания
     const onPointerDown = (e) => {
@@ -13930,8 +14936,9 @@ export function setupLocationEditing() {
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-        const intersects = raycaster.intersectObjects(tileCubes);
+        const intersects = profiledLocationRaycast(tileCubes, false, 'surface');
         if (intersects.length > 0) {
+            locationPointerProfile?.count('tileHits');
             const hit = intersects[0];
             const groundCoords = hitTileCoords(hit);
             const movePoint = editorMoveMode && groundCoords
@@ -13952,6 +14959,8 @@ export function setupLocationEditing() {
             }
             const { x, z } = coords;
             const tile = currentLocationData.tiles_data[z][x];
+            const domStartedAt = locationPointerProfile ? performance.now() : 0;
+            locationPointerProfile?.count('domWrites');
             locInfo.innerHTML = `
                 <b>(${x}, ${z})</b><br>
                 Ландшафт: ${tile.terrain}<br>
@@ -13959,13 +14968,26 @@ export function setupLocationEditing() {
                 Радиация: ${tile.radiation !== undefined ? tile.radiation : '0'}<br>
             `;
             locInfo.style.display = 'block';
+            if (houseDrawStart && houseDrawPointerId === e.pointerId) {
+                if (!houseDrawEnd || houseDrawEnd.x !== x || houseDrawEnd.z !== z) {
+                    houseDrawEnd = { x, z };
+                    updateHouseOutline();
+                }
+                const size = houseFootprint(houseDrawStart.x, houseDrawStart.z, x, z);
+                locationPointerProfile?.count('domWrites');
+                locInfo.innerHTML += `<br>Дом: ${size.width} × ${size.depth} м`;
+            }
+            locationPointerProfile?.addDuration('domMs', performance.now() - domStartedAt);
             const highlightLevel = editorHoverLevelOffset();
             const surfaceX = movePoint ? Math.floor(movePoint.x) : x;
             const surfaceZ = movePoint ? Math.floor(movePoint.z) : z;
             if (!lastHighlightCoords || lastHighlightCoords.x !== x || lastHighlightCoords.z !== z
                 || lastHighlightCoords.level !== highlightLevel
                 || lastHighlightCoords.surfaceX !== surfaceX || lastHighlightCoords.surfaceZ !== surfaceZ) {
+                const highlightStartedAt = locationPointerProfile ? performance.now() : 0;
+                locationPointerProfile?.count('highlightUpdates');
                 updateHighlight(x, z, getTileHeight(surfaceX, surfaceZ));
+                locationPointerProfile?.addDuration('highlightMs', performance.now() - highlightStartedAt);
                 lastHighlightCoords = { x, z, level: highlightLevel, surfaceX, surfaceZ };
             }
             hoveredTileCoords = { x, z };
@@ -13987,8 +15009,15 @@ export function setupLocationEditing() {
             clearBuildPreview();
         }
     };
-    window.addEventListener('pointermove', onPointerMove);
-    handlers.window.pointerMove = onPointerMove;
+    const onPointerMoveProfiled = (event) => {
+        const profile = locationPointerProfile;
+        if (!profile) return onPointerMove(event);
+        profile.count('pointerEvents');
+        if (window.locationEditMode) profile.count('editorEvents');
+        return profile.measure('pointerHandlerMs', () => onPointerMove(event));
+    };
+    window.addEventListener('pointermove', onPointerMoveProfiled);
+    handlers.window.pointerMove = onPointerMoveProfiled;
     const onCameraRotatePointerUp = event => {
         if (event.button === 2 || event.type === 'pointercancel') cameraDragMenuGuard.end();
     };
@@ -14006,7 +15035,7 @@ export function setupLocationEditing() {
             raycaster.setFromCamera(mouse, camera);
             const handles = buildPreviewMesh?.children.filter(child =>
                 child.userData.editorResizeHandleSign != null) || [];
-            const handle = raycaster.intersectObjects(handles)[0]?.object;
+            const handle = profiledLocationRaycast(handles, false, 'editor')[0]?.object;
             if (!handle) return;
             e.preventDefault();
             e.stopImmediatePropagation();
@@ -14077,6 +15106,17 @@ export function setupLocationEditing() {
             e.stopImmediatePropagation();
             const point = editorMovePointerPoint(e.clientX, e.clientY, hoveredTileCoords);
             if (point) commitEditorAssetMove(point.x, point.z);
+            return;
+        }
+        if (houseDrawMode && window.locationEditorTool === 'assets') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (houseCreationPending) return;
+            houseDrawStart = { ...hoveredTileCoords };
+            houseDrawEnd = { ...hoveredTileCoords };
+            houseDrawPointerId = e.pointerId;
+            canvas.setPointerCapture(e.pointerId);
+            updateHouseOutline();
             return;
         }
         if (window.locationEditorTool === 'select') {
@@ -14158,6 +15198,15 @@ export function setupLocationEditing() {
     const onPointerUp = (e) => {
         if (!locationActive) return;
         lastBrushTile = null;
+        if (houseDrawPointerId === e.pointerId) {
+            const start = houseDrawStart;
+            const end = houseDrawEnd;
+            houseDrawStart = null;
+            houseDrawEnd = null;
+            houseDrawPointerId = null;
+            clearHouseOutline();
+            if (e.type !== 'pointercancel' && start && end) void createResidentialHouse(start, end);
+        }
         if (editorResizeDragPointerId === e.pointerId) {
             if (e.type === 'pointercancel') cancelCurrentAssetResizeDrag();
             else {
@@ -14207,7 +15256,7 @@ export function setupLocationEditing() {
         mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-        const intersects = raycaster.intersectObjects(tileCubes);
+        const intersects = profiledLocationRaycast(tileCubes, false, 'surface');
         if (intersects.length > 0) {
             const point = intersects[0].point;
             const tileX = Math.floor(point.x);
@@ -14253,7 +15302,7 @@ export function setupLocationEditing() {
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-        const intersects = raycaster.intersectObjects(tileCubes);
+        const intersects = profiledLocationRaycast(tileCubes, false, 'surface');
         if (intersects.length === 0) return;
         const point = intersects[0].point;
         const tileX = Math.floor(point.x);
@@ -14514,6 +15563,10 @@ export function setLocationEditMode(enabled) {
     if (!enabled) {
         hideHighlight();
         clearBuildPreview();
+        houseDrawStart = null;
+        houseDrawEnd = null;
+        houseDrawPointerId = null;
+        clearHouseOutline();
         clearEditorSelection();
     }
     if (hoveredTileCoords && currentLocationData) {
@@ -14775,9 +15828,22 @@ export function addLocationRoofButton() {
 }
 
 export function destroyLocationScene() {
+    lampLightingEchoes.reset();
+    lampEditTrace = null;
+    setLocationStaticLightFieldEnabled(false);
+    staticFieldFirstFrame = null;
+    staticFieldLastToggleFrame = null;
+    staticFieldLastToggleWork = null;
+    houseSceneEpoch++;
+    houseDrawMode = false;
+    houseDrawStart = null;
+    houseDrawEnd = null;
+    houseDrawPointerId = null;
+    clearHouseOutline();
     pendingTerrainRefresh = null;
     locationProfiler?.destroy();
     locationProfiler = null;
+    locationPointerProfile = null;
     locationFpsCounter?.destroy();
     locationFpsCounter = null;
     closeNarrativeActionModal();
@@ -14927,6 +15993,12 @@ export function destroyLocationScene() {
     locationLightingPreset = 'current';
     resolvedLightingProfile = null;
     locationLightGroup = null;
+    lampRenderGroup = null;
+    lampRenderSlots = null;
+    lampRenderLights = [];
+    lampRenderSources = [];
+    lampRenderSelected = new Set();
+    lastLampRenderUpdateAt = -Infinity;
     anomalyRenderSources = [];
     anomalyRenderPool = [];
     lastAnomalyLightUpdateAt = -Infinity;

@@ -98,7 +98,8 @@ test('fire placement preview follows the cursor without rebuilding its model', a
         assert.equal(asset?.kind, 'structure', type);
         const created = [];
         const context = vm.createContext({
-            editorRotateMode: false, editorResizeMode: false, editorSelections: [], editorSelection: null,
+            houseDrawMode: false, editorRotateMode: false, editorResizeMode: false,
+            editorSelections: [], editorSelection: null,
             editorMoveMode: false, editorMovePreviewPoint: null, editorRotateAngle: 0,
             editorResizeAxis: null, editorResizeDimensions: null, editorResizeSymmetric: false,
             editorResizeElevation: null, editorResizeAnchor: null,
@@ -106,7 +107,7 @@ test('fire placement preview follows the cursor without rebuilding its model', a
             structureRotation: 0, structureWidth: 1, structureDepth: 1, structureHeight: 1,
             structureColor: '#fff', window: { locationEditMode: true, locationEditorTool: 'assets' },
             hoveredTileCoords: { x: 1, z: 2 }, scene: { add() {} },
-            buildPreviewMesh: null, buildPreviewKey: null,
+            buildPreviewMesh: null, buildPreviewKey: null, lampEditTrace: null,
             getTileHeight: x => x / 10, clampAssetElevation: value => Number(value) || 0,
             getStructurePlacementProperties: () => ({ building_id: 'test-building', level: 0 }),
             structureLevelOffset: object => (object.properties?.level || 0) * 2.4,

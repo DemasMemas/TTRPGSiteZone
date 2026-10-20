@@ -186,7 +186,7 @@ export function initSocket(lobbyId, token) {
 
     socket.on('location_updated', data => {
         if (Number(data?.location_id) === Number(window.currentLocationId) && data?.updates?.lighting) {
-            applyLocationLighting(data.updates.lighting);
+            applyLocationLighting(data.updates.lighting, true, 'socket');
         }
     });
 

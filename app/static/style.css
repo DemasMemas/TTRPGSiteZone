@@ -173,6 +173,7 @@ body {
 }
 .scene-profile-button:disabled { opacity: .55; cursor: default; }
 .scene-profile-button:hover:not(:disabled) { border-color: #c3c18d; }
+.scene-profile-copy-button { right: 150px; }
 .scene-profile-results {
   bottom: 58px;
   max-width: min(550px, calc(100vw - 36px));
@@ -1153,6 +1154,29 @@ body.light-theme .lobby-time-field input[type="time"] {
 }
 .location-asset-search {
   width: 100%;
+}
+.location-house-generator {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+.location-house-generator button {
+  padding: 6px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-color);
+  cursor: pointer;
+}
+.location-house-generator button[aria-pressed="true"] {
+  border-color: var(--username-color);
+  background: rgba(147, 194, 167, 0.16);
+}
+.location-house-generator input {
+  width: 72px;
 }
 .location-asset-tabs button,
 .location-asset-actions button,

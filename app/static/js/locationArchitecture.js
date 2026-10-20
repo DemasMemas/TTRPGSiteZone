@@ -104,6 +104,75 @@ export function floorVisualPose(object, objects) {
     };
 }
 
+export function floorFitPlan(floor, objects, blueprint = null) {
+    if (floor?.type !== 'floor' || !structureBuildingId(floor)) {
+        return { error: 'Выберите пол с назначенным зданием' };
+    }
+    const peers = (objects || []).filter(object => object.type === 'floor' && sameBuildingLevel(floor, object));
+    if (peers.length !== 1) return { error: 'Этаж содержит несколько полов: выберите контур сегмента вручную' };
+    const walls = (objects || []).filter(object => object.type === 'wall' && sameBuildingLevel(floor, object));
+    if (walls.length < 4) return { error: 'Для точной подгонки нужны четыре стороны здания на этом этаже' };
+    const base = structurePose(floor);
+    const blueprintPose = blueprint?.type === 'floor' && sameBuildingLevel(floor, blueprint)
+        ? structurePose(blueprint) : null;
+    const angles = [...new Set([blueprintPose?.angle, base.angle, ...walls.map(wall => structurePose(wall).angle)]
+        .filter(Number.isFinite))];
+    const covers = (edges, coordinate, start, end) => {
+        const intervals = edges.filter(edge => Math.abs(edge.coordinate - coordinate) < 0.12)
+            .sort((a, b) => a.start - b.start);
+        if (!intervals.some(interval => interval.end - interval.start >= (end - start) * 0.5)) return false;
+        let cursor = start;
+        for (const interval of intervals) {
+            if (interval.start > cursor + 0.12) return false;
+            cursor = Math.max(cursor, interval.end);
+        }
+        return cursor >= end - 0.12;
+    };
+    for (const angle of angles) {
+        const axis = { x: Math.cos(angle), z: -Math.sin(angle) };
+        const normal = { x: Math.sin(angle), z: Math.cos(angle) };
+        const alongWalls = [];
+        const acrossWalls = [];
+        for (const wall of walls) {
+            const edge = structurePose(wall);
+            const along = edge.x * axis.x + edge.z * axis.z;
+            const across = edge.x * normal.x + edge.z * normal.z;
+            const parallel = Math.abs(edge.axis.x * axis.x + edge.axis.z * axis.z);
+            if (parallel > 0.995) alongWalls.push({ coordinate: across,
+                start: along - edge.width / 2, end: along + edge.width / 2 });
+            else if (parallel < 0.005) acrossWalls.push({ coordinate: along,
+                start: across - edge.width / 2, end: across + edge.width / 2 });
+        }
+        if (alongWalls.length < 2 || acrossWalls.length < 2) continue;
+        const minAlong = Math.min(...acrossWalls.map(edge => edge.coordinate));
+        const maxAlong = Math.max(...acrossWalls.map(edge => edge.coordinate));
+        const minAcross = Math.min(...alongWalls.map(edge => edge.coordinate));
+        const maxAcross = Math.max(...alongWalls.map(edge => edge.coordinate));
+        const width = maxAlong - minAlong;
+        const depth = maxAcross - minAcross;
+        const floorAlong = base.x * axis.x + base.z * axis.z;
+        const floorAcross = base.x * normal.x + base.z * normal.z;
+        if (![width, depth, floorAlong, floorAcross].every(Number.isFinite)
+            || width <= 0 || depth <= 0 || width > 30 || depth > 30
+            || floorAlong < minAlong - 0.5 || floorAlong > maxAlong + 0.5
+            || floorAcross < minAcross - 0.5 || floorAcross > maxAcross + 0.5
+            || !covers(alongWalls, minAcross, minAlong, maxAlong)
+            || !covers(alongWalls, maxAcross, minAlong, maxAlong)
+            || !covers(acrossWalls, minAlong, minAcross, maxAcross)
+            || !covers(acrossWalls, maxAlong, minAcross, maxAcross)) continue;
+        const centerAlong = (minAlong + maxAlong) / 2;
+        const centerAcross = (minAcross + maxAcross) / 2;
+        const contour = { x: centerAlong * axis.x + centerAcross * normal.x,
+            z: centerAlong * axis.z + centerAcross * normal.z, angle, width, depth };
+        if (blueprintPose && Math.abs(blueprintPose.x - contour.x) < 0.12
+            && Math.abs(blueprintPose.z - contour.z) < 0.12
+            && Math.abs(blueprintPose.width - width) < 0.12
+            && Math.abs(blueprintPose.depth - depth) < 0.12) return { pose: blueprintPose };
+        return { pose: contour };
+    }
+    return { error: 'Замкнутый прямоугольный контур стен не найден; подгонка отменена' };
+}
+
 export function floorEntrancePoint(pose, objects, floor = null) {
     const halfWidth = pose.width / 2;
     const halfDepth = pose.depth / 2;

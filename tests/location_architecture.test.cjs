@@ -2,9 +2,117 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const load = async name => import(`data:text/javascript;base64,${Buffer.from(read(name)).toString('base64')}`);
+
+test('floor fit follows a complete rotated wall contour on the selected level', async () => {
+    const { floorFitPlan, floorVisualPose, structurePose } = await load('locationArchitecture.js');
+    const make = (type, x, z, width, depth, angle, level = 1) => {
+        const tileX = Math.floor(x);
+        const tileZ = Math.floor(z);
+        return { type, tile_x: tileX, tile_y: tileZ, properties: {
+            building_id: 'fit-house', level, rotation: angle,
+            offset_x: x - tileX - 0.5, offset_z: z - tileZ - 0.5,
+            dimensions: { width, depth, height: type === 'floor' ? 0.12 : 2.4 },
+        } };
+    };
+    for (const angle of [0, Math.PI / 4]) {
+        const cx = 10;
+        const cz = 12;
+        const axis = { x: Math.cos(angle), z: -Math.sin(angle) };
+        const normal = { x: Math.sin(angle), z: Math.cos(angle) };
+        const at = (along, across) => ({ x: cx + along * axis.x + across * normal.x,
+            z: cz + along * axis.z + across * normal.z });
+        const walls = [
+            ...[-3, 3].map(across => {
+                const point = at(0, across);
+                return make('wall', point.x, point.z, 8, 0.2, angle);
+            }),
+            ...[-4, 4].map(along => {
+                const point = at(along, 0);
+                return make('wall', point.x, point.z, 6, 0.2, angle + Math.PI / 2);
+            }),
+        ];
+        const floor = make('floor', cx, cz, 3, 2, angle);
+        const result = floorFitPlan(floor, [...walls, floor,
+            make('wall', 30, 30, 20, 0.2, angle, 0)]);
+        assert.equal(result.error, undefined);
+        assert.ok(Math.abs(result.pose.x - cx) < 1e-8);
+        assert.ok(Math.abs(result.pose.z - cz) < 1e-8);
+        assert.ok(Math.abs(result.pose.width - 8) < 1e-8);
+        assert.ok(Math.abs(result.pose.depth - 6) < 1e-8);
+        const adjusted = make('floor', result.pose.x, result.pose.z,
+            result.pose.width, result.pose.depth, result.pose.angle);
+        const visual = floorVisualPose(adjusted, [...walls, adjusted]);
+        assert.ok(visual.width > 7.7 && visual.width < 8);
+        assert.ok(visual.depth > 5.7 && visual.depth < 6);
+        assert.equal(structurePose(floor).height, 0.12);
+    }
+});
+
+test('floor fit rejects multiple floor segments and incomplete or nonrectangular borders', async () => {
+    const { floorFitPlan } = await load('locationArchitecture.js');
+    const obj = (type, x, z, width, rotation = 0) => ({ type,
+        tile_x: Math.floor(x), tile_y: Math.floor(z), properties: {
+            building_id: 'safe-house', level: 0, rotation,
+            offset_x: x - Math.floor(x) - 0.5, offset_z: z - Math.floor(z) - 0.5,
+            dimensions: { width, depth: type === 'floor' ? 3 : 0.2, height: 0.12 },
+        } });
+    const floor = obj('floor', 4, 4, 3);
+    const walls = [obj('wall', 4, 2, 4), obj('wall', 4, 6, 4),
+        obj('wall', 2, 4, 4, Math.PI / 2), obj('wall', 6, 4, 4, Math.PI / 2)];
+    assert.ok(floorFitPlan(floor, [...walls, floor, obj('floor', 5, 4, 1)]).error);
+    assert.ok(floorFitPlan(floor, [...walls.slice(0, 3), floor]).error);
+    assert.ok(floorFitPlan(floor, [...walls.slice(0, 3),
+        obj('wall', 6, 3, 2, Math.PI / 2), floor]).error);
+});
+
+test('fitting a floor persists only its geometry and retains material, elevation and building links', async () => {
+    const { floorFitPlan, structureBuildingId, structureLevel, structurePose } = await load('locationArchitecture.js');
+    const floor = { id: 8, type: 'floor', tile_x: 4, tile_y: 4, properties: {
+        building_id: 'house', level: 0, color: '#664433', elevation: 0.35, roof_type: 'flat',
+        rotation: 0, dimensions: { width: 2, depth: 2, height: 0.12 },
+    } };
+    const wall = (x, z, length, rotation = 0) => ({ type: 'wall', tile_x: x, tile_y: z,
+        properties: { building_id: 'house', level: 0, rotation,
+            offset_x: -0.5, offset_z: -0.5,
+            dimensions: { width: length, depth: 0.2, height: 2.4 } } });
+    const data = { grid_width: 20, grid_height: 20, objects: [floor,
+        wall(4, 2, 4), wall(4, 6, 4), wall(2, 4, 4, Math.PI / 2), wall(6, 4, 4, Math.PI / 2)] };
+    const sceneSource = read('locationScene.js');
+    const start = sceneSource.indexOf('export function getSelectedLocationFloorFit()');
+    const end = sceneSource.indexOf('export async function addFloorAboveSelectedLocationAsset()', start);
+    assert.ok(start > 0 && end > start);
+    let saved;
+    const context = vm.createContext({ currentLocationData: data, currentLocationId: 3,
+        editorSelection: { kind: 'structure', id: 8 }, editorSelections: [{ kind: 'structure', id: 8 }],
+        getSelectedEditorSource: () => data.objects[0],
+        floorFitPlan, generatedFloorBlueprint: () => null,
+        structureBuildingId, structureLevel, structurePose,
+        window: { currentLobbyId: 2, confirm: () => true },
+        Server: { updateLocationObject: async (lobby, id, changes) => {
+            assert.equal(lobby, 2);
+            assert.equal(id, 8);
+            saved = { ...floor, ...changes, properties: { ...floor.properties, ...changes.properties } };
+            return saved;
+        } },
+        updateLocationObject: object => { data.objects[0] = object; },
+        notifyEditorSelection() {}, showNotification() {},
+    });
+    vm.runInContext(sceneSource.slice(start, end).replaceAll('export ', ''), context);
+    assert.equal(await context.fitSelectedLocationFloorToBuilding(), true);
+    assert.equal(saved.properties.dimensions.width, 4);
+    assert.equal(saved.properties.dimensions.depth, 4);
+    assert.equal(saved.properties.color, '#664433');
+    assert.equal(saved.properties.elevation, 0.35);
+    assert.equal(saved.properties.roof_type, 'flat');
+    assert.equal(saved.properties.building_id, 'house');
+    assert.equal(saved.properties.level, 0);
+    assert.equal(data.objects.length, 5);
+    assert.deepEqual(JSON.parse(JSON.stringify(data.objects[0])), JSON.parse(JSON.stringify(saved)));
+});
 
 test('upper floor reuses all saved footprints and rejects duplicate or legacy floors', async () => {
     const { nextStoreyFloors, structureLevelOffset } = await load('locationArchitecture.js');

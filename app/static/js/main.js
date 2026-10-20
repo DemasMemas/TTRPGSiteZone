@@ -31,7 +31,8 @@ fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
 import { openCharacterSheet, closeCharacterSheet, exportCharacter, importCharacter } from './characterSheet.js';
 import { setCurrentLobbyId as setCharLobbyId } from './characterSheet.js';
 import {
-    initLocationScene, loadLocation, updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
+    initLocationScene, loadLocation, startLocationLoadDiagnostics,
+    updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
     loadCombatStartRequests, handleCombatStartRequest, handleCombatStartRequestResolved,
     addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible,
     addLocationGridButton, addLocationRoofButton, destroyLocationScene,
@@ -40,6 +41,7 @@ import {
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
+    setLocationHouseDrawMode,
     refreshLocationBuildPreview,
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
     setLocationStructureRotation, rotateLocationPlacement, isLocationEditorTransformActive,
@@ -47,6 +49,8 @@ import {
     getLocationLightingPreset, setLocationAssetPreset, clearLocationAssetPreset,
     setLocationAssetElevation,
     setLocationAssetDimensions, getSelectedLocationEditorAsset, getLocationBuildingIds,
+    canRestoreGeneratedLocationFloor, restoreGeneratedLocationFloor,
+    getSelectedLocationFloorFit, fitSelectedLocationFloorToBuilding,
     addFloorAboveSelectedLocationAsset, beginMoveSelectedLocationAsset,
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
     setLocationAssetResizeAxis, getLocationAssetResizeState,
@@ -254,7 +258,9 @@ window.enterLocation = async function(locationId) {
         const globalTileInfo = document.getElementById('tile-info');
         if (globalTileInfo) globalTileInfo.style.display = 'none';
 
+        const requestStartedAt = performance.now();
         const data = await Server.getLocationDetail(currentLobbyId, locationId);
+        const networkMs = performance.now() - requestStartedAt;
         currentLocationData = data;
         setCurrentLocationId(locationId);
 
@@ -263,8 +269,9 @@ window.enterLocation = async function(locationId) {
         hideGlobalCanvas();
 
         // Инициализируем сцену локации
-        destroyLocationScene();
+        const initStartedAt = performance.now();
         initLocationScene('location-canvas');
+        startLocationLoadDiagnostics(networkMs, performance.now() - initStartedAt);
         loadLocation(data);
         addLocationRoofButton();
         addLocationGridButton();
@@ -362,6 +369,7 @@ window.enterLocation = async function(locationId) {
                             <label id="loc-structure-height-field">Высота <input id="loc-structure-height" type="number" min="0.1" max="20" step="0.1" value="2.4" style="width:58px;"></label>
                             <label>Здание <select id="loc-structure-building" class="form-control" style="width:auto;"></select></label>
                             <button type="button" id="loc-structure-new-building">Новое здание</button>
+                            <button type="button" id="loc-restore-generated-floor" hidden>Восстановить пол дома</button>
                             <input id="loc-structure-building-id" type="hidden" value="${editorBuildingId}">
                             <label>Этаж <select id="loc-structure-level" class="form-control" style="width:auto;"><option value="0">1</option><option value="1">2</option></select></label>
                             <label id="loc-structure-roof-type-field" style="display:none;">Крыша <select id="loc-structure-roof-type" class="form-control" style="width:auto;"><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
@@ -493,11 +501,13 @@ window.enterLocation = async function(locationId) {
                 let environmentSection = null;
                 const selectLocationTool = tool => {
                     if (!['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'light'].includes(tool)) return;
-                    if (tool !== 'select') cancelLocationAssetResize();
+                    cancelLocationAssetResize(false);
                     const previousTool = window.locationEditorTool;
                     if (previousTool === 'assets' && tool !== 'assets') {
                         activeAsset = null;
                         clearLocationAssetPreset();
+                        setLocationHouseDrawMode(false);
+                        assetSection?.querySelector('[data-house-draw]')?.setAttribute('aria-pressed', 'false');
                         renderAssetCards();
                     }
                     window.locationEditorTool = tool;
@@ -545,6 +555,11 @@ window.enterLocation = async function(locationId) {
                         <span>Выберите карточку, затем место на карте</span>
                     </div>
                     <input class="form-control location-asset-search" type="search" placeholder="Найти ассет или аномалию" aria-label="Поиск по ассетам">
+                    <div class="location-house-generator">
+                        <button type="button" data-house-draw aria-pressed="false">Нарисовать дом</button>
+                        <label>Seed <input class="form-control" data-house-seed type="text" value="0" maxlength="32"></label>
+                        <span>Растяните контур ЛКМ по ровному участку, от 4×4 до 12×12 клеток. Мебель пока только из каталога: столы, стулья и стеллажи.</span>
+                    </div>
                     <div class="location-asset-tabs"></div>
                     <div class="location-asset-grid"></div>
                     <div class="location-asset-placement" hidden>
@@ -576,6 +591,20 @@ window.enterLocation = async function(locationId) {
                 const assetPlacement = assetSection.querySelector('.location-asset-placement');
                 const placementHeight = assetPlacement.querySelector('[data-placement-height]');
                 const assetSearch = assetSection.querySelector('.location-asset-search');
+                const houseButton = assetSection.querySelector('[data-house-draw]');
+                houseButton.onclick = () => {
+                    const enabled = houseButton.getAttribute('aria-pressed') !== 'true';
+                    if (enabled) {
+                        activeAsset = null;
+                        clearLocationAssetPreset();
+                        renderAssetCards();
+                        renderPlacementSettings();
+                    }
+                    selectLocationTool('assets');
+                    setLocationHouseDrawMode(enabled);
+                    houseButton.setAttribute('aria-pressed', String(enabled));
+                    if (enabled) hint.textContent = 'Потяните ЛКМ от первого угла дома до противоположного; отпускание создаст комнаты.';
+                };
                 const anomalyAssets = (locationWorldRules.anomalies || []).map(anomaly => ({
                     id: `anomaly_${anomaly.key}`, group: 'Аномалии', kind: 'decor',
                     label: anomaly.name, icon: '✧', color: '#79d7dd',
@@ -650,13 +679,14 @@ window.enterLocation = async function(locationId) {
                         label.textContent = asset.label;
                         card.append(symbol, label);
                         card.onclick = () => {
+                            setLocationHouseDrawMode(false);
+                            houseButton.setAttribute('aria-pressed', 'false');
                             if (activeAsset?.id === asset.id) {
                                 activeAsset = null;
                                 clearLocationAssetPreset();
                                 renderPlacementSettings();
                             } else {
                                 activeAsset = { ...asset };
-                                setLocationAssetPreset(activeAsset);
                                 selectLocationTool('assets');
                             }
                             renderAssetCards();
@@ -688,6 +718,8 @@ window.enterLocation = async function(locationId) {
                     }
                     for (const input of buildingFields) input.value = activeBuildingId;
                     for (const input of levelFields) input.value = String(activeLevel);
+                    document.getElementById('loc-restore-generated-floor').hidden =
+                        !canRestoreGeneratedLocationFloor(activeBuildingId, activeLevel);
                 };
                 const setActiveBuilding = (id, level = activeLevel) => {
                     activeBuildingId = id || '';
@@ -702,6 +734,12 @@ window.enterLocation = async function(locationId) {
                         `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`, 0);
                 }
                 for (const input of levelFields) input.onchange = () => setActiveBuilding(activeBuildingId, Number(input.value));
+                document.getElementById('loc-restore-generated-floor').onclick = async event => {
+                    const button = event.currentTarget;
+                    button.disabled = true;
+                    try { await restoreGeneratedLocationFloor(activeBuildingId, activeLevel); }
+                    finally { button.disabled = false; renderBuildingControls(); }
+                };
                 renderBuildingControls();
                 const renderAssetSelection = () => {
                     const selection = getSelectedLocationEditorAsset();
@@ -741,6 +779,8 @@ window.enterLocation = async function(locationId) {
                         <div data-selected-building-fields style="display:none;">
                             <span data-selected-building-label></span>
                             <button type="button" data-add-floor hidden>Добавить этаж</button>
+                            <button type="button" data-fit-floor hidden>Растянуть по форме здания</button>
+                            <span data-fit-floor-reason hidden></span>
                             <details><summary>Принадлежность вручную</summary>
                                 <label>ID здания <input class="form-control" type="text" maxlength="64" data-selected-building-id></label>
                                 <label>Этаж <select class="form-control" data-selected-level><option value="0">1</option><option value="1">2</option></select></label>
@@ -810,6 +850,21 @@ window.enterLocation = async function(locationId) {
                     addFloorButton.hidden = selection.selectedCount !== 1 || selection.structureType !== 'floor'
                         || selection.level !== 0;
                     addFloorButton.onclick = () => addFloorAboveSelectedLocationAsset();
+                    const fitFloorButton = assetInspector.querySelector('[data-fit-floor]');
+                    const fitFloorReason = assetInspector.querySelector('[data-fit-floor-reason]');
+                    fitFloorButton.hidden = selection.selectedCount !== 1 || selection.structureType !== 'floor';
+                    if (!fitFloorButton.hidden) {
+                        const fit = getSelectedLocationFloorFit();
+                        fitFloorButton.disabled = Boolean(fit.error);
+                        fitFloorButton.title = fit.error || 'Используется замкнутый контур стен этого этажа';
+                        fitFloorReason.hidden = !fit.error;
+                        fitFloorReason.textContent = fit.error || '';
+                        fitFloorButton.onclick = async () => {
+                            fitFloorButton.disabled = true;
+                            await fitSelectedLocationFloorToBuilding();
+                            if (fitFloorButton.isConnected) renderAssetSelection();
+                        };
+                    }
                     const roofTypeInput = assetInspector.querySelector('[data-selected-roof-type]');
                     roofTypeInput.parentElement.style.display = selection.selectedCount === 1 && selection.roofType !== undefined ? '' : 'none';
                     if (selection.roofType !== undefined) roofTypeInput.value = selection.roofType;
