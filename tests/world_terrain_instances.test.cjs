@@ -296,7 +296,7 @@ test('water-only world chunks skip terrain texture and release it across land tr
 });
 
 test('same-kind edit updates one instance; land-water edit rebuilds compact indices', () => {
-    const { context, entry, ground, water } = harness();
+    const { context, entry, ground, water, flushTimers } = harness({ deferTimers: true });
     const originalIndices = entry.groundIndices;
     context.updateTileInChunk(0, 0, 0, 0, { terrain: 'rock', height: 5 });
     assert.equal(entry.groundIndices, originalIndices);
@@ -310,12 +310,13 @@ test('same-kind edit updates one instance; land-water edit rebuilds compact indi
     assert.equal(water.count, 2);
     assert.equal(entry.groundIndices[0], -1);
     assert.equal(entry.waterIndices[0], 0);
+    flushTimers();
     assert.deepEqual(water.matrices[0].scale, [1, 4.99, 1]);
 });
 
 test('world slopes rebuild near edits and chunk changes without replacing flat terrain instances', () => {
     assert.match(source, /refreshWorldTerrainNeighborhood\(cx, cy, null, null, false, false, true, true\)/);
-    assert.match(source, /refreshWorldTerrainNeighborhood\(chunkX, chunkY, tileX, tileY,\s*!changedTerrain/);
+    assert.match(source, /refreshWorldTerrainNeighborhood\(chunkX, chunkY, tileX, tileY,\s*true/);
     assert.match(source, /setTimeout\(flushWorldTerrainRefresh, 100\)/);
     assert.match(source, /window\.addEventListener\('pointerup'/);
     assert.match(source, /worldTerrainRefreshTimer = setTimeout\(flushWorldTerrainRefresh, 0\)/);
@@ -392,7 +393,9 @@ test('slope overlay hides only its cube and restores it when the slope disappear
         } },
     };
     class Geometry {
-        setAttribute() {}
+        constructor() { this.attributes = {}; }
+        setAttribute(name, attribute) { this.attributes[name] = attribute; }
+        getAttribute(name) { return this.attributes[name]; }
         computeVertexNormals() {}
         dispose() { disposed = true; }
     }
@@ -416,7 +419,7 @@ test('slope overlay hides only its cube and restores it when the slope disappear
         } : { positions: [], tileByFace: [], foundationByTile: new Map() },
         THREE: {
             Object3D, BufferGeometry: Geometry,
-            Float32BufferAttribute: class { constructor(data) { this.data = data; } },
+            Float32BufferAttribute: class { constructor(data) { this.data = this.array = data; } },
             Color: class { setHex() { this.r = this.g = this.b = 0.5; } },
             Mesh: class { constructor(geometry) {
                 this.geometry = geometry;
@@ -587,6 +590,7 @@ test('removing a chunk releases instance buffers but keeps shared terrain resour
     assert.ok(start >= 0 && end > start);
     const removed = [];
     const cancelled = [];
+    const roads = [];
     const mesh = () => ({
         geometry: { dispose() { throw new Error('shared geometry disposed'); } },
         material: { dispose() { throw new Error('shared material disposed'); } },
@@ -594,16 +598,30 @@ test('removing a chunk releases instance buffers but keeps shared terrain resour
     });
     const entry = { ground: mesh(), water: mesh(), trees: mesh(), farAnomalies: mesh(), pendingRebuild: 7, anomalyLODs: [] };
     const chunksMap = new Map([['0,0', entry]]);
+    const east = { hasRoadNodes: true };
+    const diagonal = { hasRoadNodes: true };
+    chunksMap.set('1,0', east);
+    chunksMap.set('1,1', diagonal);
+    chunksMap.set('0,1', { hasRoadNodes: false });
+    chunksMap.set('2,0', { hasRoadNodes: true });
     const context = vm.createContext({
         chunksMap, chunkBounds: [{ key: '0,0' }],
         scene: { remove(object) { removed.push(object); } },
         cancelAnimationFrame(id) { cancelled.push(id); },
         disposeChunkAnomalyLODs() {},
-        disposeRoadMeshes() {}, refreshRoadNeighborhood() {},
+        disposeRoadMeshes() {},
+        rebuildRoadMeshes(target) {
+            assert.equal(chunksMap.has('0,0'), false);
+            roads.push(target);
+        },
         markWorldShadowsDirty() {}, lastChunkVisibilityAt: 0, lastHoverRaycastAt: 0,
         CHUNK_SIZE: 2, THREE: {},
         refreshWorldTerrainNeighborhood() {},
     });
+    const roadStart = source.indexOf('function refreshRoadNeighborhood(');
+    const roadEnd = source.indexOf('\nfunction rebuildRoadMeshes(', roadStart);
+    assert.ok(roadStart >= 0 && roadEnd > roadStart);
+    vm.runInContext(source.slice(roadStart, roadEnd), context);
     vm.runInContext(source.slice(start, end).replace('export ', ''), context);
     context.removeChunk(0, 0);
     assert.equal(chunksMap.has('0,0'), false);
@@ -613,6 +631,28 @@ test('removing a chunk releases instance buffers but keeps shared terrain resour
     assert.equal(entry.trees.disposed, true);
     assert.equal(entry.farAnomalies.disposed, true);
     assert.equal(removed.length, 4);
+    assert.deepEqual(roads, [east, diagonal]);
+});
+
+test('boundary terrain and height edits refresh loaded cardinal and diagonal roads', () => {
+    const { context, entry } = harness();
+    const roads = [];
+    entry.hasRoadNodes = true;
+    const east = { chunkX: 1, chunkY: 0, hasRoadNodes: true };
+    const diagonal = { chunkX: 1, chunkY: 1, hasRoadNodes: true };
+    context.chunksMap.set('1,0', east);
+    context.chunksMap.set('1,1', diagonal);
+    context.chunksMap.set('2,0', { hasRoadNodes: true });
+    context.rebuildRoadMeshes = target => roads.push(target);
+    // Isolate road invalidation from terrain generation in this boundary-edit test.
+    context.refreshWorldTerrainNeighborhood = () => {};
+    const start = source.indexOf('function refreshRoadNeighborhood(');
+    const end = source.indexOf('\nfunction rebuildRoadMeshes(', start);
+    assert.ok(start >= 0 && end > start);
+    vm.runInContext(source.slice(start, end), context);
+    context.updateTileInChunk(0, 0, 1, 1, { terrain: 'rock', height: 5 });
+    assert.deepEqual(roads, [entry, east, diagonal]);
+    assert.equal(entry.roadBoundaryDirty, false);
 });
 
 test('world chunks wait for one shared grass image load and keep a consistent fallback', async () => {

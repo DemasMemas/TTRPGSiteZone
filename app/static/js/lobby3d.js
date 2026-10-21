@@ -1123,7 +1123,47 @@ function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, vis
     return { groundIndices, waterIndices };
 }
 
-function refreshWorldTerrainChunk(entry, neighborOnly = false) {
+function buildWorldTerrainPreviewData(entry, padded) {
+    const region = entry.terrainPreviewRegion;
+    const baseX = entry.chunkX * CHUNK_SIZE - 1;
+    const baseZ = entry.chunkY * CHUNK_SIZE - 1;
+    // Shape depends on adjacent tiles; shared vertex normals need another ring.
+    const minX = region.minX - baseX - 2, maxX = region.maxX - baseX + 2;
+    const minZ = region.minZ - baseZ - 2, maxZ = region.maxZ - baseZ + 2;
+    const affected = (x, z) => x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+    const patch = buildSmoothTerrainData(padded, (x, z) =>
+        x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE
+        && x >= minX - 1 && x <= maxX + 1 && z >= minZ - 1 && z <= maxZ + 1);
+    const previous = entry.smoothTerrainData;
+    const result = { positions: [], normals: [], topByVertex: [], tileByFace: [],
+        tileByVertex: [], foundationByTile: new Map(previous.foundationByTile) };
+    for (const key of result.foundationByTile.keys()) {
+        const [x, z] = key.split(',').map(Number);
+        if (affected(x, z)) result.foundationByTile.delete(key);
+    }
+    for (const [key, height] of patch.foundationByTile) {
+        const [x, z] = key.split(',').map(Number);
+        if (affected(x, z)) result.foundationByTile.set(key, height);
+    }
+    for (const [data, replace] of [[previous, false], [patch, true]]) {
+        data.tileByFace.forEach((tile, face) => {
+            if (affected(tile.x, tile.z) !== replace) return;
+            result.tileByFace.push(tile);
+            for (let vertex = 0; vertex < 3; vertex++) {
+                const index = face * 3 + vertex;
+                result.tileByVertex.push(tile);
+                result.topByVertex.push(data.topByVertex[index]);
+                for (let axis = 0; axis < 3; axis++) {
+                    result.positions.push(data.positions[index * 3 + axis]);
+                    result.normals.push(data.normals[index * 3 + axis]);
+                }
+            }
+        });
+    }
+    return result;
+}
+
+function refreshWorldTerrainChunk(entry, neighborOnly = false, preview = false) {
     const metrics = typeof window !== 'undefined' && window.worldLoadMetrics?.fullLoadMs === null
         ? window.worldLoadMetrics : null;
     let stageStartedAt = metrics ? performance.now() : 0;
@@ -1158,7 +1198,7 @@ function refreshWorldTerrainChunk(entry, neighborOnly = false) {
         return;
     }
     entry.terrainBorder = border;
-    if (metrics) metrics.terrainFullRefreshes++;
+    if (metrics && !preview) metrics.terrainFullRefreshes++;
     if (entry.smoothTerrain) {
         scene.remove(entry.smoothTerrain);
         entry.smoothTerrain.geometry.dispose();
@@ -1169,8 +1209,11 @@ function refreshWorldTerrainChunk(entry, neighborOnly = false) {
         if (index >= 0) chunkBounds.splice(index, 1);
         entry.smoothTerrainBounds = null;
     }
-    const data = buildSmoothTerrainData(padded,
-        (x, z) => x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE);
+    const data = preview ? buildWorldTerrainPreviewData(entry, padded)
+        : buildSmoothTerrainData(padded,
+            (x, z) => x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE);
+    entry.terrainPreviewRegion = null;
+    entry.smoothTerrainData = data;
     const smoothTiles = new Set(data.tileByFace.map(({ x, z }) => (z - 1) * CHUNK_SIZE + x - 1));
     entry.smoothTileIndices = smoothTiles;
     entry.smoothTileFoundation = new Map();
@@ -1228,6 +1271,11 @@ function refreshWorldTerrainChunk(entry, neighborOnly = false) {
     geometry.setAttribute('terrainTileCoord', new THREE.Float32BufferAttribute(coords, 2));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3));
+    // Retain references to the existing CPU attributes, not a second geometry.
+    entry.smoothTerrainData = { ...data,
+        positions: geometry.getAttribute('position').array,
+        normals: geometry.getAttribute('normal').array,
+        topByVertex: geometry.getAttribute('terrainTop').array };
     const mesh = new THREE.Mesh(geometry, smoothGroundMat);
     mesh.position.set(chunkX * CHUNK_SIZE - 1, 0, chunkY * CHUNK_SIZE - 1);
     mesh.frustumCulled = false;
@@ -1355,6 +1403,19 @@ const pendingWorldRoadChunks = new Set();
 let worldTerrainRefreshTimer = null;
 const worldTerrainRefreshWaiters = [];
 
+function refreshWorldTerrainBrushPreview() {
+    if (!brushActive) return;
+    for (const key of pendingWorldTerrainChunks) {
+        const entry = chunksMap.get(key);
+        if (!entry?.terrainPreviewRegion || !entry.smoothTerrainData) continue;
+        refreshWorldTerrainChunk(entry, false, true);
+        if (pendingWorldRoadChunks.has(key)) {
+            if (entry.hasRoadNodes) rebuildRoadMeshes(entry);
+            pendingWorldRoadChunks.delete(key);
+        }
+    }
+}
+
 function waitForWorldTerrainRefresh() {
     if (!worldTerrainRefreshTimer && !pendingWorldTerrainChunks.size && !pendingWorldRoadChunks.size) {
         return Promise.resolve();
@@ -1404,13 +1465,16 @@ function refreshWorldTerrainNeighborhood(cx, cy, tileX = null, tileZ = null,
             const entry = chunksMap.get(`${cx + dx},${cy + dz}`);
             if (!entry) continue;
             if (refreshWater) entry.waterShoreDirty = true;
-            if (refreshTexture) {
+            // Height changes need live geometry, but do not change texture pixels.
+            const regionFields = refreshTexture ? ['terrainTextureRegion'] : [];
+            if (deferred && !loadRefresh) regionFields.push('terrainPreviewRegion');
+            for (const field of regionFields) {
                 const minX = cx * CHUNK_SIZE + (tileX ?? 0);
                 const maxX = cx * CHUNK_SIZE + (tileX ?? CHUNK_SIZE - 1);
                 const minZ = cy * CHUNK_SIZE + (tileZ ?? 0);
                 const maxZ = cy * CHUNK_SIZE + (tileZ ?? CHUNK_SIZE - 1);
-                const region = entry.terrainTextureRegion;
-                entry.terrainTextureRegion = region ? {
+                const region = entry[field];
+                entry[field] = region ? {
                     minX: Math.min(region.minX, minX), maxX: Math.max(region.maxX, maxX),
                     minZ: Math.min(region.minZ, minZ), maxZ: Math.max(region.maxZ, maxZ),
                 } : { minX, maxX, minZ, maxZ };
@@ -1511,6 +1575,15 @@ function disposeRoadMeshes(entry) {
         mesh.dispose();
     }
     entry.roads = [];
+}
+
+function refreshRoadNeighborhood(cx, cy) {
+    for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+            const entry = chunksMap.get(`${cx + dx},${cy + dy}`);
+            if (entry?.hasRoadNodes) rebuildRoadMeshes(entry);
+        }
+    }
 }
 
 function rebuildRoadMeshes(entry) {
@@ -2117,7 +2190,8 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         }
         const worldX = chunkX * CHUNK_SIZE + tileX;
         const worldZ = chunkY * CHUNK_SIZE + tileY;
-        const waterNearby = changedTerrain || [[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0]]
+        const waterNearby = changedTerrain || [[-1, -1], [0, -1], [1, -1],
+            [-1, 0], [0, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]
             .some(([dx, dz]) => {
                 const nx = worldX + dx;
                 const nz = worldZ + dz;
@@ -2126,7 +2200,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
                     ?.terrain === 'water';
             });
         refreshWorldTerrainNeighborhood(chunkX, chunkY, tileX, tileY,
-            !changedTerrain, changedHeight && updates.objects === undefined, waterNearby, changedTerrain);
+            true, changedHeight && updates.objects === undefined, waterNearby, changedTerrain);
     }
 
     if (changedHeight) {
@@ -2470,6 +2544,7 @@ function animate() {
     }
     const frameWorkStartedAt = performance.now();
     if (!renderer.isUnavailableRenderer) {
+        refreshWorldTerrainBrushPreview();
         updateGlobalCameraMovement(Math.min(0.1, Math.max(0, delta)));
         const cameraMoved = controls.update();
         if (cameraMoved || now - lastChunkVisibilityAt >= CHUNK_VISIBILITY_REFRESH_MS) {

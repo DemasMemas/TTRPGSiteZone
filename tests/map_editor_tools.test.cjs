@@ -678,11 +678,13 @@ test('location eraser deletes each structure in its radius and refreshes once', 
         { id: 3, type: 'floor', tile_x: 2, tile_y: 3 },
         { id: 4, type: 'crate', tile_x: 5, tile_y: 3 },
     ];
-    const calls = { deleted: [], removed: [], lights: [], fog: 0, architecture: 0, floor: 0 };
+    const calls = { deleted: [], removed: [], lights: [], fog: 0, architecture: 0, floor: 0, floorMenu: 0 };
     const context = vm.createContext({
         window: { currentLobbyId: 1 }, currentLocationData: { objects },
         getObjectGridPosition: object => ({ x: object.tile_x, y: object.tile_y }),
         structureDeletionInFlight: new Set(),
+        locationBuildingViewsDirty: false,
+        refreshLocationFloorMenu: () => { calls.floorMenu++; },
         Server: { deleteLocationObject: async (_lobby, id) => { calls.deleted.push(id); } },
         removeLocationObjectMesh: (id, refreshFog) => calls.removed.push([id, refreshFog]),
         isFireObject: object => object?.type === 'campfire',
@@ -704,6 +706,9 @@ test('location eraser deletes each structure in its radius and refreshes once', 
     assert.equal(calls.fog, 1);
     assert.equal(calls.architecture, 1);
     assert.equal(calls.floor, 1);
+    assert.equal(calls.floorMenu, 1);
+    assert.equal(context.locationBuildingViewsDirty, true);
+    assert.equal(context.structureDeletionInFlight.size, 0);
     assert.deepEqual(context.currentLocationData.objects.map(object => object.id), [4]);
 });
 
@@ -713,11 +718,13 @@ test('erasing several fire objects batches the darkness refresh', async () => {
     const end = source.indexOf('\nexport function setLocationBuildMode(', start);
     const objects = [{ id: 1, type: 'campfire', tile_x: 1, tile_y: 1 },
         { id: 2, type: 'torch', tile_x: 2, tile_y: 1 }];
-    const calls = { lights: 0, darkness: 0, fog: 0 };
+    const calls = { lights: 0, darkness: 0, fog: 0, floorMenu: 0 };
     const context = vm.createContext({
         window: { currentLobbyId: 1 }, currentLocationData: { objects },
         getObjectGridPosition: object => ({ x: object.tile_x, y: object.tile_y }),
         structureDeletionInFlight: new Set(),
+        locationBuildingViewsDirty: false,
+        refreshLocationFloorMenu: () => { calls.floorMenu++; },
         Server: { deleteLocationObject: async () => {} },
         removeLocationObjectMesh() {}, isFireObject: () => true,
         isObjectLightSource: () => true,
@@ -729,7 +736,9 @@ test('erasing several fire objects batches the darkness refresh', async () => {
     });
     vm.runInContext(source.slice(start, end), context);
     await context.removeStructuresAtTile(1, 1, 1);
-    assert.deepEqual(calls, { lights: 2, darkness: 1, fog: 0 });
+    assert.deepEqual(calls, { lights: 2, darkness: 1, fog: 0, floorMenu: 1 });
+    assert.equal(context.locationBuildingViewsDirty, true);
+    assert.equal(context.structureDeletionInFlight.size, 0);
     assert.equal(context.currentLocationData.objects.length, 0);
 });
 

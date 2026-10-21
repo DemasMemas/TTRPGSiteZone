@@ -34,6 +34,7 @@ function frameHarness(local) {
         updateRoofVisibility: mark('roofs'),
         updateChunkVisibility: mark('chunks'), updateRain: mark('rain'),
         refreshWorldShadows: mark('shadows'),
+        refreshWorldTerrainBrushPreview: mark('terrainPreview'),
         animateChunkAnomalies: mark('anomalies'), animateAnomalyEffects: mark('anomalies'),
         animateFireObjectModels: mark('fire'), locationObjectMeshes: [], objectMeshes: [],
         anomalyEffectMeshes: [], lastMouseX: 10, lastMouseY: 10, performRaycast: mark('raycast'),
@@ -69,6 +70,8 @@ test('hidden world does no rendering, picking, weather or camera work; resumes o
     context.window.isLocationActive = false;
     context.animate();
     assert.ok(calls.some(call => call[0] === 'render'));
+    assert.ok(calls.findIndex(call => call[0] === 'terrainPreview')
+        < calls.findIndex(call => call[0] === 'render'));
     assert.ok(calls.some(call => call[0] === 'fps'));
     assert.ok(calls.some(call => call[0] === 'rain'));
     assert.ok(calls.some(call => call[0] === 'water'));
