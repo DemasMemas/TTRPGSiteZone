@@ -19,6 +19,10 @@ import {
 import { Server } from './api.js';
 import { showNotification } from './utils.js';
 
+import { initWorldNumericInputs, syncWorldNumber, getWorldNumericValue } from './worldNumericInputs.js';
+import { initDirectWorldObjectEditor } from './worldObjectEditor.js';
+import { WORLD_VEGETATION_TYPES, planWorldVegetationBrush, vegetationStrokeCenters } from './worldVegetationBrush.js';
+
 const CHUNK_SIZE = 32;
 let currentLobbyId;
 let token;
@@ -52,6 +56,7 @@ let lastPlacedObjectAt = 0;
 let roadLinkActive = false;
 let roadLinkFirst = null;
 let roadLinkSaving = false;
+let vegetationStroke = null;
 
 const ANOMALY_TYPE_LABELS = {
     void: 'гравитационная',
@@ -69,6 +74,15 @@ export function initMapEdit(lobbyId, authToken) {
     currentLobbyId = lobbyId;
     token = authToken;
     loadAnomalyFieldCatalog();
+    initWorldNumericInputs();
+    initDirectWorldObjectEditor({
+        lobbyId, state: AppState, protectedTypes: PROTECTED_BUILDING_TYPES, labels: WORLD_OBJECT_LABELS,
+        onDetails(selection) {
+            openTileEditModal({ ...selection, tileData: chunksMap.get(`${selection.chunkX},${selection.chunkY}`)
+                .tilesData[selection.tileY][selection.tileX] });
+            selectExistingWorldObject(selection.index);
+        },
+    });
 
     document.getElementById('panel-tools')?.addEventListener('click', event => {
         const button = event.target.closest('[data-world-tool]');
@@ -103,9 +117,11 @@ export function initMapEdit(lobbyId, authToken) {
     });
     syncMapEditorAutoExpandCheckbox();
     selectWorldEditorTool('select');
-    for (const id of ['world-object-color', 'world-object-scale', 'world-object-rotation']) {
-        document.getElementById(id)?.addEventListener('input', () => updateWorldObjectPreview(getHoveredTile()));
-    }
+    document.getElementById('panel-tools')?.addEventListener('input', event => {
+        if (['world-object-color', 'world-object-scale', 'world-object-rotation'].includes(event.target.id)) {
+            updateWorldObjectPreview(getHoveredTile());
+        }
+    });
     document.getElementById('object-type-select')?.addEventListener('change', event => {
         const color = document.getElementById('object-color');
         if (color && WORLD_OBJECT_COLORS[event.target.value]) {
@@ -174,6 +190,7 @@ export function updateAnomalyFieldRankOptions() {
 export function setEditMode(enabled) {
     AppState.setEditMode(enabled);
     if (!enabled) {
+        window.clearDirectWorldObjectSelection?.();
         if (choosingExistingObjectTarget) closeTileEditModal();
         toggleWorldRoadLink(false);
         removePreviewObject();
@@ -192,6 +209,8 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     const root = document.getElementById('gm-only-controls');
     if (!root || !['select', 'terrain', 'height', 'radiation', 'erase', 'objects'].includes(tool)) return;
     const previousTool = window.worldEditorTool;
+    if (tool !== 'objects') window.endWorldVegetationStroke?.();
+    if (tool !== 'select') window.clearDirectWorldObjectSelection?.();
     if (tool !== 'objects' && roadLinkActive) toggleWorldRoadLink(false);
     root.dataset.tool = tool;
     window.worldEditorTool = tool;
@@ -213,12 +232,14 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
         erase: 'Проведите по карте, чтобы удалить объекты с тайлов.',
         objects: 'Выберите объект и поставьте его кликом по карте. Двойной клик открывает точные настройки тайла.',
     }[tool];
+    window.syncWorldVegetationControls?.();
 }
 
 export function selectWorldObject(type) {
     if (!WORLD_OBJECT_TYPES.has(type)) return;
     if (type !== 'road' && roadLinkActive) toggleWorldRoadLink(false);
     selectedWorldObject = type;
+    window.endWorldVegetationStroke?.();
     document.querySelectorAll('[data-world-object]').forEach(button => {
         button.setAttribute('aria-pressed', String(button.dataset.worldObject === type));
     });
@@ -226,6 +247,7 @@ export function selectWorldObject(type) {
     if (color) color.value = WORLD_OBJECT_COLORS[type];
     const activeBaseOption = document.getElementById('world-object-active-base-option');
     if (activeBaseOption) activeBaseOption.hidden = !PROTECTED_BUILDING_TYPES.has(type);
+    window.syncWorldVegetationControls?.();
     updateWorldObjectPreview(getHoveredTile());
 }
 
@@ -285,7 +307,7 @@ function worldObjectSettings() {
     const rotation = Math.max(0, Math.min(359, Number(document.getElementById('world-object-rotation')?.value) || 0));
     const scaleOutput = document.getElementById('world-object-scale-value');
     const rotationOutput = document.getElementById('world-object-rotation-value');
-    if (scaleOutput) scaleOutput.textContent = scale.toFixed(2);
+    if (scaleOutput) scaleOutput.textContent = String(scale);
     if (rotationOutput) rotationOutput.textContent = `${rotation}°`;
     const activeBase = PROTECTED_BUILDING_TYPES.has(selectedWorldObject)
         && document.getElementById('world-object-active-base')?.checked;
@@ -301,6 +323,13 @@ export function updateWorldObjectPreview(tile) {
         return;
     }
     if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects' || !tile || roadLinkActive) {
+        removePreviewObject();
+        return;
+    }
+    if (WORLD_VEGETATION_TYPES.has(selectedWorldObject)
+        && (!(getWorldNumericValue('world-vegetation-density') > 0)
+            || (!document.getElementById('world-vegetation-ignore-ground')?.checked
+                && ['water', 'rock'].includes(tile.tileData.terrain)))) {
         removePreviewObject();
         return;
     }
@@ -328,6 +357,7 @@ export async function placeWorldObjectAtTile(tile) {
         return AppState.isGM && AppState.editMode && window.worldEditorTool === 'objects' && tile?.tileData
             ? connectRoadAtTile(tile) : false;
     }
+    if (window.isWorldVegetationBrush?.()) return placeWorldVegetationBrush(tile);
     if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects'
         || !tile?.tileData || tile.tileData.terrain === 'water') {
         if (tile?.tileData?.terrain === 'water') showNotification('На воде этот объект разместить нельзя');
@@ -362,6 +392,55 @@ export async function placeWorldObjectAtTile(tile) {
 window.updateWorldObjectPreview = updateWorldObjectPreview;
 window.placeWorldObjectAtTile = placeWorldObjectAtTile;
 window.isWorldRoadLinkActive = () => roadLinkActive;
+
+function placeWorldVegetationBrush(tile) {
+    if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects'
+        || window.isLocationActive || !tile?.tileData) return false;
+    const center = { x: tile.chunkX * CHUNK_SIZE + tile.tileX, y: tile.chunkY * CHUNK_SIZE + tile.tileY };
+    const centers = vegetationStrokeCenters(vegetationStroke?.previous, center);
+    const radius = AppState.brushRadius;
+    const updates = planWorldVegetationBrush({
+        centers, radius, settings: worldObjectSettings(), seed: Number(currentLobbyId),
+        density: getWorldNumericValue('world-vegetation-density'),
+        ignoreGround: document.getElementById('world-vegetation-ignore-ground')?.checked === true,
+        width: window.MAP_CHUNKS_WIDTH * CHUNK_SIZE, height: window.MAP_CHUNKS_HEIGHT * CHUNK_SIZE,
+        visited: vegetationStroke?.visited,
+        anchor: radius === 0 && centers.length === 1 && Number.isFinite(tile.pointX) && Number.isFinite(tile.pointZ)
+            ? { x: tile.pointX, z: tile.pointZ } : null,
+        getTile(x, y) {
+            return chunksMap.get(`${Math.floor(x / CHUNK_SIZE)},${Math.floor(y / CHUNK_SIZE)}`)
+                ?.tilesData[y % CHUNK_SIZE]?.[x % CHUNK_SIZE];
+        },
+    });
+    if (vegetationStroke) vegetationStroke.previous = center;
+    for (const item of updates) {
+        pendingTileUpdates.push(item);
+        updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates);
+    }
+    if (updates.length) scheduleBatchUpdate();
+    return updates.length > 0;
+}
+
+window.isWorldVegetationBrush = () => WORLD_VEGETATION_TYPES.has(selectedWorldObject)
+    && !roadLinkActive && !choosingExistingObjectTarget;
+window.beginWorldVegetationStroke = () => {
+    vegetationStroke = window.isWorldVegetationBrush() ? { previous: null, visited: new Set() } : null;
+};
+window.endWorldVegetationStroke = () => { vegetationStroke = null; };
+window.syncWorldVegetationControls = () => {
+    const vegetation = WORLD_VEGETATION_TYPES.has(selectedWorldObject);
+    const root = document.getElementById('gm-only-controls');
+    if (root) {
+        root.dataset.vegetationBrush = String(vegetation);
+        root.dataset.objectType = selectedWorldObject;
+    }
+    const options = document.getElementById('world-vegetation-options');
+    if (options) options.hidden = !vegetation;
+    if (window.worldEditorTool === 'objects' && vegetation) {
+        const hint = document.getElementById('world-editor-hint');
+        if (hint) hint.textContent = '';
+    }
+};
 
 export function getEditMode() {
     return AppState.editMode;
@@ -501,6 +580,7 @@ export function openTileEditModal(tile) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
+    window.clearDirectWorldObjectSelection?.();
     currentEditTile = tile;
     selectedExistingObjectIndex = null;
     selectedExistingObjectSnapshot = null;
@@ -664,10 +744,12 @@ function updateTileEditModal() {
     renderExistingWorldObject();
 
     document.getElementById('tile-edit-terrain').value = tileData.terrain;
-    document.getElementById('tile-edit-height').value = tileData.height;
-    document.getElementById('tile-edit-height-value').textContent = tileData.height.toFixed(1);
-    document.getElementById('tile-edit-radiation').value = tileData.radiation !== undefined ? tileData.radiation : 0;
-    document.getElementById('tile-edit-radiation-value').textContent = (tileData.radiation !== undefined ? tileData.radiation : 0).toFixed(1);
+    syncWorldNumber('tile-edit-height', tileData.height);
+    document.getElementById('tile-edit-height-value').textContent = String(tileData.height);
+    syncWorldNumber('tile-edit-radiation', tileData.radiation ?? 0);
+    document.getElementById('tile-edit-radiation-value').textContent = String(tileData.radiation ?? 0);
+    syncWorldNumber('tile-edit-height');
+    syncWorldNumber('tile-edit-radiation');
     const fieldSelect = document.getElementById('tile-edit-anomaly-field');
     const selectedField = anomalyFieldCatalog.find(field => field.name === tileData.anomaly_field?.name);
     if (fieldSelect) fieldSelect.value = selectedField ? String(selectedField.source_order) : '';
@@ -720,7 +802,7 @@ export async function applyTerrainChange() {
 
 export async function applyHeightChange() {
     if (!currentEditTile) return;
-    const newHeight = parseFloat(document.getElementById('tile-edit-height').value);
+    const newHeight = getWorldNumericValue('tile-edit-height');
     await handleTileUpdate(
         currentEditTile.chunkX,
         currentEditTile.chunkY,
@@ -744,7 +826,7 @@ export async function addObjectToTile() {
     const offsetX = parseFloat(document.getElementById('object-offset-x').value) || 0;
     const offsetZ = parseFloat(document.getElementById('object-offset-z').value) || 0;
     const scale = parseFloat(document.getElementById('object-scale').value) || 1.0;
-    const rotation = parseInt(document.getElementById('object-rotation').value) || 0;
+    const rotation = parseFloat(document.getElementById('object-rotation').value) || 0;
 
     let newObject;
     const anomaly = getAnomalyTypeFromSelect(selectValue);
@@ -963,16 +1045,21 @@ function getAnomalyTypeFromSelect(value) {
 }
 
 export function setBrushRadiusFromInput(value) {
-    AppState.setBrushRadius(parseInt(value));
-    document.getElementById('brush-radius-value').textContent = AppState.brushRadius;
+    const radius = Number(value);
+    if (String(value).trim() === '' || !Number.isFinite(radius)) return;
+    AppState.setBrushRadius(Math.max(0, Math.min(4, Math.round(radius))));
+    document.getElementById('brush-radius-value').textContent = `${2 * AppState.brushRadius + 1}×${2 * AppState.brushRadius + 1}`;
     document.getElementById('brush-radius').value = AppState.brushRadius;
+    syncWorldNumber('brush-radius');
     setBrushRadius(AppState.brushRadius);
 }
 
 export function setTileHeightFromInput(value) {
-    AppState.setTileHeight(parseFloat(value));
-    document.getElementById('tile-height-value').textContent = AppState.tileHeight.toFixed(1);
-    document.getElementById('tile-height').value = AppState.tileHeight;
+    const height = Number(value);
+    if (String(value).trim() === '' || !Number.isFinite(height)) return;
+    AppState.setTileHeight(Math.max(0.5, Math.min(3, height)));
+    document.getElementById('tile-height-value').textContent = String(AppState.tileHeight);
+    syncWorldNumber('tile-height', AppState.tileHeight);
 }
 
 export function setEraserModeFromInput(checked) {
@@ -980,28 +1067,30 @@ export function setEraserModeFromInput(checked) {
 }
 
 export function setWorldBrushRadiation(value) {
-    const radiation = Math.max(0, Math.min(10, Number(value) || 0));
+    if (String(value).trim() === '' || !Number.isFinite(Number(value))) return;
+    const radiation = Math.max(0, Math.min(10, Number(value)));
     window.worldBrushRadiation = radiation;
     const output = document.getElementById('world-brush-radiation-value');
-    if (output) output.textContent = radiation.toFixed(1);
+    if (output) output.textContent = String(radiation);
+    syncWorldNumber('world-brush-radiation', radiation);
 }
 
 export function updateTileEditHeight(value) {
-    document.getElementById('tile-edit-height-value').textContent = parseFloat(value).toFixed(1);
+    document.getElementById('tile-edit-height-value').textContent = String(Number(value));
 }
 
 export function updateObjectOffsetX(value) {
-    document.getElementById('object-offset-x-value').textContent = parseFloat(value).toFixed(2);
+    document.getElementById('object-offset-x-value').textContent = String(Number(value));
     updatePreviewFromModal();
 }
 
 export function updateObjectOffsetZ(value) {
-    document.getElementById('object-offset-z-value').textContent = parseFloat(value).toFixed(2);
+    document.getElementById('object-offset-z-value').textContent = String(Number(value));
     updatePreviewFromModal();
 }
 
 export function updateObjectScale(value) {
-    document.getElementById('object-scale-value').textContent = parseFloat(value).toFixed(2);
+    document.getElementById('object-scale-value').textContent = String(Number(value));
     updatePreviewFromModal();
 }
 
@@ -1011,12 +1100,12 @@ export function updateObjectRotation(value) {
 }
 
 export function updateTileEditRadiation(value) {
-    document.getElementById('tile-edit-radiation-value').textContent = parseFloat(value).toFixed(1);
+    document.getElementById('tile-edit-radiation-value').textContent = String(Number(value));
 }
 
 export async function applyRadiationChange() {
     if (!currentEditTile) return;
-    const newRadiation = parseFloat(document.getElementById('tile-edit-radiation').value);
+    const newRadiation = getWorldNumericValue('tile-edit-radiation');
     await handleTileUpdate(
         currentEditTile.chunkX,
         currentEditTile.chunkY,
@@ -1039,7 +1128,7 @@ function updatePreviewFromModal() {
     const offsetX = parseFloat(document.getElementById('object-offset-x').value) || 0;
     const offsetZ = parseFloat(document.getElementById('object-offset-z').value) || 0;
     const scale = parseFloat(document.getElementById('object-scale').value) || 1.0;
-    const rotation = parseInt(document.getElementById('object-rotation').value) || 0;
+    const rotation = parseFloat(document.getElementById('object-rotation').value) || 0;
 
     let type, anomalyType;
     const anomalyTypeFromSelect = getAnomalyTypeFromSelect(selectValue);

@@ -72,6 +72,7 @@
             </div>
             <div class="menu-item invite-code" id="gm-invite-code" style="display:none;">Код: <span id="invite-code-value"></span></div>
             <button class="menu-item theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Переключить тему">🌓</button>
+            <button class="menu-item" id="chat-toggle" type="button" aria-controls="panel-chat" aria-expanded="false" title="Открыть или закрыть чат">Чат</button>
             <button class="menu-item edit-toggle" id="edit-toggle" style="display:none;" onclick="toggleEditMode()" title="Режим редактирования карты">✏️</button>
             <button class="menu-item" id="lobby-rest-btn" style="display:none;" onclick="openLobbyRestModal()" title="Отдых и сон персонажей">Отдых</button>
             <button class="menu-item" id="world-travel-btn" onclick="openWorldTravelModal()" title="Группы и перемещение по миру">Путь</button>
@@ -122,14 +123,16 @@
             <div id="settings-content" class="settings-tab-content"> </div>
         </div>
 
-        <!-- Левая панель: чат -->
-        <div id="panel-chat" class="draggable-panel chat-panel">
+        <!-- Чат поверх карты: закреплённая или плавающая панель -->
+        <div id="panel-chat" class="draggable-panel chat-panel" data-chat-docked="true" hidden>
             <div class="panel-header">
-                <span>Чат</span>
+                <span class="chat-panel-title">Чат</span>
+                <button id="chat-pin" type="button" aria-label="Открепить чат" title="Открепить чат" aria-pressed="true">📌</button>
                 <span class="toggle-btn">▼</span>
+                <button id="chat-close" type="button" aria-label="Закрыть чат" title="Закрыть чат">✕</button>
             </div>
             <div class="panel-content">
-                <div id="chat" class="chat-messages"></div>
+                <div id="chat" class="chat-messages" role="log" aria-label="Сообщения, броски и события"></div>
                 <div class="chat-input-area">
                     <input type="text" id="message-input" placeholder="Введите сообщение...">
                     <button class="btn btn-primary" onclick="sendMessage()">→</button>
@@ -169,7 +172,7 @@
                         <button class="btn btn-sm" id="color-picker-btn" title="Выбрать свой цвет">🎨</button>
                     </div>
                 </div>
-                <div id="gm-only-controls" class="map-editor" data-tool="select" style="display: none;">
+                <div id="gm-only-controls" class="map-editor" data-tool="select" data-object-type="tree" style="display: none;">
                     <div class="map-editor-toolbar" role="toolbar" aria-label="Инструмент мировой карты">
                         <button type="button" data-world-tool="select" aria-pressed="true">Выбор</button>
                         <button type="button" data-world-tool="terrain" aria-pressed="false">Ландшафт</button>
@@ -180,6 +183,7 @@
                     </div>
                     <div class="map-editor-inspector" data-world-settings="select">
                         <label><input type="checkbox" data-map-editor-auto-expand checked> Раскрывать панель при смене инструмента</label>
+
                     </div>
                     <div class="map-editor-inspector" data-world-settings="terrain">
                         <label>Покрытие <select id="tile-type-select" class="character-select">
@@ -191,11 +195,11 @@
                         </select></label>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="height">
-                        <label>Уровень <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.value)"></label>
+                        <label>Уровень <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.dataset.worldExactValue ?? this.value)"> <input type="number" class="world-number-input" id="tile-height-number" data-world-number="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" aria-label="Высота"></label>
                         <output id="tile-height-value" for="tile-height">1.0</output>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="radiation">
-                        <label>Уровень радиации <input type="range" id="world-brush-radiation" min="0" max="10" step="0.1" value="0" oninput="setWorldBrushRadiation(this.value)"></label>
+                        <label>Уровень радиации <input type="range" id="world-brush-radiation" min="0" max="10" step="0.5" value="0" oninput="setWorldBrushRadiation(this.dataset.worldExactValue ?? this.value)"> <input type="number" class="world-number-input" id="world-brush-radiation-number" data-world-number="world-brush-radiation" min="0" max="10" step="0.5" value="0" aria-label="Радиация"></label>
                         <output id="world-brush-radiation-value" for="world-brush-radiation">0.0</output>
                     </div>
                     <div class="map-editor-inspector world-object-editor" data-world-settings="objects">
@@ -249,21 +253,73 @@
                         </div>
                         <div class="world-object-options">
                             <label>Цвет <input id="world-object-color" type="color" value="#2d5a27"></label>
-                            <label>Масштаб <input id="world-object-scale" type="range" min="0.2" max="2" step="0.05" value="1"><output id="world-object-scale-value">1.00</output></label>
-                            <label>Поворот <input id="world-object-rotation" type="range" min="0" max="359" step="1" value="0"><output id="world-object-rotation-value">0°</output></label>
+                            <label>Масштаб <input id="world-object-scale" type="range" min="0.2" max="2" step="any" value="1"> <input type="number" class="world-number-input" id="world-object-scale-number" data-world-number="world-object-scale" min="0.2" max="2" step="any" value="1" aria-label="Масштаб"><output id="world-object-scale-value">1.00</output></label>
+                            <label>Поворот <input id="world-object-rotation" type="range" min="0" max="359" step="any" value="0"> <input type="number" class="world-number-input" id="world-object-rotation-number" data-world-number="world-object-rotation" min="0" max="359" step="any" value="0" aria-label="Поворот, °"><output id="world-object-rotation-value">0°</output></label>
                             <label id="world-object-active-base-option" hidden><input id="world-object-active-base" type="checkbox"> Действующая база (охраняемая зона)</label>
+                        </div>
+                        <div id="world-vegetation-options" class="world-object-options">
+                            <label>Плотность, %
+                                <input id="world-vegetation-density" type="range" min="0" max="100" step="1" value="60">
+                                <input id="world-vegetation-density-number" class="world-number-input" type="number" data-world-number="world-vegetation-density" min="0" max="100" step="1" value="60" aria-label="Плотность деревьев и леса, %">
+                            </label>
+                            <label><input id="world-vegetation-ignore-ground" type="checkbox"> Игнорировать ограничения грунта</label>
+                            <small>Естественные группы с промежутками. По умолчанию вода и камень исключены.</small>
                         </div>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="brush">
-                        <label>Радиус кисти <input type="range" id="brush-radius" min="0" max="5" value="0" oninput="setBrushRadiusFromInput(this.value)"></label>
-                        <output id="brush-radius-value" for="brush-radius">0</output>
+                        <label>Размер кисти <input type="range" id="brush-radius" min="0" max="4" value="0" oninput="setBrushRadiusFromInput(this.value)"> <input type="number" class="world-number-input" id="brush-radius-number" data-world-number="brush-radius" data-offset="1" min="1" max="5" step="1" value="1" aria-label="Размер кисти"></label>
+                        <output id="brush-radius-value" for="brush-radius">1×1</output>
                     </div>
                     <input type="checkbox" id="eraser-checkbox" hidden onchange="setEraserModeFromInput(this.checked)">
                     <p class="map-editor-hint" id="world-editor-hint">Выберите инструмент. Двойной клик открывает настройки тайла.</p>
-                    <p class="map-editor-shortcuts">Удерживайте Q, наведите на сектор и отпустите · 1–6: инструмент · E: редактор · R: ластик</p>
+                    <details class="map-editor-help" id="world-editor-help">
+                        <summary>Справка по управлению</summary>
+                        <dl>
+                            <dt>Q — удерживать</dt><dd>Наведите на сектор меню и отпустите Q, чтобы выбрать инструмент.</dd>
+                            <dt>1–6</dt><dd>Выбор / Ландшафт / Высота / Радиация / Ластик / Объекты.</dd>
+                            <dt>V</dt><dd>Вернуться к инструменту «Выбор».</dd>
+                            <dt>E</dt><dd>Включить или выключить редактор.</dd>
+                            <dt>R</dt><dd>Включить или выключить ластик. Он удаляет объекты, сохраняя покрытие, высоту и радиацию.</dd>
+                            <dt>Alt + / − или Alt + колесо</dt><dd>Изменить размер кисти.</dd>
+                            <dt>+ / −</dt><dd>Изменить заданную высоту на 0.1, если объект не выбран.</dd>
+                            <dt>[ / ]</dt><dd>Предыдущее / следующее покрытие.</dd>
+                            <dt>ЛКМ / двойной клик</dt><dd>Применить действующий инструмент / открыть точные настройки тайла.</dd>
+                        </dl>
+                        <p>При выбранном объекте Q, E и R управляют объектом. Справка по перемещению, масштабу и повороту находится в его панели.</p>
+                    </details>
                 </div>
             </div>
         </div>
+
+                        <fieldset id="world-selection-editor" class="map-editor-inspector world-selection-editor" aria-labelledby="world-selection-title" hidden>
+                            <strong id="world-selection-title">Объект</strong>
+                            <span id="world-selection-position"></span>
+                            <label>Название <input id="world-selection-name" type="text" maxlength="100"></label>
+                            <label>Цвет <input id="world-selection-color" type="color" value="#808080"></label>
+                            <label>Масштаб
+                                <input id="world-selection-scale" type="range" min="0.2" max="2" step="0.05" value="1">
+                                <input id="world-selection-scale-number" class="world-number-input" type="number" data-world-number="world-selection-scale" min="0.2" max="2" step="any" value="1" aria-label="Масштаб выбранного объекта">
+                            </label>
+                            <label id="world-selection-rotation-option">Поворот, °
+                                <input id="world-selection-rotation" type="range" min="0" max="359" step="1" value="0">
+                                <input id="world-selection-rotation-number" class="world-number-input" type="number" data-world-number="world-selection-rotation" min="0" max="359" step="any" value="0" aria-label="Поворот выбранного объекта">
+                            </label>
+                            <label id="world-selection-active-option" hidden><input id="world-selection-active" type="checkbox"> Действующая / охраняемая зона</label>
+                            <button id="world-selection-details" type="button" class="btn btn-secondary btn-sm">Точные параметры</button>
+                            <button id="world-selection-delete" type="button" class="btn btn-danger btn-sm">Удалить</button>
+                            <details class="map-editor-help" id="world-selection-help">
+                                <summary>Управление выбранным объектом</summary>
+                                <dl>
+                                    <dt>G</dt><dd>Перемещение: точка установки следует за курсором.</dd>
+                                    <dt>R / T</dt><dd>Масштаб / поворот. Мышь вправо — увеличить / повернуть по часовой, влево — обратно.</dd>
+                                    <dt>+ / −</dt><dd>Изменить масштаб на 0.1.</dd>
+                                    <dt>Q / E</dt><dd>Повернуть на 15° против / по часовой стрелке.</dd>
+                                    <dt>ЛКМ</dt><dd>Подтвердить преобразование.</dd>
+                                    <dt>ПКМ / Esc</dt><dd>Отменить преобразование; без преобразования — снять выбор объекта. ПКМ действует по карте.</dd>
+                                    <dt>Delete / Backspace</dt><dd>Удалить выбранный объект.</dd>
+                                </dl>
+                            </details>
+                        </fieldset>
 
         <div id="visibility-modal" class="modal" style="display:none;">
             <div class="modal-content">
@@ -318,13 +374,13 @@
                     <button class="btn btn-primary" onclick="applyTerrainChange()">Применить</button>
                     <br><br>
                     <label>Высота:</label>
-                    <input type="range" id="tile-edit-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="updateTileEditHeight(this.value)">
+                    <input type="range" id="tile-edit-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="updateTileEditHeight(this.dataset.worldExactValue ?? this.value)"> <input type="number" class="world-number-input" id="tile-edit-height-number" data-world-number="tile-edit-height" min="0.5" max="3.0" step="0.1" value="1.0" aria-label="Высота тайла">
                     <span id="tile-edit-height-value">1.0</span>
                     <button class="btn btn-primary" onclick="applyHeightChange()">Применить</button>
                     <br><br>
 
                     <label>Радиация:</label>
-                    <input type="range" id="tile-edit-radiation" min="0" max="10" step="0.1" value="0" oninput="updateTileEditRadiation(this.value)">
+                    <input type="range" id="tile-edit-radiation" min="0" max="10" step="0.5" value="0" oninput="updateTileEditRadiation(this.dataset.worldExactValue ?? this.value)"> <input type="number" class="world-number-input" id="tile-edit-radiation-number" data-world-number="tile-edit-radiation" min="0" max="10" step="0.5" value="0" aria-label="Радиация тайла">
                     <span id="tile-edit-radiation-value">0.0</span>
                     <button class="btn btn-primary" onclick="applyRadiationChange()">Сохранить радиацию</button>
                     <br><br>
@@ -356,20 +412,20 @@
 
                     <div style="display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 8px; margin-top: 10px; align-items: center;">
                         <label>X:</label>
-                        <input type="range" id="object-offset-x" min="-0.5" max="0.5" step="0.01" value="0.0" oninput="updateObjectOffsetX(this.value)">
-                        <span id="object-offset-x-value" style="text-align: right;">0.00</span>
+                        <input type="range" id="object-offset-x" min="-0.5" max="0.5" step="any" value="0.0" oninput="updateObjectOffsetX(this.value)">
+                        <input type="number" class="world-number-input" id="object-offset-x-number" data-world-number="object-offset-x" min="-0.5" max="0.5" step="any" value="0.0" aria-label="Смещение X"><span hidden id="object-offset-x-value" style="text-align: right;">0.00</span>
 
                         <label>Z:</label>
-                        <input type="range" id="object-offset-z" min="-0.5" max="0.5" step="0.01" value="0.0" oninput="updateObjectOffsetZ(this.value)">
-                        <span id="object-offset-z-value" style="text-align: right;">0.00</span>
+                        <input type="range" id="object-offset-z" min="-0.5" max="0.5" step="any" value="0.0" oninput="updateObjectOffsetZ(this.value)">
+                        <input type="number" class="world-number-input" id="object-offset-z-number" data-world-number="object-offset-z" min="-0.5" max="0.5" step="any" value="0.0" aria-label="Смещение Z"><span hidden id="object-offset-z-value" style="text-align: right;">0.00</span>
 
                         <label>Масштаб:</label>
-                        <input type="range" id="object-scale" min="0.2" max="2.0" step="0.05" value="1.0" style="width: 100%;" oninput="updateObjectScale(this.value)">
-                        <span id="object-scale-value" style="text-align: right;">1.00</span>
+                        <input type="range" id="object-scale" min="0.2" max="2.0" step="any" value="1.0" style="width: 100%;" oninput="updateObjectScale(this.value)">
+                        <input type="number" class="world-number-input" id="object-scale-number" data-world-number="object-scale" min="0.2" max="2.0" step="any" value="1.0" aria-label="Масштаб"><span hidden id="object-scale-value" style="text-align: right;">1.00</span>
 
                         <label>Поворот:</label>
-                        <input type="range" id="object-rotation" min="0" max="359" step="1" value="0" style="width: 100%;" oninput="updateObjectRotation(this.value)">
-                        <span id="object-rotation-value" style="text-align: right;">0°</span>
+                        <input type="range" id="object-rotation" min="0" max="359" step="any" value="0" style="width: 100%;" oninput="updateObjectRotation(this.value)">
+                        <input type="number" class="world-number-input" id="object-rotation-number" data-world-number="object-rotation" min="0" max="359" step="any" value="0" aria-label="Поворот, °"><span hidden id="object-rotation-value" style="text-align: right;">0°</span>
                     </div>
 
                     <button class="btn btn-primary" onclick="addObjectToTile()">➕ Добавить объект</button>

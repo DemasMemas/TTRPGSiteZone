@@ -68,6 +68,19 @@ class MapService:
         original = objects[index]
         if original != payload.get('expected'):
             raise ConflictError('World object changed; reopen its tile')
+        remove = payload.get('delete', False)
+        if type(remove) is not bool:
+            raise ValidationError('Invalid world object delete flag')
+        if remove:
+            objects.pop(index)
+            source_tile['objects'] = objects
+            source_chunk.data = source_data
+            db.session.commit()
+            return {'index': None, 'updates': [{
+                'chunk_x': source_x // CHUNK_SIZE, 'chunk_y': source_y // CHUNK_SIZE,
+                'tile_x': source_x % CHUNK_SIZE, 'tile_y': source_y % CHUNK_SIZE,
+                'updates': {'objects': objects},
+            }]}
         edited = copy.deepcopy(original)
         if 'name' in changes:
             name = changes['name']

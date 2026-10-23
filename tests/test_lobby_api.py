@@ -2002,6 +2002,33 @@ def test_gm_edits_and_moves_existing_world_object_without_duplicates(
     assert travel_scenario(lobby['id'], 34, 10) == 'wild'
 
 
+def test_direct_world_object_delete_checks_permissions_and_snapshot(client, create_user, auth_headers):
+    gm = create_user('direct-delete-gm')
+    player = create_user('direct-delete-player')
+    lobby = create_lobby(client, gm, auth_headers)
+    join_lobby(client, lobby, player, auth_headers)
+    MapService.get_chunks(lobby['id'], gm['id'], (0, 0, 0, 0))
+    objects = [{'type': 'factory', 'is_active': True}, {'type': 'tree', 'scale': 0.7}]
+    MapService.update_tile(lobby['id'], gm['id'], 0, 0, 10, 10, {'objects': objects})
+    endpoint = f"/lobbies/{lobby['id']}/world-objects/edit"
+    payload = {
+        'source': {'tile_x': 10, 'tile_y': 10, 'index': 0},
+        'target': {'tile_x': 10, 'tile_y': 10},
+        'expected': objects[0], 'changes': {}, 'delete': True,
+    }
+    assert client.post(endpoint, headers=auth_headers(player), json=payload).status_code == 403
+    stale = {**payload, 'expected': {'type': 'factory'}}
+    assert client.post(endpoint, headers=auth_headers(gm), json=stale).status_code == 409
+    assert client.post(endpoint, headers=auth_headers(gm), json={**payload, 'delete': 'yes'}).status_code == 400
+    result = client.post(endpoint, headers=auth_headers(gm), json=payload)
+    assert result.status_code == 200
+    assert result.json['index'] is None
+    assert result.json['updates'][0]['updates']['objects'] == objects[1:]
+    db.session.expire_all()
+    assert MapService.get_tile_data(lobby['id'], 10, 10)['objects'] == objects[1:]
+    assert client.post(endpoint, headers=auth_headers(gm), json=payload).status_code == 409
+
+
 def test_world_buildings_require_active_flag_and_other_types_cannot_claim_zone(
     client, create_user, auth_headers
 ):

@@ -586,12 +586,14 @@ test('road connector links two existing adjacent roads without placing a third o
     assert.equal(labels['world-road-link-button']['aria-pressed'], 'true');
 });
 
-test('road connector button is visible in the object tool and selects roads itself', () => {
+test('road connector belongs to road settings and retains its existing action', () => {
     const template = fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8');
     const objectPanel = template.slice(template.indexOf('data-world-settings="objects"'),
         template.indexOf('data-world-settings="brush"'));
     assert.match(objectPanel, /data-world-object="road"[\s\S]*?id="world-road-link-button"/);
     assert.doesNotMatch(objectPanel, /id="world-road-link-controls"[^>]*hidden/);
+    assert.match(fs.readFileSync(path.join(__dirname, '../app/static/style.css'), 'utf8'),
+        /#gm-only-controls:not\(\[data-object-type="road"\]\) #world-road-link-controls/);
     assert.match(read('mapEdit.js'), /closest\('#world-road-link-button'\)[\s\S]*?selectWorldObject\('road'\)/);
 });
 

@@ -24,6 +24,8 @@ class DevelopmentConfig(Config):
     """Development configuration."""
 
     DEBUG = True
+    # run-lan disables the debugger; templates must still refresh after edits.
+    TEMPLATES_AUTO_RELOAD = True
     SQLALCHEMY_DATABASE_URI = (
         os.environ.get('DEV_DATABASE_URL')
         or os.environ.get('DATABASE_URL')

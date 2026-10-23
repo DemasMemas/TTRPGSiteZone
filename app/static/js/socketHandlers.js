@@ -111,10 +111,9 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('new_message', (data) => {
+        addMessage(data.username, data.message, data.timestamp);
         if (data.username.startsWith('System')) {
             showNotification(data.message, 'system', 'bottom-left');
-        } else {
-            addMessage(data.username, data.message, data.timestamp);
         }
     });
 
@@ -129,11 +128,7 @@ export function initSocket(lobbyId, token) {
 
     socket.on('chat_history', (messages) => {
         messages.forEach(msg => {
-            if (msg.username.startsWith('System')) {
-                showNotification(msg.message, 'system', 'bottom-left');
-            } else {
-                addMessage(msg.username, msg.message, msg.timestamp);
-            }
+            addMessage(msg.username, msg.message, msg.timestamp);
         });
         requestAnimationFrame(() => {
             const chat = document.getElementById('chat');

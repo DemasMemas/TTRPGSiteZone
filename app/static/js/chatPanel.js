@@ -1,0 +1,74 @@
+const GAME_EVENT_SENDERS = new Set(['Бой', 'Система', 'Событие', 'Зависимость', 'Разделка', 'Взрыв', 'Аномалия', 'ГМ', 'Мутант', 'Действие', 'Стресс']);
+
+export function chatMessageKind(username, text) {
+    if (/^System\s*\(Roll\)/i.test(String(username)) || /^\/roll(?:\s|$)/i.test(String(text))) return 'roll';
+    return /^System(?:\s|$|\()/i.test(String(username)) || GAME_EVENT_SENDERS.has(username) ? 'event' : 'human';
+}
+
+export function readChatPanelState(storage, key) {
+    let saved;
+    try { saved = JSON.parse(storage.getItem(key)); } catch { /* Defaults for missing or damaged preferences. */ }
+    const position = saved?.floatingPosition;
+    return {
+        open: saved?.open === true,
+        docked: saved?.docked !== false,
+        collapsed: saved?.collapsed === true,
+        floatingPosition: position && Number.isFinite(position.left) && Number.isFinite(position.top)
+            ? { left: position.left, top: position.top } : null,
+    };
+}
+
+export function initChatPanel() {
+    const panel = document.getElementById('panel-chat');
+    const toggle = document.getElementById('chat-toggle');
+    const pin = document.getElementById('chat-pin');
+    const close = document.getElementById('chat-close');
+    if (!panel || !toggle || !pin || !close || panel.dataset.chatInitialized === 'true') return;
+    panel.dataset.chatInitialized = 'true';
+    const key = `chat-panel:${window.currentLobbyId}:${localStorage.getItem('user_id')}`;
+    const state = readChatPanelState(localStorage, key);
+    const save = () => {
+        try { localStorage.setItem(key, JSON.stringify(state)); } catch { /* Keep chat usable without persistent storage. */ }
+    };
+    const restoreFloatingPosition = () => {
+        const position = state.floatingPosition || { left: Math.max(15, (window.innerWidth - 340) / 2), top: 96 };
+        const left = Math.max(0, Math.min(position.left, window.innerWidth - panel.offsetWidth));
+        const top = Math.max(0, Math.min(position.top, window.innerHeight - panel.offsetHeight));
+        panel.style.left = `${left}px`; panel.style.top = `${top}px`;
+        panel.style.right = 'auto'; panel.style.bottom = 'auto'; panel.style.transform = 'none';
+    };
+    const apply = () => {
+        panel.hidden = !state.open;
+        panel.dataset.chatDocked = String(state.docked);
+        panel.classList.toggle('collapsed', state.collapsed);
+        toggle.setAttribute('aria-expanded', String(state.open));
+        toggle.classList.toggle('is-active', state.open);
+        pin.setAttribute('aria-pressed', String(state.docked));
+        pin.title = state.docked ? 'Открепить чат' : 'Закрепить чат справа';
+        pin.setAttribute('aria-label', pin.title);
+        if (state.open && !state.docked) restoreFloatingPosition();
+    };
+    const rememberFloatingPosition = () => {
+        if (state.docked || !state.open) return;
+        const rect = panel.getBoundingClientRect();
+        if (state.floatingPosition?.left === rect.left && state.floatingPosition?.top === rect.top) return;
+        state.floatingPosition = { left: rect.left, top: rect.top }; save();
+    };
+    toggle.addEventListener('click', () => { state.open = !state.open; apply(); save(); });
+    close.addEventListener('click', () => {
+        rememberFloatingPosition(); state.open = false; apply(); save(); toggle.focus();
+    });
+    pin.addEventListener('click', () => {
+        rememberFloatingPosition(); state.docked = !state.docked; apply(); save();
+    });
+    document.addEventListener('mouseup', rememberFloatingPosition);
+    new MutationObserver(() => {
+        const collapsed = panel.classList.contains('collapsed');
+        if (state.collapsed === collapsed) return;
+        state.collapsed = collapsed; save();
+    }).observe(panel, { attributes: true, attributeFilter: ['class'] });
+    window.addEventListener('resize', () => {
+        if (state.open && !state.docked) { restoreFloatingPosition(); rememberFloatingPosition(); }
+    });
+    apply();
+}

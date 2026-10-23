@@ -53,7 +53,7 @@ import { activeStaticLightFieldPointSlots, activeStaticLightFieldSpotSlots,
 import { applySurfaceDarkness, writeDarknessPixels } from './locationDarknessSurface.js';
 import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
 import { createGrassDetailGroup } from './locationGrassDetail.js';
-import { addNaturalGrassInstances, loadNaturalGrassAssets,
+import { addNaturalGrassInstances, disposeNaturalGrassInstances, loadNaturalGrassAssets, updateNaturalGrassInstances,
     naturalGrassPlacements } from './locationNaturalGrass.js';
 import { buildRoundedWaterData, classifyWaterRegions, waterExposedSideMask,
     waterLevelForTile, waterSideCornerDrops } from './locationWaterEdge.js';
@@ -721,6 +721,7 @@ function getTileHeight(tileX, tileZ) {
 
 function disposeObject(obj) {
     if (!obj) return;
+    if (obj.userData?.naturalGrassResources) disposeNaturalGrassInstances(obj);
     releaseLocationModel(obj);
     if (obj.isLight && obj.shadow?.map) obj.shadow.map.dispose();
     if (obj.geometry && !isSharedLocationModelGeometry(obj.geometry)) obj.geometry.dispose();
@@ -13693,7 +13694,8 @@ function terrainEditTouchesLight(changed) {
 
 function terrainEditTouchesRoof(changed) {
     const cells = new Set(changed.map(({ x, z }) => `${x},${z}`));
-    return (currentLocationData.objects || []).some(object => object.type === 'floor'
+    // Roof eaves follow wall tops, whose terrain anchors can differ from the floor's.
+    return (currentLocationData.objects || []).some(object => (object.type === 'floor' || object.type === 'wall')
         && cells.has(`${object.tile_x},${object.tile_y}`));
 }
 
@@ -13718,7 +13720,7 @@ function flushPendingTerrainRefresh() {
     if (work.water) rebuildWaterSurfaceMesh();
     if (work.grid) rebuildLocationGrid();
     else if (work.terrainColor) updateLocationGridColors(indices);
-    if (work.grass) rebuildGrassDetailMesh();
+    if (work.grass) rebuildGrassDetailMesh(changed);
     if (work.roofs) rebuildLocationRoofs();
     if (work.fogGeometry) clearFogOverlay();
     if (work.lighting) {
@@ -13937,7 +13939,6 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
         terrainGrassBlendTexture.needsUpdate = true;
     }
 
-    const sampleHeight = createTerrainSurfaceHeightSampler(tiles);
     const positions = [];
     const normals = [];
     const uvs = [];
@@ -13947,23 +13948,15 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
         for (let x = 0; x < width; x++) {
             if (tiles[z][x].terrain === 'water' || isSmoothTerrainTile(tiles, x, z)) continue;
             const first = positions.length / 3;
-            const landHeightAt = (px, pz) => sampleHeight(
-                Math.max(x + 0.00001, Math.min(x + 0.99999, px)),
-                Math.max(z + 0.00001, Math.min(z + 0.99999, pz)),
-            );
+            // Non-smooth tiles have a constant surface; slopes are copied below.
+            const flatHeight = getTileHeight(x, z);
             for (let row = 0; row <= subdivisions; row++) {
                 for (let column = 0; column <= subdivisions; column++) {
                     const px = x + column / subdivisions;
                     const pz = z + row / subdivisions;
-                    const py = landHeightAt(px, pz);
-                    positions.push(px, py + 0.002, pz);
+                    positions.push(px, flatHeight + 0.002, pz);
                     uvs.push(px / width, pz / height);
-                    const left = landHeightAt(px - 0.04, pz);
-                    const right = landHeightAt(px + 0.04, pz);
-                    const near = landHeightAt(px, pz - 0.04);
-                    const far = landHeightAt(px, pz + 0.04);
-                    const normal = new THREE.Vector3(left - right, 0.08, near - far).normalize();
-                    normals.push(normal.x, normal.y, normal.z);
+                    normals.push(0, 1, 0);
                 }
             }
             for (let row = 0; row < subdivisions; row++) {
@@ -14207,15 +14200,17 @@ export function getLocationGrassDiagnostics() {
     };
 }
 
-function rebuildGrassDetailMesh() {
-    if (grassDetailGroup) {
+function rebuildGrassDetailMesh(changedTiles = null) {
+    const partial = Boolean(changedTiles?.length && naturalGrassAssets
+        && grassDetailGroup?.userData.naturalGrassChunks);
+    if (grassDetailGroup && !partial) {
         scene.remove(grassDetailGroup);
         disposeObject(grassDetailGroup);
         grassDetailGroup = null;
     }
     if (!scene || !currentLocationData) return;
     const tiles = currentLocationData.tiles_data;
-    naturalGrassBuild = null;
+    if (!partial) naturalGrassBuild = null;
     if (!naturalGrassAssets && !naturalGrassLoading && tiles.some(row => row.some(tile => tile.terrain === 'grass'))) {
         naturalGrassLoading = true;
         naturalGrassError = null;
@@ -14259,20 +14254,38 @@ function rebuildGrassDetailMesh() {
             && Math.abs(dx * floor.normal.x + dz * floor.normal.z) < floor.depth / 2;
     });
     const getHeight = createTerrainSurfaceHeightSampler(tiles);
-    grassDetailGroup = createGrassDetailGroup(THREE, tiles, getHeight, isCovered, true);
-    const placements = naturalGrassPlacements(tiles, isCovered);
-    naturalGrassBuild = { stats: placements.stats,
-        created: { medium01: placements.medium01.length } };
-    if (naturalGrassAssets) {
-        Object.assign(naturalGrassBuild,
+    const details = createGrassDetailGroup(THREE, tiles, getHeight, isCovered, true);
+    if (partial) {
+        // Other ground decor keeps its existing full refresh; preserve natural chunks.
+        for (const child of [...grassDetailGroup.children]) {
+            if (child.userData.naturalGrassKind) continue;
+            grassDetailGroup.remove(child);
+            disposeObject(child);
+        }
+        grassDetailGroup.userData.detailCounts = details.userData.detailCounts;
+        grassDetailGroup.userData.naturalGrassBaseTufts = details.userData.detailCounts.tufts;
+        const newDetails = [...details.children];
+        for (const child of newDetails) grassDetailGroup.add(child);
+        const updated = updateNaturalGrassInstances(THREE, grassDetailGroup, tiles,
+            naturalGrassAssets, getHeight, isCovered, changedTiles);
+        naturalGrassBuild = updated.build;
+        for (const root of [...newDetails, ...updated.meshes]) attachStaticLightFieldToRoot(root, 0);
+    } else {
+        grassDetailGroup = details;
+        const placements = naturalGrassPlacements(tiles, isCovered);
+        naturalGrassBuild = { stats: placements.stats,
+            created: { medium01: placements.medium01.length } };
+        if (naturalGrassAssets) Object.assign(naturalGrassBuild,
             addNaturalGrassInstances(THREE, grassDetailGroup, placements, naturalGrassAssets, getHeight));
+        attachStaticLightFieldToRoot(grassDetailGroup, 0);
+        scene.add(grassDetailGroup);
+    }
+    if (naturalGrassAssets) {
         naturalGrassBuild.triangles.understory =
             grassDetailGroup.userData.detailCounts.understoryTriangles;
         naturalGrassBuild.triangles.total = naturalGrassBuild.triangles.medium01
             + naturalGrassBuild.triangles.understory;
     }
-    attachStaticLightFieldToRoot(grassDetailGroup, 0);
-    scene.add(grassDetailGroup);
     if (naturalGrassAssets && !naturalGrassReported) {
         console.info('[game grass] scene:', {
             grassTiles: naturalGrassBuild.stats.grassTiles,
@@ -14511,9 +14524,8 @@ export function applyLocationTilesUpdate(locationId, updates) {
         water: (heightChanged || terrainChanged) &&
             (waterTopologyChanged || terrainEditTouchesWater(changed)),
         grid: heightChanged || waterTopologyChanged,
-        grass: terrainChanged || grassSubtypeChanged ||
-            (heightChanged && changed.some(({ x, z }) =>
-                currentLocationData.tiles_data[z][x].terrain !== 'water')),
+        // Slope probes can cross onto a neighboring water tile as well as land.
+        grass: terrainChanged || grassSubtypeChanged || heightChanged,
         roofs: heightChanged && terrainEditTouchesRoof(changed),
         fogGeometry: heightChanged || waterTopologyChanged,
         lighting: lightChanged || (heightChanged && terrainEditTouchesLight(changed)),
@@ -14668,8 +14680,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         water: (heightChanged || terrainChanged) &&
             (waterTopologyChanged || terrainEditTouchesWater(changed)),
         grid: heightChanged || waterTopologyChanged,
-        grass: terrainChanged || grassSubtypeChanged ||
-            (heightChanged && changed.some(({ x, z }) => tiles[z][x].terrain !== 'water')),
+        grass: terrainChanged || grassSubtypeChanged || heightChanged,
         roofs: heightChanged && terrainEditTouchesRoof(changed),
         fogGeometry: heightChanged || waterTopologyChanged,
         lighting: lightChanged || (heightChanged && terrainEditTouchesLight(changed)),

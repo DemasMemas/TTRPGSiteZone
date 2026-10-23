@@ -45,10 +45,14 @@ test('an old loading completion cannot hide the next scene or its error', () => 
     context.finishSceneLoading(world);
     const location = context.showSceneLoading('location');
     flushFrames();
-    assert.equal(title.textContent, 'Подлокация');
+    assert.equal(title.textContent, 'Загрузка…');
+    context.setSceneLoadingLocationName(location, 'Деревня');
+    assert.equal(title.textContent, 'Деревня');
     assert.equal(classes.has('is-hidden'), false);
     context.failSceneLoading(world, 'old error');
     assert.equal(retry.hidden, true);
+    context.setSceneLoadingLocationName(world, 'Старое название');
+    assert.equal(title.textContent, 'Деревня');
     context.finishSceneLoading(location);
     flushFrames();
     assert.equal(classes.has('is-hidden'), true);

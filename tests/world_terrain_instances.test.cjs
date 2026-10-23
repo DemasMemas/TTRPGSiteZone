@@ -597,6 +597,7 @@ test('removing a chunk releases instance buffers but keeps shared terrain resour
         dispose() { this.disposed = true; },
     });
     const entry = { ground: mesh(), water: mesh(), trees: mesh(), farAnomalies: mesh(), pendingRebuild: 7, anomalyLODs: [] };
+    entry.objectStateSnapshots = [[{ objects: [{ type: 'tree' }] }]];
     const chunksMap = new Map([['0,0', entry]]);
     const east = { hasRoadNodes: true };
     const diagonal = { hasRoadNodes: true };
@@ -626,6 +627,7 @@ test('removing a chunk releases instance buffers but keeps shared terrain resour
     context.removeChunk(0, 0);
     assert.equal(chunksMap.has('0,0'), false);
     assert.deepEqual(cancelled, [7]);
+    assert.equal(entry.objectStateSnapshots, null);
     assert.equal(entry.ground.disposed, true);
     assert.equal(entry.water.disposed, true);
     assert.equal(entry.trees.disposed, true);

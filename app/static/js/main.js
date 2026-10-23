@@ -1,4 +1,5 @@
 // static/js/main.js
+import { initWorldNumericInputs } from './worldNumericInputs.js';
 import { initSocket } from './socketHandlers.js';
 import { initCharacters, initMutantForm, loadLobbyCharacters, showCreateCharacterForm, showCreateMutantForm } from './characters.js';
 import { initLobbyData, loadLobbyInfo, loadAllChunks } from './lobbyData.js';
@@ -253,6 +254,7 @@ function setLocationViewActive(active) {
 }
 
 window.enterLocation = async function(locationId) {
+    window.clearDirectWorldObjectSelection?.();
     const loadingToken = showSceneLoading('location');
     closeMapEditorQuickMenu();
     if (window._locationEventCleanup) {
@@ -275,6 +277,7 @@ window.enterLocation = async function(locationId) {
         const requestStartedAt = performance.now();
         const data = await Server.getLocationDetail(currentLobbyId, locationId);
         if (!isCurrentSceneLoading(loadingToken)) return;
+        setSceneLoadingLocationName(loadingToken, data.name);
         const networkMs = performance.now() - requestStartedAt;
         currentLocationData = data;
         setCurrentLocationId(locationId);
@@ -1340,10 +1343,13 @@ window.exitLocation = function() {
         if (toolsPanel) {
             toolsPanel.classList.remove('is-location-editor');
             toolsPanel.querySelector('.panel-content').innerHTML = window._originalToolsContent;
+            initWorldNumericInputs();
+            window.refreshDirectWorldObjectEditor?.();
             syncMapEditorAutoExpandCheckbox();
             selectWorldEditorTool('select', { autoExpand: false });
             originalSetBrushRadiusFromInput(window.brushRadius);
             originalSetTileHeightFromInput(window.tileHeight);
+            setWorldBrushRadiation(window.worldBrushRadiation ?? 0);
             document.getElementById('tile-type-select').value = window.currentTileType;
             setEditMode(getEditMode());
         }
@@ -1965,12 +1971,17 @@ function showSceneLoading(sceneType) {
     if (!screen) return token;
     screen.classList.remove('is-hidden', 'is-error');
     document.getElementById('scene-loading-title').textContent =
-        sceneType === 'location' ? 'Подлокация' : 'Карта мира';
+        sceneType === 'location' ? 'Загрузка…' : 'Карта мира';
     document.getElementById('scene-loading-detail').textContent = sceneType === 'location'
         ? 'Разворачиваем рельеф, объекты и освещение.'
         : 'Загружаем сектора и собираем поверхность.';
     document.getElementById('scene-loading-retry').hidden = true;
     return token;
+}
+
+function setSceneLoadingLocationName(token, name) {
+    if (!isCurrentSceneLoading(token)) return;
+    document.getElementById('scene-loading-title').textContent = String(name || '').trim() || 'Загрузка…';
 }
 
 function finishSceneLoading(token) {

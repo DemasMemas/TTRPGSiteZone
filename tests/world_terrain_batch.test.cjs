@@ -51,6 +51,7 @@ async function harness(keys = ['0,0'], size = 32) {
         setColorAt() {},
     });
     const context = vm.createContext({
+        window: {},
         CHUNK_SIZE: size, chunksMap, chunkBounds: [], performance,
         scene: { add() {}, remove() {} },
         terrainColors: { grass: 0x3a5f0b, sand: 0xc2b280, rock: 0x808080, water: 0x1e90ff },
@@ -171,6 +172,212 @@ function assertLiveHeightGeometry(h, entry) {
     }
     return padded;
 }
+
+// Compare against the previous invalidation rule using the same real generators
+// and queue. Counters cover water resources only, not terrain or GPU timings.
+async function waterHarness(keys = ['0,0'], waterTiles = [[11, 11]], legacy = false) {
+    const h = await harness(keys);
+    if (legacy) {
+        const start = source.indexOf('export function updateTileInChunk(');
+        const end = source.indexOf('\nexport function setBrushRadius(', start);
+        vm.runInContext(source.slice(start, end).replace('export ', '')
+            .replace('const waterNearby = wasWater || isWater ||', 'const waterNearby = changedTerrain ||'), h.context);
+    }
+    for (const [x, z] of waterTiles) {
+        h.chunksMap.get(`${Math.floor(x / 32)},${Math.floor(z / 32)}`).tilesData[z % 32][x % 32].terrain = 'water';
+    }
+    for (const entry of h.chunksMap.values()) {
+        Object.assign(entry, h.context.fillChunkTerrainInstances(entry.ground, entry.water,
+            entry.tilesData, entry.chunkX, entry.chunkY));
+        entry.waterShoreDirty = true;
+        h.context.refreshWorldTerrainChunk(entry);
+    }
+    const counts = { refreshes: 0, generations: 0, meshes: 0, disposed: 0 };
+    const generate = h.context.buildRoundedWaterData;
+    h.context.buildRoundedWaterData = (...args) => {
+        counts.generations++;
+        return generate(...args);
+    };
+    const refresh = h.context.refreshWorldWaterChunk;
+    h.context.refreshWorldWaterChunk = (entry, ...args) => {
+        counts.refreshes++;
+        const old = [entry.waterSurface, entry.waterBank];
+        refresh(entry, ...args);
+        counts.disposed += old.filter(mesh => mesh?.geometry.disposed).length;
+        counts.meshes += [entry.waterSurface, entry.waterBank].filter((mesh, i) => mesh && mesh !== old[i]).length;
+    };
+    return Object.assign(h, { counts });
+}
+
+function assertWaterEquivalent(actual, previous) {
+    for (const [key, entry] of actual.chunksMap) {
+        const reference = previous.chunksMap.get(key);
+        for (const field of ['waterSurface', 'waterBank']) {
+            assert.equal(Boolean(entry[field]), Boolean(reference[field]), `${key} ${field}`);
+            if (!entry[field]) continue;
+            const mesh = entry[field];
+            for (const name of ['position', 'color', 'uv']) {
+                assert.deepEqual(mesh.geometry.attributes[name]?.array,
+                    reference[field].geometry.attributes[name]?.array, `${key} ${field} ${name}`);
+            }
+            assert.equal(mesh.material, field === 'waterSurface' ? actual.context.waterMat : actual.context.worldWaterBankMat);
+            assert.equal(Boolean(mesh.geometry.disposed), false);
+        }
+        assert.deepEqual(entry.water.matrices, reference.water.matrices);
+    }
+}
+
+for (const [name, keys, x, z] of [
+    ['inside a chunk', ['0,0'], 20, 20],
+    ['at a two-chunk boundary', ['0,0', '1,0'], 31, 20],
+    ['at a four-chunk corner', ['0,0', '1,0', '0,1', '1,1'], 31, 31],
+]) {
+    test(`dry terrain far from water skips water resources ${name}`, async () => {
+        const pools = keys.flatMap(key => {
+            const [cx, cz] = key.split(',').map(Number);
+            return Array.from({ length: 16 }, (_, i) => [cx * 32 + 10 + i % 4, cz * 32 + 10 + Math.floor(i / 4)]);
+        });
+        const h = await waterHarness(keys, pools);
+        const previous = await waterHarness(keys, pools, true);
+        const meshes = [...h.chunksMap.values()].flatMap(entry => [entry.waterSurface, entry.waterBank]);
+        for (const run of [h, previous]) {
+            run.context.brushActive = true;
+            run.edit(x, z, { terrain: 'sand' });
+            run.context.refreshWorldTerrainBrushPreview();
+            run.context.finishWorldBrushStroke(); run.flush();
+        }
+        assert.deepEqual(h.counts, { refreshes: 0, generations: 0, meshes: 0, disposed: 0 });
+        assert.deepEqual(previous.counts, {
+            refreshes: keys.length, generations: keys.length, meshes: 2 * keys.length, disposed: 2 * keys.length,
+        });
+        assert.deepEqual([...h.chunksMap.values()].flatMap(entry => [entry.waterSurface, entry.waterBank]), meshes);
+        assertWaterEquivalent(h, previous);
+        assertLiveHeightGeometry(h, h.chunksMap.get('0,0'));
+    });
+}
+
+test('shore soil, land heights, water heights and isolated water removal match previous geometry', async () => {
+    const h = await waterHarness();
+    const previous = await waterHarness(['0,0'], [[11, 11]], true);
+    for (const run of [h, previous]) run.context.brushActive = true;
+    for (const [x, z, update] of [
+        [10, 11, { terrain: 'sand' }], [10, 11, { height: 4 }],
+        [10, 10, { height: 3 }], [11, 11, { height: 5 }],
+        [11, 11, { terrain: 'grass' }], [11, 11, { terrain: 'water' }],
+    ]) {
+        for (const run of [h, previous]) {
+            run.edit(x, z, update);
+            assert.equal(run.chunksMap.get('0,0').waterShoreDirty, true);
+            run.context.refreshWorldTerrainBrushPreview();
+        }
+        assertWaterEquivalent(h, previous);
+        assert.deepEqual(h.counts, previous.counts);
+    }
+    for (const run of [h, previous]) { run.context.finishWorldBrushStroke(); run.flush(); }
+    assertWaterEquivalent(h, previous);
+    assert.deepEqual(h.counts, { refreshes: 6, generations: 5, meshes: 10, disposed: 10 });
+});
+
+test('connected shoreline crosses the 55 percent threshold without changing previous classification', async () => {
+    const tiles = [[10, 10], [11, 10], [12, 10]];
+    const h = await waterHarness(['0,0'], tiles);
+    const previous = await waterHarness(['0,0'], tiles, true);
+    for (const run of [h, previous]) {
+        for (const [x, z] of [[10, 9], [11, 9], [12, 9], [10, 11]]) run.edit(x, z, { terrain: 'sand' });
+        run.flush();
+        run.context.brushActive = true;
+    }
+    for (const kind of ['sand', 'grass']) {
+        for (const run of [h, previous]) {
+            run.edit(11, 11, { terrain: kind });
+            run.context.refreshWorldTerrainBrushPreview();
+            const regions = run.context.classifyWaterRegions(run.chunksMap.get('0,0').tilesData);
+            assert.deepEqual([...regions.values()], [kind, kind, kind]);
+        }
+        assertWaterEquivalent(h, previous);
+    }
+    for (const run of [h, previous]) { run.context.finishWorldBrushStroke(); run.flush(); }
+    assert.deepEqual(h.counts, previous.counts);
+    assertWaterEquivalent(h, previous);
+});
+
+test('diagonal and cross-chunk connected shores keep the padded-ring dependencies', async () => {
+    const keys = ['0,0', '1,0', '0,1', '1,1'];
+    const tiles = [[32, 32], [33, 32], [33, 31], [33, 30]];
+    const h = await waterHarness(keys, tiles);
+    const previous = await waterHarness(keys, tiles, true);
+    for (const run of [h, previous]) run.context.brushActive = true;
+    for (const [x, z, update] of [
+        [31, 31, { terrain: 'sand' }], [31, 32, { height: 4 }],
+        [32, 31, { terrain: 'swamp' }], [33, 31, { height: 3 }],
+    ]) {
+        for (const run of [h, previous]) {
+            run.edit(x, z, update);
+            run.context.refreshWorldTerrainBrushPreview();
+        }
+        assertWaterEquivalent(h, previous);
+        assert.deepEqual(h.counts, previous.counts);
+    }
+    for (const run of [h, previous]) { run.context.finishWorldBrushStroke(); run.flush(); }
+    assertWaterEquivalent(h, previous);
+});
+
+test('dry events cannot clear queued shore changes and multiple edits coalesce in a stroke', async () => {
+    const h = await waterHarness();
+    const previous = await waterHarness(['0,0'], [[11, 11]], true);
+    for (const run of [h, previous]) {
+        run.context.brushActive = true;
+        run.edit(10, 11, { terrain: 'sand' });
+        run.edit(11, 10, { terrain: 'rock' });
+        run.edit(20, 20, { terrain: 'sand' });
+        assert.equal(run.chunksMap.get('0,0').waterShoreDirty, true);
+        run.context.refreshWorldTerrainBrushPreview();
+        assert.equal(run.counts.generations, 1);
+        run.edit(21, 20, { terrain: 'sand' });
+        run.context.refreshWorldTerrainBrushPreview();
+        run.context.finishWorldBrushStroke(); run.flush();
+    }
+    assert.equal(h.counts.generations, 1);
+    assert.equal(previous.counts.generations, 2);
+    assertWaterEquivalent(h, previous);
+    assertLiveHeightGeometry(h, h.chunksMap.get('0,0'));
+});
+
+test('loading a neighbor after a dry boundary edit still refreshes water and shores', async () => {
+    const keys = ['0,0', '1,0'];
+    const tiles = [[31, 10], [32, 10], [33, 10]];
+    const h = await waterHarness(keys, tiles);
+    const previous = await waterHarness(keys, tiles, true);
+    for (const run of [h, previous]) {
+        const neighbor = run.chunksMap.get('1,0');
+        run.chunksMap.delete('1,0');
+        run.context.refreshWorldTerrainNeighborhood(0, 0, null, null, false, false, true, true);
+        run.edit(31, 20, { terrain: 'sand' }); run.flush();
+        const before = run.counts.generations;
+        run.chunksMap.set('1,0', neighbor);
+        // addChunk's existing load invalidation (without unrelated object creation).
+        run.context.refreshWorldTerrainNeighborhood(1, 0, null, null, true, true, true, true, true);
+        run.flush();
+        assert.equal(run.counts.generations - before, 2);
+    }
+    assertWaterEquivalent(h, previous);
+});
+
+test('standalone terrain events flush without a brush and retain necessary shore updates', async () => {
+    const h = await waterHarness();
+    const previous = await waterHarness(['0,0'], [[11, 11]], true);
+    for (const [x, z, update, total] of [
+        [20, 20, { terrain: 'sand' }, 0],
+        [20, 20, { height: 4 }, 0],
+        [10, 11, { terrain: 'sand' }, 1],
+        [11, 11, { height: 3 }, 2],
+    ]) {
+        for (const run of [h, previous]) { run.edit(x, z, update); run.flush(); }
+        assert.equal(h.counts.generations, total);
+        assertWaterEquivalent(h, previous);
+    }
+    assert.equal(previous.counts.generations, 3);
+});
 
 test('height preview raises and lowers mixed soils with correct normals and foundations without repainting', async () => {
     const h = await harness();

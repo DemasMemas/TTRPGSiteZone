@@ -1,6 +1,7 @@
 // static/js/ui_interactions.js
 // Объединённый модуль: глобальное состояние, горячие клавиши и перетаскивание панелей
 import { isTypingTarget } from './cameraPan.js';
+import { initChatPanel } from './chatPanel.js';
 
 // ---------- Часть 1: Глобальное состояние (бывший state.js) ----------
 const AppState = {
@@ -91,6 +92,7 @@ function makeDraggable(panel, handle, panelId) {
 
     const onMouseDown = (e) => {
         if (e.button !== 0) return;
+        if (panel.dataset.chatDocked === 'true') return;
         if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"], [draggable="true"], .toggle-btn, .close, .character-card, .character-card *')) return;
         e.preventDefault();
         panel.style.transition = 'none';
@@ -181,7 +183,7 @@ export function initDraggablePanels() {
             savePanelState(panelId, { collapsed });
         });
         const saved = loadPanelState(panelId);
-        if (saved) {
+        if (saved && panelId !== 'panel-chat') {
             if (saved.collapsed) {
                 panel.classList.add('collapsed');
                 toggleBtn.innerHTML = '▶';
@@ -200,6 +202,7 @@ export function initDraggablePanels() {
         makeDraggable(modalContent, modalContent, panelId);
         modalContent.dataset.draggableInitialized = 'true';
     });
+    initChatPanel();
 }
 
 // ---------- Часть 3: Горячие клавиши ----------
@@ -450,13 +453,13 @@ function handleKeyDown(e) {
 
     if (e.altKey && e.code === 'Equal') {
         e.preventDefault();
-        const newRadius = Math.min(5, Math.max(0, AppState.brushRadius + 1));
+        const newRadius = Math.min(4, Math.max(0, AppState.brushRadius + 1));
         setBrushRadiusFromInput(newRadius);
         return;
     }
     if (e.altKey && e.code === 'Minus') {
         e.preventDefault();
-        const newRadius = Math.min(5, Math.max(0, AppState.brushRadius - 1));
+        const newRadius = Math.min(4, Math.max(0, AppState.brushRadius - 1));
         setBrushRadiusFromInput(newRadius);
         return;
     }
@@ -554,7 +557,7 @@ function handleWheel(e) {
         e.preventDefault();
         e.stopPropagation();
         const delta = e.deltaY > 0 ? -1 : 1;
-        const newRadius = Math.min(5, Math.max(0, AppState.brushRadius + delta));
+        const newRadius = Math.min(4, Math.max(0, AppState.brushRadius + delta));
         setBrushRadiusFromInput(newRadius);
         return;
     }

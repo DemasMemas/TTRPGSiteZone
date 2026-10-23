@@ -2,6 +2,7 @@
 import { showNotification } from './utils.js';
 import { Server } from './api.js';
 import { loadLobbyCharacters } from './characters.js';
+import { chatMessageKind } from './chatPanel.js';
 import {
     setGmId,
     getUserColorHex,
@@ -141,7 +142,9 @@ export function addMessage(username, text, timestamp) {
     const chat = document.getElementById('chat');
     if (!chat) return;
     const msgDiv = document.createElement('div');
-    msgDiv.className = 'message';
+    const kind = chatMessageKind(username, text);
+    msgDiv.className = `message chat-${kind}${kind === 'event' ? ' system' : ''}`;
+    msgDiv.dataset.messageKind = kind;
     msgDiv.style.whiteSpace = 'pre-wrap';
     const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : '';
     const usernameSpan = document.createElement('span');
@@ -150,6 +153,11 @@ export function addMessage(username, text, timestamp) {
     const timestampSpan = document.createElement('span');
     timestampSpan.className = 'timestamp';
     timestampSpan.textContent = timeStr;
+    if (kind !== 'human') {
+        const badge = document.createElement('span');
+        badge.className = 'message-kind'; badge.textContent = kind === 'roll' ? 'Бросок' : 'Событие';
+        msgDiv.appendChild(badge);
+    }
     msgDiv.append(
         usernameSpan,
         document.createTextNode(` ${text} `),

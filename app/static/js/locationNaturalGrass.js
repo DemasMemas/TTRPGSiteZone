@@ -23,17 +23,31 @@ function patch(x, z) {
     return a * (1 - sz) + b * sz;
 }
 
-export function naturalGrassPlacements(tiles, isCovered = () => false) {
+const emptyStats = () => ({ grassTiles: 0, plainTiles: 0, forestTiles: 0,
+    densityRejected: 0, blendRejected: 0, floorRejected: 0 });
+
+export function naturalGrassPlacements(tiles, isCovered = () => false, chunk = null) {
     const medium01 = [];
-    const grassTiles = tiles.reduce((sum, row) => sum + row.filter(tile => tile.terrain === 'grass').length, 0);
-    const stats = { grassTiles, plainTiles: 0, forestTiles: 0,
-        densityRejected: 0, blendRejected: 0, floorRejected: 0 };
-    for (let z = 0; z < tiles.length; z++) {
-        for (let x = 0; x < tiles[z].length; x++) {
+    const stats = emptyStats();
+    const statsByChunk = new Map();
+    const count = (field, local) => { if (local) { stats[field]++; local[field]++; } };
+    // Roots can extend 0.28m beyond their source tile. Include the adjoining
+    // source tiles, then keep only roots belonging to the requested render chunk.
+    const minZ = chunk ? Math.max(0, chunk.z * CHUNK_SIZE - 1) : 0;
+    const maxZ = chunk ? Math.min(tiles.length, (chunk.z + 1) * CHUNK_SIZE + 1) : tiles.length;
+    for (let z = minZ; z < maxZ; z++) {
+        const minX = chunk ? Math.max(0, chunk.x * CHUNK_SIZE - 1) : 0;
+        const maxX = chunk ? Math.min(tiles[z].length, (chunk.x + 1) * CHUNK_SIZE + 1) : tiles[z].length;
+        for (let x = minX; x < maxX; x++) {
+            const key = `${Math.floor(x / CHUNK_SIZE)},${Math.floor(z / CHUNK_SIZE)}`;
+            const ownStats = !chunk || key === `${chunk.x},${chunk.z}`;
+            if (ownStats && !statsByChunk.has(key)) statsByChunk.set(key, emptyStats());
+            const local = ownStats ? statsByChunk.get(key) : null;
             const tile = tiles[z][x];
             if (tile.terrain !== 'grass') continue;
+            count('grassTiles', local);
             const forest = tile.grass_subtype === 'forest';
-            stats[forest ? 'forestTiles' : 'plainTiles']++;
+            count(forest ? 'forestTiles' : 'plainTiles', local);
             const density = patch(x + 0.5, z + 0.5);
             const candidates = forest ? 4 : 5;
             const fringe = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx, dz]) => {
@@ -46,7 +60,7 @@ export function naturalGrassPlacements(tiles, isCovered = () => false) {
                     ? fringe[Math.min(fringe.length - 1,
                         Math.floor(hash(x, z, 105) * fringe.length))] : null;
                 if (index && !edge && hash(x, z, 110 + index) >= chance) {
-                    stats.densityRejected++;
+                    count('densityRejected', local);
                     continue;
                 }
                 const px = edge ? x + (edge[0] > 0 ? 1.02 : edge[0] < 0 ? -0.02
@@ -58,15 +72,17 @@ export function naturalGrassPlacements(tiles, isCovered = () => false) {
                     : index === 0 ? z + 0.32 + hash(x, z, 310) * 0.36
                         : edgePosition(z, hash(x, z, 310 + index), 710 + x * 5 + index);
                 if (!acceptsDetail(tiles, 'grass', px, pz, 990 + index)) {
-                    stats.blendRejected++;
+                    count('blendRejected', local);
                     continue;
                 }
                 if (isCovered(px, pz) || isCovered(px - 0.14, pz)
                     || isCovered(px + 0.14, pz) || isCovered(px, pz - 0.14)
                     || isCovered(px, pz + 0.14)) {
-                    stats.floorRejected++;
+                    count('floorRejected', local);
                     continue;
                 }
+                if (chunk && (Math.floor(px / CHUNK_SIZE) !== chunk.x
+                    || Math.floor(pz / CHUNK_SIZE) !== chunk.z)) continue;
                 medium01.push({ x: px, z: pz,
                     size: 0.86 + hash(x, z, 410 + index) * 0.28,
                     width: 0.9 + hash(x, z, 610 + index) * 0.25,
@@ -77,7 +93,7 @@ export function naturalGrassPlacements(tiles, isCovered = () => false) {
             }
         }
     }
-    return { medium01, stats };
+    return { medium01, stats, statsByChunk };
 }
 
 export function loadNaturalGrassAssets(THREE, outputEncoding = THREE.LinearEncoding) {
@@ -134,9 +150,18 @@ export function loadNaturalGrassAssets(THREE, outputEncoding = THREE.LinearEncod
 export function addNaturalGrassInstances(THREE, group, placements, assets, getHeight) {
     const dummy = new THREE.Object3D();
     const color = new THREE.Color();
-    const renderedCounts = { medium01: 0 };
-    const chunksByKind = { medium01: 0 };
+    const state = group.userData.naturalGrassChunks ??= new Map();
+    const resources = group.userData.naturalGrassResources ??= {};
+    group.userData.naturalGrassBaseTufts ??= group.userData.detailCounts.tufts;
+    for (const [key, stats] of placements.statsByChunk || []) {
+        state.set(key, { stats, created: 0, added: 0, mesh: null });
+    }
     for (const kind of ['medium01']) {
+        for (const plant of placements[kind]) {
+            const key = `${Math.floor(plant.x / CHUNK_SIZE)},${Math.floor(plant.z / CHUNK_SIZE)}`;
+            if (!state.has(key)) state.set(key, { stats: emptyStats(), created: 0, added: 0, mesh: null });
+            state.get(key).created++;
+        }
         const plants = placements[kind].filter(plant => {
             const center = getHeight(plant.x, plant.z);
             return Math.max(
@@ -146,13 +171,15 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
                 Math.abs(center - getHeight(plant.x, plant.z + 0.14)),
             ) < 0.18;
         });
-        renderedCounts[kind] = plants.length;
         if (!plants.length) continue;
         const source = assets[kind];
-        const geometry = source.geometry.clone();
-        // Instance coordinates are chunk-local, so one conservative bound works for every chunk.
-        geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(6, 0, 6), 9.5);
-        const material = source.material.clone();
+        if (!resources[kind]) {
+            const geometry = source.geometry.clone();
+            // Instance coordinates are chunk-local; keep the existing conservative bound.
+            geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(6, 0, 6), 9.5);
+            resources[kind] = { geometry, material: source.material.clone() };
+        }
+        const { geometry, material } = resources[kind];
         const chunks = new Map();
         for (const plant of plants) {
             const cx = Math.floor(plant.x / CHUNK_SIZE);
@@ -183,23 +210,89 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
             mesh.instanceMatrix.needsUpdate = true;
             mesh.instanceColor.needsUpdate = true;
             mesh.userData.naturalGrassKind = kind;
+            mesh.userData.naturalGrassChunk = `${cx},${cz}`;
             mesh.castShadow = false;
             mesh.receiveShadow = false;
             mesh.raycast = () => {};
             group.add(mesh);
+            Object.assign(state.get(`${cx},${cz}`), { mesh, added: chunkPlants.length });
         }
-        chunksByKind[kind] = chunks.size;
     }
+    return naturalGrassSummary(group, assets);
+}
+
+function naturalGrassSummary(group, assets) {
+    const stats = emptyStats();
+    let created = 0, added = 0, chunks = 0;
+    for (const entry of group.userData.naturalGrassChunks.values()) {
+        for (const field of Object.keys(stats)) stats[field] += entry.stats[field];
+        created += entry.created;
+        added += entry.added;
+        if (entry.mesh) chunks++;
+    }
+    const renderedCounts = { medium01: added };
     group.userData.naturalGrassCounts = renderedCounts;
-    group.userData.detailCounts.tufts += renderedCounts.medium01;
-    return { created: { medium01: placements.medium01.length },
+    group.userData.detailCounts.tufts = group.userData.naturalGrassBaseTufts + added;
+    return { stats, created: { medium01: created },
         added: renderedCounts,
-        slopeRejected: { medium01: placements.medium01.length - renderedCounts.medium01 },
-        chunks: chunksByKind,
+        slopeRejected: { medium01: created - added },
+        chunks: { medium01: chunks },
         triangles: Object.fromEntries(['medium01'].map(kind => {
             const geometry = assets[kind].geometry;
             const triangles = (geometry.index ? geometry.index.count
                 : geometry.getAttribute('position').count) / 3;
             return [kind, Math.round(renderedCounts[kind] * triangles)];
         })) };
+}
+
+function releaseUnusedGrassResources(group) {
+    for (const [kind, resources] of Object.entries(group.userData.naturalGrassResources || {})) {
+        if (group.children.some(mesh => mesh.userData.naturalGrassKind === kind)) continue;
+        resources.geometry.dispose();
+        resources.material.dispose(); // Texture atlases belong to the loaded asset, not the chunk.
+        delete group.userData.naturalGrassResources[kind];
+    }
+}
+
+export function disposeNaturalGrassInstances(group) {
+    for (const mesh of [...group.children]) {
+        if (!mesh.userData.naturalGrassKind) continue;
+        group.remove(mesh);
+        mesh.dispose?.(); // Release instance buffers, keeping shared resources until the last chunk.
+    }
+    releaseUnusedGrassResources(group);
+    group.userData.naturalGrassChunks?.clear();
+}
+
+export function updateNaturalGrassInstances(THREE, group, tiles, assets, getHeight, isCovered, changed) {
+    const keys = new Set();
+    for (const { x, z } of changed) {
+        // Height interpolation uses neighboring tiles, plus the +/-0.14m slope
+        // probes. Terrain blending and displaced roots also fit within this halo.
+        for (let cz = Math.max(0, Math.floor((z - 2) / CHUNK_SIZE));
+            cz <= Math.min(Math.ceil(tiles.length / CHUNK_SIZE) - 1, Math.floor((z + 2) / CHUNK_SIZE)); cz++) {
+            for (let cx = Math.max(0, Math.floor((x - 2) / CHUNK_SIZE));
+                cx <= Math.min(Math.ceil(tiles[0].length / CHUNK_SIZE) - 1, Math.floor((x + 2) / CHUNK_SIZE)); cx++) {
+                keys.add(`${cx},${cz}`);
+            }
+        }
+    }
+    for (const key of keys) {
+        const previous = group.userData.naturalGrassChunks.get(key)?.mesh;
+        if (previous) { group.remove(previous); previous.dispose?.(); }
+    }
+    // When every chunk is affected (e.g. a small location's shared corner),
+    // generate once instead of repeatedly visiting overlapping source halos.
+    if (keys.size === group.userData.naturalGrassChunks.size) {
+        addNaturalGrassInstances(THREE, group, naturalGrassPlacements(tiles, isCovered), assets, getHeight);
+    } else {
+        for (const key of keys) {
+            const [x, z] = key.split(',').map(Number);
+            addNaturalGrassInstances(THREE, group,
+                naturalGrassPlacements(tiles, isCovered, { x, z }), assets, getHeight);
+        }
+    }
+    const meshes = [...keys].map(key => group.userData.naturalGrassChunks.get(key)?.mesh).filter(Boolean);
+    releaseUnusedGrassResources(group);
+    return { build: naturalGrassSummary(group, assets), meshes };
 }
