@@ -143,6 +143,11 @@ function makeDraggable(panel, handle, panelId) {
     handle.addEventListener('mousedown', onMouseDown);
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
+    return () => {
+        handle.removeEventListener('mousedown', onMouseDown);
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+    };
 }
 
 function applyPosition(panel, pos) {
@@ -190,7 +195,7 @@ export function initDraggablePanels() {
             }
             if (saved.position) applyPosition(panel, saved.position);
         }
-        makeDraggable(panel, header, panelId);
+        panel._disposeDrag = makeDraggable(panel, header, panelId);
         panel.dataset.draggableInitialized = 'true';
         if (panelId === 'panel-common-tools') {
             const launcher = document.getElementById('common-tools-toggle');

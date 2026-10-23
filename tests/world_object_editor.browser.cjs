@@ -192,6 +192,10 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         console.log('Restored panels screenshot:',panelsScreenshot);
         console.log('PASS: both panels stay closed after reload; collapsed panels stay collapsed; launchers agree with visibility');
         if (process.env.VTT_PANELS_ONLY === '1') return;
+        if (process.env.VTT_WIDGETS_ONLY === '1') {
+            await require('./character_widgets.browser.cjs')({ page, request, token, lobby, login, profile, base, connect, debugPort });
+            return;
+        }
         const playerCharacter=await request(`/lobbies/${lobby.id}/characters`,{name:'Игрок — разведчик',data:{notes:'Keep this note'}},token);
         const npcCharacter=await request(`/lobbies/${lobby.id}/characters`,{name:'НПС — проводник',data:{basic:{is_npc:true}}},token);
         const rules=await request(`/lobbies/${lobby.id}/world-rules`,null,token,'GET');

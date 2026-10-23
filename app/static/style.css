@@ -333,6 +333,82 @@ body {
   pointer-events: auto;
 }
 
+/* The sheet temporarily masks room UI without changing its saved visibility,
+   positions, collapsed state or the local/global scene lifecycle. */
+body.character-sheet-open .ui-overlay > :not(#character-sheet-modal):not(.modal):not(#location-container),
+body.character-sheet-open > :not(.ui-overlay):not(.modal):not(script):not(#canvas-container):not(#delayed-item-tooltip),
+body.character-sheet-open .scene-fps-counter,
+body.character-sheet-open #location-container > :not(#location-canvas),
+body.character-sheet-open #location-canvas > :not(canvas) {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+.sheet-pin {
+  position: absolute; top: 2px; right: 2px; z-index: 3;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; min-width: 18px; padding: 1px; margin: 0; border: 1px solid var(--panel-border);
+  border-radius: 5px; background: var(--input-bg); color: var(--username-color);
+  cursor: pointer; font-size: 14px; vertical-align: middle;
+}
+.sheet-pin:focus-visible { outline: 2px solid var(--username-color); }
+.sheet-pin[aria-pressed="true"] { background: var(--panel-header-bg); }
+.sheet-pinnable-block { position: relative; }
+.sheet-pinnable-block > :is(summary,h4,h5,.zone-label,label):first-child { padding-right: 22px; }
+.sheet-pinnable-block:is(h4,h5) { padding-right: 24px; }
+.sheet-pin-menu { position: absolute; top: 22px; right: 0; z-index: 30; padding: 5px; background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 6px; box-shadow: var(--panel-shadow); }
+.sheet-pin-menu button { display: block; width: 100%; text-align: left; background: var(--input-bg); color: var(--text-color); border: 0; padding: 6px; cursor: pointer; }
+.health-stress-controls { display: flex; align-items: stretch; gap: 4px; height: 38px; }
+.health-stress-controls .health-readonly-value { flex: 1; min-height: 0; }
+.health-stress-controls > button { padding: 0 7px; border-radius: 5px; }
+.sheet-pinnable-field { position: relative; }
+.sheet-pinnable-field > label { padding-right: 24px; }
+.sheet-pinnable-field .sheet-field-pin { position: absolute; top: 0; right: 0; margin: 0; font-size: 12px; }
+.sheet-block-pin { display: flex; align-items: center; gap: 4px; grid-column: 1 / -1; }
+.sheet-widget-anchor { font-size: .75rem; color: var(--text-secondary); }
+#character-widgets { position: absolute; inset: 0; pointer-events: none; }
+.character-widget {
+  pointer-events: auto; width: 330px; max-width: calc(100vw - 30px);
+  box-sizing: border-box; max-height: min(55vh, 420px); overflow: auto;
+  border: 1px solid var(--panel-border); border-radius: 12px;
+  background: var(--panel-bg); box-shadow: var(--panel-shadow);
+}
+.character-widget .panel-header > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: .85rem; }
+.character-widget .panel-content { display: flex; flex-direction: column; gap: 6px; padding: 10px; }
+.character-widget .panel-content > button, .character-widget .panel-header button {
+  border: 1px solid var(--panel-border); border-radius: 6px; padding: 5px 7px;
+  background: var(--input-bg); color: var(--text-color); cursor: pointer; font: inherit; font-size: .8rem;
+}
+.character-widget .panel-content > .widget-character-name { border: 0; padding: 0; color: var(--username-color); text-align: left; }
+.widget-field { display: flex; gap: 8px; align-items: center; justify-content: space-between; font-size: .8rem; }
+.widget-field input:not([type="checkbox"]), .widget-field select {
+  width: 90px; min-width: 0; border: 1px solid var(--panel-border); border-radius: 6px;
+  background: var(--input-bg); color: var(--text-color); padding: 5px;
+}
+.character-widget button:disabled, .character-widget input:disabled, .character-widget select:disabled { opacity: .55; cursor: default; }
+.widget-block-view { display: block; min-width: 0; font-size: .8rem; }
+.widget-block-view input:not([type="checkbox"]), .widget-block-view select, .widget-block-view textarea { max-width: 100%; box-sizing: border-box; min-width: 0; }
+.widget-block-view :is(.health-vitals-grid,.health-needs-panel,.equipment-protection-grid) { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.widget-block-view.health-vitals-grid, .widget-block-view.health-needs-panel { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.widget-block-view [data-widget-effect-index] { grid-template-columns: repeat(2,minmax(0,1fr)) !important; }
+.character-widget-inventory { width: 620px; max-height: calc(100vh - 120px); overflow-x: hidden; }
+.widget-block-view .widget-inventory-row,
+.widget-block-view.widget-inventory-row { display: grid !important; grid-template-columns: minmax(70px,1fr) minmax(70px,1fr) minmax(140px,1.5fr) auto !important; gap: 8px !important; align-items: end !important; }
+.widget-inventory-name { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.widget-inventory-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; margin: 0; }
+.widget-inventory-field > span { color: var(--text-secondary); font-size: 12px; }
+.widget-inventory-field input { width: 100%; }
+.widget-inventory-field > div { display: flex; min-width: 0; }
+.widget-inventory-field > div .number-input { flex: 1; width: 50px; }
+.widget-inventory-field button, .widget-block-view .inventory-item-actions button { flex: 0 0 28px; min-width: 28px; }
+.widget-block-view .inventory-item-actions { flex-wrap: wrap; }
+@media (max-width: 560px) {
+  .widget-block-view .widget-inventory-row { grid-template-columns: repeat(2,minmax(0,1fr)) !important; }
+}
+.widget-block-view [data-widget-control][role="button"] { cursor: pointer; }
+.widget-block-view textarea { width: 100%; min-height: 160px; }
+.widget-block-view :is(input,select,textarea) { background: var(--input-bg); color: var(--text-color); border: 1px solid var(--panel-border); border-radius: 5px; padding: 5px; font: inherit; }
+.widget-block-view .health-readonly-value { background: var(--input-bg); }
+
 /* Global-map controls must not show through the local scene's canvas. */
 body.location-view-active .lobby-menu,
 body.location-view-active #settings-panel,

@@ -28,6 +28,8 @@ import { diffCharacterData, pathTouches } from './characterSheetSync.js';
 import { isWorldDarkTime } from './darknessRules.js';
 import { copyProfileComponent, profileComponentOptions, renderConsumableProfileTree } from './consumableProfileEditor.js';
 import { applyEffectToHealth, createEffectDraft, effectSummary, getEffectTypeOptions, isAlcoholConsumable, normalizeCharacterEffects, normalizeEffectList, summarizeEffectImpact, syncHealthDerivedStatuses } from './effects.js';
+import { initCharacterWidgets, getWidgetSource, resolveWidgetReference, parseWidgetAction } from './characterWidgets.js';
+import { characterWidgetBlocks, findWidgetBlock, projectWidgetBlock, widgetBlockControl } from './characterWidgetBlocks.js';
 
 // ========== 1. СОСТОЯНИЕ И УТИЛИТЫ ==========
 let currentCharacterId = null;
@@ -45,6 +47,9 @@ const AUTO_SAVE_DELAY = 500;
 const pendingWeaponJamActions = new Map();
 let equipmentRenderVersion = 0;
 let equipmentOpenPanels = new Set();
+let sheetSocketHandler = null;
+let widgetOperation = false;
+let widgetContext = false;
 
 // ========== DRAG-AND-DROP ==========
 let draggedItem = null;
@@ -66,6 +71,131 @@ let currentLobbyId = null;
 export function setCurrentLobbyId(id) {
     if (currentLobbyId !== id) allTemplatesCache = null;
     currentLobbyId = id;
+    initCharacterWidgets(id, {
+        socket: getSocket,
+        context: () => ({ id: currentCharacterId, data: currentCharacterData }),
+        ammoCount: getWeaponAmmoCount,
+        run: runCharacterWidget,
+        views: characterWidgetViews,
+    });
+}
+
+async function characterWidgetViews(characterId, references, character) {
+    const foreground = document.body.classList.contains('character-sheet-open');
+    if (foreground && Number(currentCharacterId) !== Number(characterId)) return null;
+    if (!foreground && (widgetOperation || medicalOperationInProgress || widgetDialogOpen())) return null;
+    if (!foreground) widgetOperation = true;
+    try {
+        if (!foreground) {
+            if (autoSaveTimer) await forceSyncCharacter();
+            if (currentCharacterId) await Server.waitForCharacterSave(currentCharacterId);
+            await remoteSheetUpdateQueue;
+            await openCharacterSheet(characterId, 'basic', { background: true, snapshot: true, character });
+        }
+        const root = document.getElementById('sheet-content');
+        return references.map(reference => {
+            const entry = findWidgetBlock(root, currentCharacterData, reference);
+            return entry ? projectWidgetBlock(entry) : null;
+        });
+    } finally { if (!foreground) widgetOperation = false; }
+}
+
+async function invokeWidgetControl(source, value) {
+    if (source.matches('input,select,textarea')) {
+        if (source.type === 'checkbox') source.checked = Boolean(value);
+        else source.value = String(value ?? '');
+        if (!source.checkValidity()) throw new Error(source.validationMessage || 'Некорректное значение');
+        for (const type of ['input', 'change']) {
+            const handler = source[`on${type}`], event = new Event(type, { bubbles: true });
+            source[`on${type}`] = null;
+            try { source.dispatchEvent(event); if (handler) await handler.call(source, event); }
+            finally { source[`on${type}`] = handler; }
+        }
+        const path = source.name || '';
+        if (path === 'health.current' || /^health\.zones\.[^.]+\.(current|max)$/.test(path) || /^skills\./.test(path)) pendingManualFieldPaths.add(path);
+        await forceSyncCharacter();
+        return;
+    }
+    // Observe the promise of the existing global handler even when its inline
+    // onclick does not return it. No stored script or argument is evaluated.
+    const name = source.getAttribute('onclick')?.match(/^(?:window\.)?(\w+)\(/)?.[1];
+    const original = name && window[name];
+    const promises = [];
+    let wrapper;
+    if (typeof original === 'function') {
+        wrapper = function(...args) { const result = original.apply(this, args); promises.push(result); return result; };
+        window[name] = wrapper;
+    }
+    const handler = source.onclick;
+    let returned;
+    if (handler) source.onclick = function(event) { returned = handler.call(this, event); return returned; };
+    try { source.click(); }
+    finally {
+        if (handler) source.onclick = handler;
+        if (wrapper && window[name] === wrapper) window[name] = original;
+    }
+    await Promise.all([returned, ...promises]);
+    if (autoSaveTimer) await forceSyncCharacter();
+}
+
+function widgetDialogOpen() {
+    return [...document.querySelectorAll('.modal')].some(modal => modal.id !== 'character-sheet-modal'
+        && getComputedStyle(modal).display !== 'none' && modal.getClientRects().length > 0);
+}
+
+async function runCharacterWidget(characterId, original, value) {
+    if (widgetOperation || medicalOperationInProgress || widgetDialogOpen()
+        || document.body.classList.contains('character-sheet-open')) throw new Error('Сначала завершите текущее действие');
+    widgetOperation = true;
+    try {
+        if (autoSaveTimer) await forceSyncCharacter();
+        if (currentCharacterId) await Server.waitForCharacterSave(currentCharacterId);
+        await openCharacterSheet(characterId, 'basic', { background: true });
+        if (Number(currentCharacterId) !== Number(characterId) || sheetSaveBlocked) {
+            throw new Error('Персонаж недоступен для изменения');
+        }
+        if (original.kind === 'block') {
+            const source = widgetBlockControl(document.getElementById('sheet-content'), currentCharacterData, original);
+            if (!source || source.disabled || source.readOnly || !currentCharacterCanEdit && !source.hasAttribute('data-sheet-control')) throw new Error('Этот элемент сейчас недоступен');
+            widgetContext = true;
+            if (source.dataset.equipmentOpen) {
+                const panel = source.dataset.equipmentOpen;
+                widgetOperation = false;
+                await openCharacterSheet(characterId, 'equipment');
+                document.querySelector(`#sheet-content [data-equipment-open="${CSS.escape(panel)}"]`)?.click();
+                return;
+            }
+            await invokeWidgetControl(source, value);
+            await Server.waitForCharacterSave(characterId);
+            if (sheetSaveBlocked) throw new Error('Изменение не сохранено. Откройте лист персонажа.');
+            return;
+        }
+        if (!currentCharacterCanEdit) throw new Error('Персонаж недоступен для изменения');
+        const reference = resolveWidgetReference(original, currentCharacterData);
+        const source = reference && getWidgetSource(document.getElementById('sheet-content'), reference);
+        if (!source || source.disabled || source.readOnly) throw new Error('Этот элемент сейчас недоступен. Проверьте лист персонажа.');
+        widgetContext = true;
+        if (reference.kind === 'field') {
+            if (source.type === 'checkbox') source.checked = Boolean(value);
+            else source.value = String(value ?? '');
+            if (!source.checkValidity()) throw new Error(source.validationMessage || 'Некорректное значение');
+            if (source.oninput) await source.oninput(new Event('input', { bubbles: true }));
+            if (source.onchange) await source.onchange(new Event('change', { bubbles: true }));
+            if (reference.path === 'health.current' || /^health\.zones\.[^.]+\.(current|max)$/.test(reference.path) || /^skills\./.test(reference.path)) {
+                pendingManualFieldPaths.add(reference.path);
+            }
+            await forceSyncCharacter();
+            if (sheetSaveBlocked) throw new Error('Изменение не сохранено. Откройте лист персонажа.');
+        } else {
+            // Resolve only an action currently rendered by the authorized sheet.
+            // Stored preferences never execute JavaScript or supply action arguments.
+            const action = parseWidgetAction(source.getAttribute('onclick'));
+            if (!action || typeof window[action.name] !== 'function') throw new Error('Действие недоступно');
+            await window[action.name](...action.args);
+            if (autoSaveTimer) await forceSyncCharacter();
+        }
+        await Server.waitForCharacterSave(characterId);
+    } finally { widgetOperation = false; }
 }
 
 const skillCategories = [
@@ -544,6 +674,7 @@ function initializeDelayedItemTooltips() {
     };
     document.addEventListener('pointermove', (event) => {
         pointer = { x: event.clientX, y: event.clientY };
+        schedule(findAnchor(event.target));
         if (tooltip.style.display !== 'none') position();
     }, true);
     document.addEventListener('pointerover', (event) => {
@@ -2107,13 +2238,14 @@ async function renderCharacterSheet(characterName, data) {
     renderSettingsTab(data);
 
     const form = document.getElementById('character-sheet-form');
-    if (form) {
+    if (form && form.dataset.autosaveInitialized !== 'true') {
         const handleManualFormEdit = event => {
             trackManualCharacterField(event);
             scheduleAutoSave();
         };
         form.addEventListener('input', handleManualFormEdit);
         form.addEventListener('change', handleManualFormEdit);
+        form.dataset.autosaveInitialized = 'true';
     }
 }
 
@@ -3113,9 +3245,9 @@ function renderHealthTab(data, container = null) {
                 </div>
                 <div class="health-field">
                     <label>Стресс</label>
-                    <div style="display:flex;align-items:stretch;gap:4px;">
+                    <div class="health-stress-controls">
                         ${window.isGM ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(-1)" title="Снизить стресс на 1" aria-label="Снизить стресс">−</button>' : ''}
-                        <div class="health-readonly-value" style="min-width:42px;display:flex;align-items:center;justify-content:center;" title="Стресс изменяется игровыми событиями и действиями">${Number(health.stress || 0)}</div>
+                        <div class="health-readonly-value" data-widget-readout="health.stress" data-widget-label="Стресс" style="min-width:42px;display:flex;align-items:center;justify-content:center;" title="Стресс изменяется игровыми событиями и действиями">${Number(health.stress || 0)}</div>
                         ${window.isGM ? '<button type="button" class="btn btn-sm btn-secondary" onclick="adjustCharacterStress(1)" title="Повысить стресс на 1" aria-label="Повысить стресс">+</button>' : ''}
                     </div>
                 </div>
@@ -3163,7 +3295,7 @@ function renderHealthTab(data, container = null) {
                 </div>
             </details>
             <div style="margin: 0 0 14px 0; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);">
-                <div style="font-size: 12px; opacity: 0.78; margin-bottom: 8px;">Активные эффекты и состояния</div>
+                <div data-widget-block="health-summary" style="font-size: 12px; opacity: 0.78; margin-bottom: 8px;">Активные эффекты и состояния</div>
                 <div style="display:flex; flex-wrap:wrap; gap:8px;">
                     ${visibleEffectChips.length ? visibleEffectChips.map((text) => `<span style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.08); font-size:12px;">${escapeHtml(text)}</span>`).join('') : '<span style="opacity:0.7; font-size:12px;">Сейчас нет активных эффектов</span>'}
                 </div>
@@ -3360,7 +3492,7 @@ function renderHealthTab(data, container = null) {
             const treatmentExpired = effect.treatment_window_expired
                 || Number(effect.treatment_window_seconds || 0) <= 0;
             effectsHtml += `
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px;padding:10px 12px;border:1px solid rgba(180,92,70,.4);border-radius:8px;background:rgba(115,48,38,.13);">
+                <div data-widget-effect-index="${index}" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px;padding:10px 12px;border:1px solid rgba(180,92,70,.4);border-radius:8px;background:rgba(115,48,38,.13);">
                     <div style="min-width:0;">
                         <strong style="display:block;color:#e3c0ae;">${escapeHtml(visibleName)}</strong>
                         <span class="text-muted" style="display:block;margin-top:3px;font-size:12px;">${treatmentExpired
@@ -3372,7 +3504,7 @@ function renderHealthTab(data, container = null) {
             return;
         }
         effectsHtml += `
-            <div style="display: grid; grid-template-columns: 1.1fr 0.85fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
+            <div data-widget-effect-index="${index}" style="display: grid; grid-template-columns: 1.1fr 0.85fr 0.7fr 0.8fr auto; gap: 6px; margin-bottom: 6px; align-items: end;">
                 <select class="form-control" name="health.effects.${index}.type" style="width:100%;" ${managedDisabled}>
                     ${effectTypeOptions.map(opt => `<option value="${opt.value}" ${opt.value === selectedType ? 'selected' : ''}>${opt.value === selectedType ? escapeHtml(visibleName) : opt.label}</option>`).join('')}
                 </select>
@@ -3402,7 +3534,7 @@ function renderHealthTab(data, container = null) {
     });
 
     html += `
-        <h4>Эффекты</h4>
+        <section data-widget-block="effects"><h4>Эффекты</h4>
         <div id="effects-container">
             ${effectsHtml}
         </div>
@@ -3410,7 +3542,7 @@ function renderHealthTab(data, container = null) {
             <button type="button" class="btn btn-sm" onclick="addEffect()">+ Добавить эффект</button>
             <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('pain', 1, 2, 'Боль')">Боль</button>
             <button type="button" class="btn btn-sm btn-warning" onclick="applyQuickEffect('exhaustion', 1, 2, 'Истощение')">Истощение</button>
-        </div>
+        </div></section>
         </div>
     `;
 
@@ -4170,7 +4302,7 @@ async function renderEquipmentTab(data) {
                     </div>
                 ` : ''}
                 ${(armor.containers || []).length ? `
-                <div class="armor-containers-row">
+                <div class="armor-containers-row" data-widget-block="armor-containers">
                     ${(armor.containers || []).map((slot, idx) => `
                         <div style="border: 1px solid #666; border-radius: 4px; padding: 5px; width: 180px; background: rgba(0,0,0,0.2);">
                             <div style="display: flex; align-items: center; gap: 5px;">
@@ -4724,7 +4856,7 @@ function renderSlotsUniversal(item, itemPath, depth = 0) {
             `;
         }
     }
-    return `<div class="item-slots-container">${html}</div>`;
+    return `<div class="item-slots-container" data-widget-slots="${escapeHtml(itemPath.join('.'))}">${html}</div>`;
 }
 
 function renderBeltPouches(pouches, pouchTemplates) {
@@ -13194,7 +13326,7 @@ async function renderInventoryTab(data) {
     const movementPenalty = getMovementPenaltyBreakdown(data, rawTotalWeight);
 
     let html = `
-        <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; margin-bottom:15px;">
+        <div data-widget-block="inventory-weight" style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; margin-bottom:15px;">
             <div><strong>Общий вес:</strong> <span id="total-weight-display">${rawTotalWeight.toFixed(1)}</span> кг</div>
             <div>
                 <strong>Штраф веса:</strong> <span id="weight-penalty-display">${movementPenalty.weightPenalty}</span>
@@ -13229,7 +13361,7 @@ async function renderInventoryTab(data) {
             <button type="button" class="btn btn-sm btn-secondary" onclick="openCreateMagazineTemplateModal()">➕ Создать магазин</button>
         </div>` : ''}
         <hr>
-        <h4>Карманы <span style="font-weight:normal;">(заполнено: <span id="pocket-fill-display">${pocketFill}</span> / <input type="number" class="form-control number-input" name="inventory.pocketMaxVolume" value="${pocketMaxVolume}" style="width:70px; display:inline;">)</span></h4>
+        <section data-widget-block="pockets"><h4>Карманы <span style="font-weight:normal;">(заполнено: <span id="pocket-fill-display">${pocketFill}</span> / <input type="number" class="form-control number-input" name="inventory.pocketMaxVolume" value="${pocketMaxVolume}" style="width:70px; display:inline;">)</span></h4>
         <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 5px; font-weight: bold; margin-bottom: 5px; align-items: center;">
             <div>Название</div><div>Вес</div><div>Объём</div><div>Кол-во</div><div></div>
         </div>
@@ -13242,9 +13374,9 @@ async function renderInventoryTab(data) {
             <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker()">➕ Добавить предмет</button>
         </div>` : ''}
 
-        <!-- Пояс -->
+        </section><!-- Пояс -->
         ${eq.belt?.templateId ? `
-        <div class="equipment-group" style="margin-top: 20px;">
+        <div class="equipment-group" data-widget-block="belt" style="margin-top: 20px;">
             <div class="equipment-header" style="display: flex; align-items: center; justify-content: space-between;">
                 <h4>Пояс ${renderCreatedByPlayerBadge(eq.belt)}</h4>
                 <button type="button" class="btn btn-sm btn-danger" onclick="unequipBelt()">Снять</button>
@@ -13278,7 +13410,7 @@ async function renderInventoryTab(data) {
 
         <!-- Разгрузка -->
         ${eq.vest?.templateId ? `
-        <div class="equipment-group" style="margin-top: 20px;">
+        <div class="equipment-group" data-widget-block="vest" style="margin-top: 20px;">
             <div class="equipment-header" style="display: flex; align-items: center; justify-content: space-between;">
                 <h4>Разгрузка ${renderCreatedByPlayerBadge(eq.vest)}</h4>
                 <button type="button" class="btn btn-sm btn-danger" onclick="unequipVest()">Снять</button>
@@ -13316,7 +13448,7 @@ async function renderInventoryTab(data) {
         })()}
         ` : ''}
 
-        <h4 style="margin-top:20px;">Рюкзак</h4>
+        <section data-widget-block="backpack"><h4 style="margin-top:20px;">Рюкзак</h4>
         <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
             ${equippedBackpack ? `
                 <strong>${escapeHtml(equippedBackpack.name || 'Рюкзак')}</strong>
@@ -13332,7 +13464,7 @@ async function renderInventoryTab(data) {
             <button type="button" class="btn btn-sm btn-secondary" onclick="openInventoryTemplatePicker('backpack')">➕ Добавить предмет</button>
         </div>
         ${window.isGM ? `<button type="button" class="btn btn-sm btn-secondary" onclick="addBackpackItemManual()">📝 Свой предмет</button>` : ''}` : ''}
-    `;
+    </section>`;
 
     const viewState = captureSheetViewState();
     container.innerHTML = html;
@@ -13658,6 +13790,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
     itemDiv.style.borderRadius = '4px';
     itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
     itemDiv.dataset.path = path.join(',');
+    itemDiv.dataset.widgetIdentity = JSON.stringify(pouch.id != null ? { id: pouch.id } : { type: pouch.type, name: pouch.name });
 
     const row = document.createElement('div');
     row.style.display = 'grid';
@@ -13678,6 +13811,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
     leftWrapper.appendChild(toggleIcon);
 
     const select = document.createElement('select');
+    select.dataset.widgetKey = 'pouch-type';
     select.className = 'form-control';
     select.innerHTML = '<option value="">-- Выберите подсумок --</option>';
     pouchTemplates.forEach(t => {
@@ -13708,6 +13842,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
     row.appendChild(infoSpan);
 
     const delBtn = document.createElement('button');
+    delBtn.dataset.widgetKey = 'pouch-delete';
     delBtn.className = 'btn btn-sm btn-danger';
     delBtn.textContent = '✕';
     delBtn.onclick = () => {
@@ -13742,6 +13877,7 @@ function renderPouchItem(pouch, index, path, parentContainer, pouchTemplates, al
 
     if (window.isGM && !hasArmorPlateSlot) {
         const addBtn = document.createElement('button');
+        addBtn.dataset.widgetKey = 'pouch-add';
         addBtn.type = 'button';
         addBtn.className = 'btn btn-sm btn-secondary';
         addBtn.textContent = '➕ Добавить внутрь';
@@ -13784,6 +13920,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     itemDiv.style.borderRadius = '4px';
     itemDiv.style.backgroundColor = 'rgba(0,0,0,0.2)';
     itemDiv.dataset.path = path.join(',');
+    itemDiv.dataset.widgetIdentity = JSON.stringify(pouch.id != null ? { id: pouch.id } : { type: pouch.type, name: pouch.name });
 
     const row = document.createElement('div');
     row.style.display = 'flex';
@@ -13804,6 +13941,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     leftWrapper.appendChild(toggleIcon);
 
     const select = document.createElement('select');
+    select.dataset.widgetKey = 'pouch-type';
     select.className = 'form-control';
     select.disabled = !isCustom;
     select.style.flex = '1';
@@ -13840,6 +13978,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
     // Кнопка удаления ТОЛЬКО для кастомной разгрузки
     if (isCustom) {
         const delBtn = document.createElement('button');
+        delBtn.dataset.widgetKey = 'pouch-delete';
         delBtn.type = 'button';
         delBtn.className = 'btn btn-sm btn-danger';
         delBtn.textContent = '✕';
@@ -13878,6 +14017,7 @@ function renderVestPouchItem(pouch, index, path, parentContainer, pouchTemplates
 
     if (window.isGM && !hasArmorPlateSlot) {
         const addBtn = document.createElement('button');
+        addBtn.dataset.widgetKey = 'pouch-add';
         addBtn.type = 'button';
         addBtn.className = 'btn btn-sm btn-secondary';
         addBtn.textContent = '➕ Добавить внутрь';
@@ -15061,6 +15201,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
 
     const itemPath = parentPath.concat(index);
     itemDiv.dataset.path = itemPath.join(',');
+    itemDiv.dataset.widgetIdentity = JSON.stringify(item.id != null ? { id: item.id } : { templateId: item.templateId, name: item.name, category: item.category });
 
     // Если предмет — контейнер, делаем его drop-целью (закрытый контейнер)
     const isArtifactCont = isArtifactContainer(item);
@@ -15081,6 +15222,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         nameCell.textContent = item.name;
     } else {
         nameCell = document.createElement('input');
+        nameCell.dataset.widgetKey = 'name';
         nameCell.type = 'text';
         nameCell.className = 'form-control';
         nameCell.value = item.name || '';
@@ -15190,6 +15332,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
 
     // --- Вес ---
     const weightInput = document.createElement('input');
+    weightInput.dataset.widgetKey = 'weight';
     weightInput.type = 'number';
     weightInput.className = 'form-control number-input';
     weightInput.value = item.weight || 0;
@@ -15197,6 +15340,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
 
     // --- Объём ---
     const volumeInput = document.createElement('input');
+    volumeInput.dataset.widgetKey = 'volume';
     volumeInput.type = 'number';
     volumeInput.className = 'form-control number-input';
     volumeInput.value = item.volume || 0;
@@ -15209,6 +15353,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     qtyCell.style.gap = '4px';
 
     const qtyDownBtn = document.createElement('button');
+    qtyDownBtn.dataset.widgetKey = 'quantity-down';
     qtyDownBtn.type = 'button';
     qtyDownBtn.className = 'btn btn-sm btn-secondary';
     qtyDownBtn.textContent = '−';
@@ -15219,10 +15364,11 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     qtyDownBtn.style.lineHeight = '1';
     qtyDownBtn.onclick = (e) => {
         e.stopPropagation();
-        window.adjustBackpackItemQuantityAtPath(itemPath.join(','), -1);
+        return window.adjustBackpackItemQuantityAtPath(itemPath.join(','), -1);
     };
 
     const qtyInput = document.createElement('input');
+    qtyInput.dataset.widgetKey = 'quantity';
     qtyInput.type = 'number';
     qtyInput.className = 'form-control number-input';
     qtyInput.style.minWidth = '54px';
@@ -15231,6 +15377,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     qtyInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'quantity', e.target.value);
 
     const qtyUpBtn = document.createElement('button');
+    qtyUpBtn.dataset.widgetKey = 'quantity-up';
     qtyUpBtn.type = 'button';
     qtyUpBtn.className = 'btn btn-sm btn-secondary';
     qtyUpBtn.textContent = '+';
@@ -15241,7 +15388,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     qtyUpBtn.style.lineHeight = '1';
     qtyUpBtn.onclick = (e) => {
         e.stopPropagation();
-        window.adjustBackpackItemQuantityAtPath(itemPath.join(','), 1);
+        return window.adjustBackpackItemQuantityAtPath(itemPath.join(','), 1);
     };
 
     // Отключаем временно draggable у родителя при взаимодействии с инпутами (чтобы не мешать редактированию)
@@ -15261,6 +15408,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
 
     // --- Кнопки действий ---
     const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'inventory-item-actions';
     actionsDiv.style.display = 'flex';
     actionsDiv.style.gap = '5px';
     actionsDiv.style.alignItems = 'center';
@@ -15268,6 +15416,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
 
     // Удаление
     const delBtn = document.createElement('button');
+    delBtn.dataset.widgetKey = 'delete';
     delBtn.type = 'button';
     delBtn.className = 'btn btn-sm btn-danger';
     delBtn.textContent = '✕';
@@ -15279,6 +15428,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     delBtn.onclick = () => removeBackpackItemAtPath(itemPath.join(','));
     actionsDiv.appendChild(delBtn);
     const dropBtn = document.createElement('button');
+    dropBtn.dataset.widgetKey = 'drop';
     dropBtn.type = 'button';
     dropBtn.className = 'btn btn-sm btn-warning';
     dropBtn.textContent = '⇩';
@@ -15299,6 +15449,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     'device', 'headphones', 'glasses', 'gloves', 'jewelry'];
     if (item.isEquippable || equippableCategories.includes(item.category)) {
         const equipBtn = document.createElement('button');
+        equipBtn.dataset.widgetKey = 'equip';
         equipBtn.type = 'button';
         equipBtn.className = 'btn btn-sm btn-primary';
         equipBtn.textContent = '↑';
@@ -15311,27 +15462,27 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
         equipBtn.onclick = (e) => {
             e.stopPropagation();
             const category = item.category;
-            if (category === 'armor') equipArmorFromInventory(itemPath);
-            else if (category === 'helmet') equipHelmetFromInventory(itemPath);
-            else if (category === 'gas_mask') equipGasMaskFromInventory(itemPath);
-            else if (category === 'weapon') equipWeaponFromInventory(itemPath);
-            else if (category === 'belt') equipBeltFromInventory(itemPath);
-            else if (category === 'vest') equipVestFromInventory(itemPath);
-            else if (category === 'backpack') equipBackpackFromInventory(itemPath);
-            else if (category === 'device' || category === 'detector') equipDetectorFromInventory(itemPath);
-            else if (category === 'melee_weapon') equipMeleeWeaponFromInventory(itemPath);
-            else if (category === 'headphones') equipHeadphonesFromInventory(itemPath);
-            else if (category === 'glasses') equipGlassesFromInventory(itemPath);
-            else if (category === 'gloves') equipGlovesFromInventory(itemPath);
+            if (category === 'armor') return equipArmorFromInventory(itemPath);
+            else if (category === 'helmet') return equipHelmetFromInventory(itemPath);
+            else if (category === 'gas_mask') return equipGasMaskFromInventory(itemPath);
+            else if (category === 'weapon') return equipWeaponFromInventory(itemPath);
+            else if (category === 'belt') return equipBeltFromInventory(itemPath);
+            else if (category === 'vest') return equipVestFromInventory(itemPath);
+            else if (category === 'backpack') return equipBackpackFromInventory(itemPath);
+            else if (category === 'device' || category === 'detector') return equipDetectorFromInventory(itemPath);
+            else if (category === 'melee_weapon') return equipMeleeWeaponFromInventory(itemPath);
+            else if (category === 'headphones') return equipHeadphonesFromInventory(itemPath);
+            else if (category === 'glasses') return equipGlassesFromInventory(itemPath);
+            else if (category === 'gloves') return equipGlovesFromInventory(itemPath);
             else if (category === 'jewelry') {
                 const sub = item.subcategory;
-                if (sub === 'ring') equipRingFromInventory(itemPath);
-                else if (sub === 'necklace' || sub === 'amulet') equipNecklaceFromInventory(itemPath);
-                else if (sub === 'earrings') equipEarringsFromInventory(itemPath);
+                if (sub === 'ring') return equipRingFromInventory(itemPath);
+                else if (sub === 'necklace' || sub === 'amulet') return equipNecklaceFromInventory(itemPath);
+                else if (sub === 'earrings') return equipEarringsFromInventory(itemPath);
                 else if (sub === 'bracelet') {
                     const eq = currentCharacterData.equipment || {};
-                    if (!eq.bracelet1?.templateId) equipBraceletFromInventory(itemPath, 1);
-                    else if (!eq.bracelet2?.templateId) equipBraceletFromInventory(itemPath, 2);
+                    if (!eq.bracelet1?.templateId) return equipBraceletFromInventory(itemPath, 1);
+                    else if (!eq.bracelet2?.templateId) return equipBraceletFromInventory(itemPath, 2);
                     else showNotification('Оба слота браслетов заняты');
                 }
                 else showNotification('Неизвестный тип бижутерии');
@@ -15343,6 +15494,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     // На пояс
     if (item.category === 'helmet' || item.category === 'gas_mask') {
         const beltBtn = document.createElement('button');
+        beltBtn.dataset.widgetKey = 'belt';
         beltBtn.type = 'button';
         beltBtn.className = 'btn btn-sm btn-secondary';
         beltBtn.textContent = '↓';
@@ -15364,6 +15516,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     const isBattery = (item.category === 'device' && item.subcategory === 'battery');
     if ((usableCategories.includes(item.category) || item.attributes?.usable) && !isBattery) {
         const useBtn = document.createElement('button');
+        useBtn.dataset.widgetKey = 'use';
         useBtn.type = 'button';
         useBtn.className = 'btn btn-sm btn-success';
         useBtn.textContent = '▶';
@@ -15813,18 +15966,25 @@ window.deleteCharacterFromSheet = function() {
 };
 
 // ========== 9. ПУБЛИЧНЫЕ ФУНКЦИИ ==========
-export async function openCharacterSheet(characterId, tabId = 'basic') {
+export async function openCharacterSheet(characterId, tabId = 'basic', options = {}) {
+    if (!options.background && (widgetOperation || widgetContext && widgetDialogOpen())) {
+        showNotification('Сначала завершите действие виджета', 'system');
+        return;
+    }
     if (medicalOperationInProgress) {
         showNotification('Дождитесь завершения применения предмета', 'system');
         return;
     }
     if (Number(currentCharacterId) !== Number(characterId)) expandedInventoryContainers.clear();
     currentCharacterId = characterId;
-    window.currentCharacterId = characterId;
-    localStorage.setItem('currentCharacterId', String(characterId));
+    if (!options.snapshot) {
+        window.currentCharacterId = characterId;
+        localStorage.setItem('currentCharacterId', String(characterId));
+    }
     try {
-        const character = await Server.getCharacter(characterId);
+        const character = options.character || await Server.getCharacter(characterId);
         if (character.data?.is_mutant || character.data?.basic?.is_mutant) {
+            if (options.background) throw new Error('Этот виджет относится к листу персонажа другого типа');
             currentCharacterId = null;
             window.currentCharacterId = null;
             localStorage.removeItem('currentCharacterId');
@@ -15879,16 +16039,22 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
         await renderCharacterSheet(character.name, currentCharacterData);
         applySheetEditPermissions();
         switchSheetTab(tabId);
-        document.getElementById('character-sheet-modal').style.display = 'flex';
+        if (!options.background) {
+            widgetContext = false;
+            document.body.classList.add('character-sheet-open');
+            document.getElementById('character-sheet-modal').style.display = 'flex';
+            document.dispatchEvent(new CustomEvent('character-sheet-opened'));
+        }
 
         const socket = getSocket();
-        if (socket) {
+        if (socket && !options.snapshot) {
             socket.emit('join_character', { token: localStorage.getItem('access_token'), character_id: characterId });
-            socket.off('character_data_updated');
-            socket.on('character_data_updated', async (data) => {
+            if (sheetSocketHandler) socket.off('character_data_updated', sheetSocketHandler);
+            sheetSocketHandler = async (data) => {
                 rememberCharacterSnapshots(data);
                 if (Number(data.character_id) === Number(currentCharacterId)) {
                     if (Server.isOwnCharacterSave(data.save_id)) return;
+                    if (widgetOperation) { rememberPendingSheetRemoteUpdate(data.updates.data); return; }
                     if (medicalOperationInProgress) {
                         if (!medicalRemoteUpdate || Number(data.updates.data?._revision) > Number(medicalRemoteUpdate.data?._revision)) {
                             medicalRemoteUpdate = { character_id: Number(data.character_id), data: data.updates.data };
@@ -15902,9 +16068,16 @@ export async function openCharacterSheet(characterId, tabId = 'basic') {
                     if (Number(data.updates.data?._revision) < Number(currentCharacterData?._revision)) return;
                     await queueRemoteSheetData(data.updates.data, currentCharacterId);
                 }
-            });
+            };
+            socket.on('character_data_updated', sheetSocketHandler);
         }
     } catch (error) {
+        if (options.background) {
+            currentCharacterId = null;
+            currentCharacterData = null;
+            currentCharacterCanEdit = false;
+            throw error;
+        }
         showNotification(error.message);
     }
 }
@@ -15938,11 +16111,13 @@ export function closeCharacterSheet() {
         showNotification('Дождитесь завершения применения предмета', 'system');
         return;
     }
+    if (autoSaveTimer) void forceSyncCharacter();
     const socket = getSocket();
     if (socket && currentCharacterId) {
         socket.emit('leave_character', { token: localStorage.getItem('access_token'), character_id: currentCharacterId });
     }
     document.getElementById('character-sheet-modal').style.display = 'none';
+    document.body.classList.remove('character-sheet-open');
     currentCharacterId = null;
     currentCharacterData = null;
     pendingSheetRemoteUpdate = null;
@@ -15950,6 +16125,7 @@ export function closeCharacterSheet() {
     autoSaveTimer = null;
     draggedItem = null;
     draggedItemPath = null;
+    document.dispatchEvent(new CustomEvent('character-sheet-closed'));
 }
 
 export function exportCharacter() {
