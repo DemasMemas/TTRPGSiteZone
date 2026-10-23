@@ -18,6 +18,7 @@ test('healing a mutant updates its existing list row without rebuilding the grou
     const group = { open: true, querySelectorAll: () => [row] };
     const context = vm.createContext({
         document: { getElementById: () => group },
+        lobbyCharacters: [{ id: 7, data: { health: { current: 0, max: 50 }, notes: 'keep' } }],
     });
     vm.runInContext(source.slice(start, end), context);
 
@@ -25,6 +26,8 @@ test('healing a mutant updates its existing list row without rebuilding the grou
 
     assert.equal(label.textContent, '50/50 ОЗ');
     assert.equal(group.open, true);
+    assert.equal(context.lobbyCharacters[0].data.health.current, 50);
+    assert.equal(context.lobbyCharacters[0].data.notes, 'keep');
     assert.match(source, /const result = await Server\.healCharacterFully\(currentLobbyId, characterId\);\s*updateMutantHealthInList\(characterId, result\.data\?\.health\);\s*close\(\);\s*await openMutantCard\(characterId, \{ \.\.\.character, data: result\.data \}\)/);
 });
 

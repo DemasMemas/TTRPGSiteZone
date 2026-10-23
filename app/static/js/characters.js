@@ -1,18 +1,34 @@
 // static/js/characters.js
 import { Server } from './api.js';
 import { showNotification } from './utils.js';
+import { createCharacterFolderPanel, createCharacterFolderStore } from './characterFolders.js';
 
 let currentLobbyId;
 let mutantCatalog = [];
 let mutantsBelongToGm = true;
+let renderFolderPanel;
+let characterListRequest = 0;
+let folderStore;
+let lobbyCharacters = [];
+let folderStorageHandler;
 
 export function initCharacters(lobbyId) {
     currentLobbyId = lobbyId;
+    renderFolderPanel = createCharacterFolderPanel(lobbyId, localStorage.getItem('user_id'));
+    folderStore = createCharacterFolderStore(lobbyId, localStorage.getItem('user_id'));
+    if (folderStorageHandler) window.removeEventListener('storage', folderStorageHandler);
+    folderStorageHandler = event => {
+        if (event.key === folderStore.key || event.key === null) displayLobbyCharacters(lobbyCharacters);
+    };
+    window.addEventListener('storage', folderStorageHandler);
 }
 
 export async function loadLobbyCharacters() {
+    const generation = ++characterListRequest;
     try {
         const characters = await Server.getLobbyCharacters(currentLobbyId);
+        if (generation !== characterListRequest) return;
+        lobbyCharacters = characters;
         displayLobbyCharacters(characters);
     } catch (error) {
         console.error('Error loading characters', error);
@@ -22,18 +38,14 @@ export async function loadLobbyCharacters() {
 function displayLobbyCharacters(characters) {
     const container = document.getElementById('lobby-characters-list');
     if (!container) return;
+    const npcButton = document.getElementById('create-npc-btn');
+    if (npcButton) npcButton.style.display = window.isGM ? 'inline-block' : 'none';
+    const creationButtons = [...document.querySelectorAll('[data-character-create]')];
     const expandedMutantGroups = new Set(
         [...container.querySelectorAll('details.mutant-group[open]')]
             .map(group => group.dataset.groupKey)
             .filter(Boolean)
     );
-    container.innerHTML = '';
-    if (characters.length === 0) {
-        container.innerHTML = '<p>В комнате пока нет персонажей</p>';
-        return;
-    }
-    const regularCharacters = characters.filter(char => !char.data?.is_mutant && !char.data?.basic?.is_mutant);
-    const mutants = characters.filter(char => char.data?.is_mutant || char.data?.basic?.is_mutant);
 
     const appendCharacterCard = (char, target) => {
         const charDiv = document.createElement('div');
@@ -64,28 +76,12 @@ function displayLobbyCharacters(characters) {
         target.appendChild(charDiv);
     };
 
-    if (regularCharacters.length) {
-        const heading = document.createElement('div');
-        heading.className = 'character-list-heading';
-        heading.textContent = 'Персонажи';
-        container.appendChild(heading);
-        regularCharacters.forEach(char => appendCharacterCard(char, container));
-    }
-
-    if (mutants.length) {
-        const heading = document.createElement('div');
-        heading.className = 'character-list-heading mutant-list-heading';
-        heading.innerHTML = '<span>Мутанты</span>';
-        if (window.isGM) {
-            const ownerOption = document.createElement('label');
-            ownerOption.className = 'mutant-owner-option';
-            ownerOption.innerHTML = `<input type="checkbox" id="mutants-belong-to-gm" ${mutantsBelongToGm ? 'checked' : ''}> Принадлежат ГМу`;
-            ownerOption.querySelector('input').addEventListener('change', event => {
-                mutantsBelongToGm = event.target.checked;
-            });
-            heading.appendChild(ownerOption);
+    const renderCharacters = (subset, target, category) => {
+        if (category !== 'mutants') {
+            subset.forEach(char => appendCharacterCard(char, target));
+            return;
         }
-        container.appendChild(heading);
+        const mutants = subset;
         const groups = new Map();
         mutants.forEach(char => {
             const type = char.data?.basic?.mutant_type || char.data?.mutant?.profile || 'Мутант';
@@ -164,12 +160,35 @@ function displayLobbyCharacters(characters) {
                 });
                 details.appendChild(add);
             }
-            container.appendChild(details);
+            target.appendChild(details);
         });
-    }
+    };
+    renderFolderPanel({ container, characters, organization: folderStore.read(), renderCharacters,
+        renderCategoryOptions(category, target) {
+            for (const button of creationButtons) {
+                if (button.dataset.characterCreate === category) target.appendChild(button);
+            }
+            if (category !== 'mutants' || !window.isGM) return;
+            const ownerOption = document.createElement('label');
+            ownerOption.className = 'mutant-owner-option';
+            ownerOption.innerHTML = `<input type="checkbox" id="mutants-belong-to-gm" ${mutantsBelongToGm ? 'checked' : ''}> Принадлежат ГМу`;
+            ownerOption.querySelector('input').addEventListener('change', event => { mutantsBelongToGm = event.target.checked; });
+            target.appendChild(ownerOption);
+        },
+        mutate(path, method, payload) {
+            try {
+                folderStore.mutate(path, method, payload, characters);
+                displayLobbyCharacters(characters);
+            } catch (error) { showNotification(error.message, 'error'); }
+        },
+    });
 }
 
 export function updateMutantHealthInList(characterId, health) {
+    const cached = lobbyCharacters.find(character => Number(character.id) === Number(characterId));
+    if (cached && health) {
+        cached.data = { ...cached.data, health: { ...cached.data?.health, ...health } };
+    }
     const container = document.getElementById('lobby-characters-list');
     const row = [...(container?.querySelectorAll('.mutant-instance-row') || [])]
         .find(item => item.dataset.characterId === String(characterId));
@@ -342,10 +361,11 @@ export async function createCharacter(name, data) {
     }
 }
 
-export function showCreateCharacterForm() {
+export function showCreateCharacterForm(isNpc = false) {
+    if (isNpc && !window.isGM) return;
     const name = prompt('Введите имя персонажа:');
     if (!name) return;
-    createCharacter(name, {});
+    createCharacter(name, isNpc ? { basic: { is_npc: true } } : {});
 }
 
 function escapeHtml(value) {

@@ -598,6 +598,8 @@ body.location-view-active .world-group-context-menu {
   flex-direction: column;
   gap: 10px;
 }
+#panel-characters { width: 340px; max-width: calc(100vw - 30px); box-sizing: border-box; }
+.character-category > [data-character-create] { align-self: flex-start; }
 .character-card {
   background: rgba(255,255,255,0.05);
   border-radius: 12px;
@@ -609,6 +611,22 @@ body.location-view-active .world-group-context-menu {
   margin-bottom: 5px;
   cursor: pointer;
 }
+.character-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.character-tabs button { min-width: 0; padding: 7px 4px; font-size: 0.72rem; white-space: normal; overflow-wrap: anywhere; }
+.character-tabs [aria-selected="true"] { background: var(--username-color); color: var(--bg-color, #191d15); }
+.character-category { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.character-category[hidden] { display: none; }
+.character-folder-root, .character-folder-contents { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.character-folder { border: 1px solid var(--panel-border); border-radius: 8px; min-width: 0; }
+.character-folder > summary { padding: 9px; cursor: pointer; overflow-wrap: anywhere; }
+.character-folder-contents { padding: 7px; }
+.character-folder-actions { display: flex; gap: 4px; flex-wrap: wrap; padding: 0 7px; }
+.character-folder-actions button { font-size: 0.68rem; padding: 4px 6px; }
+.character-folder-empty { margin: 3px 0; color: var(--text-muted); font-size: 0.75rem; }
+.character-folder-root { min-height: 48px; padding: 6px; border: 1px solid transparent; border-radius: 8px; }
+.character-folder-drop-active { outline: 2px solid var(--username-color); outline-offset: -2px; background: var(--input-bg); }
+#panel-characters .character-card { cursor: grab; }
+#panel-characters .character-card h4 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .character-list-heading {
   margin-top: 4px;
   color: var(--text-muted, #aaa58f);
