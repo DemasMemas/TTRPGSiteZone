@@ -554,6 +554,7 @@ export async function refreshWorldTravel() {
 }
 
 export function openWorldTravelModal() {
+    window.cancelCommonMapTool?.();
     renderModal();
     document.getElementById('world-travel-modal').style.display = 'flex';
 }
@@ -766,6 +767,11 @@ function maxDistance(x1, y1, x2, y2) {
 export function initWorldTravel(currentLobbyId, socket) {
     lobbyId = currentLobbyId;
     window.isWorldTravelSelectionActive = () => Boolean(selectionMode);
+    window.cancelWorldTravelSelection = () => {
+        selectionMode = null;
+        clearMovementHighlights();
+        hideContextMenu();
+    };
     setWorldTravelTileClickCallback(handleTileSelection);
     contextMenu = document.createElement('div');
     contextMenu.className = 'world-group-context-menu';

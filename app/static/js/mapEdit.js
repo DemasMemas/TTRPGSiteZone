@@ -188,6 +188,7 @@ export function updateAnomalyFieldRankOptions() {
 }
 
 export function setEditMode(enabled) {
+    window.cancelCommonMapTool?.();
     AppState.setEditMode(enabled);
     if (!enabled) {
         window.clearDirectWorldObjectSelection?.();
@@ -209,6 +210,7 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     const root = document.getElementById('gm-only-controls');
     if (!root || !['select', 'terrain', 'height', 'radiation', 'erase', 'objects'].includes(tool)) return;
     const previousTool = window.worldEditorTool;
+    window.cancelCommonMapTool?.();
     if (tool !== 'objects') window.endWorldVegetationStroke?.();
     if (tool !== 'select') window.clearDirectWorldObjectSelection?.();
     if (tool !== 'objects' && roadLinkActive) toggleWorldRoadLink(false);
@@ -460,6 +462,8 @@ export function getTileHeight() { return AppState.tileHeight; }
 export function getEraserMode() { return AppState.eraserMode; }
 
 function updateGMControlsVisibility() {
+    const toolsPanel = document.getElementById('panel-tools');
+    if (toolsPanel && !window.isLocationActive) toolsPanel.style.display = AppState.isGM && AppState.editMode ? 'flex' : 'none';
     const gmControls = document.getElementById('gm-only-controls');
     const createLocationBtn = document.getElementById('create-location-btn');
     if (gmControls) {

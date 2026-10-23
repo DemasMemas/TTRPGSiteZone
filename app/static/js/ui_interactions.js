@@ -192,6 +192,24 @@ export function initDraggablePanels() {
         }
         makeDraggable(panel, header, panelId);
         panel.dataset.draggableInitialized = 'true';
+        if (panelId === 'panel-common-tools') {
+            const launcher = document.getElementById('common-tools-toggle');
+            const setOpen = open => {
+                panel.hidden = !open;
+                launcher?.setAttribute('aria-expanded', String(open));
+                launcher?.classList.toggle('is-active', open);
+                if (!open) window.cancelCommonMapTool?.();
+            };
+            setOpen(saved?.open === true);
+            launcher?.addEventListener('click', () => {
+                const open = panel.hidden;
+                setOpen(open);
+                savePanelState(panelId, { open });
+            });
+            window.addEventListener('pagehide', () => {
+                savePanelState(panelId, { open: !panel.hidden, collapsed: panel.classList.contains('collapsed') });
+            });
+        }
     });
 
     document.querySelectorAll('.modal .modal-content').forEach(modalContent => {

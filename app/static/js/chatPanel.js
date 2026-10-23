@@ -41,6 +41,8 @@ export function initChatPanel() {
         panel.hidden = !state.open;
         panel.dataset.chatDocked = String(state.docked);
         panel.classList.toggle('collapsed', state.collapsed);
+        const collapse = panel.querySelector('.toggle-btn');
+        if (collapse) collapse.textContent = state.collapsed ? '▶' : '▼';
         toggle.setAttribute('aria-expanded', String(state.open));
         toggle.classList.toggle('is-active', state.open);
         pin.setAttribute('aria-pressed', String(state.docked));
@@ -69,6 +71,12 @@ export function initChatPanel() {
     }).observe(panel, { attributes: true, attributeFilter: ['class'] });
     window.addEventListener('resize', () => {
         if (state.open && !state.docked) { restoreFloatingPosition(); rememberFloatingPosition(); }
+    });
+    window.addEventListener('pagehide', () => {
+        rememberFloatingPosition();
+        state.open = !panel.hidden;
+        state.collapsed = panel.classList.contains('collapsed');
+        save();
     });
     apply();
 }

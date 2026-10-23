@@ -2,6 +2,7 @@
 import { initWorldNumericInputs } from './worldNumericInputs.js';
 import { initSocket } from './socketHandlers.js';
 import { initCharacters, initMutantForm, loadLobbyCharacters, showCreateCharacterForm, showCreateMutantForm } from './characters.js';
+import { initCommonMapTools } from './commonMapTools.js';
 import { initLobbyData, loadLobbyInfo, loadAllChunks } from './lobbyData.js';
 import { setCurrentLobbyId, toggleParticipants, toggleSettings, showSettingsTab, closeVisibilityModal,
 saveVisibility, unbanUserHandler, closeSettings, openSettings, updateParticipantsList } from './ui.js';
@@ -141,11 +142,13 @@ const socket = initSocket(currentLobbyId, token);
 // Инициализация маркеров
 initMarkers(currentLobbyId, token, socket);
 setupMarkerInteraction();
+initCommonMapTools(socket);
 
 // ========== Глобальные флаги ==========
 window.isLocationActive = false; // флаг активной локации
 window.socket = socket;
 window.currentLocationId = null;
+initDraggablePanels();
 window.currentLocationCharacterId = window.currentLocationCharacterId || null;
 
 // ========== Перенаправление UI-вызовов в зависимости от активного режима ==========
@@ -254,6 +257,7 @@ function setLocationViewActive(active) {
 }
 
 window.enterLocation = async function(locationId) {
+    window.cancelCommonMapTool?.();
     window.clearDirectWorldObjectSelection?.();
     const loadingToken = showSceneLoading('location');
     closeMapEditorQuickMenu();
@@ -321,6 +325,7 @@ window.enterLocation = async function(locationId) {
 
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) {
+                toolsPanel.style.display = 'flex';
                 const editorBuildingId = `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
                 toolsPanel.classList.add('is-location-editor');
                 if (!window._originalToolsContent) {
@@ -1296,6 +1301,7 @@ async function deleteCurrentLocation(locationId) {
 }
 
 window.exitLocation = function() {
+    window.cancelCommonMapTool?.();
     closeMapEditorQuickMenu();
     // Очищаем события локации, если они были установлены
     if (window._locationEventCleanup) {
@@ -1355,7 +1361,7 @@ window.exitLocation = function() {
         }
     } else {
         const toolsPanel = document.getElementById('panel-tools');
-        if (toolsPanel) toolsPanel.style.display = 'flex';
+        if (toolsPanel) toolsPanel.style.display = 'none';
     }
 
     // Принудительно обновляем глобальную карту
@@ -2069,7 +2075,3 @@ function escapeHtml(unsafe) {
         });
     }
 })();
-
-setTimeout(() => {
-    initDraggablePanels();
-}, 100);

@@ -18,3 +18,4 @@ from . import markers
 from . import character
 from . import location
 from . import network
+from . import map_tools

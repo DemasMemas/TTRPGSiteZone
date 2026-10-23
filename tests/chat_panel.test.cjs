@@ -20,6 +20,7 @@ function harness(saved) {
         };
     };
     const panel = element(); panel.offsetWidth = 340; panel.offsetHeight = 350;
+    const collapse = element(); panel.querySelector = () => collapse;
     panel.getBoundingClientRect = () => ({ left: parseFloat(panel.style.left) || 0, top: parseFloat(panel.style.top) || 0 });
     const toggle = element(), pin = element(), close = element();
     const documentHandlers = {}, windowHandlers = {};
@@ -31,7 +32,7 @@ function harness(saved) {
         MutationObserver: class { constructor(callback) { observer = callback; } observe() {} },
     });
     vm.runInContext(source.replaceAll('export ', ''), context);
-    return { context, panel, toggle, pin, close, documentHandlers, windowHandlers,
+    return { context, panel, toggle, pin, close, collapse, documentHandlers, windowHandlers,
         observe: () => observer(), state: () => JSON.parse(values.get(key)) };
 }
 
@@ -70,4 +71,20 @@ test('reload restores mode, collapse and bounded floating position; bad preferen
     const storage = { getItem: () => '{' };
     assert.equal(h.context.readChatPanelState(storage, 'unused').docked, true);
     assert.equal(h.context.readChatPanelState(storage, 'unused').open, false);
+});
+
+test('closing through either launcher or cross stays closed after reload', () => {
+    for (const closeControl of ['toggle', 'close']) {
+        const h = harness({ open: true, docked: false, collapsed: true, floatingPosition: { left: 170, top: 140 } });
+        h.context.initChatPanel();
+        h[closeControl].handlers.click();
+        h.windowHandlers.pagehide();
+        const restored = harness(h.state()); restored.context.initChatPanel();
+        assert.equal(restored.panel.hidden, true);
+        assert.equal(restored.toggle.attrs['aria-expanded'], 'false');
+        restored.toggle.handlers.click();
+        assert.equal(restored.panel.classList.contains('collapsed'), true);
+        assert.equal(restored.collapse.textContent, '▶');
+        assert.equal(restored.panel.style.left, '170px');
+    }
 });
