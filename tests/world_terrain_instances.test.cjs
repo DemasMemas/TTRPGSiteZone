@@ -51,9 +51,9 @@ function harness({ deferTimers = false } = {}) {
             terrainBuilds++;
             return { positions: [], tileByFace: [] };
         },
-        buildRoundedWaterData: () => {
+        buildWorldWaterData: () => {
             waterBuilds++;
-            return { water: [], bank: [], sandBank: [], regions: new Map() };
+            return { water: [], bankPositions: [], bankOwners: [], sides: [], regions: new Map() };
         },
         waterLevelForTile: tile => tile.height,
         chunkBounds: [], scene: { remove() {} },
@@ -321,7 +321,7 @@ test('world slopes rebuild near edits and chunk changes without replacing flat t
     assert.match(source, /setTimeout\(flushWorldTerrainRefresh, 100\)/);
     assert.match(source, /window\.addEventListener\('pointerup'/);
     assert.match(source, /worldTerrainRefreshTimer = setTimeout\(flushWorldTerrainRefresh, 0\)/);
-    assert.match(source, /buildRoundedWaterData\(padded, 0\.24/);
+    assert.match(source, /buildWorldWaterData\(padded,/);
     assert.match(source, /entry\.ground\.setMatrixAt\(index, dummy\.matrix\)/);
     assert.match(source, /data\.foundationByTile\.get\(`\$\{x \+ 1\},\$\{z \+ 1\}`\)/);
     assert.match(source, /Math\.max\(0\.05, foundation - 0\.085\)/);

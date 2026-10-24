@@ -11,6 +11,9 @@ const moduleUrl = name => {
     if (name === 'locationTerrainTexture.js') {
         code = code.replace("'./locationGrassSubtype.js'", `'${moduleUrl('locationGrassSubtype.js')}'`);
     }
+    if (name === 'worldWaterGeometry.js') for (const dependency of ['locationWaterEdge.js','locationTerrain.js']) {
+        code = code.replace(`'./${dependency}'`, `'${moduleUrl(dependency)}'`);
+    }
     return `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
 };
 
@@ -20,6 +23,8 @@ async function harness(keys = ['0,0'], size = 32) {
     const terrain = await import(moduleUrl('locationTerrain.js'));
     const pixels = await import(moduleUrl('locationTerrainTexture.js'));
     const water = await import(moduleUrl('locationWaterEdge.js'));
+    const topology = await import(moduleUrl('worldRoadTopology.js'));
+    const worldWater = await import(moduleUrl('worldWaterGeometry.js'));
     const chunksMap = new Map();
     const timers = new Map();
     const builds = new Map();
@@ -57,7 +62,7 @@ async function harness(keys = ['0,0'], size = 32) {
         terrainColors: { grass: 0x3a5f0b, sand: 0xc2b280, rock: 0x808080, water: 0x1e90ff },
         smoothGroundMat: {}, waterMat: {}, worldWaterBankMat: {},
         worldGrassGroundPixelsEnabled: false, worldGrassDetail: { apply() {} },
-        ...pixels, ...water, isSmoothTerrainTile: terrain.isSmoothTerrainTile,
+        ...pixels, ...water, ...worldWater, ...topology, isSmoothTerrainTile: terrain.isSmoothTerrainTile,
         buildSmoothTerrainData(padded, ...args) {
             const key = padded[1][1].chunkKey;
             let included = 0;
@@ -93,6 +98,10 @@ async function harness(keys = ['0,0'], size = 32) {
         markWorldShadowsDirty() {}, updateTileObjectsPositions() {}, refreshWorldFenceNeighborhood() {}, invalidateFenceGround() {},
         rebuildRoadMeshes() {}, refreshRoadNeighborhood() {},
     });
+    // Bridge-span invalidation reads tiles through the normal world lookup.
+    const tileLookup = source.slice(source.indexOf('function loadedWorldTile('),
+        source.indexOf('\nfunction disposeRoadMeshes('));
+    vm.runInContext(tileLookup, context);
     const start = source.indexOf('function refreshWorldTerrainSurface(');
     const end = source.indexOf('\n// --- Функции для чанков ---', start);
     const updateStart = source.indexOf('export function updateTileInChunk(');
@@ -193,8 +202,8 @@ async function waterHarness(keys = ['0,0'], waterTiles = [[11, 11]], legacy = fa
         h.context.refreshWorldTerrainChunk(entry);
     }
     const counts = { refreshes: 0, generations: 0, meshes: 0, disposed: 0 };
-    const generate = h.context.buildRoundedWaterData;
-    h.context.buildRoundedWaterData = (...args) => {
+    const generate = h.context.buildWorldWaterData;
+    h.context.buildWorldWaterData = (...args) => {
         counts.generations++;
         return generate(...args);
     };
@@ -476,11 +485,10 @@ test('height preview refreshes water levels and the shore including diagonal lan
         h.context.refreshWorldTerrainBrushPreview();
         assert.equal(oldBank.disposed, true);
         const padded = assertLiveHeightGeometry(h, entry);
-        const expected = h.context.buildRoundedWaterData(padded, 0.24,
-            (x, z) => x > 0 && x <= 32 && z > 0 && z <= 32,
-            [0, 0.075, 0.23, 0.5, 0.77, 0.925, 1], tile => Number(tile.height) || 1);
-        assert.deepEqual(entry.waterSurface.geometry.attributes.position.array, new Float32Array(expected.water));
-        assert.deepEqual(entry.waterBank.geometry.attributes.position.array, new Float32Array([...expected.bank, ...expected.sandBank]));
+        const expected = h.context.buildWorldWaterData(padded,
+            (x, z) => x > 0 && x <= 32 && z > 0 && z <= 32,-1,-1);
+        assert.deepEqual(entry.waterSurface.geometry.attributes.position.array, new Float32Array([...expected.water,...expected.sides]));
+        assert.deepEqual(entry.waterBank.geometry.attributes.position.array, new Float32Array(expected.bankPositions));
         assert.equal(entry.waterShoreDirty, false);
         const level = entry.tilesData[11][11].height - 0.01;
         assert.equal(entry.water.matrices[entry.waterIndices[11 * 32 + 11]].position[1], level / 2);

@@ -31,7 +31,7 @@ async function connect(url) {
     };
     const call = (method, params = {}) => new Promise((resolve, reject) => {
         const id = ++nextId;
-        const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`Timed out: ${method}`)); }, process.env.VTT_SECONDARY_TOOLS==='1'||process.env.VTT_ROAD_TERRAIN==='1'||process.env.VTT_BRIDGE_BANK==='1'?90000:30000);
+        const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`Timed out: ${method}`)); }, process.env.VTT_WATER_GEOMETRY==='1'||process.env.VTT_SECONDARY_TOOLS==='1'||process.env.VTT_ROAD_TERRAIN==='1'||process.env.VTT_BRIDGE_BANK==='1'?90000:30000);
         waiting.set(id, message => {
             clearTimeout(timer);
             if (message.closed && method !== 'Browser.close') reject(new Error(`Browser connection closed: ${method}`));
@@ -95,8 +95,9 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await request('/auth/register', { username: 'browser-gm', email: 'browser-gm@example.test', password: 'browser-test-password' });
         const login = await request('/auth/login', { username: 'browser-gm', password: 'browser-test-password' });
         const token = login.access_token;
-        const lobby = await request('/lobbies/', { name: 'Direct object browser test', map_type: 'empty', chunks_width: 2, chunks_height: 1 }, token);
-        await request(`/lobbies/${lobby.id}/chunks?min_chunk_x=0&max_chunk_x=1&min_chunk_y=0&max_chunk_y=0`, null, token, 'GET');
+        const waterGeometry=process.env.VTT_WATER_GEOMETRY==='1';
+        const lobby = await request('/lobbies/', { name: 'Direct object browser test', map_type: 'empty', chunks_width: 2, chunks_height: waterGeometry?2:1 }, token);
+        await request(`/lobbies/${lobby.id}/chunks?min_chunk_x=0&max_chunk_x=1&min_chunk_y=0&max_chunk_y=${waterGeometry?1:0}`, null, token, 'GET');
         await request(`/lobbies/${lobby.id}/chunks/0/0/tile/31/10`, { objects: [
             { type: 'factory', name: 'Factory with a long name that must wrap safely inside the selected object panel',
                 scale: 1, rotation: 0, color: '#66747b', is_active: true },
@@ -122,11 +123,19 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.call('Page.navigate', { url: base });
         await page.until('location.origin === ' + JSON.stringify(base), 'origin');
         await page.evaluate(`localStorage.setItem('access_token', ${JSON.stringify(token)});localStorage.setItem('user_id', ${JSON.stringify(String(login.user_id))});`);
+        if(process.env.VTT_FORCE_WEBGL1==='1')await page.call('Page.addScriptToEvaluateOnNewDocument',{source:"const originalGetContext=HTMLCanvasElement.prototype.getContext;HTMLCanvasElement.prototype.getContext=function(type,...args){return type==='webgl2'?null:originalGetContext.call(this,type,...args)}"});
         await page.call('Page.navigate', { url: `${base}/lobbies/${lobby.id}/page` });
         await page.until(`Boolean(window.toggleEditMode && window.beginDirectWorldObjectEdit && window.isGM)`, 'game startup');
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
-        await page.until(`sceneModule.chunksMap.size===2 && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
+        await page.until(`sceneModule.chunksMap.size===${waterGeometry?4:2} && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if(process.env.VTT_LOCAL_WATER_AUDIT==='1'){
+            await require('./local_water_audit.browser.cjs')({page,request,token,lobby});return;
+        }
+        if(waterGeometry){await require('./water_geometry.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;}
+        if (process.env.VTT_WATER_AUDIT === '1') {
+            await require('./water_shores_audit.browser.cjs')({page,request,token,lobby});return;
+        }
         if (process.env.VTT_BRIDGE_ASSET === '1') {
             await require('./bridge_asset.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
         }

@@ -118,6 +118,18 @@ function compile(layer, options) {
     return { material, ...result };
 }
 
+test('only global shores and grass walls next to water use the existing earth side texture',async()=>{
+    const {THREE}=environment(),world=createTerrainMaterialLayer(THREE,{world:true}),local=createTerrainMaterialLayer(THREE);
+    await world.ready;world.resize(4,4);world.update(1,1,{terrain:'water'});local.update(0,0,{terrain:'water'});
+    const bank=compile(world,{sides:true,smooth:true,shore:true}),walls=compile(world,{sides:true}),unchanged=compile(local,{sides:true});
+    assert.equal(bank.uniforms.terrainKinds.value.image.data[(1*4+1)*4+2],255);
+    assert.equal(unchanged.uniforms.terrainKinds.value.image.data[2],0);
+    assert.match(bank.fragmentShader,/float nearWater = 1\.0;/);
+    assert.match(walls.fragmentShader,/nearWater = max\(nearWater,texture2D/);
+    assert.doesNotMatch(unchanged.fragmentShader,/nearWater/);
+    world.update(1,1,{terrain:'grass'});assert.equal(bank.uniforms.terrainKinds.value.image.data[(1*4+1)*4+2],0);
+});
+
 test('world and local layers share atlases, update only lookup bytes, and release their own lookups', async () => {
     const { THREE, loaded, contexts } = environment();
     const world = createTerrainMaterialLayer(THREE), local = createTerrainMaterialLayer(THREE);

@@ -1,5 +1,5 @@
 import { ROAD_SURFACE_LIFT } from './worldRoadSurface.js';
-import { waterLevelForTile } from './locationWaterEdge.js';
+import { worldWaterCeiling } from './worldWaterGeometry.js';
 
 export const BRIDGE_WATER_CLEARANCE=.025;
 
@@ -48,7 +48,7 @@ export function buildWorldBridgeLayout({nodes,getTile,connected,sampleHeight,own
         const intervals=cells.map(c=>({
             from:Math.max(0,((dx?c.x:c.z)-origin)/along),
             to:Math.min(1,((dx?c.x:c.z)+1-origin)/along),
-            height:waterLevelForTile(getTile(c.x,c.z),'grass')+.012+BRIDGE_WATER_CLEARANCE,
+            height:worldWaterCeiling(getTile,c.x,c.z)+BRIDGE_WATER_CLEARANCE,
         }));
         const lift=intervals.some(c=>Math.min(start.y+vy*c.from,start.y+vy*c.to)<c.height);
         if(lift){

@@ -116,7 +116,7 @@ export function waterSideCornerDrops(tiles, x, z, regions, renderedHeight) {
 
 export function buildRoundedWaterData(tiles, radius = 0.24,
     includeTile = () => true, bankSamples = null, levelForWater = waterLevelForTile,
-    { shorelineRing = false, landSurfaceHeightAt = null } = {}) {
+    { shorelineRing = false, landSurfaceHeightAt = null, worldOrigin = null } = {}) {
     const water = [];
     const waterColors = [];
     const bank = [];
@@ -126,7 +126,9 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
     const sandBank = [];
     const sandBankColors = [];
     const sandBankUvs = [];
-    const regions = classifyWaterRegions(tiles);
+    // The world shore is local to the adjoining land, never a truncated basin vote.
+    // Keep the established local-location classification and geometry unchanged.
+    const regions = worldOrigin ? new Map() : classifyWaterRegions(tiles);
     const isLand = (x, z) => Boolean(tiles[z]?.[x] && tiles[z][x].terrain !== 'water');
     // Sample from touching land tiles so adjacent water cells agree on their shared shore edge.
     const sharedShoreHeight = (px, pz) => {
@@ -154,6 +156,7 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
             if (tile?.terrain !== 'water' || !includeTile(x, z)) continue;
             const kind = regions.get(`${x},${z}`) || 'grass';
             const height = levelForWater(tile, kind);
+            const patternX = x + (worldOrigin?.x || 0), patternZ = z + (worldOrigin?.z || 0);
             const waterHeightAt = (px, pz) => shorelineRing
                 ? connectedWaterHeightAt(tiles, x, z, px, pz, regions, levelForWater) : height;
             const strip = 0.075;
@@ -168,25 +171,25 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
                     first: west, second: north, at: [x, z], diagonal: [x - 1, z - 1],
                     firstOnly: [x + strip, z], secondOnly: [x, z + strip], diagonalLand: isLand(x - 1, z - 1),
                     arc: [[x + strip, z + r], [x + r - diagonal, z + r - diagonal], [x + r, z + strip]],
-                    edge: [x + 0.5, z + (north ? strip + 0.025 * Math.sin(x * 4.3 + z * 1.7) : 0)],
+                    edge: [x + 0.5, z + (north ? strip + 0.025 * Math.sin(patternX * 4.3 + patternZ * 1.7) : 0)],
                 },
                 {
                     first: north, second: east, at: [x + 1, z], diagonal: [x + 1, z - 1],
                     firstOnly: [x + 1, z + strip], secondOnly: [x + 1 - strip, z], diagonalLand: isLand(x + 1, z - 1),
                     arc: [[x + 1 - r, z + strip], [x + 1 - r + diagonal, z + r - diagonal], [x + 1 - strip, z + r]],
-                    edge: [x + 1 - (east ? strip + 0.025 * Math.sin(x * 3.1 + z * 5.1) : 0), z + 0.5],
+                    edge: [x + 1 - (east ? strip + 0.025 * Math.sin(patternX * 3.1 + patternZ * 5.1) : 0), z + 0.5],
                 },
                 {
                     first: east, second: south, at: [x + 1, z + 1], diagonal: [x + 1, z + 1],
                     firstOnly: [x + 1 - strip, z + 1], secondOnly: [x + 1, z + 1 - strip], diagonalLand: isLand(x + 1, z + 1),
                     arc: [[x + 1 - strip, z + 1 - r], [x + 1 - r + diagonal, z + 1 - r + diagonal], [x + 1 - r, z + 1 - strip]],
-                    edge: [x + 0.5, z + 1 - (south ? strip + 0.025 * Math.sin(x * 4.3 + (z + 1) * 1.7) : 0)],
+                    edge: [x + 0.5, z + 1 - (south ? strip + 0.025 * Math.sin(patternX * 4.3 + (patternZ + 1) * 1.7) : 0)],
                 },
                 {
                     first: south, second: west, at: [x, z + 1], diagonal: [x - 1, z + 1],
                     firstOnly: [x, z + 1 - strip], secondOnly: [x + strip, z + 1], diagonalLand: isLand(x - 1, z + 1),
                     arc: [[x + r, z + 1 - strip], [x + r - diagonal, z + 1 - r + diagonal], [x + strip, z + 1 - r]],
-                    edge: [x + (west ? strip + 0.025 * Math.sin((x - 1) * 3.1 + z * 5.1) : 0), z + 0.5],
+                    edge: [x + (west ? strip + 0.025 * Math.sin((patternX - 1) * 3.1 + patternZ * 5.1) : 0), z + 0.5],
                 },
             ];
             const outline = [];

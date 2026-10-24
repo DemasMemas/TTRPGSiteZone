@@ -19,7 +19,7 @@ import { createWorldGrassDetail } from './worldGrassDetail.js';
 import { createPo2Fence } from './worldPo2Fence.js';
 import { buildSmoothTerrainData, isSmoothTerrainTile, createTerrainHeightSampler } from './locationTerrain.js';
 import { fenceMatrixElements } from './worldFenceLine.js';
-import { buildRoundedWaterData } from './locationWaterEdge.js';
+import { buildWorldWaterData } from './worldWaterGeometry.js';
 import {
     createCompatibleWebGLRenderer,
     createUnavailableRenderer,
@@ -1081,8 +1081,9 @@ function animateChunkAnomalies(time) {
 const waterMat = createWaterMaterial();
 const waterTexture = waterMat.map;
 const waterHiddenTopMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
-const waterInstanceMaterials = [waterMat, waterMat, waterHiddenTopMat,
-    waterMat, waterMat, waterMat];
+// Retain compact box instances for picking; draw only the joined surface/rim.
+waterHiddenTopMat.visible = false;
+const waterInstanceMaterials = Array(6).fill(waterHiddenTopMat);
 const worldWaterBankMat = new THREE.MeshStandardMaterial({
     map: getSurfaceTexture(THREE, 'local_terrain'), vertexColors: true,
     side: THREE.DoubleSide, roughness: 0.97,
@@ -1094,7 +1095,7 @@ const smoothGroundMat = new THREE.MeshStandardMaterial({
 });
 worldTerrainMaterials.apply(groundMat, { sides: true });
 worldTerrainMaterials.apply(smoothGroundMat, { sides: true, smooth: true });
-worldTerrainMaterials.apply(worldWaterBankMat);
+worldTerrainMaterials.apply(worldWaterBankMat, { sides:true, smooth:true, shore:true });
 
 function refreshWorldTerrainSurface(entry, smoothData) {
     const metrics = typeof window !== 'undefined' && window.worldLoadMetrics?.fullLoadMs === null
@@ -1509,9 +1510,9 @@ function refreshWorldWaterChunk(entry, padded) {
     entry.waterShoreDirty = false;
     if (!entry.water.count) return;
     const { chunkX, chunkY, tilesData } = entry;
-    const data = buildRoundedWaterData(padded, 0.24,
+    const data = buildWorldWaterData(padded,
         (x, z) => x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE,
-        [0, 0.075, 0.23, 0.5, 0.77, 0.925, 1], tile => Number(tile.height) || 1);
+        chunkX * CHUNK_SIZE - 1, chunkY * CHUNK_SIZE - 1);
     const dummy = new THREE.Object3D();
     for (let z = 0; z < CHUNK_SIZE; z++) {
         for (let x = 0; x < CHUNK_SIZE; x++) {
@@ -1530,8 +1531,8 @@ function refreshWorldWaterChunk(entry, padded) {
     const originZ = chunkY * CHUNK_SIZE - 1;
     if (data.water.length) {
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.water, 3));
-        geometry.computeVertexNormals();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute([...data.water,...data.sides], 3));
+        geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.waterNormals, 3));
         const mesh = new THREE.Mesh(geometry, waterMat);
         mesh.position.set(originX, 0, originZ);
         mesh.frustumCulled = false;
@@ -1542,12 +1543,14 @@ function refreshWorldWaterChunk(entry, padded) {
         scene.add(mesh);
         entry.waterSurface = mesh;
     }
-    const bankPositions = [...data.bank, ...data.sandBank];
+    const bankPositions = data.bankPositions;
     if (bankPositions.length) {
         const geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.Float32BufferAttribute(bankPositions, 3));
         geometry.setAttribute('color', new THREE.Float32BufferAttribute(
-            [...data.bankBaseColors, ...data.sandBankColors], 3));
+            Array(bankPositions.length).fill(1), 3));
+        geometry.setAttribute('terrainTileCoord', new THREE.Float32BufferAttribute(data.bankOwners, 2));
+        geometry.setAttribute('terrainTop', new THREE.Float32BufferAttribute(Array(bankPositions.length/3).fill(0), 1));
         const uvs = [];
         for (let index = 0; index < bankPositions.length; index += 3) {
             uvs.push((bankPositions[index] + originX) * 0.25,
@@ -1556,7 +1559,7 @@ function refreshWorldWaterChunk(entry, padded) {
         geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
         geometry.computeVertexNormals();
         const mesh = new THREE.Mesh(geometry, worldWaterBankMat);
-        mesh.position.set(originX, -0.018, originZ);
+        mesh.position.set(originX, 0, originZ);
         mesh.frustumCulled = false;
         mesh.visible = entry.terrainVisible;
         mesh.raycast = () => {};

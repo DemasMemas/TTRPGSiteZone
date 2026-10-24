@@ -126,9 +126,12 @@ export function createTerrainMaterialLayer(THREE, { world = false } = {}) {
             if (!texture || x < 0 || z < 0 || x >= texture.image.width || z >= texture.image.height) return;
             const offset = (z * texture.image.width + x) * 4;
             const top = terrainMaterialIndex(tile), side = terrainMaterialIndex(tile, true);
-            if (texture.image.data[offset] === top && texture.image.data[offset + 1] === side) return;
+            const water = world && tile?.terrain === 'water' ? 255 : 0;
+            if (texture.image.data[offset] === top && texture.image.data[offset + 1] === side
+                && texture.image.data[offset + 2] === water) return;
             texture.image.data[offset] = top;
             texture.image.data[offset + 1] = side;
+            texture.image.data[offset + 2] = water;
             texture.needsUpdate = true;
         },
         fill(tiles, originX = 0, originZ = 0) {
@@ -144,11 +147,11 @@ export function createTerrainMaterialLayer(THREE, { world = false } = {}) {
             atlasBytes: TERRAIN_ATLAS_CELL ** 2 * TERRAIN_ATLAS_COLUMNS * TERRAIN_ATLAS_ROWS * 4 * 4,
             snowBytes: Math.ceil(2 * 1024 ** 2 * 4 * 4 / 3),
             materials: TERRAIN_MATERIALS.length, lookupBytes: texture?.image.data.byteLength || 0 }; },
-        apply(material, { sides = false, smooth = false } = {}) {
+        apply(material, { sides = false, smooth = false, shore = false } = {}) {
             material.extensions = { ...material.extensions, derivatives: true, shaderTextureLOD: true };
             const previousCompile = material.onBeforeCompile;
             const previousKey = material.customProgramCacheKey?.bind(material);
-            material.customProgramCacheKey = () => `${previousKey?.() || ''}:terrain-pbr-v6:${world}:${sides}:${smooth}`;
+            material.customProgramCacheKey = () => `${previousKey?.() || ''}:terrain-pbr-v7:${world}:${sides}:${smooth}:${shore}`;
             material.onBeforeCompile = shader => {
                 previousCompile?.(shader);
                 Object.assign(shader.uniforms, uniforms);
@@ -173,7 +176,7 @@ export function createTerrainMaterialLayer(THREE, { world = false } = {}) {
                 shader.fragmentShader = shader.fragmentShader
                     .replace('#include <common>', `#include <common>\n${fragmentHelpers(sides, smooth, world)}`)
                     // Inject after map/color, before scene darkness and static light callbacks.
-                    .replace('#include <color_fragment>', `#include <color_fragment>\n${fragmentSample(sides, smooth)}`)
+                    .replace('#include <color_fragment>', `#include <color_fragment>\n${fragmentSample(sides, smooth, world, shore)}`)
                     .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
                         roughnessFactor = mix(roughnessFactor, max(0.08, terrainArm.g), terrainCoverage);`)
                     .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
@@ -338,7 +341,7 @@ function fragmentHelpers(sides, smooth, world) {
     `;
 }
 
-function fragmentSample(sides, smooth) {
+function fragmentSample(sides, smooth, world, shore) {
     return `
         float terrainCoverage = 0.0;
         vec3 terrainColor = vec3(0.0), terrainNormalSample = vec3(0.0), terrainArm = vec3(0.0);
@@ -352,7 +355,19 @@ function fragmentSample(sides, smooth) {
         if (terrainAtlasReady > 0.5) {
             if (terrainSide) {
                 vec2 owner = ${smooth ? 'vTerrainOwner.xy' : 'floor(vTerrainMaterialPosition.xz - vTerrainMaterialNormal.xz * 0.02)'};
-                terrainAccumulate(terrainId(owner).g, 1.0, terrainUv, terrainDx, terrainDy,
+                float sideId = terrainId(owner).g;
+                ${world ? `
+                // Grass has no PBR side atlas entry. Use existing bare earth
+                // only on the world shore and land walls adjoining water.
+                if (sideId == 0.0) {
+                    float nearWater = ${shore ? '1.0' : `0.0;
+                    for (int z=-1; z<=1; z++) for (int x=-1; x<=1; x++) {
+                        vec2 cell = clamp(owner + vec2(float(x),float(z)),vec2(0.0),terrainKindsSize-1.0);
+                        nearWater = max(nearWater,texture2D(terrainKinds,(cell+0.5)/terrainKindsSize).b);
+                    }`}${shore ? ';' : ''}
+                    if (nearWater > 0.5) sideId = ${terrainMaterialIndex('bare_dirt').toFixed(1)};
+                }` : ''}
+                terrainAccumulate(sideId, 1.0, terrainUv, terrainDx, terrainDy,
                     terrainColor, terrainNormalSample, terrainArm, terrainCoverage);
             } else {
                 vec2 cell = floor(vTerrainMaterialPosition.xz - 0.5);
