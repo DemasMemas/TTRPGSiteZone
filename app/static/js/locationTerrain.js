@@ -126,7 +126,7 @@ function tileSurfaceRing(tiles, x, z) {
     ];
 }
 
-function tileSurfaceTriangles(tiles, x, z, ring = tileSurfaceRing(tiles, x, z)) {
+export function tileSurfaceTriangles(tiles, x, z, ring = tileSurfaceRing(tiles, x, z)) {
     const height = tileHeight(tiles, x, z);
     const center = [x + 0.5, height, z + 0.5];
     let steep = false;

@@ -31,7 +31,7 @@ async function connect(url) {
     };
     const call = (method, params = {}) => new Promise((resolve, reject) => {
         const id = ++nextId;
-        const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`Timed out: ${method}`)); }, process.env.VTT_SECONDARY_TOOLS==='1'?90000:30000);
+        const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`Timed out: ${method}`)); }, process.env.VTT_SECONDARY_TOOLS==='1'||process.env.VTT_ROAD_TERRAIN==='1'||process.env.VTT_BRIDGE_BANK==='1'?90000:30000);
         waiting.set(id, message => {
             clearTimeout(timer);
             if (message.closed && method !== 'Browser.close') reject(new Error(`Browser connection closed: ${method}`));
@@ -127,6 +127,12 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===2 && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if (process.env.VTT_BRIDGE_BANK === '1') {
+            await require('./bridge_bank.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
+        if (process.env.VTT_ROAD_TERRAIN === '1') {
+            await require('./road_terrain.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
         if (process.env.VTT_SECONDARY_TOOLS === '1') {
             await require('./secondary_tools.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
         }

@@ -55,10 +55,11 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
         const sample=()=>{r.shadowMap.needsUpdate=false;const start=performance.now();r.render(sceneModule.scene,sceneModule.camera);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return {ms:performance.now()-start,calls:r.info.render.calls,triangles:r.info.render.triangles,textures:r.info.memory.textures,geometries:r.info.memory.geometries}};
         const median=()=>{const values=[sample(),sample(),sample()].sort((a,b)=>a.ms-b.ms);return {...values[1],fps:1000/values[1].ms}};
         sample();const withRoad=median();const meshes=[...sceneModule.chunksMap.values()].flatMap(e=>e.roads);meshes.forEach(m=>m.visible=false);sample();const withoutRoad=median();meshes.forEach(m=>m.visible=true);
-        const roadInstanceBufferBytes=meshes.reduce((n,m)=>n+m.instanceMatrix.array.byteLength+(m.instanceColor?.array.byteLength||0),0);
-        const bridgeGeometry=[...new Set(meshes.filter(m=>m.geometry.getAttribute('position').count>36).map(m=>m.geometry))];
+        const roadInstanceBufferBytes=meshes.reduce((n,m)=>n+(m.instanceMatrix?.array.byteLength||0)+(m.instanceColor?.array.byteLength||0),0);
+        const bridgeGeometry=[...new Set(meshes.filter(m=>m.isInstancedMesh).map(m=>m.geometry))];
         const bridgeVertexBufferBytes=bridgeGeometry.reduce((n,g)=>n+Object.values(g.attributes).reduce((n,a)=>n+a.array.byteLength,0),0);
-        return {withRoad,withoutRoad,roadBatches:meshes.length,roadInstanceBufferBytes,bridgeVertexBufferBytes,bridgeInstances:meshes.filter(m=>m.geometry.getAttribute('position').count>36).map(m=>m.count)};
+        const roadSurfaceBufferBytes=meshes.filter(m=>m.userData.roadSurface).reduce((n,m)=>n+Object.values(m.geometry.attributes).reduce((n,a)=>n+a.array.byteLength,0),0);
+        return {withRoad,withoutRoad,roadBatches:meshes.length,roadInstanceBufferBytes,roadSurfaceBufferBytes,bridgeVertexBufferBytes,bridgeInstances:meshes.filter(m=>m.isInstancedMesh).map(m=>m.count)};
     })()`);
     await page.evaluate('roadLook(33,16,26,32,1,12)');
     await click(27.5,17.5);await move(29.5,18.5);

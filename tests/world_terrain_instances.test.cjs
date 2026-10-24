@@ -330,6 +330,21 @@ test('world slopes rebuild near edits and chunk changes without replacing flat t
     assert.doesNotMatch(source, /applyTerrainBlend\(/);
 });
 
+test('shore support stays anchored during queued height edits', () => {
+    const { context, entry, ground } = harness({ deferTimers: true });
+    // The smoothed shore rests on a shorter support than its stored center height.
+    entry.smoothTileFoundation = new Map([[0, 0.7]]);
+    context.refreshWorldTerrainNeighborhood = () => {};
+    for (const height of [5, 2]) {
+        context.updateTileInChunk(0, 0, 0, 0, { height });
+        const matrix = ground.matrices[0];
+        assert.equal(matrix.scale[1], 0.7);
+        assert.equal(matrix.position[1] - matrix.scale[1] / 2, 0,
+            'pending terrain rebuild must not lift the support above the ground');
+    }
+    assert.equal(entry.tilesData[0][0].height, 2);
+});
+
 test('height brush coalesces chunk rebuilds and ignores the echoed batch', () => {
     const world = harness({ deferTimers: true });
     world.context.brushActive = true;

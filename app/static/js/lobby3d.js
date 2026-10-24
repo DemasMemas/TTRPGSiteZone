@@ -5,6 +5,7 @@ import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { roadNode, roadConnectsAt, roadSurfaceHeight } from './worldRoadTopology.js';
+import { buildRoadSurface, ROAD_SURFACE_LIFT } from './worldRoadSurface.js';
 import { installSecondaryClick } from './locationEditorPointer.js';
 import { objectFromWorldInstance } from './worldObjectSelection.js';
 import { createWaterMaterial } from './waterSurface.js';
@@ -155,10 +156,8 @@ const WORLD_LANDMARKS = {
 };
 const WORLD_LANDMARK_TYPES = Object.keys(WORLD_LANDMARKS).filter(type => type !== 'road');
 const landmarkMat = new THREE.MeshStandardMaterial();
-const roadMaterial = new THREE.MeshStandardMaterial({ roughness: 1 });
+const roadMaterial = new THREE.MeshStandardMaterial({ roughness: 1, vertexColors: true });
 applySurfacePattern(roadMaterial, getSurfaceTexture(THREE, 'road'), 0.12, 'top');
-const roadPadGeometry = new THREE.BoxGeometry(0.32, 0.028, 0.32);
-const roadLinkGeometry = new THREE.BoxGeometry(1, 0.028, 0.24);
 // Technical bridge marker, shared by all water nodes. Final bridge asset is TASK-ASSET-02.
 const roadBridgeGeometry=landmarkGeometry([
     ...[-1,1].flatMap(side=>[
@@ -168,10 +167,20 @@ const roadBridgeGeometry=landmarkGeometry([
     ...[-.3,.3].map(x=>[new THREE.BoxGeometry(.06,.5,.28),x,-.25,0]),
 ]);
 const roadPreviewMaterial=roadMaterial.clone();
+applySurfacePattern(roadPreviewMaterial, getSurfaceTexture(THREE, 'road'), 0.12, 'top');
 roadPreviewMaterial.transparent=true;roadPreviewMaterial.opacity=.85;roadPreviewMaterial.depthWrite=false;roadPreviewMaterial.depthTest=false;
 const roadBridgePreviewMaterial=landmarkMat.clone();
 roadBridgePreviewMaterial.transparent=true;roadBridgePreviewMaterial.opacity=.85;roadBridgePreviewMaterial.depthWrite=false;roadBridgePreviewMaterial.depthTest=false;
 const roadPreviewMeshes=[];
+function roadSurfaceMesh(pads,links,material) {
+    const data=buildRoadSurface({pads,links,getTile:loadedWorldTile});
+    if(!data.positions.length)return null;
+    const geometry=new THREE.BufferGeometry();
+    geometry.setAttribute('position',new THREE.BufferAttribute(data.positions,3));
+    geometry.setAttribute('color',new THREE.BufferAttribute(data.colors,3));geometry.computeVertexNormals();
+    const mesh=new THREE.Mesh(geometry,material);mesh.userData.roadSurface=true;
+    mesh.frustumCulled=false;mesh.castShadow=false;scene.add(mesh);return mesh;
+}
 function roadInstances(geometry,material,poses) {
     if(!poses.length)return null;
     const mesh=new THREE.InstancedMesh(geometry,material,poses.length),dummy=new THREE.Object3D();
@@ -180,28 +189,26 @@ function roadInstances(geometry,material,poses) {
         dummy.scale.set(...pose.scale);dummy.updateMatrix();mesh.setMatrixAt(i,dummy.matrix);mesh.setColorAt(i,new THREE.Color(pose.color));});
     mesh.instanceMatrix.needsUpdate=true;mesh.instanceColor.needsUpdate=true;scene.add(mesh);return mesh;
 }
-export function removeWorldRoadPreview(){for(const mesh of roadPreviewMeshes){scene.remove(mesh);mesh.dispose();}roadPreviewMeshes.length=0;}
+export function removeWorldRoadPreview(){for(const mesh of roadPreviewMeshes){scene.remove(mesh);if(mesh.userData.roadSurface)mesh.geometry.dispose();else mesh.dispose();}roadPreviewMeshes.length=0;}
 export function showWorldRoadPreview(plan,settings) {
     removeWorldRoadPreview();
     const pads=[],links=[],bridges=[],nodes=plan.path;
     const point=p=>new THREE.Vector3(p.x+.5+Number(p.offset_x||0),roadSurfaceHeight(p,p),p.y+.5+Number(p.offset_z||0));
-    const width=Number(settings.scale||1),color=settings.color||'#756f61',axis=new THREE.Vector3(1,0,0);
+    const width=Number(settings.scale||1);
     const seen=new Set();
     nodes.forEach((p,i)=>{
         const key=`${p.x},${p.y}`;
         if(!seen.has(key)){
             const nodeWidth=Number(p.scale||width);
-            pads.push({position:point(p),scale:[nodeWidth,1,nodeWidth],color:'#55dbe8'});seen.add(key);
+            pads.push({position:point(p),scale:nodeWidth,color:'#55dbe8',bridge:p.bridge});seen.add(key);
             if(p.bridge){const other=nodes[i+1]||nodes[i-1];bridges.push({position:point(p),scale:[1,1,nodeWidth],color:'#777b78',
                 quaternion:new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),other?.y!==p.y?Math.PI/2:0)});}
         }
-        if(i){const from=point(nodes[i-1]),to=point(p),delta=to.clone().sub(from);
-            links.push({position:from.add(to).multiplyScalar(.5),scale:[delta.length(),1,(Number(p.scale||width)+Number(nodes[i-1].scale||width))/2],color:'#55dbe8',
-                quaternion:new THREE.Quaternion().setFromUnitVectors(axis,delta.normalize())});}
+        if(i)links.push({from:point(nodes[i-1]),to:point(p),widthScale:(Number(p.scale||width)+Number(nodes[i-1].scale||width))/2,
+            color:'#55dbe8',bridge:p.bridge||nodes[i-1].bridge});
     });
-    for(const [geometry,material,poses] of [[roadPadGeometry,roadPreviewMaterial,pads],[roadLinkGeometry,roadPreviewMaterial,links],[roadBridgeGeometry,roadBridgePreviewMaterial,bridges]]){
-        const mesh=roadInstances(geometry,material,poses);if(mesh){mesh.renderOrder=20;mesh.userData.roadRoutePreview=true;roadPreviewMeshes.push(mesh);}
-    }
+    const surface=roadSurfaceMesh(pads,links,roadPreviewMaterial),frames=roadInstances(roadBridgeGeometry,roadBridgePreviewMaterial,bridges);
+    for(const mesh of [surface,frames])if(mesh){mesh.renderOrder=20;mesh.userData.roadRoutePreview=true;roadPreviewMeshes.push(mesh);}
 }
 
 const treeMat = new THREE.MeshStandardMaterial();
@@ -1716,7 +1723,7 @@ function loadedWorldTile(x, z) {
 function disposeRoadMeshes(entry) {
     for (const mesh of entry.roads || []) {
         scene.remove(mesh);
-        mesh.dispose();
+        if(mesh.userData?.roadSurface)mesh.geometry.dispose();else mesh.dispose();
     }
     entry.roads = [];
 }
@@ -1768,6 +1775,7 @@ function rebuildRoadMeshes(entry) {
                 if (!roadConnectsAt(nodeAt, x, z, dx, dz)) continue;
                 connections++;
                 links.push({ from: center, to: point(x + dx, z + dz, neighborTile, neighbor),
+                    bridge:Boolean(node.road?.bridge||neighbor.road?.bridge),
                     color: node.road?.color || neighbor.road?.color || '#756f61',
                     widthScale: (Number(node.road?.scale || 1) + Number(neighbor.road?.scale || 1)) / 2 });
             }
@@ -1775,7 +1783,7 @@ function rebuildRoadMeshes(entry) {
                 if (roadConnectsAt(nodeAt, x - dx, z - dz, dx, dz)) connections++;
             }
             if (node.road || connections) pads.push({ position: center, color: node.road?.color || '#756f61',
-                scale: Number(node.road?.scale || 1) });
+                scale: Number(node.road?.scale || 1),bridge:Boolean(node.road?.bridge) });
             if (node.road && !connections) {
                 const angle = THREE.MathUtils.degToRad(Number(node.road.rotation || 0));
                 const direction = new THREE.Vector3(Math.cos(angle), 0, -Math.sin(angle));
@@ -1787,49 +1795,8 @@ function rebuildRoadMeshes(entry) {
     }
     const bridgeMesh=roadInstances(roadBridgeGeometry,landmarkMat,bridges);
     if(bridgeMesh){bridgeMesh.visible=entry.terrainVisible;entry.roads.push(bridgeMesh);}
-    if (pads.length) {
-        const mesh = new THREE.InstancedMesh(roadPadGeometry, roadMaterial, pads.length);
-        mesh.frustumCulled = false;
-        mesh.castShadow = false;
-        mesh.receiveShadow = false;
-        const dummy = new THREE.Object3D();
-        pads.forEach(({ position, color, scale }, index) => {
-            dummy.position.copy(position);
-            dummy.rotation.set(0, 0, 0);
-            dummy.scale.set(scale, 1, scale);
-            dummy.updateMatrix();
-            mesh.setMatrixAt(index, dummy.matrix);
-            mesh.setColorAt(index, new THREE.Color(color));
-        });
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.instanceColor.needsUpdate = true;
-        mesh.visible = entry.terrainVisible;
-        scene.add(mesh);
-        entry.roads.push(mesh);
-    }
-    if (links.length) {
-        const mesh = new THREE.InstancedMesh(roadLinkGeometry, roadMaterial, links.length);
-        mesh.frustumCulled = false;
-        mesh.castShadow = false;
-        mesh.receiveShadow = false;
-        const dummy = new THREE.Object3D();
-        const axis = new THREE.Vector3(1, 0, 0);
-        const delta = new THREE.Vector3();
-        links.forEach(({ from, to, color, widthScale }, index) => {
-            delta.subVectors(to, from);
-            dummy.position.copy(from).add(to).multiplyScalar(0.5);
-            dummy.quaternion.setFromUnitVectors(axis, delta.clone().normalize());
-            dummy.scale.set(delta.length(), 1, widthScale);
-            dummy.updateMatrix();
-            mesh.setMatrixAt(index, dummy.matrix);
-            mesh.setColorAt(index, new THREE.Color(color));
-        });
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.instanceColor.needsUpdate = true;
-        mesh.visible = entry.terrainVisible;
-        scene.add(mesh);
-        entry.roads.push(mesh);
-    }
+    const surface=roadSurfaceMesh(pads,links,roadMaterial);
+    if(surface){surface.visible=entry.terrainVisible;entry.roads.push(surface);}
 }
 
 export function addChunk(cx, cy, tilesData) {
@@ -2406,14 +2373,17 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         } else {
             const dummy = new THREE.Object3D();
             const height = tile.height || 1.0;
-            dummy.position.set(chunkX * CHUNK_SIZE + tileX + 0.5, height / 2, chunkY * CHUNK_SIZE + tileY + 0.5);
+            // A smoothed shore's support can be shorter than its stored height.
+            // Use that height for both its center and scale during queued rebuilds.
+            const instanceHeight = isWater ? height : entry.smoothTileFoundation?.get(tileIndex) ?? height;
+            dummy.position.set(chunkX * CHUNK_SIZE + tileX + 0.5, instanceHeight / 2, chunkY * CHUNK_SIZE + tileY + 0.5);
             if (isWater) {
                 dummy.scale.set(1, height, 1);
                 dummy.updateMatrix();
                 entry.water.setMatrixAt(waterIndex, dummy.matrix);
                 entry.water.instanceMatrix.needsUpdate = true;
             } else {
-                dummy.scale.set(1, entry.smoothTileFoundation?.get(tileIndex) ?? height, 1);
+                dummy.scale.set(1, instanceHeight, 1);
                 dummy.updateMatrix();
                 entry.ground.setMatrixAt(groundIndex, dummy.matrix);
                 entry.ground.setColorAt(groundIndex, new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b));
@@ -2625,7 +2595,7 @@ export function pickWorldObject(clientX, clientY) {
                     const scale = object.scale || 1;
                     const worldX = entry.chunkX * CHUNK_SIZE + x + 0.5 + (object.x || 0);
                     const worldZ = entry.chunkY * CHUNK_SIZE + y + 0.5 + (object.z || 0);
-                    const height = roadSurfaceHeight(tile,object);
+                    const height = object.bridge?roadSurfaceHeight(tile,object):sampleWorldGroundHeight(worldX,worldZ)+ROAD_SURFACE_LIFT;
                     box.min.set(worldX - 0.45 * scale, height - 0.04, worldZ - 0.45 * scale);
                     box.max.set(worldX + 0.45 * scale, height + (object.bridge ? .2 : .08), worldZ + 0.45 * scale);
                     if (!raycaster.ray.intersectBox(box, point)) return;
