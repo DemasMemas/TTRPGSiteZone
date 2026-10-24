@@ -21,6 +21,11 @@ async function connect(url) {
     };
     socket.onmessage = event => {
         const message = JSON.parse(event.data);
+        if(message.method==='Fetch.requestPaused'){
+            const p=message.params,name=new URL(p.request.url).pathname.split('/').pop(),dir=process.env.VTT_WATER_BASELINE_DIR;
+            const file=dir&&path.join(dir,name);
+            (file&&fs.existsSync(file)?call('Fetch.fulfillRequest',{requestId:p.requestId,responseCode:200,responseHeaders:[{name:'Content-Type',value:'application/javascript'}],body:fs.readFileSync(file).toString('base64')}):call('Fetch.continueRequest',{requestId:p.requestId})).catch(console.error);
+        }
         if (message.method) events.set(message.method, message.params);
         if (message.method === 'Runtime.exceptionThrown') console.error('Browser exception:', JSON.stringify(message.params.exceptionDetails));
         if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
@@ -31,7 +36,7 @@ async function connect(url) {
     };
     const call = (method, params = {}) => new Promise((resolve, reject) => {
         const id = ++nextId;
-        const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`Timed out: ${method}`)); }, process.env.VTT_WATER_GEOMETRY==='1'||process.env.VTT_SECONDARY_TOOLS==='1'||process.env.VTT_ROAD_TERRAIN==='1'||process.env.VTT_BRIDGE_BANK==='1'?90000:30000);
+        const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`Timed out: ${method}`)); }, process.env.VTT_WATER_FINAL==='1'||process.env.VTT_WATER_GEOMETRY==='1'||process.env.VTT_SECONDARY_TOOLS==='1'||process.env.VTT_ROAD_TERRAIN==='1'||process.env.VTT_BRIDGE_BANK==='1'?90000:30000);
         waiting.set(id, message => {
             clearTimeout(timer);
             if (message.closed && method !== 'Browser.close') reject(new Error(`Browser connection closed: ${method}`));
@@ -95,7 +100,7 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await request('/auth/register', { username: 'browser-gm', email: 'browser-gm@example.test', password: 'browser-test-password' });
         const login = await request('/auth/login', { username: 'browser-gm', password: 'browser-test-password' });
         const token = login.access_token;
-        const waterGeometry=process.env.VTT_WATER_GEOMETRY==='1';
+        const waterGeometry=process.env.VTT_WATER_GEOMETRY==='1'||process.env.VTT_WATER_FINAL==='1';
         const lobby = await request('/lobbies/', { name: 'Direct object browser test', map_type: 'empty', chunks_width: 2, chunks_height: waterGeometry?2:1 }, token);
         await request(`/lobbies/${lobby.id}/chunks?min_chunk_x=0&max_chunk_x=1&min_chunk_y=0&max_chunk_y=${waterGeometry?1:0}`, null, token, 'GET');
         await request(`/lobbies/${lobby.id}/chunks/0/0/tile/31/10`, { objects: [
@@ -120,6 +125,7 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.call('Page.enable');
         await page.call('Runtime.enable');
         await page.call('Log.enable');
+        if(process.env.VTT_WATER_BASELINE_DIR)await page.call('Fetch.enable',{patterns:[{urlPattern:'*/static/js/*',requestStage:'Request'}]});
         await page.call('Page.navigate', { url: base });
         await page.until('location.origin === ' + JSON.stringify(base), 'origin');
         await page.evaluate(`localStorage.setItem('access_token', ${JSON.stringify(token)});localStorage.setItem('user_id', ${JSON.stringify(String(login.user_id))});`);
@@ -129,6 +135,9 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===${waterGeometry?4:2} && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if(process.env.VTT_WATER_FINAL==='1'){
+            await require('./water_final.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
         if(process.env.VTT_LOCAL_WATER_AUDIT==='1'){
             await require('./local_water_audit.browser.cjs')({page,request,token,lobby});return;
         }

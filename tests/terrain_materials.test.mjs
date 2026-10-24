@@ -123,7 +123,7 @@ test('only global shores and grass walls next to water use the existing earth si
     await world.ready;world.resize(4,4);world.update(1,1,{terrain:'water'});local.update(0,0,{terrain:'water'});
     const bank=compile(world,{sides:true,smooth:true,shore:true}),walls=compile(world,{sides:true}),unchanged=compile(local,{sides:true});
     assert.equal(bank.uniforms.terrainKinds.value.image.data[(1*4+1)*4+2],255);
-    assert.equal(unchanged.uniforms.terrainKinds.value.image.data[2],0);
+    assert.equal(unchanged.uniforms.terrainKinds.value.image.data[2],255);
     assert.match(bank.fragmentShader,/float nearWater = 1\.0;/);
     assert.match(walls.fragmentShader,/nearWater = max\(nearWater,texture2D/);
     assert.doesNotMatch(unchanged.fragmentShader,/nearWater/);

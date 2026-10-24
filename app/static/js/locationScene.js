@@ -56,6 +56,7 @@ import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.
 import { createGrassDetailGroup } from './locationGrassDetail.js';
 import { addNaturalGrassInstances, disposeNaturalGrassInstances, loadNaturalGrassAssets, updateNaturalGrassInstances,
     naturalGrassPlacements } from './locationNaturalGrass.js';
+import { smoothWaterNormals, shoreOwners } from './waterGeometryUtils.js';
 import { buildRoundedWaterData, classifyWaterRegions, waterExposedSideMask,
     waterLevelForTile, waterSideCornerDrops } from './locationWaterEdge.js';
 import { createWaterDetailGroup } from './locationWaterDetail.js';
@@ -10758,7 +10759,7 @@ function refreshLocationDarkness(profile = activeLightingProfile, lightOnly = fa
             const z = Math.floor(index / currentLocationData.grid_width);
             const tile = currentLocationData.tiles_data[z][x];
             if (tile.terrain === 'water') {
-                waterTileMesh?.setColorAt(index, new THREE.Color(0xffffff));
+                waterTileMesh?.setColorAt(index, new THREE.Color(WATER_SIDE_COLORS[waterRegions.get(`${x},${z}`)||'grass']));
             } else {
                 locationTileMesh.setColorAt(index,
                     new THREE.Color(terrainColors[tile.terrain] || 0x3a5f0b)
@@ -13517,7 +13518,7 @@ export function loadLocation(data) {
     const tileCount = gridWidth * gridHeight;
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material = new THREE.MeshStandardMaterial();
-    locationTerrainMaterials.apply(material, { sides: true });
+    locationTerrainMaterials.apply(material, { sides: true, waterSides: true });
     // The textured terrain cap owns land tops; keep box tops pickable without drawing into depth.
     const landTopMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
     locationTileMesh = new THREE.InstancedMesh(geometry, [
@@ -13869,7 +13870,7 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
                 '#include <clipping_planes_fragment>\nif (vTerrainTop > 0.5) discard;');
     };
     smoothTerrainMesh = new THREE.Mesh(geometry, material);
-    locationTerrainMaterials?.apply(material, { sides: true, smooth: true });
+    locationTerrainMaterials?.apply(material, { sides: true, smooth: true, waterSides: true });
     smoothTerrainMesh.userData.tileByFace = data.tileByFace;
     smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
     smoothTerrainMesh.receiveShadow = true;
@@ -14087,7 +14088,7 @@ function rebuildWaterSurfaceMesh() {
     const waterGeometry = new THREE.BufferGeometry();
     waterGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.water, 3));
     waterGeometry.setAttribute('color', new THREE.Float32BufferAttribute(data.waterColors, 3));
-    waterGeometry.computeVertexNormals();
+    waterGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(smoothWaterNormals(data.water),3));
     const waterMaterial = createWaterMaterial();
     waterMaterial.vertexColors = true;
     applySurfaceDarkness(waterMaterial, locationDarknessTexture,
@@ -14101,13 +14102,15 @@ function rebuildWaterSurfaceMesh() {
     if (data.bank.length) {
         const bankGeometry = new THREE.BufferGeometry();
         bankGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.bank, 3));
-        bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(data.bankColors, 3));
+        bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(Array(data.bank.length).fill(1), 3));
         bankGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(data.bankUvs, 2));
         bankGeometry.computeVertexNormals();
         const bankMaterial = new THREE.MeshStandardMaterial({
-            map: terrainSurfaceTexture, vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
+            vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
         });
-        locationTerrainMaterials?.apply(bankMaterial);
+        bankGeometry.setAttribute('terrainTileCoord',new THREE.Float32BufferAttribute(shoreOwners(data.bank,waterTiles),2));
+        bankGeometry.setAttribute('terrainTop',new THREE.Float32BufferAttribute(Array(data.bank.length/3).fill(0),1));
+        locationTerrainMaterials?.apply(bankMaterial,{sides:true,smooth:true,shore:true});
         applySurfaceDarkness(bankMaterial, locationDarknessTexture,
             new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
         waterBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
@@ -14119,12 +14122,14 @@ function rebuildWaterSurfaceMesh() {
     if (data.sandBank.length) {
         const bankGeometry = new THREE.BufferGeometry();
         bankGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.sandBank, 3));
-        bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(data.sandBankColors, 3));
+        bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(Array(data.sandBank.length).fill(1), 3));
+        bankGeometry.setAttribute('terrainTileCoord',new THREE.Float32BufferAttribute(shoreOwners(data.sandBank,waterTiles),2));
+        bankGeometry.setAttribute('terrainTop',new THREE.Float32BufferAttribute(Array(data.sandBank.length/3).fill(0),1));
         bankGeometry.computeVertexNormals();
         const bankMaterial = new THREE.MeshStandardMaterial({
             vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
         });
-        locationTerrainMaterials?.apply(bankMaterial);
+        locationTerrainMaterials?.apply(bankMaterial,{sides:true,smooth:true,shore:true});
         applySurfaceDarkness(bankMaterial, locationDarknessTexture,
             new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
         sandBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
@@ -14340,7 +14345,7 @@ function updateTileInstance(instanceId, x, z, tile) {
     const activeMesh = isWater ? waterTileMesh : locationTileMesh;
     const inactiveMesh = isWater ? locationTileMesh : waterTileMesh;
     waterTileMesh.geometry.getAttribute('waterSideMask').setX(instanceId,
-        waterExposedSideMask(currentLocationData.tiles_data, x, z));
+        waterExposedSideMask(currentLocationData.tiles_data, x, z, true));
     if (isWater) {
         const drops = waterSideCornerDrops(currentLocationData.tiles_data,
             x, z, waterRegions, renderedHeight);
@@ -14517,6 +14522,8 @@ export function applyLocationTilesUpdate(locationId, updates) {
             delete tile.grass_subtype;
         }
         if (upd.height !== undefined) tile.height = upd.height;
+        if (upd.water_level_offset === null) delete tile.water_level_offset;
+        else if (Number.isFinite(upd.water_level_offset)) tile.water_level_offset=upd.water_level_offset;
         if (upd.objects !== undefined) tile.objects = upd.objects;
         if (upd.radiation !== undefined) tile.radiation = upd.radiation;
         terrainChanged ||= tile.terrain !== previousTerrain;
@@ -14584,7 +14591,11 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 waterTopologyChanged ||= (tile.terrain === 'water') !== (updates.terrain === 'water');
                 tile.terrain = updates.terrain;
                 if (tile.terrain !== 'grass') delete tile.grass_subtype;
-                if (tile.terrain === 'water' && previousHeight < 0.5) tile.height = 0.5;
+                if (tile.terrain === 'water') {
+                    const neighbor=[[0,-1],[1,0],[0,1],[-1,0]].map(([dx,dz])=>tiles[z+dz]?.[x+dx]).find(t=>t?.terrain==='water'&&Number.isFinite(t.water_level_offset));
+                    tile.water_level_offset=neighbor?.water_level_offset??0;
+                    if(previousHeight<.5)tile.height=.5;
+                } else delete tile.water_level_offset;
                 terrainChanged = true;
                 needUpdate = true;
             }
@@ -14668,7 +14679,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                     height: tile.height, objects: tile.objects, radiation: tile.radiation });
             }
     }
-    if (terrainChanged && changed.length) {
+    if (waterTopologyChanged && changed.length) {
         const changedByTile = new Map(changed.map(item => [`${item.x},${item.z}`, item]));
         for (const { x, z, height } of waterSurfaceAdjustments(tiles, new Set(changedByTile.keys()))) {
             const previousHeight = getTileHeight(x, z);
@@ -14713,7 +14724,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             token: localStorage.getItem('access_token'),
             location_id: window.currentLocationId,
             updates: changed.map(c => ({ x: c.x, z: c.z, terrain: c.terrain,
-                grass_subtype: c.grass_subtype, height: c.height,
+                grass_subtype: c.grass_subtype, height: c.height, water_level_offset: tiles[c.z][c.x].water_level_offset??null,
                 objects: c.objects, radiation: c.radiation }))
         });
     }

@@ -21,9 +21,9 @@ const LAND_COLORS = {
 
 const WATER_TINTS = {
     grass: [1, 1, 1],
-    swamp: [0.8, 1.1, 0.47],
-    sand: [2.5, 1.28, 0.38],
-    rock: [1.9, 0.94, 0.65],
+    swamp: [0.9, 1.02, 0.91],
+    sand: [1.07, 1.02, 0.92],
+    rock: [0.98, 0.99, 1.02],
 };
 
 export function classifyWaterRegions(tiles) {
@@ -68,12 +68,13 @@ export function classifyWaterRegions(tiles) {
 }
 
 export function waterLevelForTile(tile, kind) {
-    return (Number(tile.height) || 1) - (kind === 'sand' ? 0.2 : 0);
+    const offset=Number.isFinite(tile.water_level_offset)?tile.water_level_offset:(kind==='sand'?-.2:0);
+    return (Number(tile.height) || 1) + offset;
 }
 
-export function waterExposedSideMask(tiles, x, z) {
+export function waterExposedSideMask(tiles, x, z, outsideOnly = false) {
     if (tiles[z]?.[x]?.terrain !== 'water') return 0;
-    const exposed = (dx, dz) => tiles[z + dz]?.[x + dx]?.terrain !== 'water';
+    const exposed = (dx, dz) => outsideOnly ? !tiles[z+dz]?.[x+dx] : tiles[z + dz]?.[x + dx]?.terrain !== 'water';
     return (exposed(1, 0) ? 1 : 0) | (exposed(-1, 0) ? 2 : 0)
         | (exposed(0, 1) ? 4 : 0) | (exposed(0, -1) ? 8 : 0);
 }
@@ -116,7 +117,7 @@ export function waterSideCornerDrops(tiles, x, z, regions, renderedHeight) {
 
 export function buildRoundedWaterData(tiles, radius = 0.24,
     includeTile = () => true, bankSamples = null, levelForWater = waterLevelForTile,
-    { shorelineRing = false, landSurfaceHeightAt = null, worldOrigin = null } = {}) {
+    { shorelineRing = false, landSurfaceHeightAt = null, worldOrigin = null, flatShore = false } = {}) {
     const water = [];
     const waterColors = [];
     const bank = [];
@@ -157,37 +158,47 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
             const kind = regions.get(`${x},${z}`) || 'grass';
             const height = levelForWater(tile, kind);
             const patternX = x + (worldOrigin?.x || 0), patternZ = z + (worldOrigin?.z || 0);
-            const waterHeightAt = (px, pz) => shorelineRing
+            const rawWaterHeightAt = (px, pz) => shorelineRing
                 ? connectedWaterHeightAt(tiles, x, z, px, pz, regions, levelForWater) : height;
+            const waterHeightAt = (px,pz) => {
+                const level=rawWaterHeightAt(px,pz),land=flatShore?sharedShoreHeight(px,pz):null;
+                // End a level water boundary on the real land edge. Keeping the
+                // usual raised water edge here would leave an open .012 lip.
+                return land!==null&&Math.abs(land-level)<.0001 ? land-.012 : level;
+            };
             const strip = 0.075;
             const r = Math.max(strip * 2, Math.min(radius, 0.45));
             const diagonal = (r - strip) * Math.SQRT1_2;
-            const north = isLand(x, z - 1);
-            const east = isLand(x + 1, z);
-            const south = isLand(x, z + 1);
-            const west = isLand(x - 1, z);
+            // A level land/water seam does not need an inset dirt rim. Decide
+            // from the actual edge, not a basin-wide or chunk-dependent vote.
+            const bankNeeded=(nx,nz,px,pz)=>isLand(nx,nz)&&(!flatShore
+                ||Math.abs((sharedShoreHeight(px,pz)??height)-rawWaterHeightAt(px,pz))>0.0001);
+            const north = bankNeeded(x,z-1,x+.5,z);
+            const east = bankNeeded(x+1,z,x+1,z+.5);
+            const south = bankNeeded(x,z+1,x+.5,z+1);
+            const west = bankNeeded(x-1,z,x,z+.5);
             const corners = [
                 {
                     first: west, second: north, at: [x, z], diagonal: [x - 1, z - 1],
-                    firstOnly: [x + strip, z], secondOnly: [x, z + strip], diagonalLand: isLand(x - 1, z - 1),
+                    firstOnly: [x + strip, z], secondOnly: [x, z + strip], diagonalLand: bankNeeded(x-1,z-1,x,z),
                     arc: [[x + strip, z + r], [x + r - diagonal, z + r - diagonal], [x + r, z + strip]],
                     edge: [x + 0.5, z + (north ? strip + 0.025 * Math.sin(patternX * 4.3 + patternZ * 1.7) : 0)],
                 },
                 {
                     first: north, second: east, at: [x + 1, z], diagonal: [x + 1, z - 1],
-                    firstOnly: [x + 1, z + strip], secondOnly: [x + 1 - strip, z], diagonalLand: isLand(x + 1, z - 1),
+                    firstOnly: [x + 1, z + strip], secondOnly: [x + 1 - strip, z], diagonalLand: bankNeeded(x+1,z-1,x+1,z),
                     arc: [[x + 1 - r, z + strip], [x + 1 - r + diagonal, z + r - diagonal], [x + 1 - strip, z + r]],
                     edge: [x + 1 - (east ? strip + 0.025 * Math.sin(patternX * 3.1 + patternZ * 5.1) : 0), z + 0.5],
                 },
                 {
                     first: east, second: south, at: [x + 1, z + 1], diagonal: [x + 1, z + 1],
-                    firstOnly: [x + 1 - strip, z + 1], secondOnly: [x + 1, z + 1 - strip], diagonalLand: isLand(x + 1, z + 1),
+                    firstOnly: [x + 1 - strip, z + 1], secondOnly: [x + 1, z + 1 - strip], diagonalLand: bankNeeded(x+1,z+1,x+1,z+1),
                     arc: [[x + 1 - strip, z + 1 - r], [x + 1 - r + diagonal, z + 1 - r + diagonal], [x + 1 - r, z + 1 - strip]],
                     edge: [x + 0.5, z + 1 - (south ? strip + 0.025 * Math.sin(patternX * 4.3 + (patternZ + 1) * 1.7) : 0)],
                 },
                 {
                     first: south, second: west, at: [x, z + 1], diagonal: [x - 1, z + 1],
-                    firstOnly: [x, z + 1 - strip], secondOnly: [x + strip, z + 1], diagonalLand: isLand(x - 1, z + 1),
+                    firstOnly: [x, z + 1 - strip], secondOnly: [x + strip, z + 1], diagonalLand: bankNeeded(x-1,z+1,x,z+1),
                     arc: [[x + r, z + 1 - strip], [x + r - diagonal, z + 1 - r + diagonal], [x + strip, z + 1 - r]],
                     edge: [x + (west ? strip + 0.025 * Math.sin((patternX - 1) * 3.1 + patternZ * 5.1) : 0), z + 0.5],
                 },

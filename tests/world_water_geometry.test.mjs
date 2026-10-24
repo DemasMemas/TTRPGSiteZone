@@ -2,6 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {buildWorldWaterData,worldWaterCeiling} from '../app/static/js/worldWaterGeometry.js';
 import {createTerrainSurfaceHeightSampler} from '../app/static/js/locationTerrain.js';
+import {smoothWaterNormals} from '../app/static/js/waterGeometryUtils.js';
+import {waterLevelForTile} from '../app/static/js/locationWaterEdge.js';
+
+test('equal-level shore has no inset soil ribbon, while a raised bank retains its ring',()=>{
+    const tiles=Array.from({length:3},()=>Array.from({length:3},()=>land(1)));tiles[1][1]=water(1);
+    let d=buildWorldWaterData(tiles);assert.equal(d.bankPositions.length,0);
+    assert.ok(d.water.some((v,i)=>i%3===0&&v===1));
+    for(let i=0;i<d.water.length;i+=3)if(d.water[i]===1||d.water[i]===2||d.water[i+2]===1||d.water[i+2]===2)
+        assert.ok(Math.abs(d.water[i+1]-1)<1e-8,'level perimeter closes on the land, without an open raised lip');
+    tiles[1][0].height=2;
+    d=buildWorldWaterData(tiles);assert.ok(d.bankPositions.length>0);
+});
+test('local stored offset is independent of shore tint and welded normals agree',()=>{
+    assert.equal(waterLevelForTile({height:1,water_level_offset:-.2},'grass'),.8);
+    assert.equal(waterLevelForTile({height:1,water_level_offset:0},'sand'),1);
+    const p=[0,0,0, 1,0,0, 0,0,1, 0,0,1, 1,0,0, 1,1,1],n=smoothWaterNormals(p);
+    assert.deepEqual(n.slice(3,6),n.slice(12,15));assert.deepEqual(n.slice(6,9),n.slice(9,12));
+});
 
 const land=h=>({terrain:'grass',height:h}),water=h=>({terrain:'water',height:h});
 test('unequal water cells share one edge and have no internal volume walls',()=>{

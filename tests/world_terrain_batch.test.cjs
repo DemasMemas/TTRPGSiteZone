@@ -11,7 +11,7 @@ const moduleUrl = name => {
     if (name === 'locationTerrainTexture.js') {
         code = code.replace("'./locationGrassSubtype.js'", `'${moduleUrl('locationGrassSubtype.js')}'`);
     }
-    if (name === 'worldWaterGeometry.js') for (const dependency of ['locationWaterEdge.js','locationTerrain.js']) {
+    if (name === 'worldWaterGeometry.js') for (const dependency of ['locationWaterEdge.js','locationTerrain.js','waterGeometryUtils.js']) {
         code = code.replace(`'./${dependency}'`, `'${moduleUrl(dependency)}'`);
     }
     return `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
@@ -257,7 +257,7 @@ for (const [name, keys, x, z] of [
         }
         assert.deepEqual(h.counts, { refreshes: 0, generations: 0, meshes: 0, disposed: 0 });
         assert.deepEqual(previous.counts, {
-            refreshes: keys.length, generations: keys.length, meshes: 2 * keys.length, disposed: 2 * keys.length,
+            refreshes: keys.length, generations: keys.length, meshes: keys.length, disposed: keys.length,
         });
         assert.deepEqual([...h.chunksMap.values()].flatMap(entry => [entry.waterSurface, entry.waterBank]), meshes);
         assertWaterEquivalent(h, previous);
@@ -284,7 +284,7 @@ test('shore soil, land heights, water heights and isolated water removal match p
     }
     for (const run of [h, previous]) { run.context.finishWorldBrushStroke(); run.flush(); }
     assertWaterEquivalent(h, previous);
-    assert.deepEqual(h.counts, { refreshes: 6, generations: 5, meshes: 10, disposed: 10 });
+    assert.deepEqual(h.counts, { refreshes: 6, generations: 5, meshes: 9, disposed: 8 });
 });
 
 test('connected shoreline crosses the 55 percent threshold without changing previous classification', async () => {
@@ -479,11 +479,11 @@ test('height preview refreshes water levels and the shore including diagonal lan
     h.buildRegions.length = 0;
     h.context.brushActive = true;
     for (const [x, z, height] of [[10, 10, 5], [11, 11, 3], [10, 11, 2]]) {
-        const oldBank = entry.waterBank.geometry;
+        const oldBank = entry.waterBank?.geometry;
         h.edit(x, z, { height });
         assert.equal(entry.waterShoreDirty, true);
         h.context.refreshWorldTerrainBrushPreview();
-        assert.equal(oldBank.disposed, true);
+        if(oldBank)assert.equal(oldBank.disposed, true);
         const padded = assertLiveHeightGeometry(h, entry);
         const expected = h.context.buildWorldWaterData(padded,
             (x, z) => x > 0 && x <= 32 && z > 0 && z <= 32,-1,-1);
@@ -595,7 +595,7 @@ test('live preview refreshes both sides of chunk corners without consuming the f
     for (const entry of h.chunksMap.values()) {
         assert.equal(entry.terrainTextureRegion, null);
         assert.ok(entry.waterSurface);
-        assert.ok(entry.waterBank);
+        assert.ok(!entry.waterBank, 'a level seam has no unnecessary bank');
     }
     assert.equal(h.buildRegions.length, 4);
     assert.ok(h.buildRegions.every(region => region.included < 1024));

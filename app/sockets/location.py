@@ -9,6 +9,7 @@ from app.models import LobbyParticipant, LobbyCharacter
 from app.models.location import Location
 from app.models.location_character import LocationCharacter
 from app.services.combat import CombatService
+from app.services.location_water import freeze_water_offsets
 from app.services.character_roles import is_npc
 from app.schemas.location import LocationObjectSchema
 from app.models.location_object import LocationObject
@@ -277,6 +278,7 @@ def handle_update_location_tiles(data):
     tiles = location.tiles_data
     if not isinstance(tiles, list):
         tiles = []
+    freeze_water_offsets(tiles)
     changed = []
 
     for upd in updates:
@@ -294,6 +296,15 @@ def handle_update_location_tiles(data):
 
             if 'terrain' in upd and tile.get('terrain') != upd['terrain']:
                 tile['terrain'] = upd['terrain']
+                if tile['terrain'] == 'water':
+                    tile['water_level_offset'] = 0
+                else:
+                    tile.pop('water_level_offset', None)
+                terrain_changed = True
+            offset = upd.get('water_level_offset')
+            if (tile.get('terrain') == 'water' and type(offset) in (int, float)
+                    and offset in (0, -.2) and tile.get('water_level_offset') != offset):
+                tile['water_level_offset'] = offset
                 terrain_changed = True
             if 'grass_subtype' in upd and tile.get('terrain') == 'grass':
                 subtype = 'forest' if upd['grass_subtype'] == 'forest' else 'plain'
@@ -321,6 +332,7 @@ def handle_update_location_tiles(data):
                     'terrain': tile.get('terrain'),
                     'grass_subtype': tile.get('grass_subtype'),
                     'height': tile.get('height'),
+                    'water_level_offset': tile.get('water_level_offset'),
                     'objects': tile.get('objects'),
                     'radiation': tile.get('radiation'),
                 })

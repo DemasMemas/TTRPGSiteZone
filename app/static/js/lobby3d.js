@@ -1078,7 +1078,7 @@ function animateChunkAnomalies(time) {
     animateAnomalyEffects(visibleNearAnomalies, time);
 }
 
-const waterMat = createWaterMaterial();
+const waterMat = createWaterMaterial({ world:true });
 const waterTexture = waterMat.map;
 const waterHiddenTopMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
 // Retain compact box instances for picking; draw only the joined surface/rim.

@@ -30,6 +30,7 @@ from app.services.artifact_effects import apply_artifact_world_movement
 from app.services.character_interaction import CharacterInteractionService
 from app.services.health import apply_health_maximums, heal_character_fully, health_zones_to_location
 from app.services.location_lighting import normalize_location_lighting
+from app.services.location_water import freeze_water_offsets, preserve_water_offsets
 from app.services.equipment_repair import repair_equipment, resolve_item_path
 from app.services.gas_mask_filters import consume_equipped_filter_charges
 from app.services.addictions import advance_addictions, record_exposure, withdrawal_check, remove_addiction
@@ -2299,6 +2300,7 @@ def delete_lobby_template(lobby_id, lobby, template_id):
 def create_location(lobby_id, lobby):
     schema = LocationCreateSchema()
     data = schema.load(request.get_json())
+    freeze_water_offsets(data['tiles_data'])
     location = Location(
         lobby_id=lobby_id,
         name=data['name'],
@@ -2355,6 +2357,10 @@ def get_location_detail(lobby_id, location_id, lobby, participant):
     if location.lobby_id != lobby_id:
         return jsonify({'error': 'Access denied'}), 403
 
+    if freeze_water_offsets(location.tiles_data):
+        flag_modified(location, 'tiles_data')
+        db.session.commit()
+
     objects = LocationObject.query.filter_by(location_id=location.id).all()
     obj_schema = LocationObjectSchema(many=True)
 
@@ -2396,9 +2402,14 @@ def update_location(lobby_id, location_id, lobby):
             return jsonify({'error': f'{field} must be a tile within the world map'}), 400
     allowed = ['name', 'description', 'type', 'grid_width', 'grid_height', 'tiles_data',
                'spawn_points', 'world_radius', 'world_tile_x', 'world_tile_z']
+    if 'tiles_data' in data:
+        preserve_water_offsets(data['tiles_data'], location.tiles_data)
     for field in allowed:
         if field in data:
             setattr(location, field, data[field])
+    if 'tiles_data' in data:
+        freeze_water_offsets(location.tiles_data)
+        flag_modified(location, 'tiles_data')
     if 'lighting' in data:
         location.lighting = normalize_location_lighting(
             data['lighting'], location.grid_width, location.grid_height,
@@ -2439,6 +2450,7 @@ def update_location(lobby_id, location_id, lobby):
                     'z': z,
                     'terrain': tile.get('terrain'),
                     'height': tile.get('height'),
+                    'water_level_offset': tile.get('water_level_offset'),
                     'objects': tile.get('objects', [])
                 })
         socketio.emit('location_tiles_updated', {

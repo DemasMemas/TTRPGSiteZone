@@ -505,7 +505,7 @@ test('water side mask is per instance and refreshes with edited neighboring tile
     assert.match(update, /getAttribute\('waterSideMask'\)\.needsUpdate = true/);
     const instance = scene.slice(scene.indexOf('function updateTileInstance('),
         scene.indexOf('function updateTileInstance(') + 3000);
-    assert.match(instance, /waterExposedSideMask\(currentLocationData\.tiles_data, x, z\)/);
+    assert.match(instance, /waterExposedSideMask\(currentLocationData\.tiles_data, x, z, true\)/);
 });
 
 test('diagonal land does not pull a shore triangle across two water neighbors', async () => {
