@@ -15,6 +15,7 @@
 - constants.py  : общие константы (CHUNK_SIZE, типы тайлов и аномалий)
 """
 
+import json
 import logging
 import tempfile
 from logging.handlers import RotatingFileHandler
@@ -143,6 +144,19 @@ def create_app(config_name='default'):
     @app.route('/')
     def index():
         return render_template('index.html')
+
+    @app.route('/licenses')
+    def licenses():
+        registry_path = Path(app.config.get(
+            'ASSET_CREDITS_PATH', Path(app.root_path) / 'data' / 'asset_credits.json',
+        ))
+        with registry_path.open(encoding='utf-8') as registry:
+            assets = json.load(registry)
+        return render_template(
+            'licenses.html',
+            used_assets=[asset for asset in assets if asset['status'] == 'in_use'],
+            planned_assets=[asset for asset in assets if asset['status'] == 'planned'],
+        )
 
     @app.route('/favicon.ico')
     def favicon():

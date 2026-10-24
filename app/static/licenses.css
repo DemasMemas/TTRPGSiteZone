@@ -1,0 +1,26 @@
+body.credits-page { overflow: auto; min-height: 100vh; }
+.credits-shell { width: min(900px, 100%); margin: 0 auto; padding: 32px 24px 56px; }
+.credits-page a { color: var(--username-color); text-underline-offset: 3px; }
+.credits-page a:hover { color: var(--text-color); }
+.credits-page a:focus-visible { outline: 2px solid var(--username-color); outline-offset: 4px; border-radius: 2px; }
+.credits-heading { margin: 32px 0; }
+.credits-heading h1 { font-size: clamp(26px, 5vw, 38px); margin: 8px 0 12px; }
+.credits-heading > p:last-child, .credits-note, .credits-empty { color: var(--text-secondary); line-height: 1.6; }
+.credits-brand { color: var(--username-color); font-size: 12px; letter-spacing: .12em; }
+.credits-shell section + section { margin-top: 32px; }
+.credits-shell h2 { font-size: 20px; margin-bottom: 10px; }
+.credits-count { color: var(--text-soft); font-size: 15px; font-weight: normal; margin-left: 8px; }
+.credits-card { background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 16px; padding: 22px; margin-top: 16px; box-shadow: var(--panel-shadow); }
+.credits-card-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.credits-card h3 { margin: 0; font-size: 20px; }
+.credits-status { color: var(--username-color); background: var(--message-system-bg); padding: 6px 10px; border: 1px solid var(--panel-border); border-radius: 8px; font-size: 13px; }
+.credits-card dl { margin: 20px 0 0; }
+.credits-card dl > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-top: 1px solid var(--panel-border); line-height: 1.5; }
+.credits-card dt { color: var(--text-soft); }
+.credits-card dd { margin: 0; overflow-wrap: anywhere; }
+.credits-empty { padding: 16px 0; }
+@media (max-width: 540px) {
+    .credits-shell { padding: 24px 16px 40px; }
+    .credits-card { padding: 18px; }
+    .credits-card dl > div { grid-template-columns: 1fr; gap: 4px; }
+}

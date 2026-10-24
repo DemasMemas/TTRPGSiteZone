@@ -127,6 +127,9 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===2 && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if (process.env.VTT_LICENSES === '1') {
+            await require('./asset_credits.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
         if (process.env.VTT_BRIDGE_BANK === '1') {
             await require('./bridge_bank.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
         }

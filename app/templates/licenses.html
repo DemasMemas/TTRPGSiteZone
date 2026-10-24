@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Лицензии и авторы — Периметр</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='assets/pictures/bg.png') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='licenses.css') }}">
+</head>
+<body class="credits-page">
+    {% macro asset_card(asset, planned=false) %}
+    <article class="credits-card" id="{{ asset.id }}">
+        <header class="credits-card-header">
+            <h3>{{ asset.name }}</h3>
+            <span class="credits-status">{{ 'Запланирован к интеграции' if planned else 'Используется' }}</span>
+        </header>
+        <dl>
+            <div><dt>Автор</dt><dd>{{ asset.author or 'Не указан' }}</dd></div>
+            <div><dt>Тип ресурса</dt><dd>{{ asset.category or 'Не указан' }}</dd></div>
+            <div><dt>Источник</dt><dd>{% if asset.source_url %}<a href="{{ asset.source_url }}" target="_blank" rel="noopener noreferrer">Оригинальный ресурс ↗</a>{% else %}Не указан{% endif %}</dd></div>
+            <div><dt>Лицензия</dt><dd>{% if asset.license_url %}<a href="{{ asset.license_url }}" target="_blank" rel="noopener noreferrer">{{ asset.license or 'Условия лицензии' }} ↗</a>{% else %}{{ asset.license or 'Не уточнена' }}{% endif %}</dd></div>
+            <div><dt>Изменения</dt><dd>{{ asset.modifications or 'Сведения не добавлены' }}</dd></div>
+        </dl>
+    </article>
+    {% endmacro %}
+    <main class="credits-shell">
+        <nav aria-label="Навигация"><a href="{{ url_for('index') }}">← На главную</a></nav>
+        <header class="credits-heading">
+            <p class="credits-brand">ПЕРИМЕТР / VTT</p>
+            <h1>Лицензии и авторы</h1>
+            <p>Авторы, источники и лицензии сторонних ресурсов проекта.</p>
+        </header>
+        <section aria-labelledby="used-assets-title" id="used-assets">
+            <h2 id="used-assets-title">Используемые ресурсы <span class="credits-count">{{ used_assets|length }}</span></h2>
+            {% for asset in used_assets %}{{ asset_card(asset) }}{% else %}
+            <p class="credits-empty">Записи об используемых ресурсах пока не добавлены.</p>
+            {% endfor %}
+        </section>
+        <section aria-labelledby="planned-assets-title" id="planned-assets">
+            <h2 id="planned-assets-title">Запланированные ресурсы <span class="credits-count">{{ planned_assets|length }}</span></h2>
+            <p class="credits-note">Эти ресурсы ещё не интегрированы в VTT.</p>
+            {% for asset in planned_assets %}{{ asset_card(asset, true) }}{% else %}
+            <p class="credits-empty">Запланированных ресурсов в реестре нет.</p>
+            {% endfor %}
+        </section>
+    </main>
+</body>
+</html>

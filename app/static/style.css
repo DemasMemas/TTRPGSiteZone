@@ -1009,6 +1009,9 @@ body.light-theme .chat-roll .message-kind { color: #3d5796; }
   border-radius: 7px;
 }
 .lobby-menu button.menu-item:not(.exit-btn):hover { background: var(--panel-header-bg); }
+.lobby-menu .credits-menu-link { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; border-radius: 7px; text-decoration: none; }
+.lobby-menu .credits-menu-link:hover { background: var(--panel-header-bg); }
+.lobby-menu .credits-menu-link:focus-visible { outline: 2px solid var(--username-color); outline-offset: -2px; }
 .lobby-menu button.menu-item.is-active {
   background: var(--panel-header-bg);
   box-shadow: inset 0 0 0 1px var(--username-color);
