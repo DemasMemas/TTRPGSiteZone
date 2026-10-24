@@ -90,7 +90,7 @@ async function harness(keys = ['0,0'], size = 32) {
         brushActive: false, isMouseDown: false, lastProcessedTileKey: null,
         controlsDisabled: false, globalMouseUpHandler: null,
         lastHoverRaycastAt: 0, lastChunkVisibilityAt: 0,
-        markWorldShadowsDirty() {}, updateTileObjectsPositions() {},
+        markWorldShadowsDirty() {}, updateTileObjectsPositions() {}, refreshWorldFenceNeighborhood() {}, invalidateFenceGround() {},
         rebuildRoadMeshes() {}, refreshRoadNeighborhood() {},
     });
     const start = source.indexOf('function refreshWorldTerrainSurface(');

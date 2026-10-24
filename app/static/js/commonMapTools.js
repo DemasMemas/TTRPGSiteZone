@@ -23,6 +23,24 @@ export function initCommonMapTools(socket) {
     let suppressClickUntil = 0;
     let consumedPointer = null;
     const pings = new Map();
+    const measurements=new Map();
+    let sharedMeasure=null, measureTimer=null, pendingMeasure=null, lastMeasureAt=-Infinity;
+    const sendMeasure=payload=>{
+        if(!socket.connected)return;
+        socket.emit('map_measure',payload,result=>{if(result&&!result.ok)showNotification(result.error,'error');});
+    };
+    const publishMeasure=(from,to,final)=>{
+        sharedMeasure={from:{x:from.x,y:from.y,z:from.z},to:{x:to.x,y:to.y,z:to.z},final};
+        pendingMeasure=sharedMeasure;
+        if(final){clearTimeout(measureTimer);measureTimer=null;lastMeasureAt=performance.now();sendMeasure(pendingMeasure);pendingMeasure=null;}
+        else if(measureTimer===null)measureTimer=setTimeout(()=>{
+            measureTimer=null;lastMeasureAt=performance.now();if(pendingMeasure)sendMeasure(pendingMeasure);pendingMeasure=null;
+        },Math.max(0,100-(performance.now()-lastMeasureAt)));
+    };
+    const disposeMeasure=mesh=>{
+        scene.remove(mesh);mesh.geometry.dispose();mesh.material.dispose();
+        for(const child of mesh.children){child.material.map?.dispose();child.material.dispose();}
+    };
     const sync = () => {
         panel.querySelectorAll('[data-common-map-tool]').forEach(button => {
             button.setAttribute('aria-pressed', String(button.dataset.commonMapTool === mode));
@@ -32,22 +50,35 @@ export function initCommonMapTools(socket) {
         mode = null; start = null;
         if (frame !== null) cancelAnimationFrame(frame);
         frame = null;
-        if (line) { scene.remove(line); line.geometry.dispose(); line.material.dispose(); line = null; }
+        if (line) { disposeMeasure(line); line = null; }
+        clearTimeout(measureTimer);measureTimer=null;pendingMeasure=null;
+        if(sharedMeasure)sendMeasure({clear:true});sharedMeasure=null;
         dice.hidden = true;
         output.textContent = ''; sync();
     };
     window.cancelCommonMapTool = cancel;
     const available = () => !window.isLocationActive && mode;
-    const drawMeasure = point => {
-        if (!line) {
+    const makeMeasure = (color='#f1d878') => {
             const geometry = new THREE.BufferGeometry();
             geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
-            line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: '#f1d878', depthTest: false, depthWrite: false, fog: false }));
-            line.frustumCulled = false; line.renderOrder = 1000; line.userData.commonMapMeasure = true; scene.add(line);
-        }
-        const positions = line.geometry.getAttribute('position');
-        positions.setXYZ(0, start.x, start.y + 0.15, start.z);
+            const mesh = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color, depthTest: false, depthWrite: false, fog: false }));
+            mesh.frustumCulled = false; mesh.renderOrder = 1000; mesh.userData.commonMapMeasure = true;
+            const labelCanvas=document.createElement('canvas');labelCanvas.width=256;labelCanvas.height=48;
+            const texture=new THREE.CanvasTexture(labelCanvas);
+            const label=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,depthTest:false,depthWrite:false,fog:false,sizeAttenuation:false}));
+            label.scale.set(.12,.023,1);label.renderOrder=1001;mesh.add(label);scene.add(mesh);return mesh;
+    };
+    const updateMeasure=(mesh,from,point)=>{
+        const positions = mesh.geometry.getAttribute('position');
+        positions.setXYZ(0, from.x, from.y + 0.15, from.z);
         positions.setXYZ(1, point.x, point.y + 0.15, point.z); positions.needsUpdate = true;
+        const distance=mapDistance(from,point).toFixed(2),label=mesh.children[0],canvas=label.material.map.image,ctx=canvas.getContext('2d');
+        if(mesh.userData.distance!==distance){ctx.clearRect(0,0,256,48);ctx.fillStyle='#151b16';ctx.fillRect(0,0,256,48);ctx.fillStyle='#f1d878';ctx.font='bold 26px sans-serif';ctx.textAlign='center';ctx.fillText(distance+' кл.',128,33);label.material.map.needsUpdate=true;mesh.userData.distance=distance;}
+        label.position.set((from.x+point.x)/2,(from.y+point.y)/2+.35,(from.z+point.z)/2);
+    };
+    const drawMeasure = (point,final=false) => {
+        if(!line)line=makeMeasure();
+        updateMeasure(line,start,point);publishMeasure(start,point,final);
         output.textContent = `${mapDistance(start, point).toFixed(2)} кл. по прямой`;
     };
     panel.addEventListener('click', event => {
@@ -78,14 +109,13 @@ export function initCommonMapTools(socket) {
     });
     const consume = event => { event.preventDefault(); event.stopImmediatePropagation(); };
     window.addEventListener('pointerdown', event => {
-        if (!available() || mode === 'dice' || event.target !== renderer.domElement || ![0, 2].includes(event.button)) return;
+        if (!available() || mode === 'dice' || event.target !== renderer.domElement || event.button!==0) return;
         consume(event); consumedPointer = event.pointerId; suppressClickUntil = performance.now() + 500;
-        if (event.button === 2) { cancel(); return; }
         const point = worldPointOnTerrain(event.clientX, event.clientY);
         if (!point) return;
         if (mode === 'measure') {
             if (!start) { start = point.clone(); drawMeasure(point); }
-            else { drawMeasure(point); start = null; }
+            else { drawMeasure(point,true); start = null; }
         } else if (mode === 'marker') {
             openCreateMarkerModal({ x: point.x, y: point.y + 0.8, z: point.z });
         } else if (mode === 'ping') {
@@ -99,7 +129,7 @@ export function initCommonMapTools(socket) {
         }
     }, { capture: true });
     window.addEventListener('pointermove', event => {
-        if (!available() || !start || event.target !== renderer.domElement) return;
+        if (!available() || !start || event.target !== renderer.domElement || (event.buttons&2)) return;
         lastPointer = { x: event.clientX, y: event.clientY };
         if (frame !== null) return;
         frame = requestAnimationFrame(() => {
@@ -123,6 +153,9 @@ export function initCommonMapTools(socket) {
     window.addEventListener('contextmenu', event => {
         if (event.target === renderer.domElement && performance.now() < suppressClickUntil) consume(event);
     }, { capture: true });
+    window.addEventListener('secondaryclick',event=>{
+        if(available()&&mode!=='dice'&&event.target===renderer.domElement){consume(event);cancel();}
+    },{capture:true});
     window.addEventListener('keydown', event => {
         if (event.key !== 'Escape' || isTypingTarget(event.target) || (!mode && !line)) return;
         consume(event); cancel();
@@ -149,4 +182,15 @@ export function initCommonMapTools(socket) {
         pings.set(payload.user_id, { mesh, timer });
     };
     socket.on('map_ping', showPing);
+    const showSharedMeasure=payload=>{
+        if(Number(payload.lobby_id)!==Number(window.currentLobbyId)||payload.id===socket.id)return;
+        let mesh=measurements.get(payload.id);
+        if(payload.clear){if(mesh){disposeMeasure(mesh);measurements.delete(payload.id);}return;}
+        if(!mesh){mesh=makeMeasure('#8cdef0');measurements.set(payload.id,mesh);}
+        mesh.userData.sharedMapMeasure=payload;updateMeasure(mesh,payload.from,payload.to);
+    };
+    socket.on('map_measure',showSharedMeasure);
+    socket.on('map_measure_snapshot',items=>{for(const item of items)showSharedMeasure(item);});
+    socket.on('disconnect',()=>{for(const mesh of measurements.values())disposeMeasure(mesh);measurements.clear();});
+    socket.on('authenticated',()=>{if(sharedMeasure)sendMeasure(sharedMeasure);});
 }

@@ -128,7 +128,11 @@ def _pick_free_tile(rng, lobby_id, chunk_x, chunk_y, width, height, map_type, oc
     return None
 
 
-def _road_path(start, goal, lobby_id, width, height, map_type, sites, blocked_start_neighbors=()):
+def _road_path(start, goal, lobby_id, width, height, map_type, sites, blocked_start_neighbors=(),
+               *, terrain_at=None, road_at=None, allow_bridges=False, shore_penalty=3,
+               diagonal=False, road_discount=.25):
+    """Shared generator/editor search; bridge edges cross water straight to land."""
+    terrain_at = terrain_at or (lambda x, y: _terrain_at(lobby_id, x, y, width, height, map_type))
     if start == goal:
         return [start]
     queue = [(0, 0, start)]
@@ -139,34 +143,58 @@ def _road_path(start, goal, lobby_id, width, height, map_type, sites, blocked_st
         if cost != costs[cell]:
             continue
         if cell == goal:
-            path = []
-            while cell is not None:
-                path.append(cell)
-                cell = parents[cell]
-            return path[::-1]
+            segments = []
+            while parents[cell] is not None:
+                cell, segment = parents[cell]
+                segments.append(segment)
+            return [start] + [point for segment in reversed(segments) for point in segment]
         x, y = cell
-        for neighbor in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+        directions = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        if diagonal:
+            directions += ((1, 1), (1, -1), (-1, 1), (-1, -1))
+        for dx, dy in directions:
+            neighbor = (x + dx, y + dy)
             nx, ny = neighbor
             if cell == start and neighbor in blocked_start_neighbors:
                 continue
             if not (0 <= nx < width and 0 <= ny < height):
                 continue
-            if _terrain_at(lobby_id, nx, ny, width, height, map_type) == 'water':
+            if dx and dy and (terrain_at(nx, ny) == 'water'
+                              or terrain_at(x + dx, y) == 'water' or terrain_at(x, y + dy) == 'water'
+                              or (x + dx, y) in sites or (x, y + dy) in sites):
+                continue  # No cutting across a water corner; bridges remain straight cardinal spans.
+            segment = [neighbor]
+            while terrain_at(nx, ny) == 'water':
+                if not allow_bridges:
+                    break
+                nx += neighbor[0] - x
+                ny += neighbor[1] - y
+                if not (0 <= nx < width and 0 <= ny < height):
+                    break
+                segment.append((nx, ny))
+            if not (0 <= nx < width and 0 <= ny < height) or terrain_at(nx, ny) == 'water':
                 continue
+            neighbor = (nx, ny)
             if neighbor in sites and neighbor != goal:
                 continue
             # Keep roads off the immediate shoreline when a dry inland route exists.
             shore_neighbors = sum(
                 0 <= nx + dx < width and 0 <= ny + dy < height
-                and _terrain_at(lobby_id, nx + dx, ny + dy, width, height, map_type) == 'water'
+                and terrain_at(nx + dx, ny + dy) == 'water'
                 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
             )
-            next_cost = cost + 1 + shore_neighbors * 3
+            if not shore_penalty:
+                shore_neighbors = 0
+            travel_cost = sum(road_discount if road_at and road_at(*point) else (4 if terrain_at(*point) == 'water' else 1)
+                              for point in segment) * (2**.5 if dx and dy else 1)
+            next_cost = cost + travel_cost + shore_neighbors * shore_penalty
             if next_cost >= costs.get(neighbor, float('inf')):
                 continue
             costs[neighbor] = next_cost
-            parents[neighbor] = cell
-            priority = next_cost + abs(nx - goal[0]) + abs(ny - goal[1])
+            parents[neighbor] = (cell, segment)
+            hx, hy = abs(nx - goal[0]), abs(ny - goal[1])
+            distance = max(hx, hy) + (2**.5 - 1) * min(hx, hy) if diagonal else hx + hy
+            priority = next_cost + (road_discount if road_at else 1) * distance
             heappush(queue, (priority, next_cost, neighbor))
     return []
 

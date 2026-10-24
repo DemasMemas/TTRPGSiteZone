@@ -170,6 +170,22 @@ function tileSurfaceTriangles(tiles, x, z, ring = tileSurfaceRing(tiles, x, z)) 
     return triangles;
 }
 
+// Query the same triangles used by the renderer, including steep terrain bands.
+export function terrainSurfaceHeight(tiles, x, z, px, pz, triangles = tileSurfaceTriangles(tiles,x,z)) {
+    for (const [a,b,c] of triangles) {
+        const denominator=(b[2]-c[2])*(a[0]-c[0])+(c[0]-b[0])*(a[2]-c[2]);
+        const u=((b[2]-c[2])*(px-c[0])+(c[0]-b[0])*(pz-c[2]))/denominator;
+        const v=((c[2]-a[2])*(px-c[0])+(a[0]-c[0])*(pz-c[2]))/denominator;
+        if(u>=-EPSILON&&v>=-EPSILON&&u+v<=1+EPSILON)return u*a[1]+v*b[1]+(1-u-v)*c[1];
+    }
+    return tileHeight(tiles,x,z);
+}
+
+export function createTerrainHeightSampler(tiles,x,z) {
+    const triangles=tileSurfaceTriangles(tiles,x,z);
+    return (px,pz)=>terrainSurfaceHeight(tiles,x,z,px,pz,triangles);
+}
+
 function smoothTopNormals(positions, topByVertex) {
     const normals = new Float32Array(positions.length);
     const shared = new Map();

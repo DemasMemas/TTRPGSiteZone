@@ -4,7 +4,8 @@ import { updateRain } from './weather.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
-import { roadNode, roadConnectsAt } from './worldRoadTopology.js';
+import { roadNode, roadConnectsAt, roadSurfaceHeight } from './worldRoadTopology.js';
+import { installSecondaryClick } from './locationEditorPointer.js';
 import { objectFromWorldInstance } from './worldObjectSelection.js';
 import { createWaterMaterial } from './waterSurface.js';
 import { createTerrainMaterialLayer } from './terrainMaterialLayer.js';
@@ -14,7 +15,8 @@ import { createTerrainPixelsRegion, getGrassGroundImages,
     updateTerrainPixelsRegion } from './locationTerrainTexture.js';
 import { createWorldGrassDetail } from './worldGrassDetail.js';
 import { createPo2Fence } from './worldPo2Fence.js';
-import { buildSmoothTerrainData, isSmoothTerrainTile } from './locationTerrain.js';
+import { buildSmoothTerrainData, isSmoothTerrainTile, createTerrainHeightSampler } from './locationTerrain.js';
+import { fenceMatrixElements } from './worldFenceLine.js';
 import { buildRoundedWaterData } from './locationWaterEdge.js';
 import {
     createCompatibleWebGLRenderer,
@@ -83,6 +85,7 @@ const po2Fence = createPo2Fence(THREE, () => {
         previewObject.material.map = po2Fence.material.map;
         previewObject.material.needsUpdate = true;
     }
+    if(fenceLinePreview){fenceLinePreview.material.map=po2Fence.material.map;fenceLinePreview.material.needsUpdate=true;}
 });
 const fenceGeo = po2Fence.geometry;
 export const getWorldFenceDiagnostics = () => po2Fence.diagnostics();
@@ -156,6 +159,50 @@ const roadMaterial = new THREE.MeshStandardMaterial({ roughness: 1 });
 applySurfacePattern(roadMaterial, getSurfaceTexture(THREE, 'road'), 0.12, 'top');
 const roadPadGeometry = new THREE.BoxGeometry(0.32, 0.028, 0.32);
 const roadLinkGeometry = new THREE.BoxGeometry(1, 0.028, 0.24);
+// Technical bridge marker, shared by all water nodes. Final bridge asset is TASK-ASSET-02.
+const roadBridgeGeometry=landmarkGeometry([
+    ...[-1,1].flatMap(side=>[
+        [new THREE.BoxGeometry(1,.025,.025),0,.14,side*.17],
+        ...[-.4,.4].map(x=>[new THREE.BoxGeometry(.025,.16,.025),x,.07,side*.17]),
+    ]),
+    ...[-.3,.3].map(x=>[new THREE.BoxGeometry(.06,.5,.28),x,-.25,0]),
+]);
+const roadPreviewMaterial=roadMaterial.clone();
+roadPreviewMaterial.transparent=true;roadPreviewMaterial.opacity=.85;roadPreviewMaterial.depthWrite=false;roadPreviewMaterial.depthTest=false;
+const roadBridgePreviewMaterial=landmarkMat.clone();
+roadBridgePreviewMaterial.transparent=true;roadBridgePreviewMaterial.opacity=.85;roadBridgePreviewMaterial.depthWrite=false;roadBridgePreviewMaterial.depthTest=false;
+const roadPreviewMeshes=[];
+function roadInstances(geometry,material,poses) {
+    if(!poses.length)return null;
+    const mesh=new THREE.InstancedMesh(geometry,material,poses.length),dummy=new THREE.Object3D();
+    mesh.frustumCulled=false;mesh.castShadow=false;
+    poses.forEach((pose,i)=>{dummy.position.copy(pose.position);dummy.quaternion.copy(pose.quaternion||new THREE.Quaternion());
+        dummy.scale.set(...pose.scale);dummy.updateMatrix();mesh.setMatrixAt(i,dummy.matrix);mesh.setColorAt(i,new THREE.Color(pose.color));});
+    mesh.instanceMatrix.needsUpdate=true;mesh.instanceColor.needsUpdate=true;scene.add(mesh);return mesh;
+}
+export function removeWorldRoadPreview(){for(const mesh of roadPreviewMeshes){scene.remove(mesh);mesh.dispose();}roadPreviewMeshes.length=0;}
+export function showWorldRoadPreview(plan,settings) {
+    removeWorldRoadPreview();
+    const pads=[],links=[],bridges=[],nodes=plan.path;
+    const point=p=>new THREE.Vector3(p.x+.5+Number(p.offset_x||0),roadSurfaceHeight(p,p),p.y+.5+Number(p.offset_z||0));
+    const width=Number(settings.scale||1),color=settings.color||'#756f61',axis=new THREE.Vector3(1,0,0);
+    const seen=new Set();
+    nodes.forEach((p,i)=>{
+        const key=`${p.x},${p.y}`;
+        if(!seen.has(key)){
+            const nodeWidth=Number(p.scale||width);
+            pads.push({position:point(p),scale:[nodeWidth,1,nodeWidth],color:'#55dbe8'});seen.add(key);
+            if(p.bridge){const other=nodes[i+1]||nodes[i-1];bridges.push({position:point(p),scale:[1,1,nodeWidth],color:'#777b78',
+                quaternion:new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),other?.y!==p.y?Math.PI/2:0)});}
+        }
+        if(i){const from=point(nodes[i-1]),to=point(p),delta=to.clone().sub(from);
+            links.push({position:from.add(to).multiplyScalar(.5),scale:[delta.length(),1,(Number(p.scale||width)+Number(nodes[i-1].scale||width))/2],color:'#55dbe8',
+                quaternion:new THREE.Quaternion().setFromUnitVectors(axis,delta.normalize())});}
+    });
+    for(const [geometry,material,poses] of [[roadPadGeometry,roadPreviewMaterial,pads],[roadLinkGeometry,roadPreviewMaterial,links],[roadBridgeGeometry,roadBridgePreviewMaterial,bridges]]){
+        const mesh=roadInstances(geometry,material,poses);if(mesh){mesh.renderOrder=20;mesh.userData.roadRoutePreview=true;roadPreviewMeshes.push(mesh);}
+    }
+}
 
 const treeMat = new THREE.MeshStandardMaterial();
 const houseMat = new THREE.MeshStandardMaterial();
@@ -484,6 +531,80 @@ const tileInfoContent = document.getElementById('tile-info-content');
 
 // ---- Preview object ----
 let previewObject = null;
+let fenceLinePreview = null;
+const fenceGroundSamplers = new Map();
+function invalidateFenceGround(x,z) {
+    for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++)fenceGroundSamplers.delete(`${x+dx},${z+dz}`);
+}
+
+export function sampleWorldGroundHeight(x,z) {
+    const tx=Math.floor(x),tz=Math.floor(z);
+    const key=`${tx},${tz}`,cached=fenceGroundSamplers.get(key);
+    if(cached)return cached(1+x-tx,1+z-tz);
+    const get=(a,b)=>chunksMap.get(`${Math.floor(a/CHUNK_SIZE)},${Math.floor(b/CHUNK_SIZE)}`)?.tilesData[b%CHUNK_SIZE]?.[a%CHUNK_SIZE] || null;
+    const tile=get(tx,tz);
+    if(!tile)return 1;
+    const patch=Array.from({length:3},(_,b)=>Array.from({length:3},(_,a)=>get(tx+a-1,tz+b-1)));
+    const sample=createTerrainHeightSampler(patch,1,1);
+    if(fenceGroundSamplers.size>=8192)fenceGroundSamplers.clear();
+    fenceGroundSamplers.set(key,sample);
+    return sample(1+x-tx,1+z-tz);
+}
+
+function setFenceMatrix(matrix,object,x,z) {
+    matrix.fromArray(fenceMatrixElements(object,x,z,sampleWorldGroundHeight));
+    return matrix;
+}
+
+export function removeFenceLinePreview() {
+    if(!fenceLinePreview)return;
+    scene.remove(fenceLinePreview);fenceLinePreview.material.dispose();fenceLinePreview.dispose();fenceLinePreview=null;
+}
+
+export function showFenceLinePreview(sections) {
+    if(!sections.length){if(fenceLinePreview)fenceLinePreview.visible=false;return;}
+    if(!fenceLinePreview || fenceLinePreview.instanceMatrix.count<sections.length){
+        removeFenceLinePreview();
+        const material=fenceMat.clone();material.transparent=true;material.opacity=.55;material.depthWrite=false;
+        fenceLinePreview=new THREE.InstancedMesh(fenceGeo,material,2**Math.ceil(Math.log2(sections.length)));
+        fenceLinePreview.userData.fenceLinePreview=true;fenceLinePreview.frustumCulled=false;
+        scene.add(fenceLinePreview);
+    }
+    fenceLinePreview.visible=true;fenceLinePreview.count=sections.length;
+    fenceLinePreview.material.map=fenceMat.map;fenceLinePreview.material.color.set(sections[0].object.color||'#ffffff');
+    const matrix=new THREE.Matrix4();
+    sections.forEach((s,i)=>fenceLinePreview.setMatrixAt(i,setFenceMatrix(matrix,s.object,s.x,s.z)));
+    fenceLinePreview.instanceMatrix.needsUpdate=true;
+}
+
+const pendingFenceTiles=new Set();
+let fenceTerrainFrame=null;
+function refreshWorldFenceNeighborhood(x,z,radius=2) {
+    for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++)pendingFenceTiles.add(`${x+dx},${z+dz}`);
+    if(fenceTerrainFrame!==null)return;
+    fenceTerrainFrame=requestAnimationFrame(()=>{
+        fenceTerrainFrame=null;
+        const matrix=new THREE.Matrix4();
+        for(const key of pendingFenceTiles){
+            const [tx,tz]=key.split(',').map(Number),entry=chunksMap.get(`${Math.floor(tx/32)},${Math.floor(tz/32)}`);
+            if(!entry?.fences)continue;
+            const tileX=tx-entry.chunkX*32,tileY=tz-entry.chunkY*32;
+            let ordinal=0;
+            for(const object of entry.tilesData[tileY][tileX].objects||[])if(object.type==='fence'){
+                const index=entry.objectIndices.fences[tileY*32+tileX][ordinal++];
+                if(index!==undefined)entry.fences.setMatrixAt(index,setFenceMatrix(matrix,object,tx+.5+(object.x||0),tz+.5+(object.z||0)));
+            }
+            entry.fences.instanceMatrix.needsUpdate=true;
+        }
+        pendingFenceTiles.clear();markWorldShadowsDirty();
+    });
+}
+
+function refreshFenceChunkNeighbors(cx,cy) {
+    for(const entry of chunksMap.values())if(entry.fences && Math.abs(entry.chunkX-cx)<=1 && Math.abs(entry.chunkY-cy)<=1){
+        entry.objectIndices.fences.forEach((indices,i)=>{if(indices.length)refreshWorldFenceNeighborhood(entry.chunkX*32+i%32,entry.chunkY*32+Math.floor(i/32),0)});
+    }
+}
 
 function getGeometryForType(type) {
     if (WORLD_LANDMARKS[type]) return WORLD_LANDMARKS[type].geometry;
@@ -510,13 +631,14 @@ export function createPreviewObject(tile, params) {
     const worldZ = tile.chunkY * CHUNK_SIZE + tile.tileY + 0.5 + offsetZ;
     const height = tile.tileData.height || 1.0;
     const baseHalf = getBaseGroundOffset(type, anomalyType);
-    const yPos = height + baseHalf * scale;
+    const yPos = type==='road'&&params.bridge ? roadSurfaceHeight(tile.tileData,params) : height + baseHalf * scale;
 
     if (previewObject?.userData.previewType === type && previewObject.userData.anomalyType === anomalyType) {
         previewObject.position.set(worldX, yPos, worldZ);
         previewObject.scale.setScalar(scale);
         previewObject.rotation.y = THREE.MathUtils.degToRad(rotation);
         previewObject.material.color.set(color);
+        if(type==='fence'){previewObject.matrixAutoUpdate=false;setFenceMatrix(previewObject.matrix,params,worldX,worldZ)}
         return;
     }
     removePreviewObject();
@@ -534,6 +656,7 @@ export function createPreviewObject(tile, params) {
         obj.position.set(worldX, yPos, worldZ);
         obj.scale.set(scale, scale, scale);
         obj.rotation.y = THREE.MathUtils.degToRad(rotation);
+        if(type==='fence'){obj.matrixAutoUpdate=false;setFenceMatrix(obj.matrix,params,worldX,worldZ)}
     }
     obj.userData.previewType = type;
     obj.userData.anomalyType = anomalyType;
@@ -1612,10 +1735,11 @@ function rebuildRoadMeshes(entry) {
     if (!entry.hasRoadNodes) return;
     const pads = [];
     const links = [];
+    const bridges=[];
     const directions = [[1, 0], [0, 1], [1, 1], [-1, 1]];
     const point = (x, z, tile, node) => new THREE.Vector3(
         x + 0.5 + Number(node.road?.x || 0),
-        Number(tile.height || 1) + 0.06,
+        roadSurfaceHeight(tile,node.road),
         z + 0.5 + Number(node.road?.z || 0),
     );
     const roadNodeCache = new Map();
@@ -1632,6 +1756,11 @@ function rebuildRoadMeshes(entry) {
             const node = nodeAt(x, z);
             if (!node) continue;
             const center = point(x, z, tile, node);
+            if(node.road?.bridge){
+                const north=roadConnectsAt(nodeAt,x,z,0,-1)||roadConnectsAt(nodeAt,x,z,0,1);
+                bridges.push({position:center,scale:[1,1,Number(node.road.scale||1)],color:'#777b78',
+                    quaternion:new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),north?Math.PI/2:0)});
+            }
             let connections = 0;
             for (const [dx, dz] of directions) {
                 const neighborTile = loadedWorldTile(x + dx, z + dz);
@@ -1656,6 +1785,8 @@ function rebuildRoadMeshes(entry) {
             }
         }
     }
+    const bridgeMesh=roadInstances(roadBridgeGeometry,landmarkMat,bridges);
+    if(bridgeMesh){bridgeMesh.visible=entry.terrainVisible;entry.roads.push(bridgeMesh);}
     if (pads.length) {
         const mesh = new THREE.InstancedMesh(roadPadGeometry, roadMaterial, pads.length);
         mesh.frustumCulled = false;
@@ -1702,6 +1833,7 @@ function rebuildRoadMeshes(entry) {
 }
 
 export function addChunk(cx, cy, tilesData) {
+    fenceGroundSamplers.clear();
     if (cx < MIN_CHUNK || cx > MAX_CHUNK_X || cy < MIN_CHUNK || cy > MAX_CHUNK_Y) return;
 
     const key = `${cx},${cy}`;
@@ -1815,6 +1947,7 @@ export function addChunk(cx, cy, tilesData) {
                             objectIndices.houses[tileIndex].push(houseIdx);
                             houseIdx++;
                         } else if (obj.type === 'fence' && fenceInstances) {
+                            setFenceMatrix(dummy.matrix,obj,worldX+(obj.x||0),worldZ+(obj.z||0));
                             fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
                             fenceInstances.setColorAt(fenceIdx, objColor);
                             objectIndices.fences[tileIndex].push(fenceIdx);
@@ -1881,6 +2014,8 @@ export function addChunk(cx, cy, tilesData) {
         roadBoundaryDirty: false
     });
     worldTerrainMaterials.fill(tilesData, cx * CHUNK_SIZE, cy * CHUNK_SIZE);
+    fenceGroundSamplers.clear();
+    refreshFenceChunkNeighbors(cx,cy);
     refreshWorldTerrainNeighborhood(cx, cy, null, null, true, true, true, true, true);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
@@ -1888,6 +2023,7 @@ export function addChunk(cx, cy, tilesData) {
 }
 
 export function removeChunk(cx, cy) {
+    fenceGroundSamplers.clear();
     const key = `${cx},${cy}`;
     const entry = chunksMap.get(key);
     if (!entry) return;
@@ -1943,6 +2079,7 @@ export function removeChunk(cx, cy) {
     }
 
     chunksMap.delete(key);
+    refreshFenceChunkNeighbors(cx,cy);
     entry.objectStateSnapshots = null;
     entry.pendingObjectGroups = null;
     refreshWorldTerrainNeighborhood(cx, cy, null, null, false, false, true, true);
@@ -1987,6 +2124,7 @@ function updateTileObjectsPositions(entry, tileX, tileY, newHeight) {
             const idx = entry.objectIndices.houses[tileIndex][houseIdxPos++];
             entry.houses.setMatrixAt(idx, dummy.matrix);
         } else if (obj.type === 'fence' && entry.fences) {
+            setFenceMatrix(dummy.matrix,obj,worldX+(obj.x||0),worldZ+(obj.z||0));
             const idx = entry.objectIndices.fences[tileIndex][fenceIdxPos++];
             entry.fences.setMatrixAt(idx, dummy.matrix);
         } else if (entry.landmarks?.[obj.type]) {
@@ -2129,6 +2267,7 @@ function rebuildChunkObjects(entry, groups = null) {
                             objectIndices.houses[tileIndex].push(houseIdx);
                             houseIdx++;
                         } else if (obj.type === 'fence' && fenceInstances) {
+                            setFenceMatrix(dummy.matrix,obj,worldX+(obj.x||0),worldZ+(obj.z||0));
                             fenceInstances.setMatrixAt(fenceIdx, dummy.matrix);
                             fenceInstances.setColorAt(fenceIdx, objColor);
                             objectIndices.fences[tileIndex].push(fenceIdx);
@@ -2220,6 +2359,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     if (!changedTerrain && !changedHeight
         && Object.keys(updates).every(key => key === 'terrain' || key === 'height')) return;
     Object.assign(tile, updates);
+    if(changedHeight||changedTerrain)invalidateFenceGround(chunkX*CHUNK_SIZE+tileX,chunkY*CHUNK_SIZE+tileY);
     if (changedTerrain) entry.materialLayer?.update(chunkX * CHUNK_SIZE + tileX,
         chunkY * CHUNK_SIZE + tileY, tile);
     if (changedObjects || changedAnomalyField || (changedHeight && tile.anomaly_field)) {
@@ -2299,6 +2439,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
 
     if (changedHeight) {
         updateTileObjectsPositions(entry, tileX, tileY, tile.height);
+        refreshWorldFenceNeighborhood(chunkX*CHUNK_SIZE+tileX,chunkY*CHUNK_SIZE+tileY);
         if (changedTerrain && !changedObjects) {
             if (touchesChunkEdge) refreshRoadNeighborhood(chunkX, chunkY);
             else if (entry.hasRoadNodes) rebuildRoadMeshes(entry);
@@ -2309,6 +2450,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         lastChunkVisibilityAt = -Infinity;
         markWorldShadowsDirty();
     }
+    if(changedTerrain&&!changedHeight)refreshWorldFenceNeighborhood(chunkX*CHUNK_SIZE+tileX,chunkY*CHUNK_SIZE+tileY);
 
     if (changedObjects || changedAnomalyField
         || (changedHeight && tile.anomaly_field)) {
@@ -2483,9 +2625,9 @@ export function pickWorldObject(clientX, clientY) {
                     const scale = object.scale || 1;
                     const worldX = entry.chunkX * CHUNK_SIZE + x + 0.5 + (object.x || 0);
                     const worldZ = entry.chunkY * CHUNK_SIZE + y + 0.5 + (object.z || 0);
-                    const height = tile.height || 1;
-                    box.min.set(worldX - 0.45 * scale, height + 0.02, worldZ - 0.45 * scale);
-                    box.max.set(worldX + 0.45 * scale, height + 0.14, worldZ + 0.45 * scale);
+                    const height = roadSurfaceHeight(tile,object);
+                    box.min.set(worldX - 0.45 * scale, height - 0.04, worldZ - 0.45 * scale);
+                    box.max.set(worldX + 0.45 * scale, height + (object.bridge ? .2 : .08), worldZ + 0.45 * scale);
                     if (!raycaster.ray.intersectBox(box, point)) return;
                     const nextDistance = raycaster.ray.origin.distanceTo(point);
                     if (nextDistance < distance) {
@@ -2585,12 +2727,6 @@ function finishWorldBrushStroke() {
 function canvasMouseDownHandler(event) {
     if (window.isLocationActive) return;
     if (event.button === 2 && editMode) {
-        if (window.cancelWorldObjectPlacement?.()) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            finishWorldBrushStroke();
-            return;
-        }
         controls.enabled = true;
         controlsDisabled = false;
         brushActive = false;
@@ -2659,6 +2795,12 @@ window.addEventListener('pointerup', event => {
 window.addEventListener('pointercancel', finishWorldBrushStroke, { capture: true });
 window.addEventListener('blur', finishWorldBrushStroke);
 renderer.domElement.addEventListener('contextmenu', event => event.preventDefault());
+installSecondaryClick(renderer.domElement);
+renderer.domElement.addEventListener('secondaryclick',event=>{
+    if(!window.isLocationActive&&editMode&&window.cancelWorldObjectPlacement?.()){
+        event.preventDefault();event.stopImmediatePropagation();finishWorldBrushStroke();
+    }
+});
 renderer.domElement.addEventListener('dragstart', event => event.preventDefault());
 
 window.addEventListener('click', (event) => {
@@ -2681,6 +2823,8 @@ window.addEventListener('click', (event) => {
 
 window.addEventListener('dblclick', (event) => {
     if (window.isLocationActive) return;
+    if(editMode&&window.worldEditorTool==='objects'&&window.isWorldRoadRouteTool?.())return;
+    if(editMode && window.worldEditorTool==='objects' && window.isWorldFenceLineTool?.())return;
     if (event.target.closest('.ui-overlay')) return;
     if (editMode && hoveredTile && window.tileClickCallback) {
         window.tileClickCallback({
@@ -2938,6 +3082,8 @@ let globalCanvasParent = null;
 let globalCanvasNextSibling = null;
 
 export function hideGlobalCanvas() {
+    window.cancelWorldFenceLine?.();
+    window.cancelWorldRoadRoute?.();removeWorldRoadPreview();
     const canvas = renderer?.domElement;
     if (!canvas || !canvas.parentNode) return;
     // Сохраняем родителя и позицию в DOM

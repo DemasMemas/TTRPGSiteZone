@@ -8,9 +8,11 @@ from app.models import Lobby, LobbyParticipant, User, MapChunk
 def ping_case(app):
     from app.sockets import auth, map_tools
     for event, handler in {'connect': auth.handle_connect, 'disconnect': auth.handle_disconnect,
-            'authenticate': auth.handle_authenticate, 'map_ping': map_tools.handle_map_ping}.items():
+            'authenticate': auth.handle_authenticate, 'map_ping': map_tools.handle_map_ping,
+            'map_measure': map_tools.handle_map_measure}.items():
         socketio.on_event(event, handler)
     map_tools._last_ping.clear()
+    map_tools._measurements.clear(); map_tools._last_measure.clear()
     users = [User(username=f'ping-{i}', email=f'ping-{i}@example.test', password_hash='x') for i in range(3)]
     db.session.add_all(users)
     db.session.flush()
@@ -71,3 +73,42 @@ def test_ping_requires_authenticated_lobby_session(app):
         assert connection.emit('map_ping', {'tile_x': 1, 'tile_y': 1}, callback=True)['ok'] is False
     finally:
         connection.disconnect()
+
+
+@pytest.mark.parametrize('sender',[0,1])
+def test_ruler_preview_final_clear_and_disconnect_are_shared_only_in_room(ping_case,sender):
+    lobby,users,connections=ping_case
+    before=MapChunk.query.count()
+    payload={'from':{'x':31.5,'y':1,'z':10},'to':{'x':35,'y':2,'z':14},'final':False,'user_id':-1,'lobby_id':-1}
+    assert connections[sender].emit('map_measure',payload,callback=True)=={'ok':True}
+    for connection in connections[:2]:
+        data=next(e['args'][0] for e in connection.get_received() if e['name']=='map_measure')
+        assert data['from']==payload['from'] and data['user_id']==users[sender].id and not data['final']
+    assert not any(e['name']=='map_measure' for e in connections[2].get_received())
+    assert connections[sender].emit('map_measure',{**payload,'final':True},callback=True)=={'ok':True}
+    recipient=connections[1-sender]
+    assert next(e['args'][0] for e in recipient.get_received() if e['name']=='map_measure')['final']
+    assert connections[sender].emit('map_measure',{'clear':True},callback=True)=={'ok':True}
+    assert next(e['args'][0] for e in recipient.get_received() if e['name']=='map_measure')['clear']
+    connections[sender].emit('map_measure',payload,callback=True);recipient.get_received()
+    connections[sender].disconnect()
+    assert next(e['args'][0] for e in recipient.get_received() if e['name']=='map_measure')['clear']
+    assert MapChunk.query.count()==before
+
+
+def test_ruler_snapshot_for_new_client_and_validation(app,ping_case):
+    lobby,users,connections=ping_case
+    valid={'from':{'x':1,'y':1,'z':1},'to':{'x':3,'y':1,'z':5},'final':True}
+    for payload in [None,{}, {**valid,'from':{'x':True,'y':1,'z':1}},
+                    {**valid,'to':{'x':float('nan'),'y':1,'z':1}},
+                    {**valid,'to':{'x':64,'y':1,'z':1}},{**valid,'final':'yes'}]:
+        assert connections[1].emit('map_measure',payload,callback=True)['ok'] is False
+    connections[0].emit('map_measure',valid,callback=True)
+    late=socketio.test_client(app)
+    try:
+        late.emit('authenticate',{'token':create_access_token(identity=str(users[1].id)),'lobby_id':lobby.id})
+        snapshot=next(e['args'][0] for e in late.get_received() if e['name']=='map_measure_snapshot')
+        assert len(snapshot)==1 and snapshot[0]['final'] and snapshot[0]['from']==valid['from']
+    finally:late.disconnect()
+    db.session.get(LobbyParticipant,(lobby.id,users[1].id)).is_banned=True;db.session.commit()
+    assert connections[1].emit('map_measure',valid,callback=True)['ok'] is False

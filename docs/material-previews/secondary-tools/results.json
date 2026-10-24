@@ -1,0 +1,11 @@
+{
+  "worldPlacement": true,
+  "worldSelection": true,
+  "longHold": true,
+  "cameraActuallyRotated": true,
+  "gmAndPlayerMarker": true,
+  "gmAndPlayerRulerPreview": true,
+  "gmAndPlayerRulerFinal": true,
+  "remoteClear": true,
+  "localPlacementPreserved": true
+}

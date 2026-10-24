@@ -1348,6 +1348,18 @@ body.light-theme .lobby-time-field input[type="time"] {
 .world-object-options label {
   white-space: nowrap;
 }
+#world-fence-options[hidden],
+#world-object-rotation-option[hidden],
+#world-selection-fence-run[hidden] {
+  display: none;
+}
+#world-fence-options {
+  flex-direction: column;
+  gap: 6px;
+}
+#world-fence-options small {
+  white-space: normal;
+}
 .world-existing-object-editor {
   border: 1px solid var(--panel-border);
   border-radius: 8px;
@@ -1392,6 +1404,12 @@ body.light-theme .lobby-time-field input[type="time"] {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+.world-road-link-controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: normal;
 }
 .world-road-link-controls button {
   border: 1px solid var(--panel-border);

@@ -400,6 +400,18 @@ test('manual road links override automatic junction filtering without changing o
     assert.equal(roadConnectsAt(nodeAt, 0, 0, 1, 1), true);
 });
 
+test('new authored neighbours preserve legacy diagonal connections and do not create rungs',async()=>{
+    const {roadNode,roadConnectsAt,roadSurfaceHeight}=await load('worldRoadTopology.js');
+    const old=roadNode({objects:[{type:'road'}]}),fresh=roadNode({objects:[{type:'road',authored_route:true,connections:['E','W']}]});
+    const nodes=new Map([['0,0',old],['1,1',old]]),at=(x,z)=>nodes.get(`${x},${z}`);
+    assert.equal(roadConnectsAt(at,0,0,1,1),true);
+    nodes.set('1,0',fresh);nodes.set('0,1',fresh);
+    assert.equal(roadConnectsAt(at,0,0,1,1),true);
+    assert.equal(roadConnectsAt(at,0,0,0,1),false);
+    assert.equal(roadSurfaceHeight({height:0},{}),.06);
+    assert.equal(roadSurfaceHeight({height:.4},{bridge:true,bridge_height:1.2}),1.2);
+});
+
 test('a corner and a T junction keep their deliberate side links', async () => {
     const { roadNode, roadConnectsAt } = await load('worldRoadTopology.js');
     const road = roadNode({ objects: [{ type: 'road' }] });

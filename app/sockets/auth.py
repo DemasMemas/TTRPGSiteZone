@@ -46,6 +46,8 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    from .map_tools import clear_measurement
+    clear_measurement(request.sid)
     from app.services.character_events import forget_subscription
     forget_subscription(request.sid)
     # Отменяем таймер аутентификации, если он ещё не сработал
@@ -99,6 +101,9 @@ def handle_authenticate(data):
         return
 
     # Сохраняем информацию о подключении
+    from .map_tools import clear_measurement, sync_measurements
+    if sid_to_lobby.get(request.sid) not in (None, lobby_id):
+        clear_measurement(request.sid)
     sid_to_user[request.sid] = user.id
     sid_to_username[request.sid] = user.username
     sid_to_lobby[request.sid] = lobby_id
@@ -126,6 +131,7 @@ def handle_authenticate(data):
         if connected_lobby_id == lobby_id and sid in sid_to_user
     })
     emit('online_users', online_users, room=request.sid)
+    sync_measurements(lobby_id, request.sid)
 
     # Загружаем историю чата
     messages = ChatMessage.query.filter_by(lobby_id=lobby_id).order_by(ChatMessage.timestamp.desc()).limit(50).all()

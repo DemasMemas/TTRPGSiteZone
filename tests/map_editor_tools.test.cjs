@@ -507,7 +507,7 @@ test('choosing a destination tile saves the move immediately without spawning an
     let placed = 0;
     let saved = 0;
     const context = vm.createContext({
-        choosingExistingObjectTarget: true, selectedWorldObject: null, CHUNK_SIZE: 32,
+        choosingExistingObjectTarget: true, selectedWorldObject: null, CHUNK_SIZE: 32, window: {},
         document: { getElementById(id) { return fields[id]; } },
         finishExistingObjectTargetChoice() { finished += 1; },
         async saveExistingWorldObject() { saved += 1; },
@@ -531,7 +531,7 @@ test('Esc and right click cancel world object movement without saving', () => {
     let prevented = 0;
     let stopped = 0;
     const context = vm.createContext({
-        choosingExistingObjectTarget: true, roadLinkActive: false,
+        choosingExistingObjectTarget: true, roadLinkActive: false, fenceLineTool: {active:false}, window:{},
         document: { addEventListener(type, listener) { listeners[type] = listener; } },
         finishExistingObjectTargetChoice() { cancelled += 1; context.choosingExistingObjectTarget = false; },
     });
@@ -540,7 +540,7 @@ test('Esc and right click cancel world object movement without saving', () => {
         stopImmediatePropagation() { stopped += 1; } });
     assert.equal(cancelled, 1);
     context.choosingExistingObjectTarget = true;
-    listeners.contextmenu({ preventDefault() { prevented += 1; },
+    listeners.secondaryclick({ preventDefault() { prevented += 1; },
         stopImmediatePropagation() { stopped += 1; } });
     assert.equal(cancelled, 2);
     assert.equal(prevented, 2);
@@ -587,11 +587,13 @@ test('road connector links two existing adjacent roads without placing a third o
     assert.equal(labels['world-road-link-button']['aria-pressed'], 'true');
 });
 
-test('road connector belongs to road settings and retains its existing action', () => {
+test('road settings offer route construction and optional bridges instead of the legacy connector', () => {
     const template = fs.readFileSync(path.join(__dirname, '../app/templates/lobby.html'), 'utf8');
     const objectPanel = template.slice(template.indexOf('data-world-settings="objects"'),
         template.indexOf('data-world-settings="brush"'));
-    assert.match(objectPanel, /data-world-object="road"[\s\S]*?id="world-road-link-button"/);
+    assert.match(objectPanel, /data-world-object="road"[\s\S]*?id="world-road-route-enabled"/);
+    assert.match(objectPanel, /id="world-road-bridges"/);
+    assert.doesNotMatch(objectPanel, /id="world-road-link-button"/);
     assert.doesNotMatch(objectPanel, /id="world-road-link-controls"[^>]*hidden/);
     assert.match(fs.readFileSync(path.join(__dirname, '../app/static/style.css'), 'utf8'),
         /#gm-only-controls:not\(\[data-object-type="road"\]\) #world-road-link-controls/);
@@ -921,7 +923,7 @@ test('right drag while painting remains available to world and location cameras'
 
     const localSource = read('locationScene.js');
     const contextStart = localSource.indexOf('const onContextMenu = (e) => {');
-    const contextEnd = localSource.indexOf("canvas.addEventListener('contextmenu'", contextStart);
+    const contextEnd = localSource.indexOf("canvas.addEventListener('secondaryclick'", contextStart);
     assert.ok(contextStart >= 0 && contextEnd > contextStart);
     assert.doesNotMatch(localSource.slice(contextStart, contextEnd), /setLocationBrushObjectRotation/);
     assert.match(localSource, /canvas\.addEventListener\('pointerdown', onCameraRotatePointerDown, \{ capture: true \}\)/);

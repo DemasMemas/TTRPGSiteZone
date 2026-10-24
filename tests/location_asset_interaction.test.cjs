@@ -28,6 +28,12 @@ test('camera drag suppresses one menu, but a stationary right click still opens 
     guard.end();
     time += 400;
     assert.equal(guard.shouldSuppressMenu(), false);
+    guard.begin(10,10,1,1000);
+    assert.equal(guard.end(1400),false,'long stationary hold is not a cancel click');
+    guard.begin(10,10,1,2000);
+    assert.equal(guard.end(2050),true,'short stationary release is a click');
+    guard.begin(10,10,1,3000);guard.move(20,10,1);
+    assert.equal(guard.end(3050),false,'fast drag is camera movement too');
 });
 
 test('asset dimensions preserve legacy uniform scale and validate independent axes', () => {
@@ -64,7 +70,7 @@ test('location editor routes R to resize selected assets and keeps eraser fallba
     assert.match(main, /data-asset-action="resize"/);
     assert.doesNotMatch(main, /data-location-action="resize"/);
     assert.match(scene, /commitEditorAssetResize\(\)/);
-    assert.match(scene, /cameraDragMenuGuard\.shouldSuppressMenu\(\)/);
+    assert.match(scene, /canvas\.addEventListener\('secondaryclick', onContextMenu\)/);
 });
 
 test('resize preview changes one axis and saves only after the click', async () => {
@@ -191,6 +197,7 @@ test('rebuilding anomaly tile retains its effect model instead of replacing it w
     const added = [];
     const context = vm.createContext({
         currentLocationData: { tiles_data: tiles },
+        locationLevelVisible:()=>true, decorDisplayLevel:()=>0, refreshLocationFloorMenu(){},
         getTileHeight(x, z) { return tiles[z][x].height; },
         objectMeshes: [], anomalyEffectMeshes: [],
         scene: { add(mesh) { added.push(mesh); }, remove() {} },
@@ -221,6 +228,7 @@ test('rebuilding a decor tile releases the removed mesh once', () => {
     const disposed = [];
     const context = vm.createContext({
         currentLocationData: { tiles_data: [[{ height: 0, objects: [] }]] },
+        refreshLocationFloorMenu(){},
         getTileHeight: () => 0,
         objectMeshes: [old], anomalyEffectMeshes: [],
         scene: { remove: mesh => removed.push(mesh) },

@@ -37,7 +37,7 @@ import {
     clampAssetElevation, objectRotationToBearing,
     projectedAxisDrag, rotatePointAround, volumeResize,
 } from './locationAssetTransforms.js';
-import { createSecondaryDragGuard } from './locationEditorPointer.js';
+import { installSecondaryClick } from './locationEditorPointer.js';
 import { doorOnWall, doorFrameStyle, doorTrimLayout, floorEntrancePoint, floorFitPlan, floorVisualPose,
     houseWallWear, nextStoreyFloors, STOREY_HEIGHT, structureBuildingId, structureLevel,
     structureLevelOffset, structurePose,
@@ -261,7 +261,6 @@ let editorResizeSnapped = false;
 let editorResizeBaseCenter = null;
 let editorResizeDragPointerId = null;
 let editorResizeElevation = null;
-const cameraDragMenuGuard = createSecondaryDragGuard();
 let editorSelectionRing = null;
 let editorSelections = [];
 let lampEditPending = false;
@@ -15089,7 +15088,6 @@ function setupCharacterDragging() {
     const onContextMenu = (e) => {
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (cameraDragMenuGuard.shouldSuppressMenu()) return;
         if (cancelLocationEditorContextAction()) return;
         if (pendingCombatAction) {
             showNotification('Выберите цель левой кнопкой мыши или нажмите Esc для отмены', 'system');
@@ -15113,8 +15111,8 @@ function setupCharacterDragging() {
         }
         showObjectContextMenu(e.clientX, e.clientY, locationObject.userData.locationObject);
     };
-    canvas.addEventListener('contextmenu', onContextMenu);
-    handlers.canvas.contextmenu = onContextMenu;
+    canvas.addEventListener('secondaryclick', onContextMenu);
+    handlers.canvas.secondaryclick = onContextMenu;
 
     const onKeyDown = (e) => {
         if (isKeyboardInputTarget(e.target)
@@ -15289,8 +15287,8 @@ export function setupLocationEditing() {
     const locInfo = document.getElementById('location-tile-info');
     locationActive = true;
     let lastBrushTile = null;
+    const removeSecondaryClick=installSecondaryClick(canvas);
     const onCameraRotatePointerDown = (event) => {
-        if (event.button === 2) cameraDragMenuGuard.begin(event.clientX, event.clientY, event.pointerId);
         if (event.button === 2 && window.locationEditMode && !isDraggingCharacter) {
             controls.enabled = true;
         }
@@ -15300,7 +15298,7 @@ export function setupLocationEditing() {
 
     const onPointerMove = (e) => {
         if (!locationActive) return;
-        cameraDragMenuGuard.move(e.clientX, e.clientY, e.pointerId);
+        if(e.buttons&2)return;
         if (editorRotateMode && e.target === canvas) {
             editorRotateHotkeyPending = false;
             updateEditorRotatePreview(e.clientX, e.clientY, e.shiftKey, e.ctrlKey);
@@ -15400,11 +15398,6 @@ export function setupLocationEditing() {
     };
     window.addEventListener('pointermove', onPointerMoveProfiled);
     handlers.window.pointerMove = onPointerMoveProfiled;
-    const onCameraRotatePointerUp = event => {
-        if (event.button === 2 || event.type === 'pointercancel') cameraDragMenuGuard.end();
-    };
-    window.addEventListener('pointerup', onCameraRotatePointerUp);
-    window.addEventListener('pointercancel', onCameraRotatePointerUp);
 
     const onPointerDown = (e) => {
         if (!locationActive) return;
@@ -15721,9 +15714,7 @@ export function setupLocationEditing() {
 
     eventCleanup = () => {
         canvas.removeEventListener('pointercancel', onPointerUp);
-        window.removeEventListener('pointerup', onCameraRotatePointerUp);
-        window.removeEventListener('pointercancel', onCameraRotatePointerUp);
-        cameraDragMenuGuard.reset();
+        removeSecondaryClick();
         if (handlers.window.charDragPointerUp) {
             window.removeEventListener('pointerup', handlers.window.charDragPointerUp);
             delete handlers.window.charDragPointerUp;

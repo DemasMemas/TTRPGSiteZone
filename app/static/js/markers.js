@@ -463,7 +463,7 @@ function updateRouteLines(routeId) {
 export function setupMarkerInteraction() {
     const canvas = renderer.domElement;
 
-    canvas.addEventListener('contextmenu', event => {
+    canvas.addEventListener('secondaryclick', event => {
         if (!AppState.isGM || window.isLocationActive) return;
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;

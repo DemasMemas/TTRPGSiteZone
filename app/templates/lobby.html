@@ -276,14 +276,22 @@
                             <button type="button" data-world-object="fence" aria-pressed="false"><svg class="world-object-thumb" viewBox="0 0 48 40" aria-hidden="true"><use href="#world-icon-fence"/></svg><span>Забор</span></button>
                         </div>
                         <div id="world-road-link-controls" class="world-road-link-controls">
-                            <button id="world-road-link-button" type="button" aria-pressed="false">Соединить существующие дороги</button>
-                            <span id="world-road-link-status">Выберите две соседние клетки с дорогами.</span>
+                            <label><input id="world-road-route-enabled" type="checkbox" checked> Прокладка маршрута</label>
+                            <label><input id="world-road-continue" type="checkbox" checked> Продолжать от конца участка</label>
+                            <label><input id="world-road-bridges" type="checkbox"> Разрешить мосты через воду</label>
+                            <span id="world-road-route-status" role="status">Первый клик — начало, следующий — построить и продолжить. Esc / ПКМ — завершить.</span>
                         </div>
                         <div class="world-object-options">
                             <label>Цвет <input id="world-object-color" type="color" value="#2d5a27"></label>
                             <label>Масштаб <input id="world-object-scale" type="range" min="0.2" max="2" step="any" value="1"> <input type="number" class="world-number-input" id="world-object-scale-number" data-world-number="world-object-scale" min="0.2" max="2" step="any" value="1" aria-label="Масштаб"><output id="world-object-scale-value">1.00</output></label>
-                            <label>Поворот <input id="world-object-rotation" type="range" min="0" max="359" step="any" value="0"> <input type="number" class="world-number-input" id="world-object-rotation-number" data-world-number="world-object-rotation" min="0" max="359" step="any" value="0" aria-label="Поворот, °"><output id="world-object-rotation-value">0°</output></label>
+                            <label id="world-object-rotation-option">Поворот <input id="world-object-rotation" type="range" min="0" max="359" step="any" value="0"> <input type="number" class="world-number-input" id="world-object-rotation-number" data-world-number="world-object-rotation" min="0" max="359" step="any" value="0" aria-label="Поворот, °"><output id="world-object-rotation-value">0°</output></label>
                             <label id="world-object-active-base-option" hidden><input id="world-object-active-base" type="checkbox"> Действующая база (охраняемая зона)</label>
+                        </div>
+                        <div id="world-fence-options" class="world-object-options" hidden>
+                            <label><input id="world-fence-line-enabled" type="checkbox" checked> Забор по линии</label>
+                            <label><input id="world-fence-continue" type="checkbox" checked> Продолжать от конца участка</label>
+                            <span id="world-fence-line-status" role="status">Первый клик — начало, второй — конец. Esc / ПКМ — отменить.</span>
+                            <small>Привязка к концам секций. Масштаб равномерно подгоняется к длине. Для одной секции выключите «Забор по линии».</small>
                         </div>
                         <div id="world-vegetation-options" class="world-object-options">
                             <label>Плотность, %
@@ -334,6 +342,7 @@
                             </label>
                             <label id="world-selection-active-option" hidden><input id="world-selection-active" type="checkbox"> Действующая / охраняемая зона</label>
                             <button id="world-selection-details" type="button" class="btn btn-secondary btn-sm">Точные параметры</button>
+                            <button id="world-selection-fence-run" type="button" class="btn btn-secondary btn-sm" hidden>Выбрать связанный участок забора</button>
                             <button id="world-selection-delete" type="button" class="btn btn-danger btn-sm">Удалить</button>
                             <details class="map-editor-help" id="world-selection-help">
                                 <summary>Управление выбранным объектом</summary>

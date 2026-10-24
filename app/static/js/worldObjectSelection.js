@@ -116,6 +116,14 @@ export function createWorldObjectSelection({ getTile, editObject, applyUpdate, o
         } catch (error) { clear(); onError(error.message); return false; }
         finally { busy = false; notify(); }
     };
-    return { select, clear, commit, validate, plan,
+    const selectMany = references => {
+        if(busy)return;
+        members=references.flatMap(reference=>{
+            const object=getTile(reference)?.objects?.[reference.index];
+            return object?[{...reference,object:snapshot(object)}]:[];
+        });
+        notify();
+    };
+    return { select, selectMany, clear, commit, validate, plan,
         get selected() { return members[0] || null; }, get members() { return members; }, get busy() { return busy; } };
 }

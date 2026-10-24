@@ -1,4 +1,8 @@
 const ROAD_SETTLEMENTS = new Set(['hamlet', 'village', 'factory', 'base']);
+export function roadSurfaceHeight(tile,road) {
+    const ground=Number(tile?.height??1)+.06;
+    return road?.bridge&&Number.isFinite(Number(road.bridge_height))?Math.max(ground,Number(road.bridge_height)):ground;
+}
 const ROAD_DIRECTIONS = {
     '1,0': ['E', 'W'], '-1,0': ['W', 'E'],
     '0,1': ['S', 'N'], '0,-1': ['N', 'S'],
@@ -27,13 +31,14 @@ export function roadConnects(from, to, sideA = null, sideB = null) {
 }
 
 function roadAxisAt(nodeAt, x, z) {
+    const legacyAt=(x,z)=>{const node=nodeAt(x,z);return node?.road?.authored_route?null:node;};
     const score = (dx, dz) => {
         let neighbors = 0;
         let continuation = 0;
         for (const sign of [-1, 1]) {
-            if (!nodeAt(x + dx * sign, z + dz * sign)) continue;
+            if (!legacyAt(x + dx * sign, z + dz * sign)) continue;
             neighbors++;
-            if (nodeAt(x + dx * sign * 2, z + dz * sign * 2)) continuation++;
+            if (legacyAt(x + dx * sign * 2, z + dz * sign * 2)) continuation++;
         }
         return neighbors + (neighbors === 2 ? 1 : 0) + continuation * 0.5;
     };
@@ -46,7 +51,7 @@ function roadAxisAt(nodeAt, x, z) {
 
 function hasCardinalRoad(nodeAt, x, z) {
     return [[1, 0], [-1, 0], [0, 1], [0, -1]]
-        .some(([dx, dz]) => Boolean(nodeAt(x + dx, z + dz)));
+        .some(([dx, dz]) => {const node=nodeAt(x+dx,z+dz);return Boolean(node&&!node.road?.authored_route);});
 }
 
 export function roadConnectsAt(nodeAt, x, z, dx, dz) {
@@ -66,8 +71,9 @@ export function roadConnectsAt(nodeAt, x, z, dx, dz) {
         return Boolean(names && (!dx || !dz) && (!from.legacyDirections || from.legacyDirections.has(names[0]))
             && (!to.legacyDirections || to.legacyDirections.has(names[1])));
     }
-    const sideA = dx && dz ? nodeAt(x + dx, z) : null;
-    const sideB = dx && dz ? nodeAt(x, z + dz) : null;
+    const oldSide=(x,z)=>{const node=nodeAt(x,z);return node?.road?.authored_route?null:node;};
+    const sideA = dx && dz ? oldSide(x + dx, z) : null;
+    const sideB = dx && dz ? oldSide(x, z + dz) : null;
     if (!roadConnects(from, to, sideA, sideB)) return false;
     if (!dx || !dz) {
         if (from.settlement || to.settlement) return true;

@@ -4,6 +4,8 @@ import {
     getObjectDimensions, getObjectHeightOffset, updateTileInChunk, worldObjectDataEqual,
 } from './lobby3d.js';
 import { Server } from './api.js';
+import { roadSurfaceHeight } from './worldRoadTopology.js';
+import { connectedFenceReferences, MAX_FENCE_SECTIONS } from './worldFenceLine.js';
 import { showNotification } from './utils.js';
 import { isTypingTarget } from './cameraPan.js';
 import { syncWorldNumber, getWorldNumericValue } from './worldNumericInputs.js';
@@ -31,7 +33,7 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
             if (!tile) return [];
             const scale = object.scale ?? 1;
             return [{ x: destination.tile_x + 0.5 + (object.x || 0), z: destination.tile_y + 0.5 + (object.z || 0),
-                y: (tile.height || 1) + getObjectHeightOffset(object.type, object.anomalyType) * scale,
+                y: object.type==='road'&&object.bridge ? roadSurfaceHeight(tile,object) : (tile.height || 1) + getObjectHeightOffset(object.type, object.anomalyType) * scale,
                 dimensions: getObjectDimensions(object.type, object.anomalyType, scale), rotation: object.rotation || 0 }];
         });
         showObjectHighlights(highlights);
@@ -59,6 +61,8 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
         if (tileInfo) tileInfo.style.display = 'none';
         const object = selection.object;
         const multiple = selectionController.members.length > 1;
+        const fenceButton=document.getElementById('world-selection-fence-run');
+        if(fenceButton)fenceButton.hidden=object.type!=='fence';
         field('title').textContent = multiple ? `Выбрано объектов: ${selectionController.members.length}` : object.name || labels[object.type] || object.type;
         for (const name of ['name', 'color', 'active', 'details']) field(name).disabled = multiple;
         field('name').value = object.name || '';
@@ -154,6 +158,7 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
     };
     window.addEventListener('pointermove', event => {
         pointer = { x: event.clientX, y: event.clientY };
+        if(event.buttons&2)return;
         if (!gesture || (gesture.kind === 'drag' && event.pointerId !== gesture.pointerId)) return;
         updateGesture(event);
         event.preventDefault();
@@ -167,11 +172,8 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
     }, { capture: true });
     window.addEventListener('pointercancel', cancelGesture, { capture: true });
     window.addEventListener('pointerdown', event => {
+        if(event.button===2){if(gesture)controls.enabled=true;return;}
         if (!gesture) {
-            if (event.button === 2 && event.target === renderer.domElement && available()
-                && selection.selected && document.getElementById('tile-edit-modal')?.style.display !== 'flex') {
-                window.clearDirectWorldObjectSelection();
-            }
             return;
         }
         if (gesture.kind !== 'drag' && (event.button === 0 || event.button === 2)) {
@@ -189,7 +191,11 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
         } else if (event.button === 2) cancelGesture();
     }, { capture: true });
     window.addEventListener('blur', cancelGesture);
-    renderer.domElement.addEventListener('contextmenu', () => cancelGesture());
+    window.addEventListener('secondaryclick',event=>{
+        if(event.target!==renderer.domElement||!available())return;
+        if(gesture){cancelGesture();event.stopImmediatePropagation();}
+        else if(selection.selected){window.clearDirectWorldObjectSelection();event.stopImmediatePropagation();}
+    },{capture:true});
     const startTransform = kind => {
         if (selection.busy || !selection.validate()) return;
         cancelGesture();
@@ -272,6 +278,15 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
     });
     document.addEventListener('click', event => {
         if (!available() || selection.busy) return;
+        if(event.target.closest('#world-selection-fence-run') && selection.selected?.object.type==='fence'){
+            const references=[];
+            for(const entry of chunksMap.values())entry.tilesData.forEach((row,tileY)=>row.forEach((tile,tileX)=>(tile.objects||[]).forEach((object,index)=>{
+                if(object.type==='fence')references.push({chunkX:entry.chunkX,chunkY:entry.chunkY,tileX,tileY,index,object});
+            })));
+            const connected=connectedFenceReferences(references,selection.selected);
+            if(connected.length>MAX_FENCE_SECTIONS){showNotification('Участок содержит более 1000 секций. Выберите меньшую группу с Shift.');return;}
+            selection.selectMany(connected);
+        }
         if (event.target.closest('#world-selection-delete')) { cancelGesture(); selection.commit({}, null, true); }
         if (event.target.closest('#world-selection-details') && selection.selected) onDetails(selection.selected);
     });

@@ -2116,8 +2116,28 @@ def batch_update_tiles(lobby_id, lobby):
         return jsonify({'error': 'Expected a list of updates'}), 400
 
     MapService.batch_update_tiles(lobby_id, lobby.gm_id, data)
-    socketio.emit('tiles_updated', data, room=f"lobby_{lobby_id}")
+    socketio.emit('tiles_updated', [
+        {key: value for key, value in item.items() if key != 'expected_objects'} for item in data
+    ], room=f"lobby_{lobby_id}")
     return jsonify({'message': 'Tiles updated successfully'}), 200
+
+@lobbies_bp.route('/<int:lobby_id>/world-roads/preview', methods=['POST'])
+@jwt_required()
+@requires_gm
+def preview_world_road(lobby_id, lobby):
+    from app.services.world_road_editor import preview_world_road as preview
+    return jsonify(preview(lobby_id, lobby.gm_id, request.get_json(silent=True))), 200
+
+
+@lobbies_bp.route('/<int:lobby_id>/world-roads/build', methods=['POST'])
+@jwt_required()
+@requires_gm
+def build_world_road(lobby_id, lobby):
+    from app.services.world_road_editor import build_world_road as build
+    result = build(lobby_id, lobby.gm_id, request.get_json(silent=True))
+    socketio.emit('tiles_updated', result['updates'], room=f"lobby_{lobby_id}")
+    return jsonify(result), 200
+
 
 @lobbies_bp.route('/<int:lobby_id>/world-roads/connect', methods=['POST'])
 @jwt_required()

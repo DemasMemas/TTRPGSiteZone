@@ -126,6 +126,9 @@ class MapService:
         if edited.get('type') != 'road' or (source_x, source_y) != (target_x, target_y):
             edited.pop('connections', None)
             edited.pop('manual_connections', None)
+            edited.pop('authored_route', None)
+            edited.pop('bridge', None)
+            edited.pop('bridge_height', None)
 
         if (source_x, source_y) == (target_x, target_y):
             objects[index] = edited
@@ -345,6 +348,23 @@ class MapService:
             if key not in updates_by_chunk:
                 updates_by_chunk[key] = []
             updates_by_chunk[key].append(item)
+
+        # Optional optimistic guard for a confirmed fence line. Validate the
+        # complete packet before changing any chunk; ordinary brushes are unchanged.
+        if any('expected_objects' in item for item in updates_list):
+            for cx, cy in sorted(updates_by_chunk):
+                MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).with_for_update().first()
+            for item in updates_list:
+                if 'expected_objects' not in item:
+                    continue
+                tx, ty = item['tile_x'], item['tile_y']
+                if type(tx) is not int or type(ty) is not int or not 0 <= tx < CHUNK_SIZE or not 0 <= ty < CHUNK_SIZE:
+                    raise ValidationError('Invalid guarded tile coordinates')
+                tile = MapService.get_tile_data(lobby_id, item['chunk_x']*CHUNK_SIZE+tx, item['chunk_y']*CHUNK_SIZE+ty)
+                if not isinstance(item['expected_objects'], list) or (tile.get('objects') or []) != item['expected_objects']:
+                    raise ConflictError('Объекты участка изменились. Проверьте предпросмотр и повторите размещение.')
+                if tile.get('terrain') == 'water':
+                    raise ConflictError('Покрытие участка изменилось на воду. Проверьте маршрут.')
 
         for (cx, cy), items in updates_by_chunk.items():
             chunk = MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).first()

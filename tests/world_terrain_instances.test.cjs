@@ -43,7 +43,7 @@ function harness({ deferTimers = false } = {}) {
     const context = vm.createContext({
         THREE: { Object3D, Color }, terrainColors: { grass: 1, rock: 2 },
         CHUNK_SIZE: 2, chunksMap: new Map([['0,0', entry]]),
-        markWorldShadowsDirty() {}, updateTileObjectsPositions() {},
+        markWorldShadowsDirty() {}, updateTileObjectsPositions() {}, refreshWorldFenceNeighborhood() {}, invalidateFenceGround() {},
         rebuildRoadMeshes() {}, refreshRoadNeighborhood() {},
         requestAnimationFrame() {}, cancelAnimationFrame() {}, rebuildChunkObjects() {},
         refreshWorldTerrainSurface() {},
@@ -607,7 +607,7 @@ test('removing a chunk releases instance buffers but keeps shared terrain resour
     chunksMap.set('0,1', { hasRoadNodes: false });
     chunksMap.set('2,0', { hasRoadNodes: true });
     const context = vm.createContext({
-        chunksMap, chunkBounds: [{ key: '0,0' }],
+        chunksMap, chunkBounds: [{ key: '0,0' }], fenceGroundSamplers: new Map(), refreshFenceChunkNeighbors() {},
         scene: { remove(object) { removed.push(object); } },
         cancelAnimationFrame(id) { cancelled.push(id); },
         disposeChunkAnomalyLODs() {},

@@ -1,0 +1,39 @@
+{
+  "dryWaterRejected": true,
+  "readOnlyPreview": true,
+  "visiblePreview": true,
+  "diagonalShortest": true,
+  "simplifiedControls": true,
+  "clickBuildAndContinue": true,
+  "crossChunk": true,
+  "bridge": true,
+  "savedReload": true,
+  "peerSync": true,
+  "actualRoadPickAndColorEdit": true,
+  "cancelEscapeAndRightClick": true,
+  "existingObjectsPreserved": true,
+  "performance": {
+    "withRoad": {
+      "ms": 1142.0999999940395,
+      "calls": 22,
+      "triangles": 36640,
+      "textures": 15,
+      "geometries": 16,
+      "fps": 0.8755800718021354
+    },
+    "withoutRoad": {
+      "ms": 1110.4000000059605,
+      "calls": 17,
+      "triangles": 36268,
+      "textures": 15,
+      "geometries": 16,
+      "fps": 0.9005763688712465
+    },
+    "roadBatches": 5,
+    "roadInstanceBufferBytes": 1824,
+    "bridgeVertexBufferBytes": 6912,
+    "bridgeInstances": [
+      1
+    ]
+  }
+}

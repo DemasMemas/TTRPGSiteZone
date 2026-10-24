@@ -16,6 +16,10 @@ import {
     updatePreviewObject,
     removePreviewObject
 } from './lobby3d.js';
+import { showFenceLinePreview, removeFenceLinePreview, sampleWorldGroundHeight } from './lobby3d.js';
+import { createFenceLineTool } from './worldFenceTool.js';
+import { createWorldRoadTool } from './worldRoadTool.js';
+import { showWorldRoadPreview, removeWorldRoadPreview, renderer } from './lobby3d.js';
 import { Server } from './api.js';
 import { showNotification } from './utils.js';
 
@@ -58,6 +62,31 @@ let roadLinkActive = false;
 let roadLinkFirst = null;
 let roadLinkSaving = false;
 let vegetationStroke = null;
+let roadPointerOnCanvas=false;
+const roadRouteTool=createWorldRoadTool({
+    request:data=>Server.previewWorldRoad(currentLobbyId,data),
+    async save(data){const result=await Server.buildWorldRoad(currentLobbyId,data);for(const u of result.updates)updateTileInChunk(u.chunk_x,u.chunk_y,u.tile_x,u.tile_y,u.updates);},
+    preview:showWorldRoadPreview,clearPreview:removeWorldRoadPreview,settings:worldObjectSettings,
+    bridges:()=>document.getElementById('world-road-bridges')?.checked===true,
+    continueLine:()=>document.getElementById('world-road-continue')?.checked!==false,
+    status:message=>{const el=document.getElementById('world-road-route-status');if(el)el.textContent=message;
+        const hint=document.getElementById('world-editor-hint');if(hint&&window.isWorldRoadRouteTool?.()&&window.worldEditorTool==='objects')hint.textContent=message;},
+    notify:message=>showNotification(message,'error'),
+});
+const roadPoint=tile=>tile?[((tile.chunkX??tile.chunk?.chunkX)*32+tile.tileX),((tile.chunkY??tile.chunk?.chunkY)*32+tile.tileY)]:null;
+window.isWorldRoadRouteTool=()=>selectedWorldObject==='road'&&document.getElementById('world-road-route-enabled')?.checked===true;
+window.cancelWorldRoadRoute=()=>roadRouteTool.cancel();
+const fenceLineTool=createFenceLineTool({
+    getTile:(x,z)=>chunksMap.get(`${Math.floor(x/32)},${Math.floor(z/32)}`)?.tilesData[z%32]?.[x%32],
+    getBounds:()=>[window.MAP_CHUNKS_WIDTH*32,window.MAP_CHUNKS_HEIGHT*32],getSettings:worldObjectSettings,
+    sampleHeight:sampleWorldGroundHeight,preview:showFenceLinePreview,clearPreview:removeFenceLinePreview,
+    schedulePreview:callback=>requestAnimationFrame(callback),
+    status:message=>{const element=document.getElementById('world-fence-line-status');if(element)element.textContent=message;},
+    notify:message=>showNotification(message,'error'),continueLine:()=>document.getElementById('world-fence-continue')?.checked===true,
+    async save(updates){await Server.batchUpdateTiles(currentLobbyId,updates);for(const u of updates)updateTileInChunk(u.chunk_x,u.chunk_y,u.tile_x,u.tile_y,u.updates);},
+});
+window.cancelWorldFenceLine=()=>fenceLineTool.cancel();
+window.isWorldFenceLineTool=()=>selectedWorldObject==='fence' && document.getElementById('world-fence-line-enabled')?.checked===true;
 
 const ANOMALY_TYPE_LABELS = {
     void: 'гравитационная',
@@ -74,6 +103,14 @@ const ANOMALY_TYPE_LABELS = {
 export function initMapEdit(lobbyId, authToken) {
     currentLobbyId = lobbyId;
     token = authToken;
+    renderer.domElement.addEventListener('pointerenter',()=>{roadPointerOnCanvas=true;});
+    renderer.domElement.addEventListener('pointerleave',()=>{roadPointerOnCanvas=false;if(window.isWorldRoadRouteTool())roadRouteTool.hover(null);});
+    // Capture the real target before lobby3d's window pointer handler runs. Do not
+    // depend on a pointerenter that may have occurred before editor initialization.
+    window.addEventListener('pointermove',event=>{
+        roadPointerOnCanvas=event.target===renderer.domElement;
+        if(!roadPointerOnCanvas&&window.isWorldRoadRouteTool?.())roadRouteTool.hover(null);
+    },{capture:true});
     loadAnomalyFieldCatalog();
     initWorldNumericInputs();
     initDirectWorldObjectEditor({
@@ -96,6 +133,11 @@ export function initMapEdit(lobbyId, authToken) {
         }
     });
     document.addEventListener('keydown', event => {
+        if(window.isWorldRoadRouteTool?.()&&!window.isLocationActive&&AppState.editMode&&window.worldEditorTool==='objects'
+            &&!event.target.closest('input,textarea,select,[contenteditable="true"]')){
+            if(event.key==='Escape'&&roadRouteTool.active){event.preventDefault();event.stopImmediatePropagation();roadRouteTool.cancel();return;}
+        }
+        if(event.key==='Escape' && fenceLineTool.active){event.preventDefault();event.stopImmediatePropagation();fenceLineTool.cancel();return;}
         if (event.key === 'Escape' && roadLinkActive) toggleWorldRoadLink(false);
         if (event.key === 'Escape' && choosingExistingObjectTarget) {
             event.preventDefault();
@@ -103,13 +145,16 @@ export function initMapEdit(lobbyId, authToken) {
             finishExistingObjectTargetChoice();
         }
     });
-    document.addEventListener('contextmenu', event => {
+    document.addEventListener('secondaryclick', event => {
         if (!choosingExistingObjectTarget) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         finishExistingObjectTargetChoice();
     }, { capture: true });
     document.getElementById('panel-tools')?.addEventListener('change', event => {
+        if(event.target.id==='world-road-route-enabled'){roadRouteTool.cancel();window.syncWorldVegetationControls?.();updateWorldObjectPreview(getHoveredTile());}
+        if(event.target.id==='world-road-bridges')roadRouteTool.refresh();
+        if(event.target.id==='world-fence-line-enabled'){fenceLineTool.cancel();window.syncWorldVegetationControls?.();updateWorldObjectPreview(getHoveredTile());}
         if (event.target.id === 'tile-type-select') AppState.setCurrentTileType(event.target.value);
         if (event.target.id === 'world-brush-radiation') setWorldBrushRadiation(event.target.value);
         if (event.target.matches('[data-map-editor-auto-expand]')) {
@@ -120,6 +165,7 @@ export function initMapEdit(lobbyId, authToken) {
     selectWorldEditorTool('select');
     document.getElementById('panel-tools')?.addEventListener('input', event => {
         if (['world-object-color', 'world-object-scale', 'world-object-rotation'].includes(event.target.id)) {
+            if(window.isWorldRoadRouteTool?.())roadRouteTool.refresh();
             updateWorldObjectPreview(getHoveredTile());
         }
     });
@@ -191,6 +237,8 @@ export function updateAnomalyFieldRankOptions() {
 export function setEditMode(enabled) {
     window.cancelCommonMapTool?.();
     if (!enabled) {
+        window.cancelWorldRoadRoute?.();
+        window.cancelWorldFenceLine?.();
         toggleWorldRoadLink(false);
         cancelWorldObjectPlacement();
     }
@@ -215,6 +263,8 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     const root = document.getElementById('gm-only-controls');
     if (!root || !['select', 'terrain', 'height', 'radiation', 'erase', 'objects'].includes(tool)) return;
     const previousTool = window.worldEditorTool;
+    if(tool!=='objects')window.cancelWorldRoadRoute?.();
+    if(tool!=='objects')window.cancelWorldFenceLine?.();
     window.cancelCommonMapTool?.();
     if (tool !== 'objects') window.endWorldVegetationStroke?.();
     if (tool !== 'select') window.clearDirectWorldObjectSelection?.();
@@ -245,6 +295,8 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
 
 export function selectWorldObject(type) {
     if (!WORLD_OBJECT_TYPES.has(type)) return;
+    window.cancelWorldFenceLine?.();
+    window.cancelWorldRoadRoute?.();
     if (type !== 'road' && roadLinkActive) toggleWorldRoadLink(false);
     selectedWorldObject = type;
     syncWorldNumber('world-object-rotation', 0);
@@ -261,6 +313,8 @@ export function selectWorldObject(type) {
 }
 
 export function cancelWorldObjectPlacement() {
+    if(window.isWorldRoadRouteTool?.()&&roadRouteTool.active)return roadRouteTool.cancel();
+    if(window.isWorldFenceLineTool?.() && fenceLineTool.active)return fenceLineTool.cancel();
     if (window.isLocationActive || !AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects'
         || !selectedWorldObject || roadLinkActive || choosingExistingObjectTarget) return false;
     selectedWorldObject = null;
@@ -272,6 +326,8 @@ export function cancelWorldObjectPlacement() {
 }
 
 export function rotateWorldObjectPlacement(direction) {
+    if(window.isWorldRoadRouteTool?.())return false;
+    if(window.isWorldFenceLineTool?.())return false;
     if (window.isLocationActive || !AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects'
         || !selectedWorldObject || roadLinkActive || choosingExistingObjectTarget
         || document.getElementById('tile-edit-modal')?.style.display === 'flex') return false;
@@ -349,8 +405,14 @@ function worldObjectSettings() {
 }
 
 export function updateWorldObjectPreview(tile) {
+    if(AppState.isGM&&AppState.editMode&&!window.isLocationActive&&window.worldEditorTool==='objects'&&window.isWorldRoadRouteTool?.()){
+        roadRouteTool.hover(roadPointerOnCanvas&&tile?.tileData?.terrain!=='water'?roadPoint(tile):null);removePreviewObject();return;
+    }
     if (document.getElementById('tile-edit-modal')?.style.display === 'flex') return;
     if (window.worldEditorTool === 'select' && window.isDirectWorldObjectTransformActive?.()) return;
+    if(AppState.isGM && AppState.editMode && window.worldEditorTool==='objects' && window.isWorldFenceLineTool?.()){
+        fenceLineTool.hover(tile);removePreviewObject();return;
+    }
     if (choosingExistingObjectTarget) {
         removePreviewObject();
         return;
@@ -379,6 +441,12 @@ export function updateWorldObjectPreview(tile) {
 }
 
 export async function placeWorldObjectAtTile(tile) {
+    if(window.isWorldRoadRouteTool?.()&&AppState.isGM&&AppState.editMode&&window.worldEditorTool==='objects'&&!window.isLocationActive&&!choosingExistingObjectTarget){
+        removePreviewObject();return roadRouteTool.click(roadPoint(tile),tile?.tileData?.terrain==='water');
+    }
+    if(window.isWorldFenceLineTool?.() && AppState.isGM && AppState.editMode && window.worldEditorTool==='objects' && !window.isLocationActive && !choosingExistingObjectTarget){
+        removePreviewObject();return fenceLineTool.click(tile);
+    }
     if (!selectedWorldObject && !choosingExistingObjectTarget && !roadLinkActive) return false;
     if (choosingExistingObjectTarget) {
         document.getElementById('world-existing-tile-x').value = tile.chunkX * CHUNK_SIZE + tile.tileX;
@@ -469,7 +537,21 @@ window.syncWorldVegetationControls = () => {
         root.dataset.objectType = selectedWorldObject;
     }
     const options = document.getElementById('world-vegetation-options');
+    const fenceOptions=document.getElementById('world-fence-options');
+    if(fenceOptions)fenceOptions.hidden=selectedWorldObject!=='fence';
+    const rotationOption=document.getElementById('world-object-rotation-option');
+    if(rotationOption)rotationOption.hidden=Boolean(window.isWorldFenceLineTool?.()||window.isWorldRoadRouteTool?.());
     if (options) options.hidden = !vegetation;
+    if(window.worldEditorTool==='objects'&&!vegetation){
+        const hint=document.getElementById('world-editor-hint');
+        if(hint)hint.textContent=window.isWorldFenceLineTool?.()
+            ? 'Забор: начало → конец. Продолжайте кликами; Esc / ПКМ — завершить. Инструмент «Выбор» позволяет изменить или удалить связанный участок.'
+            : 'Выберите объект и поставьте его кликом по карте. Двойной клик открывает точные настройки тайла.';
+    }
+    if(window.worldEditorTool==='objects'&&window.isWorldRoadRouteTool?.()){
+        const hint=document.getElementById('world-editor-hint');
+        if(hint)hint.textContent=document.getElementById('world-road-route-status')?.textContent||'';
+    }
     if (window.worldEditorTool === 'objects' && vegetation) {
         const hint = document.getElementById('world-editor-hint');
         if (hint) hint.textContent = '';

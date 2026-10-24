@@ -346,6 +346,16 @@ export const Server = {
         });
     },
 
+    async previewWorldRoad(lobbyId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/world-roads/preview`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
+    async buildWorldRoad(lobbyId, payload) {
+        return apiFetch(`/lobbies/${lobbyId}/world-roads/build`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+    },
     async connectWorldRoads(lobbyId, first, second) {
         return apiFetch(`/lobbies/${lobbyId}/world-roads/connect`, {
             method: 'POST',
