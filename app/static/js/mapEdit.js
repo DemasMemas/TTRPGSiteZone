@@ -36,7 +36,7 @@ let anomalyCatalog = [];
 const WORLD_OBJECT_COLORS = {
     forest: '#315f3b', hamlet: '#aa8665', village: '#b39474',
     road: '#756f61', factory: '#66747b', base: '#6c765d', camp: '#9c8362',
-    tree: '#2d5a27', house: '#8b4513', fence: '#8b5a2b',
+    tree: '#2d5a27', house: '#8b4513', fence: '#ffffff',
 };
 const WORLD_OBJECT_TYPES = new Set(Object.keys(WORLD_OBJECT_COLORS));
 const PROTECTED_BUILDING_TYPES = new Set(['hamlet', 'village', 'factory', 'base', 'camp', 'house', 'fence']);

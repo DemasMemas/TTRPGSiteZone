@@ -13,6 +13,7 @@ import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.
 import { createTerrainPixelsRegion, getGrassGroundImages,
     updateTerrainPixelsRegion } from './locationTerrainTexture.js';
 import { createWorldGrassDetail } from './worldGrassDetail.js';
+import { createPo2Fence } from './worldPo2Fence.js';
 import { buildSmoothTerrainData, isSmoothTerrainTile } from './locationTerrain.js';
 import { buildRoundedWaterData } from './locationWaterEdge.js';
 import {
@@ -76,16 +77,15 @@ const terrainColors = {
 
 const treeGeo = new THREE.ConeGeometry(0.3, 1, 8);
 const houseGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
-const fenceGeo = landmarkGeometry([
-    [new THREE.BoxGeometry(0.11, 0.52, 0.11), 0, 0, -0.34],
-    [new THREE.BoxGeometry(0.11, 0.52, 0.11), 0, 0, 0.34],
-    [new THREE.BoxGeometry(0.07, 0.06, 0.74), -0.035, -0.09, 0],
-    [new THREE.BoxGeometry(0.07, 0.06, 0.74), -0.035, 0.12, 0],
-    ...[-0.24, -0.12, 0, 0.12, 0.24].map((z, index) => [
-        new THREE.BoxGeometry(0.07, 0.39 + index % 3 * 0.025, 0.075),
-        0.035, -0.04 + index % 3 * 0.012, z,
-    ]),
-]);
+const po2Fence = createPo2Fence(THREE, () => {
+    worldShadowsDirty = true;
+    if (previewObject?.userData.previewType === 'fence') {
+        previewObject.material.map = po2Fence.material.map;
+        previewObject.material.needsUpdate = true;
+    }
+});
+const fenceGeo = po2Fence.geometry;
+export const getWorldFenceDiagnostics = () => po2Fence.diagnostics();
 function landmarkGeometry(parts) {
     const vertices = [];
     const normals = [];
@@ -159,8 +159,7 @@ const roadLinkGeometry = new THREE.BoxGeometry(1, 0.028, 0.24);
 
 const treeMat = new THREE.MeshStandardMaterial();
 const houseMat = new THREE.MeshStandardMaterial();
-const fenceMat = new THREE.MeshStandardMaterial();
-applySurfacePattern(fenceMat, getSurfaceTexture(THREE, 'fence'), 0.4);
+const fenceMat = po2Fence.material;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050510);
@@ -527,7 +526,10 @@ export function createPreviewObject(tile, params) {
         obj = createAnomalyPreview(worldX, yPos, worldZ, anomalyType, color, scale);
     } else {
         const geo = getGeometryForType(type);
-        const mat = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.5 });
+        const mat = type === 'fence' ? fenceMat.clone() : new THREE.MeshStandardMaterial();
+        mat.color.set(color);
+        mat.transparent = true;
+        mat.opacity = 0.5;
         obj = new THREE.Mesh(geo, mat);
         obj.position.set(worldX, yPos, worldZ);
         obj.scale.set(scale, scale, scale);
@@ -584,7 +586,7 @@ function getBaseDimensions(type, anomalyType) {
         base.height = 0.6;
         base.depth = 0.6;
     } else if (type === 'fence') {
-        base.width = 0.2;
+        base.width = 0.14;
         base.height = 0.5;
         base.depth = 0.8;
     } else if (type === 'anomaly') {
@@ -629,7 +631,7 @@ function getDefaultColorForType(type) {
     switch(type) {
         case 'tree': return '#2d5a27';
         case 'house': return '#8B4513';
-        case 'fence': return '#8B5A2B';
+        case 'fence': return '#ffffff';
         case 'anomaly': return '#00FFFF';
         default: return '#ffffff';
     }

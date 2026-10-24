@@ -1,0 +1,91 @@
+{
+  "source": "https://opengameart.org/content/post-soviet-fence-po-2-and-grate",
+  "author": "Mixazzz",
+  "license": "CC0",
+  "archiveSha256": "f907fb23b982d1ba327507075ffe59577463e89701a5601d317b1b326457437d",
+  "archiveFiles": [
+    "source/zaborec.zip",
+    "textures/medicsubsta_zaborclear.png",
+    "textures/reshet.png",
+    "textures/black.png"
+  ],
+  "nestedFiles": [
+    "zaborec.obj",
+    "black.png",
+    "medicsubsta_zaborclear.png",
+    "reshet.png",
+    "zaborec.mtl"
+  ],
+  "vertices": 9602,
+  "triangles": 3698,
+  "concreteTriangles": 970,
+  "concreteConnectedComponents": 97,
+  "trianglesPerConcreteComponent": [
+    10
+  ],
+  "representativePanel": {
+    "uniquePositions": 8,
+    "positions": [
+      [
+        -47.333168,
+        1.398045,
+        39.955498
+      ],
+      [
+        -47.333168,
+        1.398046,
+        39.767887
+      ],
+      [
+        -47.333168,
+        4.719609,
+        39.767887
+      ],
+      [
+        -47.333168,
+        4.719609,
+        39.955498
+      ],
+      [
+        -44.112518,
+        1.398045,
+        39.955498
+      ],
+      [
+        -44.112518,
+        1.398046,
+        39.767887
+      ],
+      [
+        -44.112518,
+        4.719609,
+        39.767887
+      ],
+      [
+        -44.112518,
+        4.719609,
+        39.955498
+      ]
+    ],
+    "boundsXYZ": [
+      [
+        -47.333168,
+        -44.112518
+      ],
+      [
+        1.398045,
+        4.719609
+      ],
+      [
+        39.767887,
+        39.955498
+      ]
+    ],
+    "dimensionsXYZ": [
+      3.220649999999999,
+      3.3215640000000004,
+      0.18761099999999686
+    ]
+  },
+  "runtimeChanged": false
+}

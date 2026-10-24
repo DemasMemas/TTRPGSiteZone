@@ -1,0 +1,14 @@
+# Blender MTL File: 'None'
+# Material Count: 3
+
+newmtl None
+
+map_Kd black.png
+
+newmtl None_medicsubsta_zaborclear.png
+
+map_Kd medicsubsta_zaborclear.png
+
+newmtl None_reshet.png
+
+map_Kd reshet.png

@@ -1,0 +1,21 @@
+{
+  "source": "https://opengameart.org/content/post-soviet-fence-po-2-and-grate",
+  "author": "Mixazzz",
+  "license": "CC0",
+  "archiveSha256": "f907fb23b982d1ba327507075ffe59577463e89701a5601d317b1b326457437d",
+  "adaptation": "Straight source panel proportions; new two-sided geometric relief, frame and feet; original concrete Color crop.",
+  "dimensions": {
+    "width": 0.14,
+    "height": 0.5,
+    "depth": 0.8
+  },
+  "axis": "Z",
+  "pivot": "center",
+  "sectionPitch": 0.8,
+  "triangles": 240,
+  "reliefDepth": 0.014,
+  "parts": {
+    "end": "closed section end faces",
+    "turn": "rotate an existing section; no extra mesh"
+  }
+}

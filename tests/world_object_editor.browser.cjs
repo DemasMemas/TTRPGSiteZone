@@ -127,6 +127,10 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===2 && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if (process.env.VTT_PO2_FENCE === '1') {
+            await require('./po2_fence.browser.cjs')({page,request,token,lobby,base,connect,debugPort});
+            return;
+        }
         if (process.env.VTT_WORLD_OBJECT_BUGS === '1') {
             await require('./world_object_editor_regressions.browser.cjs')({ page, request, token, lobby, base, connect, debugPort, profile });
             return;
