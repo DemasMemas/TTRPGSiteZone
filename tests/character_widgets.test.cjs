@@ -95,6 +95,17 @@ test('old item, container and magazine pins use one block and retain the first p
     assert.equal(context.resolveWidgetReference(references[1], { inventory: { pockets: [{ id: 'ammo-1' }] } }).block, 'inventory-item');
 });
 
+test('legacy weapon mastery panel becomes one personal panel per weapon type', () => {
+    const pin = { id: 'mastery-old', characterId: 7, title: 'Владение оружием', references: [{ kind: 'block', block: 'weapon-mastery', title: 'Владение оружием' }] };
+    const restored = context.readWidgetPreferences({ getItem: () => JSON.stringify([pin]) }, 'old');
+    assert.equal(restored.length, 7);
+    assert.equal(restored[0].id, pin.id);
+    assert.equal(new Set(restored.map(entry => entry.id)).size, 7);
+    assert.equal(new Set(restored.map(entry => entry.references[0].block)).size, 7);
+    assert.equal(restored[0].references[0].block, 'weapon-mastery:pistols');
+    assert.equal(restored[6].references[0].block, 'weapon-mastery:machineGuns');
+});
+
 test('disposing a removed widget releases its document drag listeners', () => {
     const dragSource = fs.readFileSync(require('node:path').join(__dirname, '../app/static/js/ui_interactions.js'), 'utf8');
     const start = dragSource.indexOf('function makeDraggable('), end = dragSource.indexOf('\nfunction applyPosition(', start);

@@ -15334,6 +15334,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     const weightInput = document.createElement('input');
     weightInput.dataset.widgetKey = 'weight';
     weightInput.type = 'number';
+    weightInput.step = 'any';
     weightInput.className = 'form-control number-input';
     weightInput.value = item.weight || 0;
     weightInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'weight', e.target.value);
@@ -15342,6 +15343,7 @@ function renderBackpackItem(item, index, parentPath, parentContainer, allTemplat
     const volumeInput = document.createElement('input');
     volumeInput.dataset.widgetKey = 'volume';
     volumeInput.type = 'number';
+    volumeInput.step = 'any';
     volumeInput.className = 'form-control number-input';
     volumeInput.value = item.volume || 0;
     volumeInput.onchange = (e) => updateBackpackItemAtPath(itemPath.join(','), 'volume', e.target.value);

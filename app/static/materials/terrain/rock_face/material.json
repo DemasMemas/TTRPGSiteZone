@@ -1,0 +1,27 @@
+{
+  "id": "rock_face",
+  "sourceUrl": "https://polyhaven.com/a/rock_face",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rock_face/rock_face_diff_1k.jpg",
+      "md5": "220c637db6056b45e7c0a17e6ed8514e",
+      "sha256": "cce4b50517161264bdef196f5e247e328ca3739083cd6044ad3cc54d88cb82e2"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rock_face/rock_face_nor_gl_1k.jpg",
+      "md5": "0d244b69a346db78f06c7b76510bb640",
+      "sha256": "e2682e1286c8b6aca7e01ba7b8fe1726cb6606042b9ee70d097aa67470d410ef"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rock_face/rock_face_arm_1k.jpg",
+      "md5": "c50427671b20794a93864f0602fbbd32",
+      "sha256": "3a0fce8658ba2bac6690f68e79630c16e004f1676c1588ef4d54906fc3907616"
+    }
+  }
+}

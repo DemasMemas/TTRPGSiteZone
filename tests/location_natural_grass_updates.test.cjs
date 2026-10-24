@@ -153,6 +153,36 @@ async function assertFullEquivalent(h) {
     full.context.disposeObject(full.context.grassDetailGroup);
 }
 
+test('rotated grass roots sit just below flat and edited sloped terrain without moving the soil', async () => {
+    const tiles = tilesFor(20);
+    const h = await harness(tiles);
+    const verify = () => {
+        const sample = h.terrain.createTerrainSurfaceHeightSampler(tiles);
+        let checked = 0;
+        for (const mesh of meshes(h)) for (let i = 0; i < mesh.count; i++) {
+            const m = mesh.instanceMatrix.array.subarray(i * 16, i * 16 + 16);
+            const bottom = h.assets.medium01.bottom;
+            const rootX = mesh.position.x + m[12] + m[4] * bottom;
+            const rootY = m[13] + m[5] * bottom;
+            const rootZ = mesh.position.z + m[14] + m[6] * bottom;
+            const clearance = rootY - sample(rootX, rootZ);
+            assert.ok(clearance < -0.014 && clearance > -0.022, `root clearance ${clearance}`);
+            checked++;
+        }
+        assert.ok(checked > 100);
+    };
+    verify();
+    assert.ok(tiles.every(row => row.every(tile => tile.height === 1)));
+    for (let z = 7; z < 14; z++) for (let x = 7; x < 14; x++) tiles[z][x].height = 1 + (x - 7) * 0.08;
+    const saved = JSON.stringify(tiles);
+    h.edit([{ x: 10, z: 10 }]);
+    // Regenerate the same affected regions for the height-edited scene.
+    h.edit(Array.from({length:7},(_,z)=>Array.from({length:7},(_,x)=>({x:x+7,z:z+7}))).flat());
+    verify();
+    assert.equal(JSON.stringify(tiles), saved);
+    await assertFullEquivalent(h);
+});
+
 for (const size of [20, 40, 80]) for (const [label, x, z, replaced] of [
     ['inside', 6, 6, 1], ['edge', 11, 6, 2], ['corner', 11, 11, 4],
 ]) {

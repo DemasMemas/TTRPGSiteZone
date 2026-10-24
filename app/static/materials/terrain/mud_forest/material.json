@@ -1,0 +1,27 @@
+{
+  "id": "mud_forest",
+  "sourceUrl": "https://polyhaven.com/a/mud_forest",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/mud_forest/mud_forest_diff_1k.jpg",
+      "md5": "d3ea8fc962bbf54d66fc5723cd0096c1",
+      "sha256": "6b874ef298dd06671624032311e0dd1456251a92e396883852bf5ec75cd099eb"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/mud_forest/mud_forest_nor_gl_1k.jpg",
+      "md5": "6e2f0d15fdf402ca5221f63d0bfbeb60",
+      "sha256": "7ccce706a05d804ecf961c4c6be2ab5f496e717e05b13bd87fa086c9e082c3cf"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/mud_forest/mud_forest_arm_1k.jpg",
+      "md5": "344cbb172e258e528586ff959e84d825",
+      "sha256": "5c2e4a8ab7146f98350d11de3c6a3032741509a7ac8aaf5c34b8277fb23d568b"
+    }
+  }
+}

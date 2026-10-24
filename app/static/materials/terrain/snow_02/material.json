@@ -1,0 +1,27 @@
+{
+  "id": "snow_02",
+  "sourceUrl": "https://polyhaven.com/a/snow_02",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/snow_02/snow_02_diff_1k.jpg",
+      "md5": "fc54766c6b36ff298699115a619d440b",
+      "sha256": "523a4e69c90b96d787dd69b897f29a2b3761a017024405c60aa630d1e8e9009a"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/snow_02/snow_02_nor_gl_1k.jpg",
+      "md5": "f16b5701f9ad521cdd6af10c1d6d2b48",
+      "sha256": "9495ec680616b8340e2cbecbd151bff84c690cfad4209e90cc98d2d0ba81f810"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/snow_02/snow_02_arm_1k.jpg",
+      "md5": "701fa0f0fa36bc69f3a8f3cde0ad2d95",
+      "sha256": "1bf5380767702c1ea758f60585c1db1d655d99a2468d359b55d654e6272cc633"
+    }
+  }
+}

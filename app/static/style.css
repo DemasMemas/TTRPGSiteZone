@@ -355,6 +355,9 @@ body.character-sheet-open #location-canvas > :not(canvas) {
 .sheet-pinnable-block { position: relative; }
 .sheet-pinnable-block > :is(summary,h4,h5,.zone-label,label):first-child { padding-right: 22px; }
 .sheet-pinnable-block:is(h4,h5) { padding-right: 24px; }
+.sheet-inline-pin-anchor { display: flex; align-items: center; justify-content: flex-start !important; gap: 6px; }
+.sheet-inline-pin-anchor.block-header > h5 { margin-right: auto !important; }
+.sheet-inline-pin-anchor > .sheet-pin-inline { position: static; flex: 0 0 20px; width: 20px; height: 20px; }
 .sheet-pin-menu { position: absolute; top: 22px; right: 0; z-index: 30; padding: 5px; background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 6px; box-shadow: var(--panel-shadow); }
 .sheet-pin-menu button { display: block; width: 100%; text-align: left; background: var(--input-bg); color: var(--text-color); border: 0; padding: 6px; cursor: pointer; }
 .health-stress-controls { display: flex; align-items: stretch; gap: 4px; height: 38px; }

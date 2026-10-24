@@ -1,0 +1,36 @@
+{
+    "packing":  "Color RGB + Roughness A; AO=1, metallic=0",
+    "id":  "Snow001",
+    "maps":  {
+                 "normal":  {
+                                "sha256":  "e32616dc4eb25a5f28324c99f2c395e6150cd4a795e9ed48dfb3380b265eb941",
+                                "file":  "normal.jpg"
+                            },
+                 "color":  {
+                               "sha256":  "bf33e8f7f9c10588a4611b9f775ec56902fb348cf41d68d19a3613bcbd6c2b42",
+                               "file":  "color_roughness.png"
+                           }
+             },
+    "licenseUrl":  "https://docs.ambientcg.com/license/",
+    "resolution":  "1k",
+    "license":  "CC0",
+    "sourceUrl":  "https://ambientcg.com/view?id=Snow001",
+    "normalFormat":  "OpenGL",
+    "sourceMaps":  {
+                       "color":  {
+                                     "entry":  "Snow001_1K-JPG_Color.jpg",
+                                     "sha256":  "fa0323dae7fee84773fc7d7ad4a2cacc9fd41771fdf93522d5d8ba4b0f9a796f"
+                                 },
+                       "normal":  {
+                                      "entry":  "Snow001_1K-JPG_NormalGL.jpg",
+                                      "sha256":  "e32616dc4eb25a5f28324c99f2c395e6150cd4a795e9ed48dfb3380b265eb941"
+                                  },
+                       "ao":  null,
+                       "roughness":  {
+                                         "entry":  "Snow001_1K-JPG_Roughness.jpg",
+                                         "sha256":  "fb9f2eaba6b3f851a1be8576437f7924321fa7458a1c1ddf94c13701a2428ba3"
+                                     }
+                   },
+    "archiveSha256":  "c07262d38fccf947ca24c960068667750b58aeff25398cacfd997bace7350830",
+    "archiveUrl":  "https://ambientcg.com/get?file=Snow001_1K-JPG.zip"
+}

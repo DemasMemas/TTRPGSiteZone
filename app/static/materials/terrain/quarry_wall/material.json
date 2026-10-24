@@ -1,0 +1,27 @@
+{
+  "id": "quarry_wall",
+  "sourceUrl": "https://polyhaven.com/a/quarry_wall",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/quarry_wall/quarry_wall_diff_1k.jpg",
+      "md5": "da541a91c112793caff532a96d9921ff",
+      "sha256": "929c85d9acf3a3949bd271cd310d2c892ec8756d575b39861f179be31a41ad49"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/quarry_wall/quarry_wall_nor_gl_1k.jpg",
+      "md5": "813c68e916807a98bb7c015c3dc933d4",
+      "sha256": "64a0ded0b720fd73efb38be1a725662fcb1fe7ce789420c79049908c194dda86"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/quarry_wall/quarry_wall_arm_1k.jpg",
+      "md5": "d467615f8f93706c2bb38ea2b39e8cc6",
+      "sha256": "51da3afbf24357af72038d6065ba484e057fef114ec502fba299603d015f092c"
+    }
+  }
+}

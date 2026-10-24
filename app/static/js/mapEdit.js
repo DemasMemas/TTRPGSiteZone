@@ -789,6 +789,8 @@ export async function applyAnomalyFieldChange() {
 export async function applyTerrainChange() {
     if (!currentEditTile) return;
     const newTerrain = document.getElementById('tile-edit-terrain').value;
+    // Legacy local-only floors have no selectable world option. Keep their saved type.
+    if (!newTerrain) return;
     await handleTileUpdate(
         currentEditTile.chunkX,
         currentEditTile.chunkY,

@@ -127,6 +127,42 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===2 && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if (process.env.VTT_SNOW_INTEGRATION === '1') {
+            await require('./snow_integration.browser.cjs')({ page, request, token, lobby, base, connect, debugPort });
+            return;
+        }
+        if (process.env.VTT_SNOW_CANDIDATES === '1') {
+            await require('./snow_candidates.browser.cjs')({ page, request, token, lobby });
+            return;
+        }
+        if (process.env.VTT_SWAMP_03 === '1') {
+            await require('./world_swamp03.browser.cjs')({ page, request, token, lobby });
+            return;
+        }
+        if (process.env.VTT_SWAMP_COMPONENTS === '1') {
+            await require('./world_swamp_components.browser.cjs')({ page, request, token, lobby });
+            return;
+        }
+        if (process.env.VTT_SWAMP_COMPOSITION === '1') {
+            await require('./world_swamp_composition.browser.cjs')({ page, request, token, lobby });
+            return;
+        }
+        if (process.env.VTT_SWAMP_CANDIDATES === '1') {
+            await require('./world_swamp_candidates.browser.cjs')({ page, request, token, lobby });
+            return;
+        }
+        if (process.env.VTT_SWAMP_DIAGNOSTICS === '1') {
+            await require('./world_swamp_diagnostics.browser.cjs')({ page, request, token, lobby });
+            return;
+        }
+        if (process.env.VTT_MATERIAL_CANDIDATES === '1') {
+            await require('./terrain_material_candidates.browser.cjs')({ page, request, token, lobby, profile });
+            return;
+        }
+        if (process.env.VTT_TERRAIN_ONLY === '1') {
+            await require('./terrain_materials.browser.cjs')({ page, request, token, lobby, profile, base, connect, debugPort });
+            return;
+        }
         await page.until(`document.getElementById('panel-chat').dataset.chatInitialized==='true'`, 'chat panel initialized');
         assert.equal(await page.evaluate(`['panel-chat','panel-common-tools'].every(id=>document.getElementById(id).hidden && document.getElementById(id).getClientRects().length===0)`),true);
         await page.evaluate(`document.getElementById('common-tools-toggle').click()`);

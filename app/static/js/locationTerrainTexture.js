@@ -6,6 +6,9 @@ const COLORS = {
     swamp: [75, 65, 45],
     rock: [126, 128, 123],
     water: [43, 70, 62],
+    concrete: [179, 177, 168], gravel: [130, 121, 107],
+    snow: [212, 217, 217], metal: [133, 101, 77],
+    bare_dirt: [122, 105, 79], granite_tiles: [179, 177, 168], wood_floor: [119, 86, 53],
 };
 
 let forestGroundPixels = null;

@@ -10,6 +10,11 @@ const actions = new Set(['rollSkill', 'useWeaponFromEquipment', 'chooseMachineGu
     'equipMagazineToWeapon', 'reloadFixedMagazine', 'unloadFixedMagazine',
     'reloadGrenadeLauncher', 'fireGrenadeLauncher', 'clearWeaponJam']);
 
+export const weaponMasteryLabels = {
+    pistols: 'Пистолеты', shotguns: 'Дробовики', smgs: 'ПП', assaultRifles: 'Штурмовые',
+    sniperRifles: 'Снайперские', grenadeLaunchers: 'Гранатометы', machineGuns: 'Пулеметы',
+};
+
 export function parseWidgetAction(text) {
     const match = String(text || '').trim().match(/^(?:window\.)?(\w+)\((.*)\);?$/);
     if (!match || !actions.has(match[1])) return null;
@@ -98,12 +103,20 @@ export function readWidgetPreferences(storage, key) {
                 && (!ref.binding || typeof ref.binding.root === 'string' && ref.binding.identity
                     && typeof ref.binding.identity === 'object'))).slice(0, 50) : [];
         const seenItems = new Set();
-        return pins.map(pin => ({ ...pin, references: pin.references.map(canonicalWidgetReference) })).filter(pin => {
-            if (pin.references.length !== 1 || pin.references[0].block !== 'inventory-item') return true;
+        return pins.flatMap(pin => {
+            if (pin.references.length === 1 && pin.references[0].block === 'weapon-mastery') {
+                return Object.entries(weaponMasteryLabels).map(([key, label], index) => ({
+                    ...pin, id: index === 0 ? pin.id : `${pin.id.slice(0, 55)}-${key}`, title: `Владение: ${label}`,
+                    references: [{ kind: 'block', block: `weapon-mastery:${key}`, title: `Владение: ${label}` }],
+                }));
+            }
+            return [{ ...pin, references: pin.references.map(canonicalWidgetReference) }];
+        }).filter(pin => {
+            if (pin.references.length !== 1 || pin.references[0].block !== 'inventory-item' && !pin.references[0].block?.startsWith('weapon-mastery:')) return true;
             const identity = JSON.stringify([pin.characterId, widgetReferenceIdentity(pin.references[0])]);
             if (seenItems.has(identity)) return false;
             seenItems.add(identity); return true;
-        });
+        }).slice(0, 50);
     } catch { return []; }
 }
 
@@ -357,16 +370,23 @@ export function initCharacterWidgets(lobbyId, bridge) {
             anchor.dataset.pinBlockDecorated = 'true';
             anchor.classList.add('sheet-pinnable-block');
             const button = document.createElement('button'); button.type = 'button'; button.className = 'sheet-pin';
+            if (entries.some(entry => entry.inlinePin)) {
+                anchor.classList.add('sheet-inline-pin-anchor');
+                button.classList.add('sheet-pin-inline');
+            }
             button.dataset.sheetControl = '';
             button.dataset.pinBlock = entries[0].reference.block;
             button.dataset.pinBlocks = entries.map(entry => entry.reference.block).join(' ');
-            button.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="m8 3 8 0-1 7 4 4v2h-6v6h-2v-6H5v-2l4-4z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+            const pinIcon = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="m8 3 8 0-1 7 4 4v2h-6v6h-2v-6H5v-2l4-4z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+            const checkIcon = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
             const selected = entry => pins.some(item => item.characterId === Number(context.id)
                 && widgetReferenceIdentity(item.references[0]) === widgetReferenceIdentity(entry.reference));
             const sync = () => {
+                const active = entries.some(selected);
+                button.innerHTML = active ? checkIcon : pinIcon;
                 button.title = entries.length > 1 ? 'Закрепить блок' : `${selected(entries[0]) ? 'Открепить' : 'Закрепить'}: ${entries[0].reference.title}`;
                 button.setAttribute('aria-label', button.title);
-                button.setAttribute('aria-pressed', String(entries.some(selected)));
+                button.setAttribute('aria-pressed', String(active));
             };
             sync();
             button.onclick = event => {

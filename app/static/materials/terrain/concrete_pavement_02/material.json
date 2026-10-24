@@ -1,0 +1,27 @@
+{
+  "id": "concrete_pavement_02",
+  "sourceUrl": "https://polyhaven.com/a/concrete_pavement_02",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_pavement_02/concrete_pavement_02_diff_1k.jpg",
+      "md5": "bdee8d4deebb78609414453a5fb299e2",
+      "sha256": "e129ee6b59b6ed7f65b4c4c5ba9eb583d13d040ec26bef5d5d4e0080fe342e7a"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_pavement_02/concrete_pavement_02_nor_gl_1k.jpg",
+      "md5": "2c8ea332b4274e8728c5aa0ecf467d26",
+      "sha256": "26c09320b3373da7f55edb8165562f16d36c07161c9c715787a09daf5910450c"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_pavement_02/concrete_pavement_02_arm_1k.jpg",
+      "md5": "0aa6febd7b811c980d13374142f0030c",
+      "sha256": "544908f84d1ba795a5a7cc843dbf9b35a91d7e24e8c4127a41ae4bdebc06ca80"
+    }
+  }
+}

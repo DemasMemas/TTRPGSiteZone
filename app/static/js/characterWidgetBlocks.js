@@ -1,4 +1,4 @@
-import { widgetValue, itemBinding, resolveWidgetReference } from './characterWidgets.js';
+import { widgetValue, itemBinding, resolveWidgetReference, weaponMasteryLabels } from './characterWidgets.js';
 
 // This is the agreed list of pinnable views, not a second character model.
 // Every view is projected from the normal, authorized character sheet.
@@ -34,8 +34,9 @@ export function characterWidgetBlocks(root, data) {
         seenSkills.add(match[1]);
         add(`skill:${match[1]}`, match[2], control.parentElement);
     });
-    const mastery = [...root.querySelectorAll('h4')].find(element => element.textContent.trim() === 'Владение оружием');
-    add('weapon-mastery', 'Владение оружием', mastery?.parentElement);
+    Object.entries(weaponMasteryLabels).forEach(([key, label]) => {
+        add(`weapon-mastery:${key}`, `Владение: ${label}`, field(`skills.specialized.${key}.level`)?.parentElement);
+    });
     root.querySelectorAll('[data-weapon-index]').forEach(element => {
         const index = Number(element.dataset.weaponIndex), path = `weapons.${index}`;
         const weapon = widgetValue(data, path);
@@ -62,6 +63,10 @@ export function characterWidgetBlocks(root, data) {
         const heading = [...(q('[data-equipment-group="cosmetic"]')?.querySelectorAll('h5') || [])].find(element => element.textContent.trim() === title);
         add(`cosmetic:${key}`, title, key === 'jewelry' ? heading?.parentElement : heading?.parentElement.parentElement,
             key === 'jewelry' ? {} : { path: `equipment.${key}`, binding: itemBinding(data, `equipment.${key}`) });
+        if (heading && key !== 'jewelry') {
+            result.at(-1).anchor = heading.parentElement;
+            result.at(-1).inlinePin = true;
+        }
     });
     const inventory = { 'inventory-weight': 'Вес и перемещение', pockets: 'Карманы', belt: 'Пояс', vest: 'Разгрузка', backpack: 'Рюкзак' };
     Object.entries(inventory).forEach(([key, title]) => add(key, title, q(`[data-widget-block="${key}"]`)));
@@ -124,7 +129,7 @@ export function widgetBlockControl(root, data, reference) {
     const entry = findWidgetBlock(root, data, reference);
     if (!entry) return null;
     if (reference.block.startsWith('skill:') && !reference.controlKey.startsWith('click:window.rollSkill(')) return null;
-    if (reference.block === 'weapon-mastery' && !reference.controlKey.startsWith('click:addWeaponXp(')) return null;
+    if (reference.block.startsWith('weapon-mastery:') && !reference.controlKey.startsWith('click:addWeaponXp(')) return null;
     const matches = sourceControls(entry).filter(control => blockControlKey(entry, control) === reference.controlKey);
     if (matches.length === 1) return matches[0];
     // The skill label and dice icon intentionally invoke the same check.
@@ -198,7 +203,7 @@ export function projectWidgetBlock(entry) {
         clone.querySelectorAll('span').forEach(span => { if (span.textContent.includes('Опыт:')) span.remove(); });
         clone.querySelectorAll('input').forEach(control => { control.readOnly = true; delete control.dataset.widgetControl; });
     }
-    if (key === 'weapon-mastery') clone.querySelectorAll('select').forEach(control => { control.disabled = true; delete control.dataset.widgetControl; });
+    if (key.startsWith('weapon-mastery:')) clone.querySelectorAll('select').forEach(control => { control.disabled = true; delete control.dataset.widgetControl; });
     clone.classList.remove('sheet-tab-content', 'sheet-tab');
     clone.style.removeProperty('display');
     clone.classList.add('widget-block-view');

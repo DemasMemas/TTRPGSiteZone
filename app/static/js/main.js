@@ -1,5 +1,6 @@
 // static/js/main.js
 import { initWorldNumericInputs } from './worldNumericInputs.js';
+import { addTerrainMaterialOptions } from './terrainMaterialCatalog.js';
 import { initSocket } from './socketHandlers.js';
 import { initCharacters, initMutantForm, loadLobbyCharacters, showCreateCharacterForm, showCreateMutantForm } from './characters.js';
 import { initCommonMapTools } from './commonMapTools.js';
@@ -1155,6 +1156,7 @@ window.enterLocation = async function(locationId) {
                 // Получаем элементы
                 const editCheckbox = document.getElementById('loc-edit-toggle-checkbox');
                 const terrainSelect = document.getElementById('loc-edit-terrain');
+                addTerrainMaterialOptions(terrainSelect);
                 const grassSubtypeSelect = document.getElementById('loc-grass-subtype');
                 const radiusSlider = document.getElementById('loc-edit-radius');
                 const heightSlider = document.getElementById('loc-edit-height');

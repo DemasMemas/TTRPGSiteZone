@@ -1,0 +1,27 @@
+{
+  "id": "dense_sand",
+  "sourceUrl": "https://polyhaven.com/a/dense_sand",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/dense_sand/dense_sand_diff_1k.jpg",
+      "md5": "1c3d2c1f41b24ea9133973f2dedd5fea",
+      "sha256": "0d2430c115167a2da3f60d60eb9ea2aa51e71472e2672f94c7f5df78342081ff"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/dense_sand/dense_sand_nor_gl_1k.jpg",
+      "md5": "ade5aef220f7ad2904bf902ea02d003f",
+      "sha256": "776fe4f5008ee5043a709b0b63a9a7ec758f18ac5e62db65a0e99c04cc782617"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/dense_sand/dense_sand_arm_1k.jpg",
+      "md5": "1310b2067203e410a0df79df9a080bfb",
+      "sha256": "30d042f0b81e12eccdf2d32398c34c1f8416687a42f8ed453e9337c141c90015"
+    }
+  }
+}

@@ -3,7 +3,25 @@ import { acceptsDetail, edgePosition } from './locationGrassDetail.js';
 const ROOT = '/static/models/vegetation/polyhaven-d51/grass_medium_01/';
 const MODEL = '/static/models/vegetation/grass_medium_01_game_d8.glb';
 const CHUNK_SIZE = 12;
+export const NATURAL_GRASS_ROOT_EMBED = 0.018;
 let assetPromise = null;
+
+// Anchor the rotated/scaled root, rather than the unrotated geometry's minimum Y.
+// The terrain samples are the same footprint already used by the slope filter.
+export function naturalGrassRootPose(plant, source, height, slopeX = 0, slopeZ = 0) {
+    const sinY = Math.sin(plant.turn), cosY = Math.cos(plant.turn);
+    const localNormalX = -slopeX * cosY + slopeZ * sinY;
+    const localNormalZ = -slopeX * sinY - slopeZ * cosY;
+    const limit = value => Math.max(-0.35, Math.min(0.35, value));
+    const pitch = limit(Math.atan2(localNormalZ, 1)) + plant.lean;
+    const roll = limit(-Math.atan2(localNormalX, Math.hypot(1, localNormalZ))) + plant.lean * 0.55;
+    const root = source.bottom * source.scale * plant.size;
+    const rootX = root * (-cosY * Math.sin(roll) + sinY * Math.sin(pitch) * Math.cos(roll));
+    const rootY = root * Math.cos(pitch) * Math.cos(roll);
+    const rootZ = root * (sinY * Math.sin(roll) + cosY * Math.sin(pitch) * Math.cos(roll));
+    return { x: plant.x - rootX, y: height - NATURAL_GRASS_ROOT_EMBED * plant.size - rootY,
+        z: plant.z - rootZ, pitch, roll };
+}
 
 function hash(x, z, salt) {
     let value = Math.imul(x + salt * 37, 374761393) ^ Math.imul(z + salt * 53, 668265263);
@@ -162,14 +180,14 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
             if (!state.has(key)) state.set(key, { stats: emptyStats(), created: 0, added: 0, mesh: null });
             state.get(key).created++;
         }
+        const slopes = new Map();
         const plants = placements[kind].filter(plant => {
             const center = getHeight(plant.x, plant.z);
-            return Math.max(
-                Math.abs(center - getHeight(plant.x - 0.14, plant.z)),
-                Math.abs(center - getHeight(plant.x + 0.14, plant.z)),
-                Math.abs(center - getHeight(plant.x, plant.z - 0.14)),
-                Math.abs(center - getHeight(plant.x, plant.z + 0.14)),
-            ) < 0.18;
+            const left = getHeight(plant.x - 0.14, plant.z), right = getHeight(plant.x + 0.14, plant.z);
+            const near = getHeight(plant.x, plant.z - 0.14), far = getHeight(plant.x, plant.z + 0.14);
+            slopes.set(plant, { height: center, x: (right - left) / 0.28, z: (far - near) / 0.28 });
+            return Math.max(Math.abs(center - left), Math.abs(center - right),
+                Math.abs(center - near), Math.abs(center - far)) < 0.18;
         });
         if (!plants.length) continue;
         const source = assets[kind];
@@ -193,10 +211,10 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
             mesh.position.set(cx * CHUNK_SIZE, 0, cz * CHUNK_SIZE);
             for (let index = 0; index < chunkPlants.length; index++) {
                 const plant = chunkPlants[index];
-                dummy.position.set(plant.x - mesh.position.x,
-                    getHeight(plant.x, plant.z) + 0.012 - source.bottom * source.scale * plant.size,
-                    plant.z - mesh.position.z);
-                dummy.rotation.set(plant.lean, plant.turn, plant.lean * 0.55, 'YXZ');
+                const slope = slopes.get(plant);
+                const pose = naturalGrassRootPose(plant, source, slope.height, slope.x, slope.z);
+                dummy.position.set(pose.x - mesh.position.x, pose.y, pose.z - mesh.position.z);
+                dummy.rotation.set(pose.pitch, plant.turn, pose.roll, 'YXZ');
                 dummy.scale.set(source.spread * plant.size * plant.width,
                     source.scale * plant.size,
                     source.spread * plant.size * plant.depth);

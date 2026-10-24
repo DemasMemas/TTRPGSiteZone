@@ -359,6 +359,7 @@ test('releasing the world brush schedules its pending terrain refresh without ca
     let removed = 0;
     const context = vm.createContext({
         brushActive: true, isMouseDown: true, lastProcessedTileKey: '0,0,1,1',
+        window: {},
         controlsDisabled: true, controls: { enabled: false },
         globalMouseUpHandler() {},
         document: { removeEventListener() { removed++; } },

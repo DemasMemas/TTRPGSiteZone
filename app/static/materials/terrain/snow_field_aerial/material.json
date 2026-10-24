@@ -1,0 +1,27 @@
+{
+  "id": "snow_field_aerial",
+  "sourceUrl": "https://polyhaven.com/a/snow_field_aerial",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/snow_field_aerial/snow_field_aerial_col_1k.jpg",
+      "md5": "62563cb0342c3428295342cb2b9f593b",
+      "sha256": "902e1fef8f1bcc2f158fbb118239e29159978fd7b8e241d2d0f404b8dbecf718"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/snow_field_aerial/snow_field_aerial_nor_gl_1k.jpg",
+      "md5": "ad6ac060c44cdc8e279a363294740b78",
+      "sha256": "2037817e0166673e68039c4dd2c56fa014d6999e1d6d492e2e3e7e3cfec3862b"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/snow_field_aerial/snow_field_aerial_arm_1k.jpg",
+      "md5": "3a3f70732810adaf38aaaa9b5fb906fe",
+      "sha256": "4a6c04f8ac1f00c961cd7876b485fea5a30f1732c8fd727f48bb81e59222aaaf"
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "id": "rocky_gravel",
+  "sourceUrl": "https://polyhaven.com/a/rocky_gravel",
+  "license": "CC0",
+  "resolution": "1k",
+  "normalFormat": "OpenGL",
+  "maps": {
+    "color": {
+      "file": "color.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rocky_gravel/rocky_gravel_diff_1k.jpg",
+      "md5": "a1d5a23e5df0f2a43ec69d9a1b1c3f92",
+      "sha256": "96ca2e89a5b5d9413217dddaf6b217afccd2cc5ef39a1dbc2a2939aac4cac38e"
+    },
+    "normal": {
+      "file": "normal.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rocky_gravel/rocky_gravel_nor_gl_1k.jpg",
+      "md5": "9951d3f40a0ea515d799ef2aa271534d",
+      "sha256": "c5be6cf20a3d8cd53e99cd9e6d51aabd3af213c4fa8875ed9a676a975bcf3cab"
+    },
+    "arm": {
+      "file": "arm.jpg",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rocky_gravel/rocky_gravel_arm_1k.jpg",
+      "md5": "9392f3243365cde330eb38e11755007a",
+      "sha256": "acab0f0e4e1567aad7eddcbb4234327d94c9d57ce48ee14469d2056a4bb0bb0a"
+    }
+  }
+}

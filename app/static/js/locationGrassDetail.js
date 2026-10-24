@@ -63,17 +63,6 @@ export function grassPlacements(tiles, isCovered = () => false, includeGrass = t
     const flowers = [];
     for (let z = 0; z < tiles.length; z++) {
         for (let x = 0; x < tiles[z].length; x++) {
-            if (tiles[z][x].terrain === 'rock') {
-                if (hash(x, z, 170) < 0.24) {
-                    const px = x + 0.15 + hash(x, z, 171) * 0.7;
-                    const pz = z + 0.15 + hash(x, z, 172) * 0.7;
-                    if (!isCovered(px, pz) && acceptsDetail(tiles, 'rock', px, pz, 174)) tufts.push({ x: px, z: pz,
-                        size: 0.4 + hash(x, z, 173) * 0.22,
-                        turn: hash(x, z, 174) * Math.PI * 2,
-                        color: hash(x, z, 175), rock: true });
-                }
-                continue;
-            }
             if (tiles[z][x].terrain !== 'grass') continue;
             const understory = includeGrass === 'understory';
             for (let cell = 0; includeGrass && cell < (understory ? 20 : 25); cell++) {
@@ -405,8 +394,8 @@ export function createGrassDetailGroup(THREE, tiles, getHeight, isCovered, useNa
                     0.22 + tuft.color * 0.07, 0.34 + tuft.color * 0.08);
             } else {
                 tuftColor.setHSL(0.17 + tuft.color * 0.12,
-                    tuft.rock ? 0.23 : 0.28 + tuft.color * 0.1,
-                    (tuft.rock ? 0.29 : 0.32) + tuft.color * 0.09);
+                    0.28 + tuft.color * 0.1,
+                    0.32 + tuft.color * 0.09);
             }
             mesh.setColorAt(index, tuftColor);
         }

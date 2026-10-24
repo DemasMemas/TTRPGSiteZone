@@ -7,6 +7,8 @@ import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { roadNode, roadConnectsAt } from './worldRoadTopology.js';
 import { objectFromWorldInstance } from './worldObjectSelection.js';
 import { createWaterMaterial } from './waterSurface.js';
+import { createTerrainMaterialLayer } from './terrainMaterialLayer.js';
+import { addTerrainMaterialOptions } from './terrainMaterialCatalog.js';
 import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
 import { createTerrainPixelsRegion, getGrassGroundImages,
     updateTerrainPixelsRegion } from './locationTerrainTexture.js';
@@ -20,6 +22,12 @@ import {
 } from './webglSupport.js';
 
 const CHUNK_SIZE = 32;
+const worldTerrainMaterials = createTerrainMaterialLayer(THREE, { world: true });
+worldTerrainMaterials.resize(512, 512);
+for (const id of ['tile-type-select', 'tile-edit-terrain']) {
+    addTerrainMaterialOptions(document.getElementById(id), { world: true });
+}
+export const getWorldTerrainMaterialDiagnostics = () => worldTerrainMaterials.diagnostics();
 export const chunksMap = new Map();
 let worldGrassGroundPixelsEnabled = false;
 const worldGrassDetail = createWorldGrassDetail(THREE);
@@ -61,6 +69,8 @@ const terrainColors = {
     sand: 0xC2B280,
     rock: 0x808080,
     swamp: 0x4B3B2A,
+    concrete: 0xb3b1a8, gravel: 0x82796b, snow: 0xd4d9d9, metal: 0x85654d,
+    bare_dirt: 0x7a694f, granite_tiles: 0xb3b1a8, wood_floor: 0x775635,
     water: 0x1E90FF
 };
 
@@ -551,6 +561,10 @@ export function removePreviewObject() {
 export function setMapDimensions(widthChunks, heightChunks) {
     MAX_CHUNK_X = widthChunks - 1;
     MAX_CHUNK_Y = heightChunks - 1;
+    worldTerrainMaterials.resize(widthChunks * CHUNK_SIZE, heightChunks * CHUNK_SIZE);
+    for (const entry of chunksMap.values()) {
+        worldTerrainMaterials.fill(entry.tilesData, entry.chunkX * CHUNK_SIZE, entry.chunkY * CHUNK_SIZE);
+    }
     updateCelestialPositions();
     console.log(`Map dimensions set: ${widthChunks} x ${heightChunks} chunks`);
 }
@@ -928,6 +942,9 @@ const groundMat = new THREE.MeshStandardMaterial({ map: getSurfaceTexture(THREE,
 const smoothGroundMat = new THREE.MeshStandardMaterial({
     map: getSurfaceTexture(THREE, 'local_terrain'), vertexColors: true, side: THREE.DoubleSide,
 });
+worldTerrainMaterials.apply(groundMat, { sides: true });
+worldTerrainMaterials.apply(smoothGroundMat, { sides: true, smooth: true });
+worldTerrainMaterials.apply(worldWaterBankMat);
 
 function refreshWorldTerrainSurface(entry, smoothData) {
     const metrics = typeof window !== 'undefined' && window.worldLoadMetrics?.fullLoadMs === null
@@ -1007,6 +1024,7 @@ function refreshWorldTerrainSurface(entry, smoothData) {
         polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
     });
     worldGrassDetail.apply(material);
+    entry.materialLayer?.apply(material);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.frustumCulled = false;
     mesh.visible = entry.terrainVisible;
@@ -1836,6 +1854,7 @@ export function addChunk(cx, cy, tilesData) {
     if (waterInstances) chunkBounds.push({ box, mesh: waterInstances, key });
 
     chunksMap.set(key, {
+        materialLayer: worldTerrainMaterials,
         ground: groundInstances,
         water: waterInstances,
         trees: treeInstances,
@@ -1859,6 +1878,7 @@ export function addChunk(cx, cy, tilesData) {
         pendingRebuild: null,
         roadBoundaryDirty: false
     });
+    worldTerrainMaterials.fill(tilesData, cx * CHUNK_SIZE, cy * CHUNK_SIZE);
     refreshWorldTerrainNeighborhood(cx, cy, null, null, true, true, true, true, true);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
@@ -1869,6 +1889,7 @@ export function removeChunk(cx, cy) {
     const key = `${cx},${cy}`;
     const entry = chunksMap.get(key);
     if (!entry) return;
+    entry.materialLayer?.clear(cx * CHUNK_SIZE, cy * CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE);
     if (entry.pendingRebuild) {
         cancelAnimationFrame(entry.pendingRebuild);
         entry.pendingRebuild = null;
@@ -2197,6 +2218,8 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     if (!changedTerrain && !changedHeight
         && Object.keys(updates).every(key => key === 'terrain' || key === 'height')) return;
     Object.assign(tile, updates);
+    if (changedTerrain) entry.materialLayer?.update(chunkX * CHUNK_SIZE + tileX,
+        chunkY * CHUNK_SIZE + tileY, tile);
     if (changedObjects || changedAnomalyField || (changedHeight && tile.anomaly_field)) {
         const groups = entry.pendingObjectGroups ??= new Set();
         if (changedObjects) {

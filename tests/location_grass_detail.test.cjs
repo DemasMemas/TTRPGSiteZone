@@ -67,7 +67,10 @@ test('sand pebbles are sparse, irregular, deterministic, and absent from floors'
     assert.ok(a.pebbles.length < 15);
     assert.ok(Object.values(a).flat().every(item => item.x >= 2));
     assert.ok(new Set(a.pebbles.map(item => Math.round((item.x % 1) * 100))).size > 2);
-    assert.ok(grassPlacements(tiles).tufts.some(item => item.rock));
+    assert.ok(grassPlacements(tiles).tufts.every(item => !item.rock));
+    const rock = Array.from({ length: 20 }, () => Array.from({ length: 20 }, () => ({ terrain: 'rock' })));
+    assert.deepEqual(grassPlacements(rock), { tufts: [], flowers: [] });
+    assert.deepEqual(grassPlacements(rock, () => false, false, false), { tufts: [], flowers: [] });
     assert.match(source, /new THREE\.InstancedMesh\(new THREE\.IcosahedronGeometry/);
     assert.doesNotMatch(source, /new THREE\.CircleGeometry|new THREE\.LineSegments/);
 });

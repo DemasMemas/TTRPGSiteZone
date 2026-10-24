@@ -11,7 +11,7 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
         basic: { name: 'Виджеты — первый' }, health: { current: 100, max: 100, painLevel: 1,
             organs: { heart: { current: 1, max: 100 } }, effects: [{ id: 'widget-effect', type: 'custom', name: 'Проверочный эффект', value: 2, remaining: 3 }] },
         skills: { physical: { will: { base: 10, bonus: 0, xp: 0 }, strength: { base: 10, bonus: 0, xp: 0 } } },
-        equipment: { armor: { id: 'widget-armor', name: 'Widget armor', durability: 40, currentStageDurability: 20 }, backpack: { id: 'bag', name: 'Рюкзак', attributes: { capacity: 20 } } },
+        equipment: { headphones: { id: 'test-headphones', templateId: 999991, name: 'Наушники', deafeningCoef: .5 }, glasses: { id: 'test-glasses', templateId: 999992, name: 'Очки', charismaBonus: .2 }, gloves: { id: 'test-gloves', templateId: 999993, name: 'Перчатки', charismaBonus: .3 }, armor: { id: 'widget-armor', name: 'Widget armor', durability: 40, currentStageDurability: 20 }, backpack: { id: 'bag', name: 'Рюкзак', attributes: { capacity: 20 } } },
         weapons: [{ id: 'widget-pistol', name: 'Widget pistol', templateId: template.id + 1000000,
             type: 'firearm', ammo: 3, durability: 40, currentStageDurability: 20, fixedAmmo: [{ quantity: 3, name: '9x19', templateId: 999001 }] },
             { id: 'widget-knife', name: 'Нож', category: 'melee_weapon', attributes: { damage: 10, allowed_attacks: ['Колющий'], weight_class: 'Лёгкое' } }],
@@ -28,8 +28,12 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
     const pinBlock = async (block, scope = '') => {
         const selector = `${scope || '#sheet-content'} .sheet-pin[data-pin-blocks~="${block}"]`;
         await page.until(`document.querySelector(${JSON.stringify(selector)})`, `pin affordance ${block}`);
+        const wasPressed = await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).getAttribute('aria-pressed')==='true'`);
         await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
         await page.evaluate(`document.querySelector('.sheet-pin-menu [data-pin-block="${block}"]')?.click()`);
+        assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).getAttribute('aria-pressed')`), String(!wasPressed), `pin state for ${block}`);
+        assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).querySelector('path').getAttribute('d')`),
+            wasPressed ? 'm8 3 8 0-1 7 4 4v2h-6v6h-2v-6H5v-2l4-4z' : 'm5 12 4 4L19 6', `pin/check icon for ${block}`);
     };
     const pinField = field => pinBlock(field === 'health.painLevel' ? 'health-status' : 'equipment:armor');
     const pinAction = text => pinBlock('skill:physical.will');
@@ -44,7 +48,7 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
     assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('.lobby-menu')).visibility==='hidden' && getComputedStyle(document.getElementById('panel-participants')).visibility==='hidden' && getComputedStyle(document.getElementById('panel-common-tools')).visibility==='hidden'`), true);
     const agreed = await page.evaluate(`[...document.querySelectorAll('#sheet-content .sheet-pin')].flatMap(b=>b.dataset.pinBlocks.split(' '))`);
     for (const block of ['health-pool', 'health-status', 'blood-check', 'infection', 'needs', 'organs', 'health-summary', 'effects', 'effect', 'addictions', 'zone:head',
-        'weapon-mastery', 'equipment:helmet', 'equipment:gasMask', 'equipment:armor', 'protection:armor', 'coverage:armor', 'modifications:armor',
+        'weapon-mastery:pistols', 'equipment:helmet', 'equipment:gasMask', 'equipment:armor', 'protection:armor', 'coverage:armor', 'modifications:armor',
         'equipment:detector', 'cosmetic:headphones', 'cosmetic:glasses', 'cosmetic:gloves', 'cosmetic:jewelry', 'equipment:pda', 'inventory-weight', 'pockets', 'backpack', 'inventory-item', 'money', 'notes']) {
         assert.ok(agreed.includes(block), `agreed block ${block}`);
     }
@@ -52,19 +56,27 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
     assert.equal(agreed.includes('inventory-actions'), false);
     assert.equal(agreed.includes('inventory-container'), false);
     assert.equal(agreed.includes('inventory-magazine'), false);
+    assert.equal(agreed.includes('weapon-mastery'), false);
+    assert.equal(agreed.filter(block => block.startsWith('weapon-mastery:')).length, 7);
     assert.equal(await page.evaluate(`document.querySelector('[data-path="inventory,pockets,1"] .sheet-pin').dataset.pinBlocks`), 'inventory-item');
     assert.equal(await page.evaluate(`document.querySelectorAll('[name^="basic."] + .sheet-pin,[name^="health.organs."] + .sheet-pin,[name="skills.skillPoints"] + .sheet-pin').length`), 0);
+    for (const block of ['blood-check', 'infection', 'zone:head', 'cosmetic:glasses', 'effects', 'money']) {
+        await pinBlock(block);
+        await pinBlock(block);
+    }
     // Exercise the blocks which previously could not be pinned, then remove them
     // to keep the later layout/permissions regression compact.
     await pinBlock('organs'); await pinBlock('effect');
     await pinBlock('inventory-item', '[data-path="inventory,pockets,1"]');
+    assert.equal(await page.evaluate(`document.querySelector('[data-path="inventory,pockets,1"] .sheet-pin').getAttribute('aria-pressed')`), 'true');
+    assert.equal(await page.evaluate(`document.querySelector('[data-path="inventory,pockets,1"] .sheet-pin path').getAttribute('d')`), 'm5 12 4 4L19 6');
     await pinBlock('weapon', '[data-weapon-index="1"]');
     const extraPrefs = await prefs();
     const extra = block => '#character-widget-' + extraPrefs.find(pin => pin.references[0].block === block).id;
     await page.evaluate('window.closeCharacterSheet()');
     await page.until(`document.querySelector('${extra('effect')} [data-widget-control="field:$item.value"]') && document.querySelector('${extra('organs')} .zone-item-vertical')`, 'effect and damaged organs projected');
     assert.equal(await page.evaluate(`document.querySelectorAll('${extra('organs')} .zone-item-vertical').length`), 1);
-    assert.ok(await page.evaluate(`document.querySelector('${extra('weapon')}').textContent.includes('Колющий')`));
+    await page.until(`document.querySelector('${extra('weapon')}')?.textContent.includes('Колющий')`, 'melee widget projected');
     await page.evaluate(`(()=>{const i=document.querySelector('${extra('effect')} [data-widget-control="field:$item.value"]');i.value=4;i.dispatchEvent(new Event('change',{bubbles:true}))})()`);
     await page.until(`document.querySelector('${extra('effect')} [data-widget-control="field:$item.value"]')?.value==='4' && !document.querySelector('${extra('effect')} input').disabled`, 'individual effect saved');
     assert.equal((await request(`/lobbies/characters/${character.id}`, null, token, 'GET')).data.health.effects.find(e => e.id === 'widget-effect').value, 4);
@@ -72,6 +84,10 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
     assert.deepEqual(await page.evaluate(`[...document.querySelectorAll('${itemPanel} .widget-inventory-field > span')].map(e=>e.textContent)`), ['Вес, кг','Объём','Количество']);
     assert.ok(await page.evaluate(`document.querySelector('${itemPanel}').getBoundingClientRect().width >= 600`));
     assert.equal(await page.evaluate(`(()=>{const p=document.querySelector('${itemPanel} .panel-content');return p.scrollWidth<=p.clientWidth+1})()`), true);
+    assert.equal(await page.evaluate(`[...document.querySelectorAll('${itemPanel} input[type="number"]')].every(input=>input.validity.valid)`), true, 'fractional item measurements do not trigger native invalid-value tooltip');
+    await page.evaluate(`(()=>{const i=document.querySelector('${itemPanel} [data-widget-key="weight"]');i.value='0.35';i.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+    await page.until(`document.querySelector('${itemPanel} [data-widget-key="weight"]')?.value==='0.35' && !document.querySelector('${itemPanel} input').disabled`, 'fractional weight saved');
+    assert.equal((await request(`/lobbies/characters/${character.id}`, null, token, 'GET')).data.inventory.pockets[1].weight, .35);
     fs.writeFileSync(path.join(profile, 'inventory-widget-fields.png'), Buffer.from((await page.call('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
     await page.evaluate(`document.querySelector('${itemPanel} [data-widget-control$=":quantity-up"]').click()`);
     await page.until(`document.querySelector('${itemPanel} [data-widget-control$=":quantity"]')?.value==='4' && !document.querySelector('${itemPanel} input').disabled`, 'inventory quantity through original closure');
@@ -101,6 +117,17 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
         await page.until(`(()=>{const t=document.getElementById('delayed-item-tooltip');return t && getComputedStyle(t).display!=='none' && getComputedStyle(t).visibility==='visible' && t.textContent.includes(${JSON.stringify(expected)})})()`, 'visible hover tooltip');
     };
     await page.evaluate(`document.querySelector('[data-tab="equipment"]').click()`);
+    await page.evaluate(`document.querySelector('[data-equipment-panel="cosmetic"]').open=true;document.querySelector('[data-equipment-group="cosmetic"]').scrollIntoView({block:'center'})`);
+    fs.writeFileSync(path.join(profile, 'cosmetic-pin-buttons.png'), Buffer.from((await page.call('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+    assert.equal(await page.evaluate(`(()=>{
+        return ['headphones','glasses','gloves'].every(key=>{
+            const pin=document.querySelector('.sheet-pin[data-pin-block="cosmetic:'+key+'"]');
+            const remove=pin.previousElementSibling;
+            const a=pin.getBoundingClientRect(),b=remove.getBoundingClientRect();
+            return remove.textContent==='Снять' && pin.parentElement===remove.parentElement && a.left>=b.right && a.left-b.right<=8 && Math.abs(a.top+a.height/2-b.top-b.height/2)<2;
+        });
+    })()`), true, 'cosmetic unequip and pin buttons sit side by side');
+    fs.writeFileSync(path.join(profile, 'cosmetic-pin-buttons.png'), Buffer.from((await page.call('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
     const collisions = await page.evaluate(`(()=>{
         const failures=[];
         for(const key of ['gasMask','armor']){
@@ -126,7 +153,7 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
     assert.ok(attackText);
     await pinBlock('needs');
     await pinBlock('health-pool');
-    await pinBlock('weapon-mastery');
+    await pinBlock('weapon-mastery:pistols');
     await pinBlock('notes');
     const savedCount = (await prefs()).length;
     assert.ok(savedCount >= 7);
@@ -135,9 +162,10 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
     await page.evaluate(`window.closeCharacterSheet()`);
     await page.until(`document.querySelectorAll('.character-widget .widget-character-name').length===${savedCount}`, 'authorized widget values');
     assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('.lobby-menu')).visibility`), 'visible');
-    const masteryPin = (await prefs()).find(pin => pin.references[0].block === 'weapon-mastery');
+    const masteryPin = (await prefs()).find(pin => pin.references[0].block === 'weapon-mastery:pistols');
     const masteryPanel = '#character-widget-' + masteryPin.id;
     await page.until(`document.querySelector('${masteryPanel} [data-widget-control*="addWeaponXp"]')`, 'weapon mastery projected');
+    assert.equal(await page.evaluate(`document.querySelectorAll('${masteryPanel} [data-widget-control*="addWeaponXp"]').length`), 1, 'one mastery type per panel');
     await page.evaluate(`document.querySelector('${masteryPanel} [data-widget-control*="addWeaponXp"]').click()`);
     await page.until(`document.querySelector('${masteryPanel}').textContent.includes('Прогресс: 1/5') && !document.querySelector('${masteryPanel} button[data-widget-control]').disabled`, 'weapon mastery progress saved');
     assert.equal((await request(`/lobbies/characters/${character.id}`, null, token, 'GET')).data.skills.specialized.pistols.xp, 1);
@@ -209,6 +237,10 @@ module.exports = async ({ page, request, token, lobby, login, profile, base, con
     const mapScreenshot = path.join(profile, 'character-map-widgets.png');
     fs.writeFileSync(mapScreenshot, Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
     console.log('Map widgets screenshot:', mapScreenshot);
+    if (process.env.VTT_WIDGETS_FOCUSED === '1') {
+        console.log('PASS: pinned checkmark, cosmetic button placement, separate mastery progress, decimal measurements, actions, realtime and reload persistence');
+        return;
+    }
     const version = await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json();
     const protocol = await connect(version.webSocketDebuggerUrl);
     let player;

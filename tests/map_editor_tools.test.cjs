@@ -925,3 +925,26 @@ test('right drag while painting remains available to world and location cameras'
     assert.doesNotMatch(localSource.slice(contextStart, contextEnd), /setLocationBrushObjectRotation/);
     assert.match(localSource, /canvas\.addEventListener\('pointerdown', onCameraRotatePointerDown, \{ capture: true \}\)/);
 });
+
+
+test('applying an unselected legacy world floor preserves its saved terrain', async () => {
+    const source = read('mapEdit.js');
+    const start = source.indexOf('export async function applyTerrainChange(');
+    const end = source.indexOf('export async function applyHeightChange(', start);
+    assert.ok(start >= 0 && end > start);
+    const select = { value: '' }, updates = [];
+    const context = vm.createContext({
+        currentEditTile: { chunkX: 0, chunkY: 0, tileX: 1, tileY: 2,
+            tileData: { terrain: 'wood_floor' } },
+        document: { getElementById: () => select }, chunksMap: new Map(),
+        handleTileUpdate: async (...args) => updates.push(args),
+    });
+    vm.runInContext(source.slice(start, end).replace('export async function', 'async function'), context);
+    await context.applyTerrainChange();
+    assert.equal(updates.length, 0);
+    assert.equal(context.currentEditTile.tileData.terrain, 'wood_floor');
+    select.value = 'sand';
+    await context.applyTerrainChange();
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0][4].terrain, 'sand');
+});

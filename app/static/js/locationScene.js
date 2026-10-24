@@ -17,6 +17,7 @@ import { anomalyCoversTile } from './locationAnomalyArea.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { createWaterMaterial } from './waterSurface.js';
+import { createTerrainMaterialLayer } from './terrainMaterialLayer.js';
 import {
     buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData,
     createTerrainSurfaceHeightSampler, isSmoothTerrainTile, terrainFoundationHeight,
@@ -369,6 +370,9 @@ let waterRegions = new Map();
 const WATER_SIDE_COLORS = { grass: 0x183c4a, swamp: 0x244c3b, sand: 0x76603a, rock: 0x5b5b50 };
 let smoothTerrainMesh = null;
 let terrainSurfaceMesh = null;
+let locationTerrainMaterials = null;
+export const getLocationTerrainMaterialDiagnostics = () => ({ ...locationTerrainMaterials?.diagnostics(),
+    shaderErrors: renderer?.info.programs?.filter(program => program.diagnostics?.runnable === false).length || 0 });
 let terrainSurfaceTexture = null;
 let terrainGrassBlendTexture = null;
 let terrainGrassDetail = null;
@@ -666,6 +670,8 @@ const handlers = {
 };
 
 const terrainColors = {
+    concrete: 0xb3b1a8, gravel: 0x82796b, snow: 0xd4d9d9, metal: 0x85654d,
+    bare_dirt: 0x7a694f, granite_tiles: 0xb3b1a8, wood_floor: 0x775635,
     grass: 0x4e5736,
     sand: 0xC2B280,
     rock: 0x808080,
@@ -13451,6 +13457,10 @@ export function loadLocation(data) {
     if (!scene) return;
 
     // Очистка старых объектов (кроме света и highlight)
+    locationTerrainMaterials?.dispose();
+    locationTerrainMaterials = createTerrainMaterialLayer(THREE);
+    locationTerrainMaterials.resize(data.grid_width, data.grid_height);
+    locationTerrainMaterials.fill(data.tiles_data);
     waterTileMesh = null;
     if (waterSurfaceMesh?.material.map) waterSurfaceMesh.material.map.dispose();
     waterSurfaceMesh = null;
@@ -13492,6 +13502,7 @@ export function loadLocation(data) {
     locationDarknessTexture.magFilter = THREE.LinearFilter;
     locationDarknessTexture.minFilter = THREE.LinearFilter;
     locationDarknessTexture.needsUpdate = true;
+    locationTerrainMaterials.setDarkness(locationDarknessTexture);
     const darknessSize = new THREE.Vector2(gridWidth, gridHeight);
 
     // Пол
@@ -13507,6 +13518,7 @@ export function loadLocation(data) {
     const tileCount = gridWidth * gridHeight;
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material = new THREE.MeshStandardMaterial();
+    locationTerrainMaterials.apply(material, { sides: true });
     // The textured terrain cap owns land tops; keep box tops pickable without drawing into depth.
     const landTopMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
     locationTileMesh = new THREE.InstancedMesh(geometry, [
@@ -13858,6 +13870,7 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
                 '#include <clipping_planes_fragment>\nif (vTerrainTop > 0.5) discard;');
     };
     smoothTerrainMesh = new THREE.Mesh(geometry, material);
+    locationTerrainMaterials?.apply(material, { sides: true, smooth: true });
     smoothTerrainMesh.userData.tileByFace = data.tileByFace;
     smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
     smoothTerrainMesh.receiveShadow = true;
@@ -13869,6 +13882,9 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
 
 function updateLocationTerrainSurfaceTexture(changedTiles) {
     if (!terrainSurfaceTexture || !currentLocationData || !changedTiles.length) return;
+    for (const { x, z } of changedTiles) {
+        locationTerrainMaterials?.update(x, z, currentLocationData.tiles_data[z][x]);
+    }
     updateLocationTerrainPixels(currentLocationData.tiles_data, terrainSurfaceTexture.image, changedTiles);
     terrainSurfaceTexture.needsUpdate = true;
     if (terrainGrassBlendTexture) terrainGrassBlendTexture.needsUpdate = true;
@@ -14015,6 +14031,7 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
     });
     applySurfaceDarkness(material, locationDarknessTexture,
         new THREE.Vector2(width, height), null, ensureTerrainGrassDetail());
+    locationTerrainMaterials?.apply(material);
     if (locationStaticLightField) locationStaticLightField.attach(material, 0);
     terrainSurfaceMesh = new THREE.Mesh(geometry, material);
     terrainSurfaceMesh.raycast = () => {};
@@ -14091,6 +14108,7 @@ function rebuildWaterSurfaceMesh() {
         const bankMaterial = new THREE.MeshStandardMaterial({
             map: terrainSurfaceTexture, vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
         });
+        locationTerrainMaterials?.apply(bankMaterial);
         applySurfaceDarkness(bankMaterial, locationDarknessTexture,
             new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
         waterBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
@@ -14107,6 +14125,7 @@ function rebuildWaterSurfaceMesh() {
         const bankMaterial = new THREE.MeshStandardMaterial({
             vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
         });
+        locationTerrainMaterials?.apply(bankMaterial);
         applySurfaceDarkness(bankMaterial, locationDarknessTexture,
             new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
         sandBankMesh = new THREE.Mesh(bankGeometry, bankMaterial);
@@ -14140,12 +14159,13 @@ export function getLocationGrassDiagnostics() {
             const position = new THREE.Vector3().setFromMatrixPosition(transform);
             const scale = new THREE.Vector3().setFromMatrixScale(transform).y;
             const bounds = sample.geometry.boundingBox;
+            const rootPosition = new THREE.Vector3(0, bounds.min.y, 0).applyMatrix4(transform);
             const groundHeight = createTerrainSurfaceHeightSampler(currentLocationData.tiles_data)
-                (position.x, position.z);
+                (rootPosition.x, rootPosition.z);
             firstInstance = {
                 position: position.toArray().map(value => Number(value.toFixed(3))),
                 heightMeters: Number(((bounds.max.y - bounds.min.y) * scale).toFixed(3)),
-                bottomAboveGround: Number((position.y + bounds.min.y * scale - groundHeight)
+                bottomAboveGround: Number((rootPosition.y - groundHeight)
                     .toFixed(3)),
             };
         }
@@ -16346,6 +16366,8 @@ export function destroyLocationScene() {
 
     clearFogOverlay();
     // Очищаем сцену
+    locationTerrainMaterials?.dispose();
+    locationTerrainMaterials = null;
     if (scene) {
         if (waterSurfaceMesh?.material.map) waterSurfaceMesh.material.map.dispose();
         terrainSurfaceTexture?.dispose();

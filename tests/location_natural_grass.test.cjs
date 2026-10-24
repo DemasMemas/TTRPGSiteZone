@@ -123,7 +123,7 @@ test('optimized grass adds one shared instanced model at ground height', async (
     assert.deepEqual(result.added, { medium01: 1 });
     assert.deepEqual(result.triangles, { medium01: 457 });
     assert.equal(group.children.length, 1);
-    assert.equal(group.children[0].transforms[0].position[1], 1.012);
+    assert.equal(group.children[0].transforms[0].position[1], 0.982);
     assert.deepEqual(group.children[0].color, [1, 1, 1]);
     assert.equal(group.children[0].instanceColor.needsUpdate, true);
 });
