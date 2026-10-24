@@ -17,18 +17,18 @@ def test_registry_has_unique_ids_and_known_statuses(app):
                 assert url.scheme in {'https', 'http'} and url.netloc
 
 
-def test_public_page_separates_planned_bridge_from_used_resources(client):
+def test_public_page_lists_integrated_bridge_only_as_used(client):
     response = client.get('/licenses')
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     used, planned = html.split('id="planned-assets"')
-    assert 'Modular Road Bridge' not in used
-    assert 'Modular Road Bridge' in planned and 'VectorMan' in planned
-    assert 'CC BY 4.0' in planned
-    assert 'https://creativecommons.org/licenses/by/4.0/' in planned
-    assert 'Запланирован к интеграции' in planned
-    assert 'интеграция ещё не выполнена' in planned
-    assert 'Изменения' in planned
+    assert 'Modular Road Bridge' in used and 'VectorMan' in used
+    assert 'Modular Road Bridge' not in planned
+    assert 'CC BY 4.0' in used
+    assert 'https://creativecommons.org/licenses/by/4.0/' in used
+    assert 'Используется' in used
+    assert 'нормализованы оси и масштаб' in used
+    assert 'Изменения' in used
 
 
 def test_registry_changes_appear_on_next_request_and_unknown_fields_are_honest(app, client, tmp_path):

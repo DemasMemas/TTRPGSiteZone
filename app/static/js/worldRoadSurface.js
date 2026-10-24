@@ -22,8 +22,15 @@ function clip(polygon,a,b) {
     return output;
 }
 
-export function buildRoadSurface({pads=[],links=[],getTile}) {
+export function buildRoadSurface({pads=[],links=[],getTile,bridgeApproaches=[]}) {
     const positions=[],colors=[],cache=new Map();
+    const approaches=new Map();
+    for(const cut of bridgeApproaches){
+        const key=`${cut.position.x},${cut.position.z}`;
+        if(!approaches.has(key))approaches.set(key,[]);
+        approaches.get(key).push(cut);
+    }
+    const cutsAt=p=>approaches.get(`${p.x},${p.z}`)||[];
     const trianglesAt=(x,z)=>{
         const key=`${x},${z}`;
         if(!cache.has(key)){
@@ -39,7 +46,15 @@ export function buildRoadSurface({pads=[],links=[],getTile}) {
         }
         return cache.get(key);
     };
-    const append=(footprint,color,lift,deck=null)=>{
+    const append=(footprint,color,lift,deck=null,cuts=[])=>{
+        // A bridge begins at the bank road node. End the land surface at that
+        // same cross-section instead of leaving half a junction pad underneath.
+        for(const {position:p,toward} of cuts){
+            const dx=toward.x-p.x,dz=toward.z-p.z;
+            if(Math.hypot(dx,dz)<EPS)continue;
+            footprint=clip(footprint.map(([x,z])=>[x,0,z]),[p.x,p.z],[p.x-dz,p.z+dx]).map(([x,,z])=>[x,z]);
+            if(footprint.length<3)return;
+        }
         const xs=footprint.map(p=>p[0]),zs=footprint.map(p=>p[1]);
         const hex=Number.parseInt(String(color||'#756f61').replace('#',''),16);
         const rgb=[(hex>>16&255)/255,(hex>>8&255)/255,(hex&255)/255];
@@ -52,7 +67,9 @@ export function buildRoadSurface({pads=[],links=[],getTile}) {
                 height=h;
             }
             if(flat&&height!==null){
-                for(const index of [0,2,1,0,3,2]){positions.push(footprint[index][0],height+lift,footprint[index][1]);colors.push(...rgb);}
+                for(let i=1;i<footprint.length-1;i++)for(const index of [0,i+1,i]){
+                    positions.push(footprint[index][0],height+lift,footprint[index][1]);colors.push(...rgb);
+                }
                 return;
             }
         }
@@ -88,11 +105,11 @@ export function buildRoadSurface({pads=[],links=[],getTile}) {
         const footprint=[[from.x-sx,from.z-sz],[to.x-sx,to.z-sz],[to.x+sx,to.z+sz],[from.x+sx,from.z+sz]];
         const lift=ROAD_SURFACE_LIFT+(Math.abs(dx)<EPS?1:Math.abs(dz)<EPS?0:dx*dz>0?2:3)*.001;
         const deck=bridge?(x,z)=>from.y+(to.y-from.y)*Math.max(0,Math.min(1,((x-from.x)*dx+(z-from.z)*dz)/(length*length)))+.014:null;
-        append(footprint,color,lift,deck);
+        append(footprint,color,lift,deck,[...cutsAt(from),...cutsAt(to)]);
     }
     for(const {position:p,scale=1,color,bridge=false} of pads){
         const half=.16*scale;
-        append([[p.x-half,p.z-half],[p.x+half,p.z-half],[p.x+half,p.z+half],[p.x-half,p.z+half]],color,ROAD_SURFACE_LIFT+.004,bridge?()=>p.y+.018:null);
+        append([[p.x-half,p.z-half],[p.x+half,p.z-half],[p.x+half,p.z+half],[p.x-half,p.z+half]],color,ROAD_SURFACE_LIFT+.004,bridge?()=>p.y+.018:null,cutsAt(p));
     }
     return {positions:new Float32Array(positions),colors:new Float32Array(colors)};
 }

@@ -1,0 +1,46 @@
+{
+  "source_sha256": "442e7c162ea75ef41e215d70328a9f420523aea275252056c27b9dc5622557d0",
+  "source_bytes": 3352428,
+  "source_triangles": 666,
+  "groups": {
+    "deck_0": 262,
+    "deck_1": 82,
+    "deck_3": 2,
+    "deck_4": 192,
+    "pier": 64
+  },
+  "pier_anchors": [
+    [
+      -0.00140921552947288,
+      -0.3631897938091741,
+      -0.14685858383724018
+    ],
+    [
+      -0.00140921552947288,
+      -0.3631897938091741,
+      0.15850291768116737
+    ]
+  ],
+  "source_road_bounds": [
+    [
+      -1135.017910003662,
+      1166.014804840088
+    ],
+    [
+      3300.4219468011524,
+      3300.422596700797
+    ],
+    [
+      -1988.9063483992468,
+      2000.149226527481
+    ]
+  ],
+  "source_section_length": 3989.055574926728,
+  "license": {
+    "author": "VectorMan (https://sketchfab.com/ankit.baing.ab)",
+    "license": "CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)",
+    "source": "https://sketchfab.com/3d-models/modular-road-bridge-f14e768fde1d4d4d9ef8886ca55cfc03",
+    "title": "Modular Road Bridge"
+  },
+  "runtime_bytes": 3360060
+}

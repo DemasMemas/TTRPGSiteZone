@@ -6,6 +6,7 @@ import { createFpsCounter } from './fpsCounter.js';
 import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { roadNode, roadConnectsAt, roadSurfaceHeight } from './worldRoadTopology.js';
 import { buildRoadSurface, ROAD_SURFACE_LIFT } from './worldRoadSurface.js';
+import { loadWorldRoadBridge, createWorldRoadBridgeMeshes } from './worldRoadBridge.js';
 import { installSecondaryClick } from './locationEditorPointer.js';
 import { objectFromWorldInstance } from './worldObjectSelection.js';
 import { createWaterMaterial } from './waterSurface.js';
@@ -158,22 +159,40 @@ const WORLD_LANDMARK_TYPES = Object.keys(WORLD_LANDMARKS).filter(type => type !=
 const landmarkMat = new THREE.MeshStandardMaterial();
 const roadMaterial = new THREE.MeshStandardMaterial({ roughness: 1, vertexColors: true });
 applySurfacePattern(roadMaterial, getSurfaceTexture(THREE, 'road'), 0.12, 'top');
-// Technical bridge marker, shared by all water nodes. Final bridge asset is TASK-ASSET-02.
-const roadBridgeGeometry=landmarkGeometry([
-    ...[-1,1].flatMap(side=>[
-        [new THREE.BoxGeometry(1,.025,.025),0,.14,side*.17],
-        ...[-.4,.4].map(x=>[new THREE.BoxGeometry(.025,.16,.025),x,.07,side*.17]),
-    ]),
-    ...[-.3,.3].map(x=>[new THREE.BoxGeometry(.06,.5,.28),x,-.25,0]),
-]);
+let roadBridgeRequested=false;
+let activeRoadPreview=null;
+function ensureRoadBridge() {
+    if(roadBridgeRequested)return;
+    roadBridgeRequested=true;
+    loadWorldRoadBridge().then(()=>{
+        for(const entry of chunksMap.values())if(entry.hasRoadNodes)rebuildRoadMeshes(entry);
+        if(activeRoadPreview)showWorldRoadPreview(activeRoadPreview.plan,activeRoadPreview.settings);
+    }).catch(error=>{roadBridgeRequested=false;console.error('Не удалось загрузить Modular Road Bridge',error);});
+}
 const roadPreviewMaterial=roadMaterial.clone();
 applySurfacePattern(roadPreviewMaterial, getSurfaceTexture(THREE, 'road'), 0.12, 'top');
 roadPreviewMaterial.transparent=true;roadPreviewMaterial.opacity=.85;roadPreviewMaterial.depthWrite=false;roadPreviewMaterial.depthTest=false;
-const roadBridgePreviewMaterial=landmarkMat.clone();
-roadBridgePreviewMaterial.transparent=true;roadBridgePreviewMaterial.opacity=.85;roadBridgePreviewMaterial.depthWrite=false;roadBridgePreviewMaterial.depthTest=false;
 const roadPreviewMeshes=[];
 function roadSurfaceMesh(pads,links,material) {
-    const data=buildRoadSurface({pads,links,getTile:loadedWorldTile});
+    const bridgeApproaches=[];
+    for(const link of links.filter(l=>l.bridge))for(const [position,toward] of [[link.from,link.to],[link.to,link.from]]){
+        const tile=loadedWorldTile(Math.floor(position.x),Math.floor(position.z));
+        if(tile&&tile.terrain!=='water')bridgeApproaches.push({position,toward});
+    }
+    // The connecting link can belong to the water node in the next chunk.
+    const nodeAt=(x,z)=>roadNode(loadedWorldTile(x,z));
+    for(const pad of pads.filter(p=>!p.bridge)){
+        const x=Math.floor(pad.position.x),z=Math.floor(pad.position.z);
+        for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+            const tile=loadedWorldTile(x+dx,z+dz);
+            if(tile?.terrain!=='water')continue;
+            const node=roadNode(tile);
+            if(node?.road?.bridge&&roadConnectsAt(nodeAt,x,z,dx,dz))bridgeApproaches.push({
+                position:pad.position,toward:{x:x+dx+.5+Number(node.road.x||0),z:z+dz+.5+Number(node.road.z||0)},
+            });
+        }
+    }
+    const data=buildRoadSurface({pads:pads.filter(p=>!p.bridge),links:links.filter(l=>!l.bridge),getTile:loadedWorldTile,bridgeApproaches});
     if(!data.positions.length)return null;
     const geometry=new THREE.BufferGeometry();
     geometry.setAttribute('position',new THREE.BufferAttribute(data.positions,3));
@@ -181,17 +200,10 @@ function roadSurfaceMesh(pads,links,material) {
     const mesh=new THREE.Mesh(geometry,material);mesh.userData.roadSurface=true;
     mesh.frustumCulled=false;mesh.castShadow=false;scene.add(mesh);return mesh;
 }
-function roadInstances(geometry,material,poses) {
-    if(!poses.length)return null;
-    const mesh=new THREE.InstancedMesh(geometry,material,poses.length),dummy=new THREE.Object3D();
-    mesh.frustumCulled=false;mesh.castShadow=false;
-    poses.forEach((pose,i)=>{dummy.position.copy(pose.position);dummy.quaternion.copy(pose.quaternion||new THREE.Quaternion());
-        dummy.scale.set(...pose.scale);dummy.updateMatrix();mesh.setMatrixAt(i,dummy.matrix);mesh.setColorAt(i,new THREE.Color(pose.color));});
-    mesh.instanceMatrix.needsUpdate=true;mesh.instanceColor.needsUpdate=true;scene.add(mesh);return mesh;
-}
-export function removeWorldRoadPreview(){for(const mesh of roadPreviewMeshes){scene.remove(mesh);if(mesh.userData.roadSurface)mesh.geometry.dispose();else mesh.dispose();}roadPreviewMeshes.length=0;}
+export function removeWorldRoadPreview(){activeRoadPreview=null;for(const mesh of roadPreviewMeshes){scene.remove(mesh);if(mesh.userData.roadSurface)mesh.geometry.dispose();else mesh.dispose();}roadPreviewMeshes.length=0;}
 export function showWorldRoadPreview(plan,settings) {
     removeWorldRoadPreview();
+    activeRoadPreview={plan,settings};
     const pads=[],links=[],bridges=[],nodes=plan.path;
     const point=p=>new THREE.Vector3(p.x+.5+Number(p.offset_x||0),roadSurfaceHeight(p,p),p.y+.5+Number(p.offset_z||0));
     const width=Number(settings.scale||1);
@@ -201,14 +213,20 @@ export function showWorldRoadPreview(plan,settings) {
         if(!seen.has(key)){
             const nodeWidth=Number(p.scale||width);
             pads.push({position:point(p),scale:nodeWidth,color:'#55dbe8',bridge:p.bridge});seen.add(key);
-            if(p.bridge){const other=nodes[i+1]||nodes[i-1];bridges.push({position:point(p),scale:[1,1,nodeWidth],color:'#777b78',
-                quaternion:new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),other?.y!==p.y?Math.PI/2:0)});}
+            if(p.bridge)bridges.push({x:p.x,z:p.y});
         }
         if(i)links.push({from:point(nodes[i-1]),to:point(p),widthScale:(Number(p.scale||width)+Number(nodes[i-1].scale||width))/2,
             color:'#55dbe8',bridge:p.bridge||nodes[i-1].bridge});
     });
-    const surface=roadSurfaceMesh(pads,links,roadPreviewMaterial),frames=roadInstances(roadBridgeGeometry,roadBridgePreviewMaterial,bridges);
-    for(const mesh of [surface,frames])if(mesh){mesh.renderOrder=20;mesh.userData.roadRoutePreview=true;roadPreviewMeshes.push(mesh);}
+    const tiles=new Map(nodes.map(p=>[`${p.x},${p.y}`,{...loadedWorldTile(p.x,p.y),...p,terrain:p.bridge?'water':loadedWorldTile(p.x,p.y)?.terrain||'grass',
+        objects:[{type:'road',bridge:p.bridge,bridge_height:p.bridge_height,x:p.offset_x,z:p.offset_z,scale:p.scale}]}]));
+    const edges=new Set();
+    for(let i=1;i<nodes.length;i++){const a=nodes[i-1],b=nodes[i];edges.add(`${a.x},${a.y}:${b.x},${b.y}`);edges.add(`${b.x},${b.y}:${a.x},${a.y}`);}
+    if(bridges.length)ensureRoadBridge();
+    const frames=createWorldRoadBridgeMeshes({nodes:bridges,getTile:(x,z)=>tiles.get(`${x},${z}`)||loadedWorldTile(x,z),
+        connected:(x,z,dx,dz)=>edges.has(`${x},${z}:${x+dx},${z+dz}`),sampleHeight:sampleWorldGroundHeight},true);
+    const surface=roadSurfaceMesh(pads,links,roadPreviewMaterial);
+    for(const mesh of [surface,...frames])if(mesh){scene.add(mesh);mesh.renderOrder=20;mesh.userData.roadRoutePreview=true;roadPreviewMeshes.push(mesh);}
 }
 
 const treeMat = new THREE.MeshStandardMaterial();
@@ -1554,6 +1572,21 @@ const pendingWorldRoadChunks = new Set();
 let worldTerrainRefreshTimer = null;
 const worldTerrainRefreshWaiters = [];
 
+function queueWorldBridgeSpanRefresh(worldX,worldZ) {
+    const queue=[[worldX,worldZ],[worldX-1,worldZ],[worldX+1,worldZ],[worldX,worldZ-1],[worldX,worldZ+1]],seen=new Set();
+    const nodeAt=(x,z)=>roadNode(loadedWorldTile(x,z));
+    let found=false;
+    for(let head=0;head<queue.length;head++){
+        const [x,z]=queue[head],key=`${x},${z}`;
+        if(seen.has(key))continue;
+        seen.add(key);
+        if(!nodeAt(x,z)?.road?.bridge)continue;
+        found=true;pendingWorldRoadChunks.add(`${Math.floor(x/CHUNK_SIZE)},${Math.floor(z/CHUNK_SIZE)}`);
+        for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]])if(roadConnectsAt(nodeAt,x,z,dx,dz))queue.push([x+dx,z+dz]);
+    }
+    if(found&&!worldTerrainRefreshTimer)worldTerrainRefreshTimer=setTimeout(flushWorldTerrainRefresh,100);
+}
+
 function refreshWorldTerrainBrushPreview() {
     if (!brushActive) return;
     for (const key of pendingWorldTerrainChunks) {
@@ -1763,10 +1796,8 @@ function rebuildRoadMeshes(entry) {
             const node = nodeAt(x, z);
             if (!node) continue;
             const center = point(x, z, tile, node);
-            if(node.road?.bridge){
-                const north=roadConnectsAt(nodeAt,x,z,0,-1)||roadConnectsAt(nodeAt,x,z,0,1);
-                bridges.push({position:center,scale:[1,1,Number(node.road.scale||1)],color:'#777b78',
-                    quaternion:new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),north?Math.PI/2:0)});
+            if(tile.terrain==='water'&&node.road?.bridge){
+                bridges.push({x,z});
             }
             let connections = 0;
             for (const [dx, dz] of directions) {
@@ -1775,7 +1806,7 @@ function rebuildRoadMeshes(entry) {
                 if (!roadConnectsAt(nodeAt, x, z, dx, dz)) continue;
                 connections++;
                 links.push({ from: center, to: point(x + dx, z + dz, neighborTile, neighbor),
-                    bridge:Boolean(node.road?.bridge||neighbor.road?.bridge),
+                    bridge:Boolean((tile.terrain==='water'&&node.road?.bridge)||(loadedWorldTile(x+dx,z+dz)?.terrain==='water'&&neighbor.road?.bridge)),
                     color: node.road?.color || neighbor.road?.color || '#756f61',
                     widthScale: (Number(node.road?.scale || 1) + Number(neighbor.road?.scale || 1)) / 2 });
             }
@@ -1783,7 +1814,7 @@ function rebuildRoadMeshes(entry) {
                 if (roadConnectsAt(nodeAt, x - dx, z - dz, dx, dz)) connections++;
             }
             if (node.road || connections) pads.push({ position: center, color: node.road?.color || '#756f61',
-                scale: Number(node.road?.scale || 1),bridge:Boolean(node.road?.bridge) });
+                scale: Number(node.road?.scale || 1),bridge:Boolean(tile.terrain==='water'&&node.road?.bridge) });
             if (node.road && !connections) {
                 const angle = THREE.MathUtils.degToRad(Number(node.road.rotation || 0));
                 const direction = new THREE.Vector3(Math.cos(angle), 0, -Math.sin(angle));
@@ -1793,8 +1824,12 @@ function rebuildRoadMeshes(entry) {
             }
         }
     }
-    const bridgeMesh=roadInstances(roadBridgeGeometry,landmarkMat,bridges);
-    if(bridgeMesh){bridgeMesh.visible=entry.terrainVisible;entry.roads.push(bridgeMesh);}
+    if(bridges.length)ensureRoadBridge();
+    for(const bridgeMesh of createWorldRoadBridgeMeshes({nodes:bridges,getTile:loadedWorldTile,
+        connected:(x,z,dx,dz)=>roadConnectsAt(nodeAt,x,z,dx,dz),sampleHeight:sampleWorldGroundHeight,
+        owns:(x,z)=>Math.floor(x/CHUNK_SIZE)===entry.chunkX&&Math.floor(z/CHUNK_SIZE)===entry.chunkY})){
+        bridgeMesh.visible=entry.terrainVisible;scene.add(bridgeMesh);entry.roads.push(bridgeMesh);
+    }
     const surface=roadSurfaceMesh(pads,links,roadMaterial);
     if(surface){surface.visible=entry.terrainVisible;entry.roads.push(surface);}
 }
@@ -2421,6 +2456,7 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
         markWorldShadowsDirty();
     }
     if(changedTerrain&&!changedHeight)refreshWorldFenceNeighborhood(chunkX*CHUNK_SIZE+tileX,chunkY*CHUNK_SIZE+tileY);
+    if(changedHeight||changedTerrain||changedObjects)queueWorldBridgeSpanRefresh(chunkX*CHUNK_SIZE+tileX,chunkY*CHUNK_SIZE+tileY);
 
     if (changedObjects || changedAnomalyField
         || (changedHeight && tile.anomaly_field)) {
@@ -2587,15 +2623,22 @@ export function pickWorldObject(clientX, clientY) {
     const point = new THREE.Vector3();
     for (const entry of chunksMap.values()) {
         if (!entry.terrainVisible || !entry.hasRoadNodes) continue;
+        for(const hit of raycaster.intersectObjects((entry.roads||[]).filter(m=>m.visible&&m.userData.worldBridgeAsset),false)){
+            const owner=hit.object.userData.bridgeOwners[hit.instanceId];
+            if(!owner||hit.distance>=distance)continue;
+            const tileX=owner.x-entry.chunkX*CHUNK_SIZE,tileY=owner.z-entry.chunkY*CHUNK_SIZE;
+            const index=entry.tilesData[tileY]?.[tileX]?.objects?.findIndex(o=>o.type==='road');
+            if(index>=0){distance=hit.distance;nearest={chunkX:entry.chunkX,chunkY:entry.chunkY,tileX,tileY,index};}
+        }
         for (let y = 0; y < entry.tilesData.length; y++) {
             for (let x = 0; x < entry.tilesData[y].length; x++) {
                 const tile = entry.tilesData[y][x];
                 (tile.objects || []).forEach((object, index) => {
-                    if (object.type !== 'road') return;
+                    if (object.type !== 'road'||(object.bridge&&tile.terrain==='water')) return;
                     const scale = object.scale || 1;
                     const worldX = entry.chunkX * CHUNK_SIZE + x + 0.5 + (object.x || 0);
                     const worldZ = entry.chunkY * CHUNK_SIZE + y + 0.5 + (object.z || 0);
-                    const height = object.bridge?roadSurfaceHeight(tile,object):sampleWorldGroundHeight(worldX,worldZ)+ROAD_SURFACE_LIFT;
+                    const height = sampleWorldGroundHeight(worldX,worldZ)+ROAD_SURFACE_LIFT;
                     box.min.set(worldX - 0.45 * scale, height - 0.04, worldZ - 0.45 * scale);
                     box.max.set(worldX + 0.45 * scale, height + (object.bridge ? .2 : .08), worldZ + 0.45 * scale);
                     if (!raycaster.ray.intersectBox(box, point)) return;

@@ -61,3 +61,26 @@ test('empty or unloaded cells produce no dangling surface and do not mutate save
     assert.equal(JSON.stringify(tiles),snapshot);
     assert.equal(buildRoadSurface({getTile:()=>null,links:[{from:{x:0,z:0},to:{x:1,z:1}}]}).positions.length,0);
 });
+
+test('bridge approaches trim junction pads and diagonal links at the same seam',()=>{
+    const tiles=Array.from({length:4},()=>Array.from({length:4},()=>({terrain:'grass',height:1})));
+    for(const toward of [{x:3.5,z:2.5},{x:1.5,z:2.5},{x:2.5,z:3.5},{x:2.5,z:1.5}]){
+        const position={x:2.5,z:2.5},dx=toward.x-position.x,dz=toward.z-position.z;
+        const from={x:position.x-dx*.5-dz*.5,z:position.z-dz*.5+dx*.5};
+        const data=buildRoadSurface({getTile:getter(tiles),pads:[{position}],links:[{from,to:position}],
+            bridgeApproaches:[{position,toward}]});
+        assert.ok(data.positions.length>0);
+        for(let i=0;i<data.positions.length;i+=3){
+            assert.ok((data.positions[i]-position.x)*dx+(data.positions[i+2]-position.z)*dz<1e-7,'no land road triangles extend underneath bridge');
+        }
+        assert.ok(Array.from(data.positions).some((v,i)=>i%3===0&&Math.abs((v-position.x)*dx+(data.positions[i+2]-position.z)*dz)<1e-7),'road reaches the seam without a gap');
+    }
+});
+
+test('trimmed bridge approach stays conforming on steep sand',()=>{
+    const tiles=grid(),position=point(2.5,2.5,tiles);
+    const data=buildRoadSurface({getTile:getter(tiles),pads:[{position,scale:2}],
+        bridgeApproaches:[{position,toward:{x:3.5,z:2.5}}]});
+    checkSurface(data,tiles);
+    for(let i=0;i<data.positions.length;i+=3)assert.ok(data.positions[i]<=2.500001);
+});

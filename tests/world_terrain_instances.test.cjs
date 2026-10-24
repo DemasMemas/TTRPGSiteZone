@@ -44,7 +44,7 @@ function harness({ deferTimers = false } = {}) {
         THREE: { Object3D, Color }, terrainColors: { grass: 1, rock: 2 },
         CHUNK_SIZE: 2, chunksMap: new Map([['0,0', entry]]),
         markWorldShadowsDirty() {}, updateTileObjectsPositions() {}, refreshWorldFenceNeighborhood() {}, invalidateFenceGround() {},
-        rebuildRoadMeshes() {}, refreshRoadNeighborhood() {},
+        rebuildRoadMeshes() {}, refreshRoadNeighborhood() {}, queueWorldBridgeSpanRefresh() {},
         requestAnimationFrame() {}, cancelAnimationFrame() {}, rebuildChunkObjects() {},
         refreshWorldTerrainSurface() {},
         buildSmoothTerrainData: () => {
@@ -68,6 +68,7 @@ function harness({ deferTimers = false } = {}) {
     });
     vm.runInContext(source.slice(fillStart, fillEnd)
         + source.slice(updateStart, updateEnd).replace('export ', ''), context);
+    context.queueWorldBridgeSpanRefresh = () => {};
     Object.assign(entry, context.fillChunkTerrainInstances(ground, water, tilesData, 0, 0));
     return {
         context, entry, ground, water,

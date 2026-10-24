@@ -6,7 +6,7 @@
 
 ## Первый ресурс
 
-В `app/data/asset_credits.json` внесён Modular Road Bridge, автор VectorMan, статус `planned`. Изменений нет, интеграция не выполнялась.
+Изначально в `app/data/asset_credits.json` внесён Modular Road Bridge, автор VectorMan, статус `planned`. После TASK-ASSET-02 эта же запись переведена в `in_use`, перечислены реальные изменения. Лицензия CC BY 4.0 также подтверждена метаданными предоставленного GLB. Подробности — в [аудите моста](bridge-asset-audit.md).
 
 24.10.2026 через [публичный API Sketchfab](https://api.sketchfab.com/v3/models/f14e768fde1d4d4d9ef8886ca55cfc03) подтверждены название, автор, канонический URL модели и точная версия лицензии: API вернул `license.url = http://creativecommons.org/licenses/by/4.0/`. В реестре используется соответствующий HTTPS-адрес [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 

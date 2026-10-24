@@ -29,8 +29,8 @@ module.exports = async ({page, request, lobby, base, connect, debugPort}) => {
     try {
         await credits.call('Page.enable');await credits.call('Runtime.enable');
         await credits.until('Boolean(document.getElementById("modular_road_bridge"))', 'credits card');
-        assert.equal(await credits.evaluate('document.querySelector("#used-assets article")'), null);
-        assert.ok((await credits.evaluate('document.querySelector("#planned-assets").textContent')).includes('Запланирован к интеграции'));
+        assert.ok(await credits.evaluate('Boolean(document.querySelector("#used-assets #modular_road_bridge"))'));
+        assert.ok((await credits.evaluate('document.querySelector("#modular_road_bridge").textContent')).includes('Используется'));
         assert.ok(await credits.evaluate('document.querySelector("#modular_road_bridge").textContent.includes("CC BY 4.0")'));
         const links=await credits.evaluate('[...document.querySelectorAll("#modular_road_bridge a")].map(a=>({href:a.href,rel:a.rel}))');
         assert.equal(links.length, 2);
