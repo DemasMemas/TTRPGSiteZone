@@ -32,63 +32,90 @@ export function worldObjectMouseTransform(kind, object, deltaX) {
     return { rotation: Math.min(359, ((angle % 360) + 360) % 360) };
 }
 
-export function createWorldObjectSelection({ getTile, editObject, applyUpdate, onChange, onError, equal }) {
-    let selected = null;
-    let busy = false;
+// Reuse the primary object's transform as a group pivot. A single ratio is
+// clamped for the entire group so relative sizes and distances stay intact.
+export function worldObjectGroupTransform(members, changes = {}, target = null, width = Infinity, height = Infinity) {
+    if (!members.length) return null;
+    const first = members[0], base = first.object;
+    const position = member => ({ x: member.chunkX * 32 + member.tileX + 0.5 + (member.object.x || 0), z: member.chunkY * 32 + member.tileY + 0.5 + (member.object.z || 0) });
+    const pivot = position(first);
+    let ratio = changes.scale === undefined ? 1 : changes.scale / (base.scale ?? 1);
+    ratio = Math.max(...members.map(member => 0.2 / (member.object.scale ?? 1)),
+        Math.min(ratio, ...members.map(member => 2 / (member.object.scale ?? 1))));
+    const angle = changes.rotation === undefined ? 0 : changes.rotation - (base.rotation || 0);
+    const radians = angle * Math.PI / 180, cos = Math.cos(radians), sin = Math.sin(radians);
+    const destination = target ? { x: target.tile_x + 0.5 + (changes.x ?? base.x ?? 0), z: target.tile_y + 0.5 + (changes.z ?? base.z ?? 0) }
+        : { x: pivot.x + (changes.x === undefined ? 0 : changes.x - (base.x || 0)), z: pivot.z + (changes.z === undefined ? 0 : changes.z - (base.z || 0)) };
+    const plans = members.map(member => {
+        const object = member.object, current = position(member);
+        const dx = (current.x - pivot.x) * ratio, dz = (current.z - pivot.z) * ratio;
+        const moved = ratio !== 1 || angle !== 0 || destination.x !== pivot.x || destination.z !== pivot.z;
+        const x = moved ? destination.x + dx * cos + dz * sin : current.x;
+        const z = moved ? destination.z - dx * sin + dz * cos : current.z;
+        if (x < 0 || z < 0 || x >= width || z >= height) return null;
+        const tileX = moved ? Math.floor(x) : member.chunkX * 32 + member.tileX;
+        const tileY = moved ? Math.floor(z) : member.chunkY * 32 + member.tileY;
+        const own = { ...changes };
+        if (changes.scale !== undefined) own.scale = Number(((object.scale ?? 1) * ratio).toFixed(10));
+        if (changes.rotation !== undefined) own.rotation = Number(((((object.rotation || 0) + angle) % 360 + 360) % 360).toFixed(10)) % 360;
+        if (moved) { own.x = Number((x - tileX - 0.5).toFixed(10)); own.z = Number((z - tileY - 0.5).toFixed(10)); }
+        return { reference: member, changes: own, target: { tile_x: tileX, tile_y: tileY } };
+    });
+    return plans.every(Boolean) ? plans : null;
+}
+
+export function createWorldObjectSelection({ getTile, editObject, applyUpdate, onChange, onError, equal, getBounds = () => [Infinity, Infinity] }) {
+    let members = [], busy = false;
     const snapshot = object => JSON.parse(JSON.stringify(object));
     const same = equal;
-    const clear = () => { selected = null; onChange(null, busy); };
-    const select = reference => {
+    const notify = () => onChange(members[0] || null, busy);
+    const clear = () => { members = []; notify(); };
+    const sameReference = (a, b) => ['chunkX', 'chunkY', 'tileX', 'tileY', 'index'].every(key => a[key] === b[key]);
+    const select = (reference, { toggle = false, preserve = false } = {}) => {
         if (busy) return;
         const object = reference && getTile(reference)?.objects?.[reference.index];
-        selected = object ? { ...reference, object: snapshot(object) } : null;
-        onChange(selected, busy);
+        const existing = reference ? members.findIndex(member => sameReference(member, reference)) : -1;
+        if (toggle) {
+            if (!object) return;
+            members = existing >= 0 ? members.filter((_, index) => index !== existing) : [...members, { ...reference, object: snapshot(object) }];
+        } else if (!(preserve && existing >= 0)) members = object ? [{ ...reference, object: snapshot(object) }] : [];
+        notify();
     };
     const validate = () => {
-        if (selected && !same(getTile(selected)?.objects?.[selected.index], selected.object)) {
-            clear();
-            onError('Объект изменён другим участником. Выберите его снова.');
-            return false;
+        if (members.some(member => !same(getTile(member)?.objects?.[member.index], member.object))) {
+            clear(); onError('Объект изменён другим участником. Выберите его снова.'); return false;
         }
-        return Boolean(selected);
+        return Boolean(members.length);
     };
+    const plan = (changes = {}, target = null) => worldObjectGroupTransform(members, changes, target, ...getBounds());
     const commit = async (changes = {}, target = null, remove = false) => {
         if (busy || !validate()) return false;
-        const original = selected;
-        const source = { tile_x: original.chunkX * 32 + original.tileX,
-            tile_y: original.chunkY * 32 + original.tileY, index: original.index };
-        target ||= { tile_x: source.tile_x, tile_y: source.tile_y };
-        changes = Object.fromEntries(Object.entries(changes).filter(([key, value]) =>
-            !same(value, original.object[key] ?? ({ x: 0, z: 0, scale: 1, rotation: 0 }[key]))));
-        if (!remove && !Object.keys(changes).length && source.tile_x === target.tile_x && source.tile_y === target.tile_y) {
-            onChange(selected, false);
-            return true;
-        }
-        busy = true;
-        onChange(selected, busy);
+        const original = members;
+        const plans = plan(changes, target);
+        if (!plans) { onError('Группа выходит за границы карты'); notify(); return false; }
+        const edits = plans.map(({ reference: member, changes: own, target: destination }) => ({
+            source: { tile_x: member.chunkX * 32 + member.tileX, tile_y: member.chunkY * 32 + member.tileY, index: member.index },
+            target: destination,
+            changes: Object.fromEntries(Object.entries(own).filter(([key, value]) => !same(value, member.object[key] ?? ({ x: 0, z: 0, scale: 1, rotation: 0 }[key])))),
+            expected: member.object, ...(remove ? { delete: true } : {}),
+        }));
+        if (!remove && edits.every(edit => !Object.keys(edit.changes).length && edit.source.tile_x === edit.target.tile_x && edit.source.tile_y === edit.target.tile_y)) { notify(); return true; }
+        busy = true; notify();
         try {
-            const result = await editObject({ source, target, changes, expected: original.object,
-                ...(remove ? { delete: true } : {}) });
+            const result = await editObject(edits.length === 1 ? edits[0] : { edits });
             for (const update of result.updates) applyUpdate(update);
-            // A tool switch during the request must not restore the selection.
-            if (selected === original) {
-                selected = remove ? null : {
-                    chunkX: Math.floor(target.tile_x / 32), chunkY: Math.floor(target.tile_y / 32),
-                    tileX: target.tile_x % 32, tileY: target.tile_y % 32, index: result.index,
-                };
-                const object = selected && getTile(selected)?.objects?.[selected.index];
-                selected = object ? { ...selected, object: snapshot(object) } : null;
+            if (members === original) {
+                const locations = result.objects || [{ ...plans[0].target, index: result.index }];
+                members = remove ? [] : locations.flatMap(location => {
+                    const reference = { chunkX: Math.floor(location.tile_x / 32), chunkY: Math.floor(location.tile_y / 32), tileX: location.tile_x % 32, tileY: location.tile_y % 32, index: location.index };
+                    const object = getTile(reference)?.objects?.[reference.index];
+                    return object ? [{ ...reference, object: snapshot(object) }] : [];
+                });
             }
             return true;
-        } catch (error) {
-            clear();
-            onError(error.message);
-            return false;
-        } finally {
-            busy = false;
-            onChange(selected, busy);
-        }
+        } catch (error) { clear(); onError(error.message); return false; }
+        finally { busy = false; notify(); }
     };
-    return { select, clear, commit, validate,
-        get selected() { return selected; }, get busy() { return busy; } };
+    return { select, clear, commit, validate, plan,
+        get selected() { return members[0] || null; }, get members() { return members; }, get busy() { return busy; } };
 }

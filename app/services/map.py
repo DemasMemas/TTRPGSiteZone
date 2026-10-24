@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class MapService:
     @staticmethod
-    def edit_world_object(lobby_id, gm_id, payload):
+    def edit_world_object(lobby_id, gm_id, payload, *, _commit=True):
         """Update one object, optionally moving it between tiles in one commit."""
         lobby = db.session.get(Lobby, lobby_id)
         if not lobby:
@@ -23,6 +23,8 @@ class MapService:
             raise PermissionDenied('Only GM can edit world objects')
         if not isinstance(payload, dict):
             raise ValidationError('Expected world object edit data')
+        if 'edits' in payload:
+            return MapService._edit_world_object_group(lobby_id, gm_id, payload['edits'])
         source = payload.get('source')
         target = payload.get('target')
         changes = payload.get('changes')
@@ -39,6 +41,8 @@ class MapService:
 
         source_x, source_y = position(source)
         target_x, target_y = position(target)
+        for cx, cy in sorted({(source_x // CHUNK_SIZE, source_y // CHUNK_SIZE), (target_x // CHUNK_SIZE, target_y // CHUNK_SIZE)}):
+            MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).with_for_update().first()
         index = source.get('index')
         if type(index) is not int or index < 0:
             raise ValidationError('Invalid world object index')
@@ -75,7 +79,8 @@ class MapService:
             objects.pop(index)
             source_tile['objects'] = objects
             source_chunk.data = source_data
-            db.session.commit()
+            if _commit:
+                db.session.commit()
             return {'index': None, 'updates': [{
                 'chunk_x': source_x // CHUNK_SIZE, 'chunk_y': source_y // CHUNK_SIZE,
                 'tile_x': source_x % CHUNK_SIZE, 'tile_y': source_y % CHUNK_SIZE,
@@ -103,10 +108,10 @@ class MapService:
                 raise ValidationError('Invalid world object color')
             edited['color'] = color
         for key, lower, upper in (('x', -0.5, 0.5), ('z', -0.5, 0.5),
-                                  ('scale', 0.2, 2.0), ('rotation', 0, 359)):
+                                  ('scale', 0.2, 2.0), ('rotation', 0, 360)):
             if key in changes:
                 value = changes[key]
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not lower <= value <= upper:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not lower <= value <= upper or key == 'rotation' and value == 360:
                     raise ValidationError(f'Invalid world object {key}')
                 edited[key] = value
         if 'is_active' in changes:
@@ -150,8 +155,64 @@ class MapService:
                  'tile_x': target_x % CHUNK_SIZE, 'tile_y': target_y % CHUNK_SIZE,
                  'updates': {'objects': target_objects}},
             ]
-        db.session.commit()
+        if _commit:
+            db.session.commit()
         return {'updates': updates, 'index': target_index}
+
+    @staticmethod
+    def _edit_world_object_group(lobby_id, gm_id, edits):
+        """Apply the existing guarded edit to every member in one transaction."""
+        if not isinstance(edits, list) or not 1 <= len(edits) <= 1000:
+            raise ValidationError('Expected 1-1000 world object edits')
+        records, chunk_keys, seen = [], set(), set()
+        lobby = db.session.get(Lobby, lobby_id)
+        for edit in edits:
+            if not isinstance(edit, dict) or 'edits' in edit:
+                raise ValidationError('Invalid world object group edit')
+            source, target = edit.get('source'), edit.get('target')
+            if not isinstance(source, dict) or not isinstance(target, dict):
+                raise ValidationError('Source and target are required')
+            for position in (source, target):
+                if any(type(position.get(key)) is not int for key in ('tile_x', 'tile_y')):
+                    raise ValidationError('Invalid world object coordinates')
+                if not (0 <= position['tile_x'] < lobby.chunks_width * CHUNK_SIZE and 0 <= position['tile_y'] < lobby.chunks_height * CHUNK_SIZE):
+                    raise ValidationError('World object tile is outside the map')
+                chunk_keys.add((position['tile_x'] // CHUNK_SIZE, position['tile_y'] // CHUNK_SIZE))
+            identity = (source['tile_x'], source['tile_y'], source.get('index'))
+            if type(identity[2]) is not int or identity in seen:
+                raise ValidationError('Duplicate or invalid group member')
+            seen.add(identity)
+            records.append({'edit': edit, 'current': dict(source)})
+        try:
+            # Deterministic row lock order prevents concurrent group edits from
+            # overwriting each other. Validate every original index before shifts.
+            for cx, cy in sorted(chunk_keys):
+                MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).with_for_update().first()
+            for record in records:
+                source = record['current']
+                objects = MapService.get_tile_data(lobby_id, source['tile_x'], source['tile_y']).get('objects') or []
+                index = source['index']
+                if index < 0 or index >= len(objects) or objects[index] != record['edit'].get('expected'):
+                    raise ConflictError('World object changed; select the group again')
+            updates = {}
+            for record in records:
+                edit, source = record['edit'], record['current']
+                result = MapService.edit_world_object(lobby_id, gm_id, {**edit, 'source': dict(source)}, _commit=False)
+                removed = edit.get('delete', False) or any(source[key] != edit['target'][key] for key in ('tile_x', 'tile_y'))
+                if removed:
+                    for other in records:
+                        current = other['current']
+                        if other is not record and current and all(current[key] == source[key] for key in ('tile_x', 'tile_y')) and current['index'] > source['index']:
+                            current['index'] -= 1
+                record['current'] = None if result['index'] is None else {**edit['target'], 'index': result['index']}
+                for update in result['updates']:
+                    key = tuple(update[key] for key in ('chunk_x', 'chunk_y', 'tile_x', 'tile_y'))
+                    updates[key] = update
+            db.session.commit()
+            return {'updates': list(updates.values()), 'objects': [record['current'] for record in records if record['current'] is not None]}
+        except Exception:
+            db.session.rollback()
+            raise
 
     @staticmethod
     def get_tile_data(lobby_id, tile_x, tile_y):

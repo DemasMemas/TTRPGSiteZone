@@ -21,6 +21,7 @@ import { showNotification } from './utils.js';
 
 import { initWorldNumericInputs, syncWorldNumber, getWorldNumericValue } from './worldNumericInputs.js';
 import { initDirectWorldObjectEditor } from './worldObjectEditor.js';
+import { worldObjectMouseTransform } from './worldObjectSelection.js';
 import { WORLD_VEGETATION_TYPES, planWorldVegetationBrush, vegetationStrokeCenters } from './worldVegetationBrush.js';
 
 const CHUNK_SIZE = 32;
@@ -189,6 +190,10 @@ export function updateAnomalyFieldRankOptions() {
 
 export function setEditMode(enabled) {
     window.cancelCommonMapTool?.();
+    if (!enabled) {
+        toggleWorldRoadLink(false);
+        cancelWorldObjectPlacement();
+    }
     AppState.setEditMode(enabled);
     if (!enabled) {
         window.clearDirectWorldObjectSelection?.();
@@ -214,6 +219,7 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     if (tool !== 'objects') window.endWorldVegetationStroke?.();
     if (tool !== 'select') window.clearDirectWorldObjectSelection?.();
     if (tool !== 'objects' && roadLinkActive) toggleWorldRoadLink(false);
+    if (previousTool === 'objects' && tool !== 'objects') cancelWorldObjectPlacement();
     root.dataset.tool = tool;
     window.worldEditorTool = tool;
     if (autoExpand) expandMapToolsPanelOnToolChange(previousTool, tool);
@@ -241,6 +247,7 @@ export function selectWorldObject(type) {
     if (!WORLD_OBJECT_TYPES.has(type)) return;
     if (type !== 'road' && roadLinkActive) toggleWorldRoadLink(false);
     selectedWorldObject = type;
+    syncWorldNumber('world-object-rotation', 0);
     window.endWorldVegetationStroke?.();
     document.querySelectorAll('[data-world-object]').forEach(button => {
         button.setAttribute('aria-pressed', String(button.dataset.worldObject === type));
@@ -252,6 +259,29 @@ export function selectWorldObject(type) {
     window.syncWorldVegetationControls?.();
     updateWorldObjectPreview(getHoveredTile());
 }
+
+export function cancelWorldObjectPlacement() {
+    if (window.isLocationActive || !AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects'
+        || !selectedWorldObject || roadLinkActive || choosingExistingObjectTarget) return false;
+    selectedWorldObject = null;
+    window.endWorldVegetationStroke?.();
+    document.querySelectorAll('[data-world-object]').forEach(button => button.setAttribute('aria-pressed', 'false'));
+    removePreviewObject();
+    window.syncWorldVegetationControls?.();
+    return true;
+}
+
+export function rotateWorldObjectPlacement(direction) {
+    if (window.isLocationActive || !AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects'
+        || !selectedWorldObject || roadLinkActive || choosingExistingObjectTarget
+        || document.getElementById('tile-edit-modal')?.style.display === 'flex') return false;
+    const rotation = worldObjectMouseTransform('rotate', worldObjectSettings(), direction * 30).rotation;
+    syncWorldNumber('world-object-rotation', rotation);
+    updateWorldObjectPreview(getHoveredTile());
+    return true;
+}
+window.cancelWorldObjectPlacement = cancelWorldObjectPlacement;
+window.rotateWorldObjectPlacement = rotateWorldObjectPlacement;
 
 function updateWorldRoadLinkStatus(message) {
     const button = document.getElementById('world-road-link-button');
@@ -320,11 +350,12 @@ function worldObjectSettings() {
 
 export function updateWorldObjectPreview(tile) {
     if (document.getElementById('tile-edit-modal')?.style.display === 'flex') return;
+    if (window.worldEditorTool === 'select' && window.isDirectWorldObjectTransformActive?.()) return;
     if (choosingExistingObjectTarget) {
         removePreviewObject();
         return;
     }
-    if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects' || !tile || roadLinkActive) {
+    if (!AppState.isGM || !AppState.editMode || window.worldEditorTool !== 'objects' || !selectedWorldObject || !tile || roadLinkActive) {
         removePreviewObject();
         return;
     }
@@ -348,6 +379,7 @@ export function updateWorldObjectPreview(tile) {
 }
 
 export async function placeWorldObjectAtTile(tile) {
+    if (!selectedWorldObject && !choosingExistingObjectTarget && !roadLinkActive) return false;
     if (choosingExistingObjectTarget) {
         document.getElementById('world-existing-tile-x').value = tile.chunkX * CHUNK_SIZE + tile.tileX;
         document.getElementById('world-existing-tile-y').value = tile.chunkY * CHUNK_SIZE + tile.tileY;

@@ -2583,6 +2583,12 @@ function finishWorldBrushStroke() {
 function canvasMouseDownHandler(event) {
     if (window.isLocationActive) return;
     if (event.button === 2 && editMode) {
+        if (window.cancelWorldObjectPlacement?.()) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            finishWorldBrushStroke();
+            return;
+        }
         controls.enabled = true;
         controlsDisabled = false;
         brushActive = false;
@@ -2804,6 +2810,22 @@ const highlightWireframeGeometry = new THREE.BoxGeometry(1, 1, 1);
 const highlightWireframe = new THREE.Mesh(highlightWireframeGeometry, highlightWireframeMaterial);
 scene.add(highlightWireframe);
 highlightWireframe.visible = false;
+const objectHighlights = [highlightWireframe];
+
+export function showObjectHighlights(items) {
+    hideObjectHighlight();
+    items.forEach((item, index) => {
+        let mesh = objectHighlights[index];
+        if (!mesh) {
+            mesh = new THREE.Mesh(highlightWireframeGeometry, highlightWireframeMaterial);
+            objectHighlights.push(mesh); scene.add(mesh);
+        }
+        mesh.position.set(item.x, item.y, item.z);
+        mesh.scale.set(item.dimensions.width, item.dimensions.height, item.dimensions.depth);
+        mesh.rotation.y = THREE.MathUtils.degToRad(item.rotation || 0);
+        mesh.visible = true;
+    });
+}
 
 export function showObjectHighlight(x, y, z, dimensions, rotation = 0) {
     highlightWireframe.position.set(x, y, z);
@@ -2813,7 +2835,7 @@ export function showObjectHighlight(x, y, z, dimensions, rotation = 0) {
 }
 
 export function hideObjectHighlight() {
-    highlightWireframe.visible = false;
+    objectHighlights.forEach(mesh => { mesh.visible = false; });
 }
 
 export function getHoveredTile() {

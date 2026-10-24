@@ -78,6 +78,8 @@ test('smallest brush places at the cursor, bounds are clipped, and legacy trees 
     assert.equal(updates.length, 1);
     assert.ok(Math.abs(updates[0].updates.objects[0].x - 0.2) < 1e-9);
     assert.ok(Math.abs(updates[0].updates.objects[0].z + 0.2) < 1e-9);
+    assert.equal(updates[0].updates.objects[0].scale, 1);
+    assert.equal(updates[0].updates.objects[0].rotation, 0);
     assert.equal(h.plan({ radius: 4, density: 100, anchor: null }).length, 25);
     h.tiles[0][0].objects = [{ type: 'forest', scale: 0.777, rotation: 37.5 }, { type: 'tree' }];
     assert.equal(h.plan().length, 0);

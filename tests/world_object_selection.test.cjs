@@ -105,3 +105,60 @@ test('delete keeps the expected snapshot and clearing selection during a request
     assert.equal(h.controller.selected, null);
     assert.equal(h.source.objects[0].type, 'tree');
 });
+
+
+test('Shift toggles exact members without mutating objects; ordinary selection replaces the group', async () => {
+    const h = await harness();
+    const first = h.controller.selected;
+    h.controller.select({ ...first, index: 1 }, { toggle: true });
+    assert.equal(h.controller.members.length, 2);
+    assert.equal(h.source.objects[1].type, 'tree');
+    h.controller.select({ ...first, index: 1 }, { toggle: true });
+    assert.equal(h.controller.members.length, 1);
+    h.controller.select({ ...first, index: 1 }, { toggle: true });
+    h.controller.select(first);
+    assert.equal(h.controller.members.length, 1);
+    assert.equal(h.calls.length, 0);
+});
+
+test('group transforms retain relative positions, scales and yaw around the primary pivot', async () => {
+    const { worldObjectGroupTransform } = await modulePromise;
+    const members = [
+        { chunkX: 0, chunkY: 0, tileX: 30, tileY: 10, index: 0, object: { scale: 1, rotation: 0, custom: 'first' } },
+        { chunkX: 1, chunkY: 0, tileX: 0, tileY: 10, index: 0, object: { scale: .5, rotation: 30, custom: 'second' } },
+    ];
+    const plan = worldObjectGroupTransform(members, { scale: 1.5, rotation: 90 }, null, 64, 32);
+    assert.equal(plan[0].changes.scale, 1.5);
+    assert.equal(plan[1].changes.scale, .75);
+    assert.equal(plan[1].changes.rotation, 120);
+    assert.equal(plan[1].target.tile_x, 30);
+    assert.equal(plan[1].target.tile_y, 7);
+    const moved = worldObjectGroupTransform(members, { x: -.2, z: .1 }, { tile_x: 32, tile_y: 11 }, 64, 32);
+    assert.equal(moved[1].target.tile_x, 34);
+    assert.equal(moved[1].target.tile_y, 11);
+    assert.equal(worldObjectGroupTransform(members, {}, { tile_x: 63, tile_y: 10 }, 64, 32), null);
+    assert.equal(members[1].object.custom, 'second');
+});
+
+test('group scale bounds clamp the common ratio without changing relative sizes', async () => {
+    const { worldObjectGroupTransform } = await modulePromise;
+    const members = [1,2].map((scale, index) => ({ chunkX: 0, chunkY: 0, tileX: 10 + index, tileY: 10, object: { scale } }));
+    const plan = worldObjectGroupTransform(members, { scale: 1.5 });
+    assert.equal(plan[0].changes.scale, 1);
+    assert.equal(plan[1].changes.scale, 2);
+});
+
+test('group commit sends all expected snapshots in one request and resolves final indices', async () => {
+    const h = await harness();
+    h.controller.select({ chunkX: 0, chunkY: 0, tileX: 31, tileY: 10, index: 1 }, { toggle: true });
+    const pending = h.controller.commit({ rotation: 15 });
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].edits.length, 2);
+    assert.equal(h.calls[0].edits[0].expected.custom.retained, true);
+    const objects = h.source.objects.map(object => ({ ...object, rotation: 15 }));
+    h.resolve({ objects: [{ tile_x: 31, tile_y: 10, index: 0 }, { tile_x: 31, tile_y: 10, index: 1 }],
+        updates: [{ chunk_x: 0, updates: { objects } }] });
+    assert.equal(await pending, true);
+    assert.equal(h.controller.members.length, 2);
+    assert.equal(h.controller.members[1].object.rotation, 15);
+});

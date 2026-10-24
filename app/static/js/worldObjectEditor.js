@@ -1,6 +1,6 @@
 import {
     renderer, controls, chunksMap, pickWorldObject, worldPointOnObjectPlane, worldPointOnTerrain,
-    createPreviewObject, removePreviewObject, showObjectHighlight, hideObjectHighlight,
+    createPreviewObject, removePreviewObject, showObjectHighlights, hideObjectHighlight,
     getObjectDimensions, getObjectHeightOffset, updateTileInChunk, worldObjectDataEqual,
 } from './lobby3d.js';
 import { Server } from './api.js';
@@ -23,6 +23,19 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
     let quickGeneration = 0;
     const highlight = (selection, changes = {}, target = null, preview = false) => {
         if (!selection) { removePreviewObject(); hideObjectHighlight(); return; }
+        const plans = selectionController.plan(changes, target);
+        if (!plans) { removePreviewObject(); hideObjectHighlight(); return; }
+        const highlights = plans.flatMap(plan => {
+            const object = { ...plan.reference.object, ...plan.changes }, destination = plan.target;
+            const tile = getTile({ chunkX: Math.floor(destination.tile_x / 32), chunkY: Math.floor(destination.tile_y / 32), tileX: destination.tile_x % 32, tileY: destination.tile_y % 32 });
+            if (!tile) return [];
+            const scale = object.scale ?? 1;
+            return [{ x: destination.tile_x + 0.5 + (object.x || 0), z: destination.tile_y + 0.5 + (object.z || 0),
+                y: (tile.height || 1) + getObjectHeightOffset(object.type, object.anomalyType) * scale,
+                dimensions: getObjectDimensions(object.type, object.anomalyType, scale), rotation: object.rotation || 0 }];
+        });
+        showObjectHighlights(highlights);
+        changes = plans[0].changes; target = plans[0].target;
         const object = { ...selection.object, ...changes };
         const tileX = target?.tile_x ?? selection.chunkX * 32 + selection.tileX;
         const tileY = target?.tile_y ?? selection.chunkY * 32 + selection.tileY;
@@ -31,9 +44,6 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
         tile.tileData = getTile(tile);
         if (!tile.tileData) return;
         const scale = object.scale ?? 1;
-        const offset = getObjectHeightOffset(object.type, object.anomalyType) * scale;
-        showObjectHighlight(tileX + 0.5 + (object.x || 0), (tile.tileData.height || 1) + offset,
-            tileY + 0.5 + (object.z || 0), getObjectDimensions(object.type, object.anomalyType, scale), object.rotation || 0);
         if (preview) createPreviewObject(tile, {
             ...object, color: object.color || '#808080', scale, rotation: object.rotation || 0,
             offsetX: object.x || 0, offsetZ: object.z || 0,
@@ -48,7 +58,9 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
         const tileInfo = document.getElementById('tile-info');
         if (tileInfo) tileInfo.style.display = 'none';
         const object = selection.object;
-        field('title').textContent = object.name || labels[object.type] || object.type;
+        const multiple = selectionController.members.length > 1;
+        field('title').textContent = multiple ? `Выбрано объектов: ${selectionController.members.length}` : object.name || labels[object.type] || object.type;
+        for (const name of ['name', 'color', 'active', 'details']) field(name).disabled = multiple;
         field('name').value = object.name || '';
         field('color').value = /^#[0-9a-f]{6}$/i.test(object.color || '') ? object.color : '#808080';
         syncWorldNumber('world-selection-scale', object.scale ?? 1);
@@ -56,19 +68,21 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
         field('active-option').hidden = !protectedTypes.has(object.type);
         field('active').checked = object.is_active === true;
         // Connected roads derive direction from their links, not this angle.
-        field('rotation-option').hidden = object.type === 'road'
-            && Boolean(object.manual_connections?.length || object.connections?.length);
+        field('rotation-option').hidden = selectionController.members.some(member => member.object.type === 'road'
+            && Boolean(member.object.manual_connections?.length || member.object.connections?.length));
         field('position').textContent = `Клетка ${selection.chunkX * 32 + selection.tileX}, ${selection.chunkY * 32 + selection.tileY}`;
         if (!busy) { previewChanges = {}; removePreviewObject(); highlight(selection); }
     };
-    const selection = createWorldObjectSelection({
+    const selectionController = createWorldObjectSelection({
         equal: worldObjectDataEqual,
         getTile,
+        getBounds: () => [window.MAP_CHUNKS_WIDTH * 32, window.MAP_CHUNKS_HEIGHT * 32],
         editObject: payload => Server.editWorldObject(lobbyId, payload),
         applyUpdate: item => updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates),
         onChange: render,
         onError: message => showNotification(message, 'error'),
     });
+    const selection = selectionController;
     const cancelGesture = () => {
         if (!gesture) return;
         controls.enabled = gesture.controlsEnabled;
@@ -82,25 +96,31 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
         cancelGesture(); selection.clear();
     };
     window.hasDirectWorldObjectSelection = () => Boolean(selection.selected);
+    window.isDirectWorldObjectTransformActive = () => Boolean(gesture);
+    window.getDirectWorldObjectSelection = () => selection.members.map(member => ({ ...member, object: { ...member.object } }));
     window.refreshDirectWorldObjectEditor = () => render(selection.selected, selection.busy);
     window.syncDirectWorldObjectSelection = (chunkX, chunkY, tileX, tileY) => {
         const selected = selection.selected;
-        if (!selected || selection.busy || selected.chunkX !== chunkX || selected.chunkY !== chunkY
-            || selected.tileX !== tileX || selected.tileY !== tileY) return;
+        if (!selected || selection.busy || !selection.members.some(member => member.chunkX === chunkX && member.chunkY === chunkY
+            && member.tileX === tileX && member.tileY === tileY)) return;
         if (!selection.validate()) cancelGesture();
         else highlight(selected);
     };
     window.beginDirectWorldObjectEdit = event => {
         if (!available() || selection.busy || document.getElementById('tile-edit-modal')?.style.display === 'flex') return false;
         const reference = pickWorldObject(event.clientX, event.clientY);
-        selection.select(reference);
+        if (event.shiftKey) {
+            selection.select(reference, { toggle: true });
+            return true;
+        }
+        selection.select(reference, { preserve: true });
         if (!reference) return false;
         pointer = { x: event.clientX, y: event.clientY };
         const selected = selection.selected;
         const height = getTile(selected)?.height || 1;
         const point = worldPointOnObjectPlane(event.clientX, event.clientY, height);
         if (!point) return true;
-        gesture = { kind: 'drag', pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+        gesture = { kind: 'drag', reference, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
             controlsEnabled: controls.enabled, height, moved: false, target: null,
             grabOffset: { x: selected.chunkX * 32 + selected.tileX + 0.5 + (selected.object.x || 0) - point.x,
                 z: selected.chunkY * 32 + selected.tileY + 0.5 + (selected.object.z || 0) - point.z } };
@@ -140,9 +160,10 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
     }, { capture: true });
     window.addEventListener('pointerup', event => {
         if (!gesture || gesture.kind !== 'drag' || event.pointerId !== gesture.pointerId || event.button !== 0) return;
-        const { moved, target } = gesture;
+        const { moved, target, reference } = gesture;
         cancelGesture();
         if (moved && target && available()) selection.commit({ x: target.x, z: target.z }, target);
+        else if (!moved && available()) selection.select(reference);
     }, { capture: true });
     window.addEventListener('pointercancel', cancelGesture, { capture: true });
     window.addEventListener('pointerdown', event => {

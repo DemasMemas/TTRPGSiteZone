@@ -4583,3 +4583,51 @@ def test_world_road_connector_requires_roads_on_both_tiles(client, create_user, 
     assert diagonal.status_code == 200
     assert MapService.get_tile_data(lobby_id, 3, 3)["objects"][0]["manual_connections"] == ["SE"]
     assert MapService.get_tile_data(lobby_id, 4, 4)["objects"][0]["manual_connections"] == ["NW"]
+
+
+@pytest.mark.parametrize('conflict', [False, True])
+def test_world_object_group_edit_is_atomic_and_tracks_shifted_indices(client, create_user, auth_headers, conflict):
+    gm = create_user('group-object-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    MapService.get_chunks(lobby['id'], gm['id'], (0, 1, 0, 0))
+    objects = [{'type': 'house', 'name': name, 'scale': 1, 'rotation': 0, 'custom': {'name': name}} for name in ['A', 'B', 'C']]
+    MapService.update_tile(lobby['id'], gm['id'], 0, 0, 31, 10, {'objects': objects})
+    edits = [{'source': {'tile_x': 31, 'tile_y': 10, 'index': index},
+              'target': {'tile_x': 32, 'tile_y': 10}, 'expected': obj,
+              'changes': {'rotation': 359.5, 'scale': 1.2}} for index, obj in enumerate(objects)]
+    if conflict:
+        edits[-1]['changes']['scale'] = 99
+    response = client.post(f"/lobbies/{lobby['id']}/world-objects/edit", headers=auth_headers(gm), json={'edits': edits})
+    assert response.status_code == (400 if conflict else 200), response.json
+    db.session.expire_all()
+    if conflict:
+        assert MapService.get_tile_data(lobby['id'], 31, 10)['objects'] == objects
+        assert not MapService.get_tile_data(lobby['id'], 32, 10).get('objects')
+    else:
+        assert not MapService.get_tile_data(lobby['id'], 31, 10)['objects']
+        moved = MapService.get_tile_data(lobby['id'], 32, 10)['objects']
+        assert [obj['name'] for obj in moved] == ['A', 'B', 'C']
+        assert [entry['index'] for entry in response.json['objects']] == [0, 1, 2]
+        assert len(response.json['updates']) == 2
+        assert all(obj['scale'] == 1.2 and obj['rotation'] == 359.5 and obj['custom']['name'] == obj['name'] for obj in moved)
+
+
+def test_world_object_group_swap_rejects_stale_snapshots_and_duplicate_members(client, create_user, auth_headers):
+    gm = create_user('group-swap-gm')
+    lobby = create_lobby(client, gm, auth_headers)
+    MapService.get_chunks(lobby['id'], gm['id'], (0, 0, 0, 0))
+    a, b = {'type': 'house', 'name': 'A'}, {'type': 'tree', 'name': 'B'}
+    for x, obj in [(10,a),(11,b)]:
+        MapService.update_tile(lobby['id'], gm['id'], 0, 0, x, 10, {'objects': [obj]})
+    edits = [{'source': {'tile_x': x, 'tile_y': 10, 'index': 0}, 'target': {'tile_x': y, 'tile_y': 10}, 'expected': obj, 'changes': {}}
+             for x,y,obj in [(10,11,a),(11,10,b)]]
+    endpoint = f"/lobbies/{lobby['id']}/world-objects/edit"
+    assert client.post(endpoint, headers=auth_headers(gm), json={'edits': [edits[0], edits[0]]}).status_code == 400
+    stale = [{**edits[0]}, {**edits[1], 'expected': {'type': 'tree'}}]
+    assert client.post(endpoint, headers=auth_headers(gm), json={'edits': stale}).status_code == 409
+    assert MapService.get_tile_data(lobby['id'], 10, 10)['objects'] == [a]
+    response = client.post(endpoint, headers=auth_headers(gm), json={'edits': edits})
+    assert response.status_code == 200, response.json
+    assert all(entry['index'] == 0 for entry in response.json['objects'])
+    assert MapService.get_tile_data(lobby['id'], 10, 10)['objects'] == [b]
+    assert MapService.get_tile_data(lobby['id'], 11, 10)['objects'] == [a]

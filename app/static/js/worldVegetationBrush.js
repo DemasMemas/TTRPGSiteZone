@@ -53,9 +53,9 @@ export function planWorldVegetationBrush({ centers, radius, density, ignoreGroun
                         : (randomAt(x, y, seed + 2) * 2 - 1) * jitter,
                     z: radius === 0 && anchor ? Math.max(-0.49, Math.min(0.49, anchor.z - y - 0.5))
                         : (randomAt(x, y, seed + 3) * 2 - 1) * jitter,
-                    scale: Number(Math.max(0.2, Math.min(2,
+                    scale: radius === 0 && anchor ? settings.scale : Number(Math.max(0.2, Math.min(2,
                         settings.scale * (0.85 + randomAt(x, y, seed + 4) * 0.3))).toFixed(4)),
-                    rotation: Math.round(settings.rotation + randomAt(x, y, seed + 5) * 359) % 360,
+                    rotation: radius === 0 && anchor ? settings.rotation : Math.round(settings.rotation + randomAt(x, y, seed + 5) * 359) % 360,
                 };
                 updates.push({ chunk_x: Math.floor(x / 32), chunk_y: Math.floor(y / 32),
                     tile_x: x % 32, tile_y: y % 32, updates: { objects: [...objects, object] } });

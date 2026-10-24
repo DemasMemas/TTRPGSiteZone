@@ -334,6 +334,7 @@ test('world object tool places once at the pointer without replacing other tile 
         placingObjectTiles: new Set(), lastPlacedObjectKey: null, lastPlacedObjectAt: 0,
         roadLinkActive: false,
         choosingExistingObjectTarget: false,
+        selectedWorldObject: 'tree',
         CHUNK_SIZE: 32,
         worldObjectSettings() { return { type: 'tree', color: '#2d5a27', scale: 1, rotation: 0 }; },
         async handleTileUpdate(...args) { updates.push(args); return true; },
@@ -506,7 +507,7 @@ test('choosing a destination tile saves the move immediately without spawning an
     let placed = 0;
     let saved = 0;
     const context = vm.createContext({
-        choosingExistingObjectTarget: true, CHUNK_SIZE: 32,
+        choosingExistingObjectTarget: true, selectedWorldObject: null, CHUNK_SIZE: 32,
         document: { getElementById(id) { return fields[id]; } },
         finishExistingObjectTargetChoice() { finished += 1; },
         async saveExistingWorldObject() { saved += 1; },
