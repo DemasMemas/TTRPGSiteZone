@@ -42,7 +42,8 @@ import { doorOnWall, doorFrameStyle, doorTrimLayout, floorEntrancePoint, floorFi
     houseWallWear, nextStoreyFloors, STOREY_HEIGHT, structureBuildingId, structureLevel,
     structureLevelOffset, structurePose,
     wallVisualPlan } from './locationArchitecture.js';
-import { applyInteriorFloorShade, createRoofVisual, roofPlans, roofVisibleForCamera } from './locationRoof.js';
+import { applyInteriorFloorShade, createRoofVisual, roofOpacityForCamera, roofPlans,
+    roofVisibleForCamera } from './locationRoof.js';
 import { generatedFloorBlueprint, houseBuildingId, houseFootprint, planResidentialHouse,
     restorableGeneratedFloor } from './locationHouseGenerator.js';
 import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
@@ -10973,12 +10974,22 @@ function updateRoofVisibility() {
         }
     }
     for (const roof of roofMeshes) {
-        const visible = roofVisibleForCamera(roof.userData.roofPlan, controls.target,
+        const opacity = roofOpacityForCamera(roof.userData.roofPlan, controls.target,
             distance, locationRoofsVisible, false, camera.position);
-        for (const child of roof.userData.visualMeshes) child.visible = visible;
-        if (roof.userData.cutawayFloorMesh) {
-            for (const child of roof.children) if (child.castShadow) child.visible = visible;
+        if (opacity === roof.userData.roofOpacity) continue;
+        roof.userData.roofOpacity = opacity;
+        const translucent = opacity > 0 && opacity < 1;
+        for (const child of roof.userData.visualMeshes) {
+            child.visible = opacity > 0;
+            child.material.opacity = opacity;
+            child.material.transparent = translucent;
+            // The roof has an inner shell; keep the outer face in depth while fading.
+            child.material.depthWrite = true;
+            if (child === roof.userData.visualMeshes[0]) {
+                child.material.side = translucent ? THREE.FrontSide : THREE.DoubleSide;
+            }
         }
+        for (const child of roof.children) if (child.castShadow) child.visible = opacity === 1;
     }
     if (floorVisibilityChanged) {
         applyFogOfWar();

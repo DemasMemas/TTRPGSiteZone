@@ -307,8 +307,26 @@ test('small and large roofs cut away at comparable framing, and enclosed floors 
     assert.match(sceneSource, /height - FLOOR_SURFACE_OFFSET/);
 });
 
+test('roof opacity follows camera distance and roof size without changing the cutaway boundary', async () => {
+    const { roofOpacityForCamera, roofVisibleForCamera } = await load();
+    const plan = { x: 5, z: 5, angle: 0, width: 6, depth: 5, eaveY: 5, rise: 1 };
+    const threshold = Math.max(5, plan.width * 0.85);
+    const opacityAtHeight = height => roofOpacityForCamera(plan, { x: 5, z: 5 }, height,
+        true, false, { x: 5, y: plan.eaveY + plan.rise + height, z: 5 });
+    assert.equal(opacityAtHeight(threshold - 2), 0);
+    assert.ok(Math.abs(opacityAtHeight(threshold) - 0.5) < 1e-10);
+    assert.equal(opacityAtHeight(threshold + 2), 1);
+    assert.equal(roofVisibleForCamera(plan, { x: 5, z: 5 }, threshold - 2, true, false), false);
+    assert.equal(roofVisibleForCamera(plan, { x: 5, z: 5 }, threshold + 2, true, false), true);
+    assert.equal(roofOpacityForCamera(plan, { x: 5, z: 5 }, threshold + 2, false, false), 0);
+    assert.equal(roofOpacityForCamera(plan, { x: 5, z: 5 }, threshold + 2, true, true), 0);
+    const horizontal = roofOpacityForCamera(plan, { x: 5, z: 5 }, threshold, true, false,
+        { x: 5 + plan.width / 2 + threshold, y: plan.eaveY + plan.rise, z: 5 });
+    assert.ok(Math.abs(horizontal - 0.5) < 1e-10);
+});
+
 test('near roof cuts away while distant roof remains complete on any viewed floor', async () => {
-    const { roofVisibleForCamera } = await load();
+    const { roofOpacityForCamera, roofVisibleForCamera } = await load();
     const start = sceneSource.indexOf('function updateRoofVisibility()');
     const end = sceneSource.indexOf('function rebuildLocationRoofs()', start);
     assert.ok(start >= 0 && end > start);
@@ -318,18 +336,21 @@ test('near roof cuts away while distant roof remains complete on any viewed floo
     const upperFloor = { visible: true, userData: { locationObject: {
         type: 'floor', properties: { level: 1, building_id: 'house-a' },
     } } };
-    const face = { visible: true };
+    const face = { visible: true, material: { opacity: 1, transparent: false, depthWrite: true, side: 2 } };
+    const gable = { visible: true, material: { opacity: 1, transparent: false, depthWrite: true, side: 2 } };
     const shadow = { visible: true, castShadow: true };
     const roof = { userData: { roofPlan: { x: 5, z: 5, angle: 0, width: 6, depth: 5,
-        eaveY: 5, rise: 1 }, floorLevel: 1, visualMeshes: [face], cutawayFloorMesh: upperFloor },
-    children: [face, shadow] };
+        eaveY: 5, rise: 1 }, floorLevel: 1, visualMeshes: [face, gable], cutawayFloorMesh: upperFloor },
+    children: [face, gable, shadow] };
     const view = { minLevel: 0, maxLevel: 1, distant: false, plan: roof.userData.roofPlan };
     let visibilityUpdates = 0;
     const context = vm.createContext({
         camera: { position: { x: 5, y: 8, z: 5,
             distanceTo(target) { return Math.hypot(this.x - target.x, this.y - target.y, this.z - target.z); } } },
         controls: { target: { x: 5, y: 0, z: 5 } }, roofMeshes: [roof],
-        roofVisibleForCamera, locationRoofsVisible: true, editMode: false, locationViewLevel: 0,
+        roofOpacityForCamera, roofVisibleForCamera, locationRoofsVisible: true,
+        editMode: false, locationViewLevel: 0,
+        THREE: { FrontSide: 0, DoubleSide: 2 },
         locationBuildingViewsDirty: false, getLocationBuildingViews: () => new Map([['house-a', view]]),
         applyFogOfWar: () => visibilityUpdates++, updateLocationLampFixtureFloors() {},
         lampRenderSources: [],
@@ -353,10 +374,21 @@ test('near roof cuts away while distant roof remains complete on any viewed floo
     context.updateRoofVisibility();
     assert.equal(upperFloor.visible, true);
     assert.equal(lowerFloor.visible, true);
+    assert.ok(face.material.opacity > 0 && face.material.opacity < 1);
+    assert.equal(face.material.transparent, true);
+    assert.equal(face.material.depthWrite, true);
+    assert.equal(face.material.side, 0);
+    assert.equal(gable.material.side, 2);
+    assert.equal(gable.material.opacity, face.material.opacity);
+    assert.equal(shadow.visible, false);
 
     context.camera.position.x = 40;
     context.updateRoofVisibility();
     assert.equal(face.visible, true);
+    assert.equal(face.material.opacity, 1);
+    assert.equal(face.material.transparent, false);
+    assert.equal(face.material.depthWrite, true);
+    assert.equal(face.material.side, 2);
     assert.equal(view.distant, true);
     assert.equal(visibilityUpdates, 1);
     assert.equal(shadow.visible, true);
@@ -380,11 +412,12 @@ test('near roof cuts away while distant roof remains complete on any viewed floo
     assert.equal(shadow.visible, false);
     assert.equal(lowerFloor.visible, true);
 
-    const oldRoof = { userData: { ...roof.userData, cutawayFloorMesh: null }, children: [face, shadow] };
+    const oldRoof = { userData: { ...roof.userData, roofOpacity: undefined,
+        cutawayFloorMesh: null }, children: [face, gable, shadow] };
     shadow.visible = true;
     context.roofMeshes = [oldRoof];
     context.updateRoofVisibility();
     assert.equal(lowerFloor.visible, true);
-    assert.equal(shadow.visible, true);
+    assert.equal(shadow.visible, false);
     assert.match(sceneSource, /structureBuildingId\(lower\) === structureBuildingId\(floor\)/);
 });

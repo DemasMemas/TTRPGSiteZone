@@ -163,8 +163,8 @@ export function createRoofVisual(THREE, plan, { roofTexture, wallTexture, gableC
     return roof;
 }
 
-export function roofVisibleForCamera(plan, target, cameraDistance, enabled, editing, cameraPosition = null) {
-    if (!enabled || editing) return false;
+export function roofOpacityForCamera(plan, target, cameraDistance, enabled, editing, cameraPosition = null) {
+    if (!enabled || editing) return 0;
     const position = cameraPosition || target;
     const dx = position.x - plan.x;
     const dz = position.z - plan.z;
@@ -173,7 +173,15 @@ export function roofVisibleForCamera(plan, target, cameraDistance, enabled, edit
     const edgeX = Math.max(0, Math.abs(along) - plan.width / 2);
     const edgeZ = Math.max(0, Math.abs(across) - plan.depth / 2);
     const height = cameraPosition ? Math.max(0, cameraPosition.y - plan.eaveY - plan.rise) : cameraDistance;
-    return Math.hypot(edgeX, edgeZ, height) >= Math.max(5, Math.max(plan.width, plan.depth) * 0.85);
+    const threshold = Math.max(5, Math.max(plan.width, plan.depth) * 0.85);
+    const fadeHalfWidth = Math.max(1.5, threshold * 0.2);
+    const t = Math.max(0, Math.min(1,
+        (Math.hypot(edgeX, edgeZ, height) - threshold + fadeHalfWidth) / (fadeHalfWidth * 2)));
+    return t * t * (3 - 2 * t);
+}
+
+export function roofVisibleForCamera(plan, target, cameraDistance, enabled, editing, cameraPosition = null) {
+    return roofOpacityForCamera(plan, target, cameraDistance, enabled, editing, cameraPosition) >= 0.5;
 }
 
 export function applyInteriorFloorShade(material, width, depth, entrance = null) {
