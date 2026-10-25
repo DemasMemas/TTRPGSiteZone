@@ -115,6 +115,7 @@ export async function loadLobbyInfo() {
                     window.applyBrush(tile, { objects: [] }, window.brushRadius);
                 } else if (window.worldEditorTool === 'terrain') {
                     window.applyBrush(tile, { terrain: window.currentTileType }, window.brushRadius);
+
                 } else if (window.worldEditorTool === 'height') {
                     window.applyBrush(tile, { height: window.tileHeight }, window.brushRadius);
                 } else if (window.worldEditorTool === 'radiation') {

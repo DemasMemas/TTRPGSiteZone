@@ -12,6 +12,7 @@ class MapChunkSchema(Schema):
     data = fields.List(fields.List(fields.Dict()))
 
 class TileUpdateSchema(Schema):
+    water_profile = fields.Str()
     terrain = fields.Str(allow_none=True)
     height = fields.Float(allow_none=True)
     objects = fields.List(fields.Dict(), allow_none=True)

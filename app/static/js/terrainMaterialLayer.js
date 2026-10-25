@@ -292,7 +292,7 @@ function fragmentHelpers(sides, smooth, world) {
                 #else
                     macroSnow = texture2D(terrainSnowColorRoughness, uv * 0.0375, 6.0).rgb;
                 #endif
-                color = mix(color, terrainLinear(macroSnow), 0.35);` : ''}
+                color = mix(color, terrainLinear(macroSnow), 0.35) * 0.78;` : ''}
                 mapNormal = terrainSnowSample(terrainSnowNormal, uv, dx, dy).xyz * 2.0 - 1.0;
                 arm = vec3(1.0, clamp(snow.a, 0.88, 0.98), 0.0);
                 return;

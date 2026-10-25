@@ -44,4 +44,6 @@ def preserve_water_offsets(tiles, previous):
             old = previous[z][x] if z < len(previous) and x < len(previous[z]) else {}
             if cell.get('terrain') == old.get('terrain') == 'water' and 'water_level_offset' not in cell:
                 cell['water_level_offset'] = old.get('water_level_offset', 0)
+            if cell.get('terrain') == old.get('terrain') == 'water' and 'water_profile' not in cell and 'water_profile' in old:
+                cell['water_profile'] = old['water_profile']
     freeze_water_offsets(tiles)

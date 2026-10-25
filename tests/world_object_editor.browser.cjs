@@ -138,6 +138,9 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         if(process.env.VTT_GPU_PROBE==='1'){
             console.log('GPU',await page.evaluate(`(()=>{const gl=sceneModule.renderer.getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');return ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)})()`));return;
         }
+        if(process.env.VTT_WATER_PROFILES==='1'){
+            await require('./water_profiles.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
         if(process.env.VTT_WATER_SIMPLIFY==='1'){
             await require('./water_simplify.browser.cjs')({page,request,token,lobby});return;
         }

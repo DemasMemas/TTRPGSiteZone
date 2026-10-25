@@ -1,3 +1,4 @@
+import { waterProfileControls, normalizeWaterProfile } from './waterProfiles.js';
 // static/js/mapEdit.js
 import AppState, {
     expandMapToolsPanelOnToolChange,
@@ -101,6 +102,10 @@ const ANOMALY_TYPE_LABELS = {
 };
 
 export function initMapEdit(lobbyId, authToken) {
+    if(!document.getElementById('world-water-profile')){
+        const controls=waterProfileControls('world');controls.hidden=window.currentTileType!=='water';
+        document.querySelector('[data-world-settings="terrain"]')?.appendChild(controls);
+    }
     currentLobbyId = lobbyId;
     token = authToken;
     renderer.domElement.addEventListener('pointerenter',()=>{roadPointerOnCanvas=true;});
@@ -155,7 +160,10 @@ export function initMapEdit(lobbyId, authToken) {
         if(event.target.id==='world-road-route-enabled'){roadRouteTool.cancel();window.syncWorldVegetationControls?.();updateWorldObjectPreview(getHoveredTile());}
         if(event.target.id==='world-road-bridges')roadRouteTool.refresh();
         if(event.target.id==='world-fence-line-enabled'){fenceLineTool.cancel();window.syncWorldVegetationControls?.();updateWorldObjectPreview(getHoveredTile());}
-        if (event.target.id === 'tile-type-select') AppState.setCurrentTileType(event.target.value);
+        if (event.target.id === 'tile-type-select') {
+            AppState.setCurrentTileType(event.target.value);
+            document.getElementById('world-water-profile').closest('section').hidden=event.target.value!=='water';
+        }
         if (event.target.id === 'world-brush-radiation') setWorldBrushRadiation(event.target.value);
         if (event.target.matches('[data-map-editor-auto-expand]')) {
             setMapEditorAutoExpandEnabled(event.target.checked);
@@ -608,13 +616,42 @@ function scheduleBatchUpdate() {
     }, 500);
 }
 
+let waterBasinPending=false;
+export async function applyWorldWaterProfile(centerTile,profile,radius=0){
+    if(!AppState.isGM)return;
+    const cx=centerTile.chunk?.chunkX??centerTile.chunkX,cz=centerTile.chunk?.chunkY??centerTile.chunkY,
+        x=cx*32+centerTile.tileX,z=cz*32+centerTile.tileY;
+    profile=normalizeWaterProfile(profile);
+    if(document.getElementById('world-water-basin')?.checked){
+        if(waterBasinPending)return;waterBasinPending=true;
+        try{
+            const response=await fetch(`/lobbies/${currentLobbyId}/water-profile`,{method:'POST',
+                headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({x,z,profile})});
+            const result=await response.json();if(!response.ok)throw Error(result.error||'Не удалось изменить профиль воды');
+            for(const u of result.updates)updateTileInChunk(u.chunk_x,u.chunk_y,u.tile_x,u.tile_y,u.updates);
+        }catch(error){showNotification(error.message);}finally{waterBasinPending=false;}
+        return;
+    }
+    for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++){
+        const wx=x+dx,wz=z+dz,chunkX=Math.floor(wx/32),chunkY=Math.floor(wz/32),tx=wx-chunkX*32,ty=wz-chunkY*32;
+        const tile=chunksMap.get(`${chunkX},${chunkY}`)?.tilesData[ty]?.[tx];
+        if(tile?.terrain!=='water'||normalizeWaterProfile(tile.water_profile)===profile)continue;
+        const updates={water_profile:profile};pendingTileUpdates.push({chunk_x:chunkX,chunk_y:chunkY,tile_x:tx,tile_y:ty,updates});
+        updateTileInChunk(chunkX,chunkY,tx,ty,updates);
+    }
+    scheduleBatchUpdate();
+}
+
 export function applyBrush(centerTile, updates, radius) {
     if (document.getElementById('location-container')?.style.display === 'block') return;
     if (!AppState.isGM) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-    const allowedFields = ['terrain', 'height', 'radiation', 'objects'];
+    if(updates.terrain==='water')updates={...updates,water_profile:updates.water_profile??document.getElementById('world-water-profile')?.value??'auto'};
+    if(updates.water_profile!==undefined&&(updates.terrain!=='water'||document.getElementById('world-water-basin')?.checked))
+        return applyWorldWaterProfile(centerTile,updates.water_profile,radius);
+    const allowedFields = ['terrain', 'height', 'radiation', 'objects', 'water_profile'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
         if (updates[key] !== undefined) {
@@ -674,7 +711,7 @@ export async function handleTileUpdate(chunkX, chunkY, tileX, tileY, updates) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
     }
-    const allowedFields = ['terrain', 'height', 'objects', 'name', 'radiation', 'anomaly_field'];
+    const allowedFields = ['terrain', 'height', 'objects', 'name', 'radiation', 'anomaly_field', 'water_profile'];
     const filteredUpdates = {};
     for (const key of allowedFields) {
         if (updates[key] !== undefined) {

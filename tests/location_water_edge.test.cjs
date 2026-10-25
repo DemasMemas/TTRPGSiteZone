@@ -176,7 +176,7 @@ test('legacy dense banks remain available while local water keeps its side geome
     const scene = read('locationScene.js');
     const waterBuild = scene.slice(scene.indexOf('function rebuildWaterSurfaceMesh()'),
         scene.indexOf('export function getLocationGrassDiagnostics()'));
-    assert.match(waterBuild, /const waterMaterial = createWaterMaterial\(\)/);
+    assert.match(waterBuild, /const waterMaterial = createWaterMaterial\(\{profileLayer:locationWaterProfiles\}\)/);
     assert.doesNotMatch(waterBuild, /waterMaterial\.polygonOffset/);
     assert.doesNotMatch(waterBuild, /waterMaterial\.depthTest = false|waterMaterial\.depthWrite = false/);
     assert.match(scene, /waterTileMesh = new THREE\.InstancedMesh\(waterBoxGeometry, \[\s*waterMaterial, waterMaterial, waterTopMaterial,\s*waterMaterial, waterMaterial, waterMaterial,/);

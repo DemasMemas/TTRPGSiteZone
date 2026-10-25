@@ -1,3 +1,4 @@
+import { waterProfileControls } from './waterProfiles.js';
 // static/js/main.js
 import { initWorldNumericInputs } from './worldNumericInputs.js';
 import { addTerrainMaterialOptions } from './terrainMaterialCatalog.js';
@@ -522,6 +523,7 @@ window.enterLocation = async function(locationId) {
                 eraseSettings.hidden = true;
                 toolsRoot.appendChild(eraseSettings);
 
+                const waterSettings=waterProfileControls('loc');waterSettings.hidden=true;sections.terrain.appendChild(waterSettings);
                 let activeAsset = null;
                 let assetSection = null;
                 let environmentSection = null;
@@ -545,6 +547,7 @@ window.enterLocation = async function(locationId) {
                         section.hidden = name !== 'mode' && name !== tool
                             && !(name === 'brush' && ['terrain', 'height', 'radiation', 'erase'].includes(tool));
                     });
+                    waterSettings.hidden = document.getElementById('loc-edit-terrain')?.value !== 'water';
                     eraseSettings.hidden = tool !== 'erase';
                     if (assetSection) assetSection.hidden = tool !== 'assets';
                     if (environmentSection) environmentSection.hidden = tool !== 'light';
@@ -1182,6 +1185,7 @@ window.enterLocation = async function(locationId) {
 
                 terrainSelect.value = window.currentTileType;
                 setLocationBrushTerrain(window.currentTileType);
+                waterSettings.hidden=terrainSelect.value!=='water';
                 setLocationGrassSubtype(grassSubtypeSelect.value);
 
                 const objModeCheck = document.getElementById('loc-obj-mode');
@@ -1260,7 +1264,7 @@ window.enterLocation = async function(locationId) {
                 // Обработчики
                 editCheckbox.onchange = (e) => setLocationEditMode(e.target.checked);
 
-                terrainSelect.onchange = (e) => setLocationBrushTerrain(e.target.value);
+                terrainSelect.onchange = (e) => {setLocationBrushTerrain(e.target.value);waterSettings.hidden=e.target.value!=='water';};
                 grassSubtypeSelect.onchange = (e) => setLocationGrassSubtype(e.target.value);
 
                 radiusSlider.oninput = (e) => {

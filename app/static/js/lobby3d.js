@@ -1,3 +1,4 @@
+import { createWaterProfileLayer } from './waterProfiles.js';
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { updateRain } from './weather.js';
@@ -711,12 +712,14 @@ export function removePreviewObject() {
 // ---- End Preview object ----
 
 export function setMapDimensions(widthChunks, heightChunks) {
+    worldWaterProfiles.resize(widthChunks*CHUNK_SIZE,heightChunks*CHUNK_SIZE);
     MAX_CHUNK_X = widthChunks - 1;
     MAX_CHUNK_Y = heightChunks - 1;
     worldTerrainMaterials.resize(widthChunks * CHUNK_SIZE, heightChunks * CHUNK_SIZE);
     for (const entry of chunksMap.values()) {
         worldTerrainMaterials.fill(entry.tilesData, entry.chunkX * CHUNK_SIZE, entry.chunkY * CHUNK_SIZE);
     }
+    worldWaterProfiles.updateRegion(0,0,widthChunks*CHUNK_SIZE,heightChunks*CHUNK_SIZE);
     updateCelestialPositions();
     console.log(`Map dimensions set: ${widthChunks} x ${heightChunks} chunks`);
 }
@@ -1080,7 +1083,10 @@ function animateChunkAnomalies(time) {
     animateAnomalyEffects(visibleNearAnomalies, time);
 }
 
-const waterMat = createWaterMaterial({ world:true });
+const worldWaterTileAt=(x,z)=>chunksMap.get(`${Math.floor(x/CHUNK_SIZE)},${Math.floor(z/CHUNK_SIZE)}`)
+    ?.tilesData[((z%CHUNK_SIZE)+CHUNK_SIZE)%CHUNK_SIZE]?.[((x%CHUNK_SIZE)+CHUNK_SIZE)%CHUNK_SIZE];
+export const worldWaterProfiles=createWaterProfileLayer(THREE,worldWaterTileAt);
+const waterMat = createWaterMaterial({ world:true,profileLayer:worldWaterProfiles });
 const waterTexture = waterMat.map;
 const waterHiddenTopMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
 // Retain compact box instances for picking; draw only the joined surface/rim.
@@ -2056,6 +2062,7 @@ export function addChunk(cx, cy, tilesData) {
     fenceGroundSamplers.clear();
     refreshFenceChunkNeighbors(cx,cy);
     refreshWorldTerrainNeighborhood(cx, cy, null, null, true, true, true, true, true);
+    worldWaterProfiles.updateRegion(cx*CHUNK_SIZE,cy*CHUNK_SIZE,CHUNK_SIZE,CHUNK_SIZE);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
     markWorldShadowsDirty();
@@ -2118,6 +2125,7 @@ export function removeChunk(cx, cy) {
     }
 
     chunksMap.delete(key);
+    worldWaterProfiles.updateRegion(cx*CHUNK_SIZE,cy*CHUNK_SIZE,CHUNK_SIZE,CHUNK_SIZE);
     refreshFenceChunkNeighbors(cx,cy);
     entry.objectStateSnapshots = null;
     entry.pendingObjectGroups = null;
@@ -2398,6 +2406,9 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     if (!changedTerrain && !changedHeight
         && Object.keys(updates).every(key => key === 'terrain' || key === 'height')) return;
     Object.assign(tile, updates);
+    if(changedTerrain&&updates.water_profile===undefined)delete tile.water_profile;
+    if(changedTerrain||updates.water_profile!==undefined)
+        worldWaterProfiles.updateRegion(chunkX*CHUNK_SIZE+tileX,chunkY*CHUNK_SIZE+tileY);
     if(changedHeight||changedTerrain)invalidateFenceGround(chunkX*CHUNK_SIZE+tileX,chunkY*CHUNK_SIZE+tileY);
     if (changedTerrain) entry.materialLayer?.update(chunkX * CHUNK_SIZE + tileX,
         chunkY * CHUNK_SIZE + tileY, tile);
@@ -3052,6 +3063,7 @@ window.addEventListener('pointermove', (event) => {
     }
     performRaycast(event.clientX, event.clientY);
 
+    if(window.worldEditorTool==='terrain'&&window.currentTileType==='water'&&document.getElementById('world-water-basin')?.checked)return;
     if ((event.buttons === 1) && brushActive && editMode && hoveredTile && window.applyBrush) {
         const tileKey = `${hoveredTile.chunk.chunkX},${hoveredTile.chunk.chunkY},${hoveredTile.tileX},${hoveredTile.tileY}`;
         if (lastProcessedTileKey === tileKey) return;
@@ -3069,6 +3081,7 @@ window.addEventListener('pointermove', (event) => {
             updates.objects = [];
         } else if (window.worldEditorTool === 'terrain') {
             updates.terrain = window.currentTileType;
+
         } else if (window.worldEditorTool === 'height') {
             updates.height = window.tileHeight;
         } else if (window.worldEditorTool === 'radiation') {

@@ -2083,7 +2083,7 @@ def update_tile(lobby_id, lobby, chunk_x, chunk_y, tile_x, tile_y):
     schema = TileUpdateSchema()
     updates = schema.load(data)
     MapService.update_tile(lobby_id, lobby.gm_id, chunk_x, chunk_y, tile_x, tile_y, updates)
-    allowed_fields = ['terrain', 'height', 'objects', 'name', 'radiation', 'anomaly_field']
+    allowed_fields = ['terrain', 'height', 'objects', 'name', 'radiation', 'anomaly_field', 'water_profile']
     safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
     socketio.emit('tile_updated', {
         'chunk_x': chunk_x,
@@ -2107,6 +2107,19 @@ def get_chunks(lobby_id, lobby, participant):
     chunks = MapService.get_chunks(lobby_id, participant.user_id, (min_x, max_x, min_y, max_y))
     schema = MapChunkSchema(many=True)
     return jsonify(schema.dump(chunks)), 200
+
+@lobbies_bp.route('/<int:lobby_id>/water-profile', methods=['POST'])
+@jwt_required()
+@requires_gm
+def set_connected_water_profile(lobby_id, lobby):
+    from app.services.water_profiles import connected_world_water_updates
+    data = request.get_json(silent=True) or {}
+    updates = connected_world_water_updates(lobby, data.get('x'), data.get('z'), data.get('profile'))
+    if updates:
+        MapService.batch_update_tiles(lobby_id, lobby.gm_id, updates)
+        socketio.emit('tiles_updated', updates, room=f"lobby_{lobby_id}")
+    return jsonify({'updates': updates}), 200
+
 
 @lobbies_bp.route('/<int:lobby_id>/chunks/batch', methods=['POST'])
 @jwt_required()
@@ -2451,6 +2464,7 @@ def update_location(lobby_id, location_id, lobby):
                     'terrain': tile.get('terrain'),
                     'height': tile.get('height'),
                     'water_level_offset': tile.get('water_level_offset'),
+                    'water_profile': tile.get('water_profile', 'auto'),
                     'objects': tile.get('objects', [])
                 })
         socketio.emit('location_tiles_updated', {

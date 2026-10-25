@@ -55,7 +55,7 @@ async function harness(keys = ['0,0'], size = 32) {
         setMatrixAt(index, matrix) { this.matrices[index] = structuredClone(matrix); },
         setColorAt() {},
     });
-    const context = vm.createContext({
+    const context = vm.createContext({ worldWaterProfiles: { updateRegion() {} },
         window: {},
         CHUNK_SIZE: size, chunksMap, chunkBounds: [], performance,
         scene: { add() {}, remove() {} },

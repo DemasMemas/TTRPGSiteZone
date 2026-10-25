@@ -1,3 +1,4 @@
+from app.services.water_profiles import WATER_PROFILES
 import logging
 
 from flask import has_request_context, request
@@ -275,6 +276,10 @@ def handle_update_location_tiles(data):
         emit('error', {'message': 'Only GM can edit location tiles'}, room=request.sid)
         return
 
+    if any('water_profile' in u and (not isinstance(u['water_profile'], str) or u['water_profile'] not in WATER_PROFILES) for u in updates):
+        emit('error', {'message': 'Invalid water profile'}, room=request.sid)
+        return
+
     tiles = location.tiles_data
     if not isinstance(tiles, list):
         tiles = []
@@ -293,14 +298,20 @@ def handle_update_location_tiles(data):
             height_changed = False
             objects_changed = False
             radiation_changed = False
+            profile_changed = False
 
             if 'terrain' in upd and tile.get('terrain') != upd['terrain']:
+                tile.pop('water_profile', None)
                 tile['terrain'] = upd['terrain']
                 if tile['terrain'] == 'water':
                     tile['water_level_offset'] = 0
                 else:
                     tile.pop('water_level_offset', None)
                 terrain_changed = True
+            if ('water_profile' in upd and tile.get('terrain') == 'water'
+                    and tile.get('water_profile', 'auto') != upd['water_profile']):
+                tile['water_profile'] = upd['water_profile']
+                profile_changed = True
             offset = upd.get('water_level_offset')
             if (tile.get('terrain') == 'water' and type(offset) in (int, float)
                     and offset in (0, -.2) and tile.get('water_level_offset') != offset):
@@ -324,7 +335,7 @@ def handle_update_location_tiles(data):
                 tile['radiation'] = upd['radiation']
                 radiation_changed = True
 
-            if terrain_changed or subtype_changed or height_changed or objects_changed or radiation_changed:
+            if terrain_changed or subtype_changed or height_changed or objects_changed or radiation_changed or profile_changed:
                 tiles[z][x] = tile
                 changed.append({
                     'x': x,
@@ -333,6 +344,7 @@ def handle_update_location_tiles(data):
                     'grass_subtype': tile.get('grass_subtype'),
                     'height': tile.get('height'),
                     'water_level_offset': tile.get('water_level_offset'),
+                    'water_profile': tile.get('water_profile', 'auto'),
                     'objects': tile.get('objects'),
                     'radiation': tile.get('radiation'),
                 })

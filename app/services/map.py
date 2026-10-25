@@ -1,3 +1,4 @@
+from app.services.water_profiles import apply_water_profile, validate_water_profile
 # app/services/map.py
 import logging
 import copy
@@ -321,8 +322,13 @@ class MapService:
             logger.debug(f"Created new chunk ({chunk_x},{chunk_y}) for tile update")
 
         # Глубокая копия данных
+        if 'water_profile' in updates:
+            validate_water_profile(updates['water_profile'])
         new_data = copy.deepcopy(chunk.data)
+        apply_water_profile(new_data[tile_y][tile_x], updates)
         for key, value in updates.items():
+            if key == 'water_profile':
+                continue
             new_data[tile_y][tile_x][key] = value
         chunk.data = new_data
         db.session.commit()
@@ -348,6 +354,10 @@ class MapService:
             if key not in updates_by_chunk:
                 updates_by_chunk[key] = []
             updates_by_chunk[key].append(item)
+
+        for item in updates_list:
+            if 'water_profile' in item['updates']:
+                validate_water_profile(item['updates']['water_profile'])
 
         # Optional optimistic guard for a confirmed fence line. Validate the
         # complete packet before changing any chunk; ordinary brushes are unchanged.
@@ -382,8 +392,10 @@ class MapService:
                 tx, ty = item['tile_x'], item['tile_y']
                 updates = item['updates']
                 if 0 <= tx < CHUNK_SIZE and 0 <= ty < CHUNK_SIZE:
+                    apply_water_profile(new_data[ty][tx], updates)
                     for key, value in updates.items():
-                        new_data[ty][tx][key] = value
+                        if key != 'water_profile':
+                            new_data[ty][tx][key] = value
             chunk.data = new_data
 
         db.session.commit()

@@ -1,3 +1,4 @@
+import { createWaterProfileLayer, connectedWaterCells, normalizeWaterProfile } from './waterProfiles.js';
 // static/js/locationScene.js
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
@@ -16,7 +17,7 @@ import { createMutantModel } from './mutantModels.js';
 import { anomalyCoversTile } from './locationAnomalyArea.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
-import { createWaterMaterial } from './waterSurface.js';
+import { createWaterMaterial, WATER_PROFILE_COLOR_GLSL } from './waterSurface.js';
 import { createTerrainMaterialLayer } from './terrainMaterialLayer.js';
 import {
     buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData,
@@ -372,6 +373,7 @@ const WATER_SIDE_COLORS = { grass: 0x183c4a, swamp: 0x244c3b, sand: 0x76603a, ro
 let smoothTerrainMesh = null;
 let terrainSurfaceMesh = null;
 let locationTerrainMaterials = null;
+let locationWaterProfiles = null;
 export const getLocationTerrainMaterialDiagnostics = () => ({ ...locationTerrainMaterials?.diagnostics(),
     shaderErrors: renderer?.info.programs?.filter(program => program.diagnostics?.runnable === false).length || 0 });
 let terrainSurfaceTexture = null;
@@ -13469,6 +13471,10 @@ export function loadLocation(data) {
 
     // Очистка старых объектов (кроме света и highlight)
     locationTerrainMaterials?.dispose();
+    locationWaterProfiles?.dispose();
+    locationWaterProfiles=createWaterProfileLayer(THREE,(x,z)=>currentLocationData?.tiles_data[z]?.[x]);
+    locationWaterProfiles.resize(data.grid_width,data.grid_height);
+    locationWaterProfiles.updateRegion(0,0,data.grid_width,data.grid_height);
     locationTerrainMaterials = createTerrainMaterialLayer(THREE);
     locationTerrainMaterials.resize(data.grid_width, data.grid_height);
     locationTerrainMaterials.fill(data.tiles_data);
@@ -13537,14 +13543,20 @@ export function loadLocation(data) {
     ], tileCount);
     locationTileMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tileCount * 3), 3);
     const waterMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
-    waterMaterial.customProgramCacheKey = () => 'location-water-exterior-sides-v1';
+    waterMaterial.customProgramCacheKey = () => 'location-water-exterior-sides-v2';
     waterMaterial.onBeforeCompile = shader => {
+        Object.assign(shader.uniforms,locationWaterProfiles.uniforms);
+        shader.uniforms.sideWaterDarkness={value:locationDarknessTexture};
         shader.vertexShader = shader.vertexShader
             .replace('#include <common>', `#include <common>
+                varying vec2 vSideWaterXZ;
                 attribute float waterSideMask;
                 attribute vec4 waterCornerDrops;
                 varying float vWaterSideMask;
                 varying vec3 vWaterSideNormal;`)
+            .replace('#include <project_vertex>', `
+                vSideWaterXZ=(modelMatrix*instanceMatrix*vec4(transformed,1.0)).xz;
+                #include <project_vertex>`)
             .replace('#include <begin_vertex>', `#include <begin_vertex>
                 vWaterSideMask = waterSideMask;
                 vWaterSideNormal = normal;
@@ -13556,8 +13568,17 @@ export function loadLocation(data) {
                 }`);
         shader.fragmentShader = shader.fragmentShader
             .replace('#include <common>', `#include <common>
+                uniform sampler2D waterProfiles;
+                uniform vec2 waterProfilesSize;
+                uniform sampler2D sideWaterDarkness;
+                varying vec2 vSideWaterXZ;
+                ${WATER_PROFILE_COLOR_GLSL}
                 varying float vWaterSideMask;
                 varying vec3 vWaterSideNormal;`)
+            .replace('#include <color_fragment>', `#include <color_fragment>
+                vec4 context=texture2D(waterProfiles,vSideWaterXZ/waterProfilesSize);
+                float shade=texture2D(sideWaterDarkness,vSideWaterXZ/waterProfilesSize).r;
+                diffuseColor.rgb=waterProfileColor(context,0.5,0.5,0.5)*vec3(0.7216,0.7647,0.7804)*shade;`)
             .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
                 float sideBit = 0.0;
                 if (vWaterSideNormal.x > 0.5) sideBit = 1.0;
@@ -14101,8 +14122,8 @@ function rebuildWaterSurfaceMesh() {
     waterGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.water, 3));
     waterGeometry.setAttribute('color', new THREE.Float32BufferAttribute(data.waterColors, 3));
     waterGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(smoothWaterNormals(data.water),3));
-    const waterMaterial = createWaterMaterial();
-    waterMaterial.vertexColors = true;
+    const waterMaterial = createWaterMaterial({profileLayer:locationWaterProfiles});
+    waterMaterial.vertexColors = false;
     applySurfaceDarkness(waterMaterial, locationDarknessTexture,
         new THREE.Vector2(currentLocationData.grid_width, currentLocationData.grid_height));
     waterSurfaceMesh = new THREE.Mesh(waterGeometry, waterMaterial);
@@ -14513,11 +14534,13 @@ export function applyLocationTilesUpdate(locationId, updates) {
     let terrainChanged = false;
     let grassSubtypeChanged = false;
     let waterTopologyChanged = false;
+    let waterShoreChanged = false;
     let lightChanged = false;
     const changed = [];
     for (const upd of updates) {
         const tile = currentLocationData.tiles_data[upd.z][upd.x];
         const previousTerrain = tile.terrain;
+        if(upd.water_profile!==undefined)tile.water_profile=normalizeWaterProfile(upd.water_profile);
         const previousGrassSubtype = tile.grass_subtype;
         const previousHeight = getTileHeight(upd.x, upd.z);
         const objectsChanged = upd.objects !== undefined
@@ -14538,6 +14561,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
         else if (Number.isFinite(upd.water_level_offset)) tile.water_level_offset=upd.water_level_offset;
         if (upd.objects !== undefined) tile.objects = upd.objects;
         if (upd.radiation !== undefined) tile.radiation = upd.radiation;
+        waterShoreChanged ||= tile.terrain!==previousTerrain&&[previousTerrain,tile.terrain].some(t=>t==='sand'||t==='swamp');
         terrainChanged ||= tile.terrain !== previousTerrain;
         waterTopologyChanged ||= (tile.terrain === 'water') !== (previousTerrain === 'water');
         grassSubtypeChanged ||= tile.grass_subtype !== previousGrassSubtype;
@@ -14551,6 +14575,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
         changed.push({ x: upd.x, z: upd.z });
     }
     if (!changed.length) return;
+    for(const {x,z} of changed)locationWaterProfiles?.updateRegion(x,z);
     const foundationChanged = refreshTerrainFoundation();
     const tilesNeedSmooth = updateTileCubes(changed);
     const smoothAffected = foundationChanged || tilesNeedSmooth;
@@ -14559,7 +14584,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
         texture: terrainChanged || grassSubtypeChanged,
         terrainColor: terrainChanged,
         surface: heightChanged || waterTopologyChanged,
-        water: (heightChanged || terrainChanged) &&
+        water: (heightChanged || waterTopologyChanged || waterShoreChanged) &&
             (waterTopologyChanged || terrainEditTouchesWater(changed)),
         grid: heightChanged || waterTopologyChanged,
         // Slope probes can cross onto a neighboring water tile as well as land.
@@ -14575,7 +14600,29 @@ export function applyLocationTilesUpdate(locationId, updates) {
 }
 
 // ========== Кисть ==========
+export function applyLocationWaterProfile(centers,profile,radius=0,basin=false) {
+    if(!currentLocationData||!window.isGM)return;
+    const tiles=currentLocationData.tiles_data,getTile=(x,z)=>tiles[z]?.[x],targets=new Map();
+    for(const [x,z]of centers){
+        const cells=basin?connectedWaterCells(getTile,x,z):Array.from({length:(radius*2+1)**2},(_,i)=>
+            [x+i%(radius*2+1)-radius,z+Math.floor(i/(radius*2+1))-radius]);
+        for(const [cx,cz]of cells)if(getTile(cx,cz)?.terrain==='water')targets.set(`${cx},${cz}`,[cx,cz]);
+    }
+    profile=normalizeWaterProfile(profile);const updates=[];
+    for(const [x,z]of targets.values())if(normalizeWaterProfile(getTile(x,z).water_profile)!==profile){
+        getTile(x,z).water_profile=profile;locationWaterProfiles?.updateRegion(x,z);
+        updates.push({x,z,water_profile:profile});
+    }
+    if(updates.length)window.socket?.emit('update_location_tiles',{
+        token:localStorage.getItem('access_token'),location_id:window.currentLocationId,updates});
+    return updates.length;
+}
+export function getLocationWaterProfileDiagnostics(){return locationWaterProfiles?.diagnostics();}
+
 export function applyLocationBrush(centerX, centerZ, updates, radius) {
+    if(updates.water_profile!==undefined&&(updates.terrain!=='water'||document.getElementById('loc-water-basin')?.checked))return applyLocationWaterProfile(
+        Array.isArray(centerX)?centerX:[[centerX,centerZ]],updates.water_profile,radius,
+        document.getElementById('loc-water-basin')?.checked===true);
     if (!currentLocationData) return;
     const tiles = currentLocationData.tiles_data;
     const changed = [];
@@ -14583,6 +14630,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     let terrainChanged = false;
     let grassSubtypeChanged = false;
     let waterTopologyChanged = false;
+    let waterShoreChanged = false;
     let lightChanged = false;
     const targets = new Map();
     for (const [brushX, brushZ] of Array.isArray(centerX) ? centerX : [[centerX, centerZ]]) {
@@ -14601,7 +14649,9 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             let needUpdate = false;
             if (updates.terrain !== undefined && tile.terrain !== updates.terrain) {
                 waterTopologyChanged ||= (tile.terrain === 'water') !== (updates.terrain === 'water');
+                waterShoreChanged ||= [tile.terrain,updates.terrain].some(t=>t==='sand'||t==='swamp');
                 tile.terrain = updates.terrain;
+                delete tile.water_profile;
                 if (tile.terrain !== 'grass') delete tile.grass_subtype;
                 if (tile.terrain === 'water') {
                     const neighbor=[[0,-1],[1,0],[0,1],[-1,0]].map(([dx,dz])=>tiles[z+dz]?.[x+dx]).find(t=>t?.terrain==='water'&&Number.isFinite(t.water_level_offset));
@@ -14610,6 +14660,9 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 } else delete tile.water_level_offset;
                 terrainChanged = true;
                 needUpdate = true;
+            }
+            if(tile.terrain==='water'&&updates.water_profile!==undefined&&normalizeWaterProfile(tile.water_profile)!==normalizeWaterProfile(updates.water_profile)){
+                tile.water_profile=normalizeWaterProfile(updates.water_profile);needUpdate=true;
             }
             if (updates.grass_subtype !== undefined && tile.terrain === 'grass'
                 && tile.grass_subtype !== updates.grass_subtype) {
@@ -14711,6 +14764,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         }
     }
     if (changed.length === 0) return;
+    if(terrainChanged||updates.water_profile!==undefined)for(const {x,z} of changed)locationWaterProfiles?.updateRegion(x,z);
     const foundationChanged = refreshTerrainFoundation();
     const tilesNeedSmooth = updateTileCubes(changed);
     const smoothAffected = foundationChanged || tilesNeedSmooth;
@@ -14719,7 +14773,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         texture: terrainChanged || grassSubtypeChanged,
         terrainColor: terrainChanged,
         surface: heightChanged || waterTopologyChanged,
-        water: (heightChanged || terrainChanged) &&
+        water: (heightChanged || waterTopologyChanged || waterShoreChanged) &&
             (waterTopologyChanged || terrainEditTouchesWater(changed)),
         grid: heightChanged || waterTopologyChanged,
         grass: terrainChanged || grassSubtypeChanged || heightChanged,
@@ -14736,7 +14790,8 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             token: localStorage.getItem('access_token'),
             location_id: window.currentLocationId,
             updates: changed.map(c => ({ x: c.x, z: c.z, terrain: c.terrain,
-                grass_subtype: c.grass_subtype, height: c.height, water_level_offset: tiles[c.z][c.x].water_level_offset??null,
+                grass_subtype: c.grass_subtype, height: c.height,
+                ...(typeof tiles[c.z][c.x].water_profile==='string'?{water_profile:tiles[c.z][c.x].water_profile}:{}),water_level_offset: tiles[c.z][c.x].water_level_offset??null,
                 objects: c.objects, radiation: c.radiation }))
         });
     }
@@ -15294,7 +15349,8 @@ function getEditBrushUpdates() {
     if (tool === 'radiation') return { radiation: brushRadiation };
     if (tool === 'decor') return { addObject: true };
     if (tool === 'terrain') return { terrain: currentBrushTerrain,
-        ...(currentBrushTerrain === 'grass' ? { grass_subtype: currentBrushGrassSubtype } : {}) };
+        ...(currentBrushTerrain === 'grass' ? { grass_subtype: currentBrushGrassSubtype } : {}),
+        ...(currentBrushTerrain === 'water' ? {water_profile:document.getElementById('loc-water-profile')?.value||'auto'} : {}) };
     if (tool === 'height') return { height: currentBrushHeight };
     return {};
 }
@@ -15583,6 +15639,7 @@ export function setupLocationEditing() {
             if (eraserMode) removeStructuresAtTile(x, z, brushRadius);
             return;
         }
+        if(window.locationEditorTool==='terrain'&&currentBrushTerrain==='water'&&document.getElementById('loc-water-basin')?.checked)return;
         const updates = getEditBrushUpdates();
         if (Object.keys(updates).length) {
             const path = lastBrushTile
@@ -16006,6 +16063,8 @@ export function setLocationBrushTerrain(t) {
     if (select) select.value = t;
     const locSelect = document.getElementById('loc-edit-terrain');
     if (locSelect) locSelect.value = t;
+    const waterControls=document.getElementById('loc-water-profile')?.closest('section');
+    if(waterControls)waterControls.hidden=t!=='water';
     const subtypeField = document.getElementById('loc-grass-subtype-field');
     if (subtypeField) subtypeField.style.display = t === 'grass' ? 'flex' : 'none';
 }
@@ -16382,6 +16441,8 @@ export function destroyLocationScene() {
     // Очищаем сцену
     locationTerrainMaterials?.dispose();
     locationTerrainMaterials = null;
+    locationWaterProfiles?.dispose();
+    locationWaterProfiles = null;
     if (scene) {
         if (waterSurfaceMesh?.material.map) waterSurfaceMesh.material.map.dispose();
         terrainSurfaceTexture?.dispose();
