@@ -51,6 +51,7 @@ function harness({ deferTimers = false } = {}) {
             terrainBuilds++;
             return { positions: [], tileByFace: [] };
         },
+        indexWaterGeometry: () => {},
         buildWorldWaterData: () => {
             waterBuilds++;
             return { water: [], bankPositions: [], bankOwners: [], sides: [], regions: new Map() };
@@ -321,7 +322,7 @@ test('world slopes rebuild near edits and chunk changes without replacing flat t
     assert.match(source, /setTimeout\(flushWorldTerrainRefresh, 100\)/);
     assert.match(source, /window\.addEventListener\('pointerup'/);
     assert.match(source, /worldTerrainRefreshTimer = setTimeout\(flushWorldTerrainRefresh, 0\)/);
-    assert.match(source, /buildWorldWaterData\(padded,/);
+    assert.match(source, /buildWorldWaterData\(waterTiles,/);
     assert.match(source, /entry\.ground\.setMatrixAt\(index, dummy\.matrix\)/);
     assert.match(source, /data\.foundationByTile\.get\(`\$\{x \+ 1\},\$\{z \+ 1\}`\)/);
     assert.match(source, /Math\.max\(0\.05, foundation - 0\.085\)/);
@@ -739,4 +740,31 @@ test('world chunks wait for one shared grass image load and keep a consistent fa
     assert.equal(fallback.window.getWorldLoadDiagnostics().grassGroundSource, 'procedural-fallback');
     assert.equal(fallback.counters.warnings, 1);
     assert.equal(fallback.counters.errors, 0);
+});
+
+
+test('side-only ground rendering preserves full-box picking and restores geometry on failure', () => {
+    const start = source.indexOf('function raycastGroundInstances(');
+    const end = source.indexOf('\nconst groundMat', start);
+    const rendered = {}, fullBox = {}, ray = {}, hits = [];
+    const mesh = { geometry: rendered };
+    let fail = false;
+    const context = vm.createContext({
+        groundGeo: fullBox,
+        THREE: { InstancedMesh: { prototype: { raycast(raycaster, intersections) {
+            assert.equal(this, mesh);
+            assert.equal(this.geometry, fullBox);
+            assert.equal(raycaster, ray);
+            assert.equal(intersections, hits);
+            if (fail) throw new Error('ray failure');
+            hits.push({ instanceId: 19 });
+        } } } },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    context.raycastGroundInstances.call(mesh, ray, hits);
+    assert.equal(hits[0].instanceId, 19);
+    assert.equal(mesh.geometry, rendered);
+    fail = true;
+    assert.throws(() => context.raycastGroundInstances.call(mesh, ray, hits), /ray failure/);
+    assert.equal(mesh.geometry, rendered);
 });

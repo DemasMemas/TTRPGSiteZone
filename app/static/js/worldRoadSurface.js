@@ -6,7 +6,7 @@ export const ROAD_SURFACE_LIFT=.006;
 
 // Clip the actual terrain triangles to each road footprint in XZ. Interpolating
 // their Y values preserves steep terrain bands without sampling gaps or roll.
-function clip(polygon,a,b) {
+export function clipTerrainPolygon(polygon,a,b) {
     const distance=p=>(b[0]-a[0])*(p[2]-a[1])-(b[1]-a[1])*(p[0]-a[0]);
     const output=[];
     let previous=polygon.at(-1),before=distance(previous);
@@ -21,6 +21,23 @@ function clip(polygon,a,b) {
     }
     return output;
 }
+const clip=clipTerrainPolygon;
+
+export function roadTerrainTriangles(getTile,x,z,cache=new Map()) {
+    const key=`${x},${z}`;
+    if(!cache.has(key)){
+        const tile=getTile(x,z);
+        if(!tile||tile.terrain==='water')cache.set(key,null);
+        else{
+            const patch=Array.from({length:3},(_,b)=>Array.from({length:3},(_,a)=>getTile(x+a-1,z+b-1)));
+            const triangles=tileSurfaceTriangles(patch,1,1).map(triangle=>triangle.map(([px,py,pz])=>[px+x-1,py,pz+z-1]));
+            const height=triangles[0][0][1];
+            triangles.flatHeight=triangles.every(t=>t.every(v=>Math.abs(v[1]-height)<EPS))?height:null;
+            cache.set(key,triangles);
+        }
+    }
+    return cache.get(key);
+}
 
 export function buildRoadSurface({pads=[],links=[],getTile,bridgeApproaches=[]}) {
     const positions=[],colors=[],cache=new Map();
@@ -31,21 +48,7 @@ export function buildRoadSurface({pads=[],links=[],getTile,bridgeApproaches=[]})
         approaches.get(key).push(cut);
     }
     const cutsAt=p=>approaches.get(`${p.x},${p.z}`)||[];
-    const trianglesAt=(x,z)=>{
-        const key=`${x},${z}`;
-        if(!cache.has(key)){
-            const tile=getTile(x,z);
-            if(!tile||tile.terrain==='water')cache.set(key,null);
-            else{
-                const patch=Array.from({length:3},(_,b)=>Array.from({length:3},(_,a)=>getTile(x+a-1,z+b-1)));
-                const triangles=tileSurfaceTriangles(patch,1,1).map(triangle=>triangle.map(([px,py,pz])=>[px+x-1,py,pz+z-1]));
-                const height=triangles[0][0][1];
-                triangles.flatHeight=triangles.every(t=>t.every(v=>Math.abs(v[1]-height)<EPS))?height:null;
-                cache.set(key,triangles);
-            }
-        }
-        return cache.get(key);
-    };
+    const trianglesAt=(x,z)=>roadTerrainTriangles(getTile,x,z,cache);
     const append=(footprint,color,lift,deck=null,cuts=[])=>{
         // A bridge begins at the bank road node. End the land surface at that
         // same cross-section instead of leaving half a junction pad underneath.
@@ -91,7 +94,7 @@ export function buildRoadSurface({pads=[],links=[],getTile,bridgeApproaches=[]})
                     for(const [px,py,pz] of vertices){
                         // Technical bridge decks stay above water and their approaches
                         // stay above the bank; ordinary roads use only terrain height.
-                        const y=deck?Math.max(getTile(x,z)?.terrain==='water'?-Infinity:py+lift,deck(px,pz)):py+lift;
+                        let y=deck?Math.max(getTile(x,z)?.terrain==='water'?-Infinity:py+lift,deck(px,pz)):py+lift;
                         positions.push(px,y,pz);colors.push(...rgb);
                     }
                 }

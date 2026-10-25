@@ -15,6 +15,7 @@ export function createWorldGrassDetail(THREE) {
     const ready = { value: 0 };
 
     return {
+        textures() { return { earth, forest, ready }; },
         setImages(images) {
             if (!images) { ready.value = 0; return; }
             if (earth.image !== images.plain || forest.image !== images.forest) {

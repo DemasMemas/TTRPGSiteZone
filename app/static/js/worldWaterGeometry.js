@@ -4,6 +4,29 @@ import { createTerrainSurfaceHeightSampler } from './locationTerrain.js';
 
 export const worldWaterLevel = tile => Number(tile?.height) || 1;
 
+// Weld only bit-identical rendered attributes. This changes storage and vertex
+// shader work, not triangles, UVs, material ownership or hard/smooth normals.
+export function indexWaterGeometry(geometry) {
+    if(typeof geometry.setIndex!=='function')return;
+    const entries=Object.entries(geometry.attributes),vertices=new Map(),indices=[],values=entries.map(()=>[]);
+    const count=geometry.attributes.position.count;
+    for(let i=0;i<count;i++){
+        const row=entries.map(([,a])=>Array.from(a.array.subarray(i*a.itemSize,(i+1)*a.itemSize)));
+        const key=row.flat().join(',');
+        let index=vertices.get(key);
+        if(index===undefined){
+            index=vertices.size;
+            // Retain the original path if a device would need 32-bit indices.
+            if(index>=65535)return;
+            vertices.set(key,index);row.forEach((v,n)=>values[n].push(...v));
+        }
+        indices.push(index);
+    }
+    if(vertices.size===count)return;
+    entries.forEach(([name,a],n)=>geometry.setAttribute(name,new a.constructor(values[n],a.itemSize,a.normalized)));
+    geometry.setIndex(indices);
+}
+
 // A conservative envelope for a bridge, including water touching its corners.
 export function worldWaterCeiling(getTile, x, z) {
     const tiles=Array.from({length:3},(_,j)=>Array.from({length:3},(_,i)=>getTile(x+i-1,z+j-1)));
@@ -11,12 +34,12 @@ export function worldWaterCeiling(getTile, x, z) {
         connectedWaterHeightAt(tiles,1,1,px,pz,new Map(),worldWaterLevel)))+.012;
 }
 
-// World adapter to the existing local shoreline ring. All dependencies remain
+// World adapter to the shared local shoreline surface. All dependencies remain
 // within the tile's 3x3 neighbourhood; no flood-fill or persisted level map.
 export function buildWorldWaterData(tiles, includeTile=()=>true, originX=0, originZ=0) {
     const options={
         shorelineRing:true, worldOrigin:{x:originX,z:originZ},
-        landSurfaceHeightAt:createTerrainSurfaceHeightSampler(tiles), flatShore:true,
+        landSurfaceHeightAt:createTerrainSurfaceHeightSampler(tiles),
     };
     const data=buildRoundedWaterData(tiles,.24,includeTile,null,worldWaterLevel,options);
     // Weld geometric normals across tile fans, including the padded neighbour
@@ -24,6 +47,7 @@ export function buildWorldWaterData(tiles, includeTile=()=>true, originX=0, orig
     const halo=buildRoundedWaterData(tiles,.24,(x,z)=>!includeTile(x,z),null,worldWaterLevel,options);
     const waterNormals=smoothWaterNormals(data.water,halo.water);
     const bankPositions=[...data.bank,...data.sandBank],bankOwners=shoreOwners(bankPositions,tiles,originX,originZ);
+    const bankNormals=smoothWaterNormals(bankPositions,[...halo.bank,...halo.sandBank]);
     const sides=[];
     // Only map/unloaded boundaries need a water volume wall. Along land the
     // shoreline ring closes the surface; between water cells there is no wall.
@@ -43,5 +67,5 @@ export function buildWorldWaterData(tiles, includeTile=()=>true, originX=0, orig
         }
     }
     for(let i=0;i<sides.length;i+=9){const n=waterFaceNormal(sides,i),length=Math.hypot(...n)||1;for(let j=0;j<3;j++)waterNormals.push(...n.map(v=>v/length));}
-    return {...data,bankPositions,bankOwners,sides,waterNormals};
+    return {...data,bankPositions,bankOwners,bankNormals,sides,waterNormals};
 }

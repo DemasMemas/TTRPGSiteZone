@@ -130,6 +130,20 @@ test('only global shores and grass walls next to water use the existing earth si
     world.update(1,1,{terrain:'grass'});assert.equal(bank.uniforms.terrainKinds.value.image.data[(1*4+1)*4+2],0);
 });
 
+test('shore shoulders reuse existing grass resources and select UV projection from the geometric face',async()=>{
+    const {THREE,loaded}=environment(),layer=createTerrainMaterialLayer(THREE);
+    await layer.ready;const count=loaded.length,earth={},forest={},ready={value:1};
+    layer.setShoreGrass({earth,forest,ready});
+    const bank=compile(layer,{sides:true,smooth:true,shore:true}),ordinary=compile(layer,{sides:true});
+    assert.equal(bank.uniforms.terrainShoreEarth.value,earth);
+    assert.equal(bank.uniforms.terrainShoreForest.value,forest);
+    assert.equal(bank.uniforms.terrainShoreGrassReady,ready);
+    assert.equal(loaded.length,count,'no extra asset or texture fetch');
+    assert.match(bank.fragmentShader,/cross\(dFdx\(vTerrainMaterialPosition\),dFdy\(vTerrainMaterialPosition\)\)/);
+    assert.doesNotMatch(ordinary.fragmentShader,/float grassShoulder/);
+    assert.match(bank.fragmentShader,/shoreGrassWeight>0.005/);
+});
+
 test('world and local layers share atlases, update only lookup bytes, and release their own lookups', async () => {
     const { THREE, loaded, contexts } = environment();
     const world = createTerrainMaterialLayer(THREE), local = createTerrainMaterialLayer(THREE);

@@ -118,6 +118,7 @@ export function waterSideCornerDrops(tiles, x, z, regions, renderedHeight) {
 export function buildRoundedWaterData(tiles, radius = 0.24,
     includeTile = () => true, bankSamples = null, levelForWater = waterLevelForTile,
     { shorelineRing = false, landSurfaceHeightAt = null, worldOrigin = null, flatShore = false } = {}) {
+    if (shorelineRing) return buildShoreSurface(tiles, includeTile, levelForWater, landSurfaceHeightAt, worldOrigin);
     const water = [];
     const waterColors = [];
     const bank = [];
@@ -205,20 +206,12 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
             ];
             const outline = [];
             const waterOutline = [];
-            const diagonalCorners = [];
-            for (const corner of corners) {
+                    for (const corner of corners) {
                 let points;
                 let diagonalOnly = false;
-                const diagonalWater = shorelineRing
-                    && tiles[corner.diagonal[1]]?.[corner.diagonal[0]]?.terrain === 'water';
+                const diagonalWater = false;
                 if (corner.first && corner.second) points = corner.arc;
-                else if (shorelineRing && corner.diagonalLand && !corner.first && !corner.second) {
-                    // Keep the ordinary ring out of this corner; its water triangle is replaced by a cap.
-                    points = [corner.at];
-                    waterOutline.push(corner.secondOnly, corner.firstOnly);
-                    diagonalCorners.push(corner);
-                    diagonalOnly = true;
-                } else if (corner.first && (corner.diagonalLand || diagonalWater)) {
+                else if (corner.first && (corner.diagonalLand || diagonalWater)) {
                     points = [corner.firstOnly];
                 } else if (corner.second && (corner.diagonalLand || diagonalWater)) {
                     points = [corner.secondOnly];
@@ -270,134 +263,138 @@ export function buildRoundedWaterData(tiles, radius = 0.24,
                 const target = kind === 'sand'
                     ? [sandBank, sandBankColors, sandBankUvs] : [bank, bankColors, bankUvs];
                 const baseColors = kind === 'sand' ? null : bankBaseColors;
-                if (shorelineRing) {
-                    const centerX = x + 0.5;
-                    const centerZ = z + 0.5;
-                    const edgePoint = (u, v) => {
-                        const point = bankPoint(u, v);
-                        const meetsWater = outline.some(([px, pz]) =>
-                            Math.abs(px - point.x) < 1e-8 && Math.abs(pz - point.z) < 1e-8);
-                        point.y = meetsWater ? waterHeightAt(point.x, point.z) + 0.012
-                            : (sharedShoreHeight(point.x, point.z)
-                                ?? (waterHeightAt(point.x, point.z) + 0.006)) + 0.006;
-                        return point;
-                    };
-                    const angleOf = ([px, pz]) => Math.atan2(pz - centerZ, px - centerX);
-                    const outerPoint = ([px, pz]) => {
-                        const dx = px - centerX;
-                        const dz = pz - centerZ;
-                        const scale = 0.5 / Math.max(Math.abs(dx), Math.abs(dz));
-                        return edgePoint(0.5 + dx * scale, 0.5 + dz * scale);
-                    };
-                    const addTriangle = (a, b, c) => {
-                        const area = (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
-                        if (Math.abs(area) < 1e-10) return;
+
+                const samples = bankSamples || [0, 0.05, 0.075, 0.125, 0.25, 0.375, 0.5,
+                    0.625, 0.75, 0.875, 0.925, 0.95, 1];
+                const vertices = samples.map(v => samples.map(u => bankPoint(u, v)));
+                for (let row = 0; row < samples.length - 1; row++) {
+                    for (let column = 0; column < samples.length - 1; column++) {
+                        const a = vertices[row][column];
+                        const b = vertices[row][column + 1];
+                        const c = vertices[row + 1][column + 1];
+                        const d = vertices[row + 1][column];
                         pushBankTriangle(...target, a, b, c, tiles[z].length, tiles.length, baseColors);
-                    };
-                    const squareCorners = [[0, 0], [1, 0], [1, 1], [0, 1]];
-                    const addShoreSegment = (a, b, levelA, levelB) => {
-                        const innerA = { ...bankPoint(a[0] - x, a[1] - z), y: levelA + 0.012 };
-                        const innerB = { ...bankPoint(b[0] - x, b[1] - z), y: levelB + 0.012 };
-                        const start = angleOf(a);
-                        let end = angleOf(b);
-                        if (end <= start) end += Math.PI * 2;
-                        const outerPath = [{ angle: start, point: outerPoint(a) }];
-                        for (let corner = 0; corner < squareCorners.length; corner++) {
-                            let angle = -Math.PI * 3 / 4 + corner * Math.PI / 2;
-                            if (angle <= start) angle += Math.PI * 2;
-                            if (angle > start + 1e-8 && angle < end - 1e-8) {
-                                const [u, v] = squareCorners[corner];
-                                outerPath.push({ angle, point: edgePoint(u, v) });
-                            }
-                        }
-                        outerPath.push({ angle: end, point: outerPoint(b) });
-                        outerPath.sort((left, right) => left.angle - right.angle);
-                        for (let path = 0; path < outerPath.length - 1; path++) {
-                            addTriangle(innerA, outerPath[path].point, outerPath[path + 1].point);
-                        }
-                        addTriangle(innerA, outerPath[outerPath.length - 1].point, innerB);
-                    };
-                    for (let index = 0; index < outline.length; index++) {
-                        const a = outline[index];
-                        const b = outline[(index + 1) % outline.length];
-                        const levelA = waterHeightAt(a[0], a[1]);
-                        const levelB = waterHeightAt(b[0], b[1]);
-                        const outerA = outerPoint(a);
-                        const outerB = outerPoint(b);
-                        const span = Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]),
-                            Math.hypot(outerB.x - outerA.x, outerB.z - outerA.z));
-                        // Limit large corner facets without restoring the dense bank grid.
-                        const segments = Math.max(1, Math.ceil(span / 0.16));
-                        const along = fraction => [a[0] + (b[0] - a[0]) * fraction,
-                            a[1] + (b[1] - a[1]) * fraction];
-                        for (let segment = 0; segment < segments; segment++) {
-                            const start = segment / segments;
-                            const end = (segment + 1) / segments;
-                            addShoreSegment(along(start), along(end),
-                                levelA + (levelB - levelA) * start,
-                                levelA + (levelB - levelA) * end);
-                        }
-                    }
-                } else {
-                    const samples = bankSamples || [0, 0.05, 0.075, 0.125, 0.25, 0.375, 0.5,
-                        0.625, 0.75, 0.875, 0.925, 0.95, 1];
-                    const vertices = samples.map(v => samples.map(u => bankPoint(u, v)));
-                    for (let row = 0; row < samples.length - 1; row++) {
-                        for (let column = 0; column < samples.length - 1; column++) {
-                            const a = vertices[row][column];
-                            const b = vertices[row][column + 1];
-                            const c = vertices[row + 1][column + 1];
-                            const d = vertices[row + 1][column];
-                            pushBankTriangle(...target, a, b, c, tiles[z].length, tiles.length, baseColors);
-                            pushBankTriangle(...target, a, c, d, tiles[z].length, tiles.length, baseColors);
-                        }
+                        pushBankTriangle(...target, a, c, d, tiles[z].length, tiles.length, baseColors);
                     }
                 }
             }
-            if (shorelineRing) {
-                for (const corner of diagonalCorners) {
-                    const land = tiles[corner.diagonal[1]][corner.diagonal[0]];
-                    const shoreY = sharedShoreHeight(...corner.at);
-                    if (shoreY == null) continue;
-                    const tint = LAND_COLORS[land.terrain] || LAND_COLORS.grass;
-                    const point = ([px, pz], y, color) => ({
-                        x: px, y, z: pz, color, baseColor: tint,
-                    });
-                    const waterTint = kind === 'sand' ? [0.61, 0.53, 0.35] : [0.73, 0.85, 0.87];
-                    const landTint = kind === 'sand' ? [0.83, 0.73, 0.47] : [1, 1, 1];
-                    const a = point(corner.at, shoreY + 0.006, landTint);
-                    const b = point(corner.firstOnly,
-                        waterHeightAt(...corner.firstOnly) + 0.012, waterTint);
-                    const c = point(corner.secondOnly,
-                        waterHeightAt(...corner.secondOnly) + 0.012, waterTint);
-                    const target = kind === 'sand'
-                        ? [sandBank, sandBankColors, sandBankUvs] : [bank, bankColors, bankUvs];
-                    pushBankTriangle(...target, a, b, c, tiles[z].length, tiles.length,
-                        kind === 'sand' ? null : bankBaseColors);
-                }
-            }
+
             const center = [x + 0.5, z + 0.5];
             for (let index = 0; index < waterOutline.length; index++) {
-                if (shorelineRing) {
-                    const a = waterOutline[index];
-                    const b = waterOutline[(index + 1) % waterOutline.length];
-                    const points = [
-                        [center[0], height + 0.012, center[1]],
-                        [a[0], waterHeightAt(a[0], a[1]) + 0.012, a[1]],
-                        [b[0], waterHeightAt(b[0], b[1]) + 0.012, b[1]],
-                    ];
-                    const [first, second, third] = points;
-                    const cross = (second[2] - first[2]) * (third[0] - first[0])
-                        - (second[0] - first[0]) * (third[2] - first[2]);
-                    for (const point of cross >= 0 ? points : [first, third, second]) water.push(...point);
-                } else {
-                    pushTriangle(water, center, waterOutline[index],
-                        waterOutline[(index + 1) % waterOutline.length], height + 0.012);
-                }
+
+                pushTriangle(water, center, waterOutline[index],
+                    waterOutline[(index + 1) % waterOutline.length], height + 0.012);
+
                 for (let vertex = 0; vertex < 3; vertex++) waterColors.push(...WATER_TINTS[kind]);
             }
         }
     }
     return { water, waterColors, bank, bankColors, bankUvs, bankBaseColors,
         sandBank, sandBankColors, sandBankUvs, regions };
+}
+
+// One conforming surface per water cell. A shared lattice and a continuous
+// distance-to-land field replace the independently projected radial rings.
+// Clip each triangle once: its water and bank polygons partition the footprint,
+// including concave corners and diagonally disconnected bodies of water.
+function buildShoreSurface(tiles, includeTile, levelForWater, sampleLand, origin) {
+    const data={water:[],waterColors:[],bank:[],bankColors:[],bankUvs:[],bankBaseColors:[],
+        sandBank:[],sandBankColors:[],sandBankUvs:[],regions:origin?new Map():classifyWaterRegions(tiles)};
+    const smooth=t=>t*t*(3-2*t);
+    for(let z=0;z<tiles.length;z++)for(let x=0;x<(tiles[z]?.length||0);x++){
+        if(tiles[z][x]?.terrain!=='water'||!includeTile(x,z))continue;
+        const kind=data.regions.get(`${x},${z}`)||'grass',level=levelForWater(tiles[z][x],kind),land=[];
+        for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){
+            const tile=tiles[z+dz]?.[x+dx];
+            if(tile&&tile.terrain!=='water')land.push({x:x+dx,z:z+dz,tile});
+        }
+        // A global cell spans 100 m; local banks need the finer close-up mesh.
+        const steps=4;
+        const ring=[[0,0],[.5,0],[1,0],[1,.5],[1,1],[.5,1],[0,1],[0,.5]];
+        const heights=ring.map(([u,v])=>connectedWaterHeightAt(tiles,x,z,x+u,z+v,data.regions,levelForWater));
+        const waterHeight=(u,v)=>{
+            const dx=u-.5,dz=v-.5,r=Math.max(Math.abs(dx),Math.abs(dz))*2;
+            if(r<1e-9)return level+.012;
+            const a=Math.atan2(dz,dx),side=((Math.floor((a+Math.PI*3/4)/(Math.PI/4))+8)%8);
+            // Interpolate on the boundary of the original eight-triangle fan.
+            const [ax,az]=ring[side], [bx,bz]=ring[(side+1)%8];
+            const px=.5+dx/r,pz=.5+dz/r;
+            const t=Math.abs(bx-ax)>1e-9?(px-ax)/(bx-ax):(pz-az)/(bz-az);
+            return level+(heights[side]*(1-t)+heights[(side+1)%8]*t-level)*r+.012;
+        };
+        const point=(u,v)=>{
+            const px=x+u,pz=z+v,waterY=waterHeight(u,v);
+            const wx=px+(origin?.x||0),wz=pz+(origin?.z||0);
+            let total=0,target=0,red=0,green=0,blue=0,nearest=Infinity;
+            const touching=[];
+            const distances=[1,1,1,1];
+            for(const cell of land){
+                const lx=Math.max(cell.x,Math.min(cell.x+1,px)),lz=Math.max(cell.z,Math.min(cell.z+1,pz)),distance=Math.hypot(px-lx,pz-lz);
+                const ground=sampleLand?sampleLand(Math.max(cell.x+1e-5,Math.min(cell.x+.99999,lx)),Math.max(cell.z+1e-5,Math.min(cell.z+.99999,lz))):Number(cell.tile.height);
+                nearest=Math.min(nearest,distance);
+                if(distance<1e-8)touching.push(ground);
+                const width=(cell.tile.terrain==='swamp'?.16:.25)+Math.min(.07,Math.abs(ground-(waterY-.012))*.04)
+                    +.025*Math.sin(wx*.73+wz*.41)+.018*Math.sin(wz*1.13-wx*.28);
+                const direction=Math.abs(px-lx)>Math.abs(pz-lz)+1e-9?(px<lx?1:3):(pz<lz?2:0);
+                distances[direction]=Math.min(distances[direction],distance-width);
+                if(distance>.75)continue;
+                const weight=1/(.015+distance)**4,tint=LAND_COLORS[cell.tile.terrain]||LAND_COLORS.grass;
+                total+=weight;target+=ground*weight;red+=tint[0]*weight;green+=tint[1]*weight;blue+=tint[2]*weight;
+            }
+            const soften=land.every(c=>c.tile.terrain==='swamp')?.12:.28;
+            let distance=distances[0];
+            for(const next of distances.slice(1)){
+                const h=Math.max(0,soften-Math.abs(distance-next))/soften;
+                distance=Math.min(distance,next)-h*h*soften*.25;
+            }
+            const mask=-distance;
+            // Normalise against actual distance to land. The former fixed .22
+            // denominator left narrow swamp banks short of the ground edge.
+            const blend=mask>0?smooth(mask/(mask+nearest)):0;
+            const ground=touching.length?touching.reduce((a,b)=>a+b,0)/touching.length:total?target/total:waterY;
+            return {x:px,z:pz,y:waterY*(1-blend)+(ground+.002)*blend,
+                waterY,mask,color:[1,1,1],baseColor:total?[red/total,green/total,blue/total]:[1,1,1]};
+        };
+        const clip=(polygon,bank)=>{
+            const out=[];let a=polygon.at(-1),inside=bank?a.mask>=0:a.mask<=0;
+            for(const b of polygon){
+                const next=bank?b.mask>=0:b.mask<=0;
+                if(next!==inside){
+                    const t=a.mask/(a.mask-b.mask),p={mask:0,color:[1,1,1]};
+                    for(const key of ['x','z','waterY'])p[key]=a[key]+(b[key]-a[key])*t;
+                    p.y=p.waterY;p.baseColor=a.baseColor.map((v,i)=>v+(b.baseColor[i]-v)*t);out.push(p);
+                }
+                if(next)out.push(b);a=b;inside=next;
+            }
+            return out;
+        };
+        const emit=(polygon,bank)=>{
+            for(let i=1;i<polygon.length-1;i++){
+                const points=[polygon[0],polygon[i],polygon[i+1]], [a,b,c]=points;
+                const cross=(b.z-a.z)*(c.x-a.x)-(b.x-a.x)*(c.z-a.z);
+                if(Math.abs(cross)<1e-10)continue;
+                if(bank){
+                    const sand=kind==='sand';
+                    pushBankTriangle(sand?data.sandBank:data.bank,sand?data.sandBankColors:data.bankColors,
+                        sand?data.sandBankUvs:data.bankUvs,a,b,c,tiles[z].length,tiles.length,sand?null:data.bankBaseColors);
+                }else for(const p of cross>=0?points:[a,c,b]){data.water.push(p.x,p.waterY,p.z);data.waterColors.push(...WATER_TINTS[kind]);}
+            }
+        };
+        if(!land.length){
+            const center=point(.5,.5),outline=[];
+            const edges=origin?2:steps;
+            for(let i=0;i<edges;i++)outline.push(point(i/edges,0));
+            for(let i=0;i<edges;i++)outline.push(point(1,i/edges));
+            for(let i=0;i<edges;i++)outline.push(point(1-i/edges,1));
+            for(let i=0;i<edges;i++)outline.push(point(0,1-i/edges));
+            for(let i=0;i<outline.length;i++)emit([center,outline[i],outline[(i+1)%outline.length]],false);
+            continue;
+        }
+        const grid=Array.from({length:steps+1},(_,v)=>Array.from({length:steps+1},(_,u)=>point(u/steps,v/steps)));
+        for(let row=0;row<steps;row++)for(let col=0;col<steps;col++){
+            const a=grid[row][col],b=grid[row][col+1],c=grid[row+1][col+1],d=grid[row+1][col];
+            for(const triangle of [[a,b,c],[a,c,d]]){emit(clip(triangle,false),false);emit(clip(triangle,true),true);}
+        }
+    }
+    return data;
 }

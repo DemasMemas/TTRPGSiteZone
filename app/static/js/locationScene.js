@@ -14074,6 +14074,7 @@ function rebuildWaterSurfaceMesh() {
     }
     if (!scene || !currentLocationData) return;
     const waterTiles = currentLocationData.tiles_data;
+    locationTerrainMaterials?.setShoreGrass(ensureTerrainGrassDetail());
     const data = buildRoundedWaterData(waterTiles, 0.24, undefined, null, waterLevelForTile, {
         shorelineRing: true,
         landSurfaceHeightAt: createTerrainSurfaceHeightSampler(waterTiles),
@@ -14115,7 +14116,7 @@ function rebuildWaterSurfaceMesh() {
         bankGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.bank, 3));
         bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(Array(data.bank.length).fill(1), 3));
         bankGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(data.bankUvs, 2));
-        bankGeometry.computeVertexNormals();
+        bankGeometry.setAttribute('normal',new THREE.Float32BufferAttribute(smoothWaterNormals(data.bank,data.sandBank),3));
         const bankMaterial = new THREE.MeshStandardMaterial({
             vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
         });
@@ -14136,7 +14137,7 @@ function rebuildWaterSurfaceMesh() {
         bankGeometry.setAttribute('color', new THREE.Float32BufferAttribute(Array(data.sandBank.length).fill(1), 3));
         bankGeometry.setAttribute('terrainTileCoord',new THREE.Float32BufferAttribute(shoreOwners(data.sandBank,waterTiles),2));
         bankGeometry.setAttribute('terrainTop',new THREE.Float32BufferAttribute(Array(data.sandBank.length/3).fill(0),1));
-        bankGeometry.computeVertexNormals();
+        bankGeometry.setAttribute('normal',new THREE.Float32BufferAttribute(smoothWaterNormals(data.sandBank,data.bank),3));
         const bankMaterial = new THREE.MeshStandardMaterial({
             vertexColors: true, side: THREE.DoubleSide, roughness: 0.97,
         });

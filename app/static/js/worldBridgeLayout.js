@@ -70,6 +70,46 @@ export function buildWorldBridgeLayout({nodes,getTile,connected,sampleHeight,own
                 }
             }
         }
+        // Constrain the deck, rather than the bottom of the complete model.
+        // The dry endpoints remain the existing road anchors. A single pass
+        // collects ground constraints; the envelope below removes local ripples.
+        for(let i=0;i<count;i++){
+            const a=joints[i],b=joints[i+1],run=Math.hypot(b.x-a.x,b.z-a.z),ux=(b.x-a.x)/run,uz=(b.z-a.z)/run;
+            for(let k=0;k<=16;k++){
+                const t=k/16,px=a.x+(b.x-a.x)*t,pz=a.z+(b.z-a.z)*t;
+                const tile=getTile(Math.floor(px),Math.floor(pz));
+                if(!tile||tile.terrain==='water')continue;
+                // At the road cross-section the asphalt follows the road;
+                // broaden the clearance check across the bank-side approach.
+                const distance=Math.min(Math.hypot(px-start.x,pz-start.z),Math.hypot(px-end.x,pz-end.z));
+                const half=.2884181952*scale*Math.min(1,distance/.25);
+                const ground=Math.max(...[-half,0,half].map(side=>{
+                    const x=px-uz*side,z=pz+ux*side;
+                    const tile=getTile(Math.floor(x),Math.floor(z));
+                    return tile&&tile.terrain!=='water'?sampleHeight(x,z)+ROAD_SURFACE_LIFT+.004:-Infinity;
+                }));
+                if(i===0&&start.land){if(t>1e-8)b.y=Math.max(b.y,(ground-a.y*(1-t))/t);}
+                else if(i===count-1&&end.land){if(t<1-1e-8)a.y=Math.max(a.y,(ground-b.y*t)/(1-t));}
+                else {a.y=Math.max(a.y,ground);b.y=Math.max(b.y,ground);}
+            }
+        }
+        // Use the upper concave envelope of the required deck heights. It
+        // removes local peaks/dips while keeping both dry road anchors fixed.
+        // Abutments may enter the bank: lifting the complete model's underside
+        // above land was what raised the road and caused the previous regression.
+        const hull=[];
+        for(let i=0;i<joints.length;i++){
+            while(hull.length>1){
+                const a=hull.at(-2),b=hull.at(-1);
+                if((joints[b].y-joints[a].y)/(b-a)>(joints[i].y-joints[b].y)/(i-b)+1e-10)break;
+                hull.pop();
+            }
+            hull.push(i);
+        }
+        for(let k=1;k<hull.length;k++){
+            const a=hull[k-1],b=hull[k];
+            for(let i=a+1;i<b;i++)joints[i].y=joints[a].y+(joints[b].y-joints[a].y)*(i-a)/(b-a);
+        }
         for(let i=0;i<count;i++){
             const a=joints[i],b=joints[i+1],p={x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:(a.z+b.z)/2};
             const sx=b.x-a.x,sy=b.y-a.y,sz=b.z-a.z,sectionLength=Math.hypot(sx,sy,sz);

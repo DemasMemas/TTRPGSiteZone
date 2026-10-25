@@ -84,3 +84,18 @@ test('trimmed bridge approach stays conforming on steep sand',()=>{
     checkSurface(data,tiles);
     for(let i=0;i<data.positions.length;i+=3)assert.ok(data.positions[i]<=2.500001);
 });
+
+test('a stale bridge height cannot lift the ordinary approach road off the terrain',()=>{
+    const tiles=Array.from({length:4},()=>Array.from({length:4},()=>({terrain:'grass',height:1})));
+    const position={x:2.5,z:2.5},height=1.24;
+    const d=buildRoadSurface({getTile:getter(tiles),pads:[{position}],links:[{from:{x:1.5,z:2.5},to:position}],
+        bridgeApproaches:[{position,toward:{x:3.5,z:2.5},height}]});
+    let seam=0,unchanged=0;
+    for(let i=0;i<d.positions.length;i+=3){
+        const x=d.positions[i],y=d.positions[i+1];
+        assert.ok(y>=1+ROAD_SURFACE_LIFT-1e-6,'ramp never sinks below terrain');
+        if(Math.abs(x-position.x)<1e-6){near(y,1+ROAD_SURFACE_LIFT, .005);seam++;}
+        if(x<position.x-.75){near(y,1+ROAD_SURFACE_LIFT);unchanged++;}
+    }
+    assert.ok(seam>1&&unchanged>0);
+});

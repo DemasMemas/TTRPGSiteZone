@@ -257,7 +257,7 @@ for (const [name, keys, x, z] of [
         }
         assert.deepEqual(h.counts, { refreshes: 0, generations: 0, meshes: 0, disposed: 0 });
         assert.deepEqual(previous.counts, {
-            refreshes: keys.length, generations: keys.length, meshes: keys.length, disposed: keys.length,
+            refreshes: keys.length, generations: keys.length, meshes: keys.length*2, disposed: keys.length*2,
         });
         assert.deepEqual([...h.chunksMap.values()].flatMap(entry => [entry.waterSurface, entry.waterBank]), meshes);
         assertWaterEquivalent(h, previous);
@@ -284,7 +284,7 @@ test('shore soil, land heights, water heights and isolated water removal match p
     }
     for (const run of [h, previous]) { run.context.finishWorldBrushStroke(); run.flush(); }
     assertWaterEquivalent(h, previous);
-    assert.deepEqual(h.counts, { refreshes: 6, generations: 5, meshes: 9, disposed: 8 });
+    assert.deepEqual(h.counts, { refreshes: 6, generations: 5, meshes: 10, disposed: 10 });
 });
 
 test('connected shoreline crosses the 55 percent threshold without changing previous classification', async () => {
@@ -485,8 +485,9 @@ test('height preview refreshes water levels and the shore including diagonal lan
         h.context.refreshWorldTerrainBrushPreview();
         if(oldBank)assert.equal(oldBank.disposed, true);
         const padded = assertLiveHeightGeometry(h, entry);
-        const expected = h.context.buildWorldWaterData(padded,
-            (x, z) => x > 0 && x <= 32 && z > 0 && z <= 32,-1,-1);
+        const waterTiles=Array.from({length:36},(_,z)=>Array.from({length:36},(_,x)=>h.context.loadedWorldTile(x-2,z-2)||null));
+        const expected = h.context.buildWorldWaterData(waterTiles,
+            (x, z) => x >= 2 && x < 34 && z >= 2 && z < 34,-2,-2);
         assert.deepEqual(entry.waterSurface.geometry.attributes.position.array, new Float32Array([...expected.water,...expected.sides]));
         assert.deepEqual(entry.waterBank.geometry.attributes.position.array, new Float32Array(expected.bankPositions));
         assert.equal(entry.waterShoreDirty, false);
@@ -595,7 +596,9 @@ test('live preview refreshes both sides of chunk corners without consuming the f
     for (const entry of h.chunksMap.values()) {
         assert.equal(entry.terrainTextureRegion, null);
         assert.ok(entry.waterSurface);
-        assert.ok(!entry.waterBank, 'a level seam has no unnecessary bank');
+        assert.ok(entry.waterBank,'live preview includes the rounded shore');
+        const p=entry.waterBank.geometry.attributes.position.array;
+        for(let i=1;i<p.length;i+=3)assert.ok(p[i]>=1-1e-6&&p[i]<=1.012+1e-6,'level shore has no depression');
     }
     assert.equal(h.buildRegions.length, 4);
     assert.ok(h.buildRegions.every(region => region.included < 1024));

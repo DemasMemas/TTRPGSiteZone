@@ -111,7 +111,7 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await request(`/lobbies/${lobby.id}/chunks/1/0/tile/0/10`, { objects: [{ type: 'house', x: -0.4, z: -0.4 }] }, token, 'PATCH');
         browser = spawn(process.env.BROWSER_EXECUTABLE || 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
             '--headless=new', '--no-sandbox', '--no-first-run', '--ignore-certificate-errors',
-            '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--window-size=1440,900',
+            ...(process.env.VTT_BROWSER_GPU==='1'?[]:['--use-angle=swiftshader','--enable-unsafe-swiftshader']), '--window-size=1440,900',
             '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
         ], { windowsHide: true, stdio: 'ignore' });
         let debugPort;
@@ -135,6 +135,12 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===${waterGeometry?4:2} && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if(process.env.VTT_GPU_PROBE==='1'){
+            console.log('GPU',await page.evaluate(`(()=>{const gl=sceneModule.renderer.getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');return ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)})()`));return;
+        }
+        if(process.env.VTT_WATER_SIMPLIFY==='1'){
+            await require('./water_simplify.browser.cjs')({page,request,token,lobby});return;
+        }
         if(process.env.VTT_WATER_FINAL==='1'){
             await require('./water_final.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
         }

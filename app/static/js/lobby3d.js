@@ -19,7 +19,7 @@ import { createWorldGrassDetail } from './worldGrassDetail.js';
 import { createPo2Fence } from './worldPo2Fence.js';
 import { buildSmoothTerrainData, isSmoothTerrainTile, createTerrainHeightSampler } from './locationTerrain.js';
 import { fenceMatrixElements } from './worldFenceLine.js';
-import { buildWorldWaterData } from './worldWaterGeometry.js';
+import { buildWorldWaterData, indexWaterGeometry } from './worldWaterGeometry.js';
 import {
     createCompatibleWebGLRenderer,
     createUnavailableRenderer,
@@ -36,6 +36,7 @@ export const getWorldTerrainMaterialDiagnostics = () => worldTerrainMaterials.di
 export const chunksMap = new Map();
 let worldGrassGroundPixelsEnabled = false;
 const worldGrassDetail = createWorldGrassDetail(THREE);
+worldTerrainMaterials.setShoreGrass(worldGrassDetail.textures());
 
 export function setWorldGrassGroundPixelsEnabled(enabled) {
     worldGrassGroundPixelsEnabled = enabled === true;
@@ -173,7 +174,7 @@ const roadPreviewMaterial=roadMaterial.clone();
 applySurfacePattern(roadPreviewMaterial, getSurfaceTexture(THREE, 'road'), 0.12, 'top');
 roadPreviewMaterial.transparent=true;roadPreviewMaterial.opacity=.85;roadPreviewMaterial.depthWrite=false;roadPreviewMaterial.depthTest=false;
 const roadPreviewMeshes=[];
-function roadSurfaceMesh(pads,links,material) {
+function roadSurfaceMesh(pads,links,material,bridgeOptions=null) {
     const bridgeApproaches=[];
     for(const link of links.filter(l=>l.bridge))for(const [position,toward] of [[link.from,link.to],[link.to,link.from]]){
         const tile=loadedWorldTile(Math.floor(position.x),Math.floor(position.z));
@@ -223,9 +224,10 @@ export function showWorldRoadPreview(plan,settings) {
     const edges=new Set();
     for(let i=1;i<nodes.length;i++){const a=nodes[i-1],b=nodes[i];edges.add(`${a.x},${a.y}:${b.x},${b.y}`);edges.add(`${b.x},${b.y}:${a.x},${a.y}`);}
     if(bridges.length)ensureRoadBridge();
-    const frames=createWorldRoadBridgeMeshes({nodes:bridges,getTile:(x,z)=>tiles.get(`${x},${z}`)||loadedWorldTile(x,z),
-        connected:(x,z,dx,dz)=>edges.has(`${x},${z}:${x+dx},${z+dz}`),sampleHeight:sampleWorldGroundHeight},true);
-    const surface=roadSurfaceMesh(pads,links,roadPreviewMaterial);
+    const bridgeOptions={nodes:bridges,getTile:(x,z)=>tiles.get(`${x},${z}`)||loadedWorldTile(x,z),
+        connected:(x,z,dx,dz)=>edges.has(`${x},${z}:${x+dx},${z+dz}`),sampleHeight:sampleWorldGroundHeight};
+    const frames=createWorldRoadBridgeMeshes(bridgeOptions,true);
+    const surface=roadSurfaceMesh(pads,links,roadPreviewMaterial,bridgeOptions);
     for(const mesh of [surface,...frames])if(mesh){scene.add(mesh);mesh.renderOrder=20;mesh.userData.roadRoutePreview=true;roadPreviewMeshes.push(mesh);}
 }
 
@@ -1089,6 +1091,28 @@ const worldWaterBankMat = new THREE.MeshStandardMaterial({
     side: THREE.DoubleSide, roughness: 0.97,
 });
 const groundGeo = new THREE.BoxGeometry(1, 1, 1);
+// Terrain surfaces already cover the box tops. Keep the full box for picking,
+// but submit only its sides to avoid shading the buried caps a second time.
+const groundSideGeo = groundGeo.clone();
+const groundSideIndices = [];
+for (let i = 0; i < groundGeo.index.count; i += 3) {
+    const a = groundGeo.index.getX(i);
+    if (Math.abs(groundGeo.attributes.normal.getY(a)) < 0.5) {
+        groundSideIndices.push(a, groundGeo.index.getX(i + 1), groundGeo.index.getX(i + 2));
+    }
+}
+groundSideGeo.setIndex(groundSideIndices);
+groundSideGeo.clearGroups();
+
+function raycastGroundInstances(raycaster, intersections) {
+    const renderedGeometry = this.geometry;
+    this.geometry = groundGeo;
+    try {
+        THREE.InstancedMesh.prototype.raycast.call(this, raycaster, intersections);
+    } finally {
+        this.geometry = renderedGeometry;
+    }
+}
 const groundMat = new THREE.MeshStandardMaterial({ map: getSurfaceTexture(THREE, 'local_terrain') });
 const smoothGroundMat = new THREE.MeshStandardMaterial({
     map: getSurfaceTexture(THREE, 'local_terrain'), vertexColors: true, side: THREE.DoubleSide,
@@ -1510,9 +1534,18 @@ function refreshWorldWaterChunk(entry, padded) {
     entry.waterShoreDirty = false;
     if (!entry.water.count) return;
     const { chunkX, chunkY, tilesData } = entry;
-    const data = buildWorldWaterData(padded,
-        (x, z) => x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE,
-        chunkX * CHUNK_SIZE - 1, chunkY * CHUNK_SIZE - 1);
+    // A halo water tile also needs its own immediate land neighbours when
+    // generating normals. Two cells still use only the same 3x3 chunk set.
+    const originX = chunkX * CHUNK_SIZE - 2;
+    const originZ = chunkY * CHUNK_SIZE - 2;
+    const waterTiles=Array.from({length:CHUNK_SIZE+4},(_,z)=>
+        Array.from({length:CHUNK_SIZE+4},(_,x)=>{
+            const wx=originX+x,wz=originZ+z,cx=Math.floor(wx/CHUNK_SIZE),cz=Math.floor(wz/CHUNK_SIZE);
+            return chunksMap.get(`${cx},${cz}`)?.tilesData[wz-cz*CHUNK_SIZE]?.[wx-cx*CHUNK_SIZE]||null;
+        }));
+    const data = buildWorldWaterData(waterTiles,
+        (x, z) => x >= 2 && x < CHUNK_SIZE+2 && z >= 2 && z < CHUNK_SIZE+2,
+        originX, originZ);
     const dummy = new THREE.Object3D();
     for (let z = 0; z < CHUNK_SIZE; z++) {
         for (let x = 0; x < CHUNK_SIZE; x++) {
@@ -1527,12 +1560,11 @@ function refreshWorldWaterChunk(entry, padded) {
         }
     }
     entry.water.instanceMatrix.needsUpdate = true;
-    const originX = chunkX * CHUNK_SIZE - 1;
-    const originZ = chunkY * CHUNK_SIZE - 1;
     if (data.water.length) {
         const geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.Float32BufferAttribute([...data.water,...data.sides], 3));
         geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.waterNormals, 3));
+        indexWaterGeometry(geometry);
         const mesh = new THREE.Mesh(geometry, waterMat);
         mesh.position.set(originX, 0, originZ);
         mesh.frustumCulled = false;
@@ -1557,7 +1589,8 @@ function refreshWorldWaterChunk(entry, padded) {
                 (bankPositions[index + 2] + originZ) * 0.25);
         }
         geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-        geometry.computeVertexNormals();
+        geometry.setAttribute('normal',new THREE.Float32BufferAttribute(data.bankNormals,3));
+        indexWaterGeometry(geometry);
         const mesh = new THREE.Mesh(geometry, worldWaterBankMat);
         mesh.position.set(originX, 0, originZ);
         mesh.frustumCulled = false;
@@ -1846,7 +1879,8 @@ export function addChunk(cx, cy, tilesData) {
     const size = tilesData.length;
     const totalTiles = size * size;
 
-    const groundInstances = new THREE.InstancedMesh(groundGeo, groundMat, totalTiles);
+    const groundInstances = new THREE.InstancedMesh(groundSideGeo, groundMat, totalTiles);
+    groundInstances.raycast = raycastGroundInstances;
     groundInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalTiles * 3), 3);
 
     const waterInstances = new THREE.InstancedMesh(groundGeo, waterInstanceMaterials, totalTiles);
