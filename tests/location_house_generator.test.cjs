@@ -7,10 +7,119 @@ const vm = require('node:vm');
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const asUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 
+test('empty shells preserve orthogonal boundaries, independent wealth/damage, and valid editable openings', async () => {
+    const { house, architecture, catalog } = await modules();
+    const base = { minX: 2, minZ: 2, width: 10, depth: 12, storeys: 3, basements: 2,
+        seed: 'shell', buildingId: 'shell' };
+    for (const shape of ['rectangle', 'L', 'U', 'C', 'compound']) {
+        for (const wealth of ['poor', 'ordinary', 'rich']) for (const condition of ['intact', 'worn', 'damaged', 'ruins']) {
+            const options = { ...base, shape, wealth, condition };
+            const plan = house.planBuildingShell(options);
+            assert.equal(plan.error, undefined);
+            assert.deepEqual(plan, house.planBuildingShell(options));
+            assert.deepEqual(JSON.parse(JSON.stringify(plan)), plan);
+            assert.deepEqual([...new Set(plan.objects.map(o => o.properties.level))].sort(), [-1,-2,0,1,2]);
+            assert.equal(plan.objects.filter(o => o.type === 'ladder').length, condition === 'ruins' ? 3 : 4);
+            assert.equal(plan.objects.filter(o => o.type === 'door').length, 1);
+            for (const object of plan.objects) {
+                assert.ok(['floor','wall','roof','door','window','ladder','floor_opening'].includes(object.type));
+                assert.equal(object.properties.building_id, 'shell');
+                assert.equal(object.properties.building_generation.wealth, wealth);
+                if (object.properties.visual_asset) assert.ok(catalog.findLocationAsset(object.properties.visual_asset));
+                if (['door','window'].includes(object.type)) {
+                    assert.equal(plan.objects.filter(w => w.type === 'wall' && architecture.doorOnWall(object,w)).length, 1);
+                }
+            }
+            const original = house.planBuildingShell({ ...options, condition: 'intact' });
+            if (condition === 'damaged' || condition === 'ruins') {
+                assert.ok(plan.objects.filter(o=>o.type==='roof').length < original.objects.filter(o=>o.type==='roof').length);
+                assert.ok(plan.objects.some(o=>o.type==='wall'&&o.properties.dimensions.height<1));
+                assert.ok(plan.objects.filter(o=>o.type==='floor').length < original.objects.filter(o=>o.type==='floor').length);
+            }
+            for (const floor of plan.objects.filter(o=>o.type==='floor')) {
+                assert.equal(floor.properties.roof_enabled, false);
+                assert.ok(architecture.floorSlabParts(floor, plan.objects).every(p=>p.width>0&&p.depth>0));
+            }
+        }
+    }
+    assert.ok(house.planBuildingShell({...base, width:9}).error);
+    assert.ok(house.planBuildingShell({...base, shape:'U', width:6}).error);
+    assert.ok(house.planBuildingShell({...base, storeys:5}).error);
+});
+
+test('failed shell creation rolls back its own objects and preserves unrelated manual objects', async () => {
+    const {house, architecture} = await modules();
+    const scene = read('locationScene.js');
+    const source = scene.slice(scene.indexOf('async function createResidentialHouse('),
+        scene.indexOf('export function canRestoreGeneratedLocationFloor('));
+    const manual = {id:99,type:'floor',tile_x:20,tile_y:20,properties:{building_id:'manual'}};
+    const data = {objects:[manual],grid_width:30,grid_height:30};
+    const saved = [], deleted = [];
+    let requests = 0;
+    const context = vm.createContext({
+        houseCreationPending:false,currentLocationData:data,currentLocationId:1,houseSceneEpoch:1,
+        window:{currentLobbyId:2},crypto:{randomUUID:()=> 'unique-run'},
+        document:{querySelector:s=>({value:s==='[data-house-kind]'?'shell':'0'})},
+        houseFootprint:house.houseFootprint,houseBuildingId:house.houseBuildingId,
+        planBuildingShell:house.planBuildingShell,structureBuildingId:architecture.structureBuildingId,
+        structurePose:architecture.structurePose,
+        chooseBuildingShell:async footprint=>({...footprint,storeys:2,basements:1}),getTileHeight:()=>0,
+        Server:{createLocationObject:async(lobby,location,spec)=>{
+            if(++requests===4)throw Error('save failed');
+            const object={...spec,id:requests};saved.push(object);return object;
+        },getLocationDetail:async()=>({objects:[manual,...saved]}),
+        deleteLocationObject:async(lobby,id)=>deleted.push(id)},
+        addLocationObject:o=>data.objects.push(o),removeLocationObject:id=>{data.objects=data.objects.filter(o=>o.id!==id)},
+        showNotification(){},
+    });
+    vm.runInContext(source,context);
+    await context.createResidentialHouse({x:2,z:2},{x:11,z:11});
+    assert.deepEqual(deleted,[1,2,3]);
+    assert.equal(data.objects.length,1);
+    assert.equal(data.objects[0],manual);
+    assert.equal(context.houseCreationPending,false);
+});
+
+test('shell roof sections use the saved editable building extent for camera cutaway', async () => {
+    const {house,architecture,roof} = await modules();
+    const plan = house.planBuildingShell({minX:2,minZ:2,width:10,depth:12,shape:'L',storeys:3,buildingId:'shell'});
+    const objects=plan.objects.map((o,i)=>({...o,id:i+1}));
+    const scene=read('locationScene.js');
+    const context=vm.createContext({...architecture,...roof,currentLocationData:{objects},
+        locationBuildingViewsDirty:true,locationBuildingViews:new Map(),roofMeshes:[],camera:null,controls:null,
+        getTileHeight:()=>1});
+    vm.runInContext(scene.slice(scene.indexOf('function getLocationBuildingViews('),scene.indexOf('function locationBuildingAt(')),context);
+    const view=context.getLocationBuildingViews().get('shell');
+    assert.equal(view.plan.width,10);assert.equal(view.plan.depth,12);assert.equal(view.plan.eaveY,8.2);
+    const object=objects.find(o=>o.type==='roof'), child={isMesh:true,material:{}};
+    context.camera={position:{x:11,y:8,z:13,distanceTo:()=>10}};
+    context.controls={target:{x:7,y:5,z:8}};
+    context.locationObjectMeshes=[{position:{y:8.2},userData:{locationObject:object},traverse:fn=>fn(child)}];
+    Object.assign(context,{locationViewLevel:2,locationRoofsVisible:true,editMode:false,
+        updateStoreyTerrainVisibility(){},applyFogOfWar(){},updateLocationLampFixtureFloors(){},lampRenderSources:[]});
+    const start=scene.indexOf('function updateRoofVisibility(');
+    vm.runInContext(scene.slice(start,scene.indexOf('\n}',start)+2),context);
+    context.updateRoofVisibility();assert.equal(child.visible,false);
+    context.camera.position.y=40;context.updateRoofVisibility();assert.equal(child.visible,true);
+    objects.find(o=>o.type==='floor').tile_x+=10;context.locationBuildingViewsDirty=true;
+    assert.ok(context.getLocationBuildingViews().get('shell').plan.width>10,'manual edits update the cutaway extent');
+});
+
+test('a wall across a courtyard cannot shrink an unrelated floor section on the same level', async () => {
+    const {architecture} = await modules();
+    const floor={type:'floor',tile_x:3,tile_y:5,properties:{building_id:'C',dimensions:{width:2,depth:2,height:.12}}};
+    const wall={type:'wall',tile_x:9,tile_y:4,properties:{building_id:'C',dimensions:{width:2,depth:.2,height:2.4}}};
+    const original=architecture.structurePose(floor);
+    const actual=architecture.floorVisualPose(floor,[floor,wall]);
+    assert.equal(actual.width,original.width);assert.equal(actual.depth,original.depth);
+    wall.tile_x=floor.tile_x;
+    assert.ok(architecture.floorVisualPose(floor,[floor,wall]).depth<original.depth);
+});
+
 async function modules() {
     const architectureUrl = asUrl(read('locationArchitecture.js'));
     const [house, architecture, roof, catalog] = await Promise.all([
-        import(asUrl(read('locationHouseGenerator.js'))),
+        import(asUrl(read('locationHouseGenerator.js').replace("'./locationRoofSections.js'", `'${asUrl(read('locationRoofSections.js'))}'`))),
         import(architectureUrl),
         import(asUrl(read('locationRoof.js').replace(
             "from './locationArchitecture.js'", `from '${architectureUrl}'`))),

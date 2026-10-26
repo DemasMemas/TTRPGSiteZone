@@ -55,6 +55,12 @@ export function storeyPlan({ buildingId, sourceLevel, targetLevel, mode = 'copy'
         if (Array.isArray(properties.contents)) properties.contents = [];
         properties.level = targetLevel;
         properties.building_id = buildingId;
+        if(properties.roof_group)properties.roof_group=`${properties.roof_group}-level-${targetLevel}`;
+        for(const profile of [properties.roof_section,properties.roof_wall]) {
+            if(Array.isArray(profile?.bodies))for(const body of profile.bodies)body.level+=targetLevel-sourceLevel;
+        }
+        if(properties.roof_section)properties.roof_section.level=(properties.roof_section.level??sourceLevel)+targetLevel-sourceLevel;
+        if(properties.roof_wall?.frame)properties.roof_wall.frame.level+=targetLevel-sourceLevel;
         return { name: o.name || o.type, type: o.type, tile_x: o.tile_x, tile_y: o.tile_y, properties };
     };
     const selected = mode === 'copy' ? source : source.filter(o => ['floor','roof','ceiling'].includes(o.type) || exterior.includes(o)
@@ -173,10 +179,12 @@ export function floorVisualPose(object, objects) {
         const across = dx * pose.normal.x + dz * pose.normal.z;
         const parallel = Math.abs(edge.axis.x * pose.axis.x + edge.axis.z * pose.axis.z);
         if (parallel >= 0.98 && edge.width >= pose.width * 0.5
+            && Math.abs(along) < (edge.width + pose.width) / 2 - wallGap
             && Math.abs(Math.abs(across) - pose.depth / 2) <= 0.2) {
             if (across < 0) minAcross = Math.max(minAcross, across + edge.depth / 2 + wallGap);
             else maxAcross = Math.min(maxAcross, across - edge.depth / 2 - wallGap);
         } else if (parallel <= 0.02 && edge.width >= pose.depth * 0.5
+            && Math.abs(across) < (edge.width + pose.depth) / 2 - wallGap
             && Math.abs(Math.abs(along) - pose.width / 2) <= 0.2) {
             if (along < 0) minAlong = Math.max(minAlong, along + edge.depth / 2 + wallGap);
             else maxAlong = Math.min(maxAlong, along - edge.depth / 2 - wallGap);

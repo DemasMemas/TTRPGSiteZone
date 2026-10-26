@@ -61,7 +61,7 @@ import {
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
     setLocationAssetResizeAxis, getLocationAssetResizeState,
     deleteSelectedLocationAsset, toggleSelectedLocationAssetsHidden, toggleSelectedLocationFire,
-    updateSelectedLocationAssetDetails, previewSelectedLocationLamp,
+    updateSelectedLocationAssetDetails, previewSelectedLocationLamp, updateSelectedLocationRoof, generateSelectedLocationRoof,
     previewLocationDarkTiles, setLocationDarknessOverlayVisible,
 } from './locationScene.js';
 import { paintDarkTiles } from './locationDarkness.js';
@@ -585,9 +585,10 @@ window.enterLocation = async function(locationId) {
                     </div>
                     <input class="form-control location-asset-search" type="search" placeholder="Найти ассет или аномалию" aria-label="Поиск по ассетам">
                     <div class="location-house-generator">
-                        <button type="button" data-house-draw aria-pressed="false">Нарисовать дом</button>
+                        <button type="button" data-house-draw aria-pressed="false">Нарисовать здание</button>
+                        <label>Генератор <select class="form-control" data-house-kind><option value="shell">Пустое здание</option><option value="residential">Прежний жилой дом</option></select></label>
                         <label>Seed <input class="form-control" data-house-seed type="text" value="0" maxlength="32"></label>
-                        <span>Растяните контур ЛКМ по ровному участку, от 4×4 до 12×12 клеток. Мебель пока только из каталога: столы, стулья и стеллажи.</span>
+                        <span>Растяните область ЛКМ по ровному участку. Затем выберите форму, размеры и этажность, проверьте предпросмотр и нажмите «Создать».</span>
                     </div>
                     <div class="location-asset-tabs"></div>
                     <div class="location-asset-grid"></div>
@@ -632,7 +633,7 @@ window.enterLocation = async function(locationId) {
                     selectLocationTool('assets');
                     setLocationHouseDrawMode(enabled);
                     houseButton.setAttribute('aria-pressed', String(enabled));
-                    if (enabled) hint.textContent = 'Потяните ЛКМ от первого угла дома до противоположного; отпускание создаст комнаты.';
+                    if (enabled) hint.textContent = 'Потяните ЛКМ от первого угла до противоположного; затем настройте здание и проверьте предпросмотр.';
                 };
                 const anomalyAssets = (locationWorldRules.anomalies || []).map(anomaly => ({
                     id: `anomaly_${anomaly.key}`, group: 'Аномалии', kind: 'decor',
@@ -792,6 +793,7 @@ window.enterLocation = async function(locationId) {
                         setActiveBuilding(selection.buildingId, selection.level);
                     }
                     const keepPreciseOpen = assetInspector.querySelector('.location-asset-precise')?.open || false;
+                    const keepRoofOpen=assetInspector.querySelector('[data-roof-section-fields]')?.open||false;
                     assetInspector.replaceChildren();
                     if (!selection) {
                         const hint = document.createElement('p');
@@ -825,6 +827,7 @@ window.enterLocation = async function(locationId) {
                             <span data-selected-building-label></span>
                             <button type="button" data-add-floor hidden>Добавить этаж</button>
                             <button type="button" data-fit-floor hidden>Растянуть по форме здания</button>
+                            <button type="button" data-generate-roof hidden>Создать / заменить крышу здания</button>
                             <span data-fit-floor-reason hidden></span>
                             <details><summary>Принадлежность вручную</summary>
                                 <label>ID здания <input class="form-control" type="text" maxlength="64" data-selected-building-id></label>
@@ -832,6 +835,16 @@ window.enterLocation = async function(locationId) {
                             </details>
                         </div>
                         <label data-selected-roof-type-field style="display:none;">Крыша <select class="form-control" data-selected-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option><option value="none">Без автоматической крыши</option></select></label>
+                        <details data-roof-section-fields hidden><summary>Параметры секции крыши</summary>
+                            <label>Область<select class="form-control" data-roof-scope><option value="body">Корпус и его сопряжения</option><option value="section">Только эта секция</option></select></label>
+                            <label>Тип<select class="form-control" data-roof-setting="type"><option value="flat">Плоская</option><option value="shed">Односкатная</option><option value="gable">Двускатная</option></select></label>
+                            <label>Направление<select class="form-control" data-roof-setting="direction"><option value="north">Север / С–Ю</option><option value="south">Юг / С–Ю</option><option value="east">Восток / В–З</option><option value="west">Запад / В–З</option></select></label>
+                            <label>Уклон, °<input class="form-control" data-roof-setting="pitch" type="number" min="0" max="60" step="1"></label>
+                            <label>Высота стен корпуса, м<input class="form-control" data-roof-setting="eave" type="number" min="2.4" max="8" step="0.1"></label>
+                            <small>Удалённые секции не восстанавливаются. Размеры и перемещение отдельных секций меняются обычными инструментами.</small>
+                            <button type="button" data-roof-apply>Применить к крыше</button>
+                        </details>
+                        <div data-roof-wall-fields hidden><small>Высота этой стороны изменяет кровлю корпуса. Для независимой ручной правки можно отвязать стену.</small><button type="button" data-roof-wall-detach>Отвязать стену от крыши</button></div>
                         <div class="location-asset-resize-tools" data-resize-tools hidden>
                             <strong data-resize-status></strong>
                             <span>Ось размера:</span>
@@ -873,6 +886,7 @@ window.enterLocation = async function(locationId) {
                     const heightInput = assetInspector.querySelector('[data-asset-elevation]');
                     heightInput.min = selection.kind === 'lamp' ? String((selection.level || 0)*STOREY_HEIGHT) : '0';
                     heightInput.max = selection.kind === 'lamp' ? String((selection.level || 0)*STOREY_HEIGHT+10) : '10';
+                    if(selection.roofSection)heightInput.max='40';
                     heightInput.value = selection.elevation ?? 0;
                     assetInspector.querySelectorAll('[data-lamp-field]').forEach(field => {
                         field.hidden = selection.kind !== 'lamp';
@@ -883,6 +897,7 @@ window.enterLocation = async function(locationId) {
                     if (selection.resizable) assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
                         input.value = selection.dimensions[input.dataset.selectedDimension];
                     });
+                    if(selection.roofWall)assetInspector.querySelector('[data-selected-dimension="height"]').parentElement.firstChild.textContent='Основная высота стены, м ';
                     const buildingIdInput = assetInspector.querySelector('[data-selected-building-id]');
                     const levelInput = assetInspector.querySelector('[data-selected-level]');
                     assetInspector.querySelector('[data-selected-building-fields]').style.display = selection.kind === 'structure' && selection.selectedCount === 1 ? '' : 'none';
@@ -894,6 +909,25 @@ window.enterLocation = async function(locationId) {
                             ? `Здание ${buildingNumber} · этаж ${selection.level}` : 'Старая постройка · без ID';
                     }
                     const addFloorButton = assetInspector.querySelector('[data-add-floor]');
+                    const roofGenerateButton=assetInspector.querySelector('[data-generate-roof]');
+                    roofGenerateButton.hidden=selection.selectedCount!==1||!selection.buildingId;
+                    roofGenerateButton.onclick=()=>generateSelectedLocationRoof();
+                    const roofFields=assetInspector.querySelector('[data-roof-section-fields]');
+                    roofFields.open=keepRoofOpen;
+                    const roofWallFields=assetInspector.querySelector('[data-roof-wall-fields]');
+                    roofWallFields.hidden=!selection.roofWall||selection.selectedCount!==1;
+                    roofWallFields.querySelector('[data-roof-wall-detach]').onclick=()=>updateSelectedLocationAssetDetails({...selection,detachRoof:true});
+                    roofFields.hidden=!(selection.roofSection||selection.structureType==='roof')||selection.selectedCount!==1;
+                    if(selection.roofSection||selection.structureType==='roof') {
+                        roofFields.querySelector('[data-roof-apply]').disabled=selection.roofEditing;
+                        const roofSettings=selection.roofSection||{type:'flat',direction:'south',pitch:25,eave:2.4};
+                        for(const input of roofFields.querySelectorAll('[data-roof-setting]'))input.value=roofSettings[input.dataset.roofSetting];
+                        roofFields.querySelector('[data-roof-apply]').onclick=async()=>{
+                            const settings={scope:roofFields.querySelector('[data-roof-scope]').value};
+                            for(const input of roofFields.querySelectorAll('[data-roof-setting]'))settings[input.dataset.roofSetting]=input.type==='number'?Number(input.value):input.value;
+                            await updateSelectedLocationRoof(settings);
+                        };
+                    }
                     addFloorButton.hidden = selection.selectedCount !== 1 || !selection.buildingId;
                     addFloorButton.onclick = () => addFloorAboveSelectedLocationAsset();
                     const fitFloorButton = assetInspector.querySelector('[data-fit-floor]');

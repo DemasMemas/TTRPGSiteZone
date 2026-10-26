@@ -1,7 +1,157 @@
 // The room graph is transient. Only ordinary location objects are persisted.
+import { planEditableRoofs, roofBodyDefaults } from './locationRoofSections.js';
 const WALL_HEIGHT = 2.4;
 const WALL_DEPTH = 0.2;
 const DOOR_WIDTH = 0.9;
+
+export function shellBodyRects(shape,width,depth) {
+    const horizontal={x:0,z:0,width,depth:4},vertical={x:0,z:0,width:4,depth};
+    return shape==='rectangle'?[{x:0,z:0,width,depth}]
+        :shape==='L'?[horizontal,vertical]
+        :shape==='U'?[horizontal,vertical,{...vertical,x:width-4}]
+        :shape==='C'?[vertical,horizontal,{...horizontal,z:depth-4}]
+        :shape==='T'?[horizontal,{...vertical,x:(width-4)/2}]
+        :shape==='cross'?[{...horizontal,z:(depth-4)/2},{...vertical,x:(width-4)/2}]
+        :[horizontal,vertical,{...vertical,x:width-4,depth:depth-2}];
+}
+
+// Empty shells use the same editable primitives and signed levels as manual building.
+// Two metre modules keep openings clear of corners and cap the number of objects.
+export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle',
+    storeys = 1, basements = 0, wealth = 'ordinary', condition = 'intact',
+    seed = '0', buildingId, roofType, roofPitch = 25, roofDirection = 'auto', roofOverhang = .25,
+    bodies: requestedBodies = null, groundHeight = () => 0 }) {
+    if (![minX, minZ, width, depth, storeys, basements].every(Number.isInteger)
+        || width < 6 || depth < 6 || width > 16 || depth > 16 || width % 2 || depth % 2
+        || storeys < 1 || storeys > 4 || basements < 0 || basements > 2 || !buildingId
+        || !['rectangle', 'L', 'U', 'C', 'compound', 'T', 'cross', 'custom'].includes(shape)
+        || !['poor', 'ordinary', 'rich'].includes(wealth)
+        || !['intact', 'worn', 'damaged', 'ruins'].includes(condition)) {
+        return { error: 'Размеры: чётные числа от 6 до 16 м; этажи 1–4, подвалы 0–2' };
+    }
+    if (shape !== 'rectangle' && (width < 10 || depth < 10)) {
+        return { error: 'Для фигурного контура нужны размеры от 10×10 м' };
+    }
+    const bodyRects = requestedBodies || shellBodyRects(shape,width,depth);
+    if (!Array.isArray(bodyRects) || !bodyRects.length || bodyRects.length > 16
+        || bodyRects.some(b=>![b.x,b.z,b.width,b.depth].every(Number.isInteger)
+            || b.x<0 || b.z<0 || b.width<2 || b.depth<2 || b.x+b.width>width || b.z+b.depth>depth
+            || !Number.isInteger(b.storeys??storeys) || (b.storeys??storeys)<1 || (b.storeys??storeys)>4)) return {error:'Корпуса: целые размеры от 2 м внутри контура, 1–4 этажа'};
+    const connected=new Set([0]);
+    for(let pass=0;pass<bodyRects.length;pass++)bodyRects.forEach((a,i)=>{
+        if(connected.has(i))return;
+        if(bodyRects.some((b,j)=>connected.has(j)&&(()=>{
+            const x=Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x);
+            const z=Math.min(a.z+a.depth,b.z+b.depth)-Math.max(a.z,b.z);
+            return x>=0&&z>=0&&(x>0||z>0);
+        })()))connected.add(i);
+    });
+    if(connected.size!==bodyRects.length)return {error:'Корпуса должны соединяться сторонами или перекрываться; касания одним углом недостаточно'};
+    const roofBodies=bodyRects.map((b,i)=>roofBodyDefaults({...b,x:minX+b.x,z:minZ+b.z,
+        level:(b.storeys??storeys)-1,type:b.type||roofType||'flat',pitch:b.pitch??roofPitch,
+        direction:b.direction||(roofDirection==='auto'?undefined:roofDirection),eave:b.eave??2.4,overhang:b.overhang??roofOverhang},i));
+    const unit = bodyRects.every(b=>[b.x,b.z,b.width,b.depth].every(v=>v%2===0)) ? 2 : 1;
+    const cols = width / unit, rows = depth / unit;
+    const occupied = (x, z, level=0) => {
+        if (x < 0 || z < 0 || x >= cols || z >= rows) return false;
+        if (roofType || requestedBodies || ['T','cross','custom'].includes(shape)) return bodyRects.some(b=>
+            x*unit+unit/2>b.x && x*unit+unit/2<b.x+b.width && z*unit+unit/2>b.z && z*unit+unit/2<b.z+b.depth && level<(b.storeys??storeys));
+        if (shape === 'L') return x < 2 || z < 2;
+        if (shape === 'U') return x < 2 || x >= cols - 2 || z < 2;
+        if (shape === 'C') return x < 2 || z < 2 || z >= rows - 2;
+        if (shape === 'compound') return x < 2 || z < 2 || (x >= cols - 2 && z < rows - 1);
+        return true;
+    };
+    const cells = [];
+    for (let z = 0; z < rows; z++) for (let x = 0; x < cols; x++) {
+        if (occupied(x, z)) cells.push({ x, z });
+    }
+    const generation = { version: 1, minX, minZ, width, depth, shape, storeys, basements,
+        wealth, condition, seed: String(seed), ...(roofType?{roofType,roofPitch,roofDirection,bodies:bodyRects}: {}) };
+    const objects = [];
+    const style = {
+        poor: { wall: 'wall', floor: 'art_aged_wood', color: '#877964', thickness: .16, window: .8 },
+        ordinary: { wall: 'art_worn_plaster', floor: 'floor', color: '#aaa18e', thickness: .2, window: 1.1 },
+        rich: { wall: 'art_worn_plaster', floor: 'art_aged_wood', color: '#d4c9ae', thickness: .3, window: 1.5 },
+    }[wealth];
+    const random = key => hashSeed(`${seed}:${key}`) / 4294967296;
+    const add = (type, level, x, z, w, d, h, extra = {}) => {
+        const tile_x = Math.min(minX + width - 1, Math.max(minX, Math.floor(x)));
+        const tile_y = Math.min(minZ + depth - 1, Math.max(minZ, Math.floor(z)));
+        objects.push({ type, name: `Здание · ${type}`, tile_x, tile_y, properties: {
+            building_id: buildingId, level, dimensions: { width: w, depth: d, height: h },
+            offset_x: x - tile_x - .5, offset_z: z - tile_y - .5,
+            elevation: 0, generation_seed: String(seed), building_generation: generation, ...extra,
+        } });
+    };
+    // Keep the entrance and vertical circulation strip intact. Damage elsewhere is
+    // missing geometry, never a colour-only effect or a phantom stair connection.
+    const highestStorey=Math.max(...bodyRects.map(b=>b.storeys??storeys));
+    // The ordinary entry and alternating ladders need a four metre service area.
+    const service=cells.find(c=>Array.from({length:4/unit},(_,i)=>i).every(i=>
+        Array.from({length:4/unit},(_,j)=>j).every(j=>occupied(c.x+i,c.z+j,highestStorey-1))));
+    if(!service)return {error:'В контуре нет места для входа и межэтажных связей'};
+    const serviceX=minX+service.x*unit,serviceZ=minZ+service.z*unit;
+    const entry=cells.find(c=>!occupied(c.x,c.z-1));
+    for (let level = -basements; level < highestStorey; level++) {
+        for (const { x, z } of cells) {
+            if(!occupied(x,z,level))continue;
+            const protectedCell = x*unit < (service.x*unit+4) && z*unit < (service.z*unit+4)
+                && x>=service.x && z>=service.z || x===entry.x&&z===entry.z;
+            const collapse = level > -basements && !protectedCell
+                && random(`slab:${level}:${x}:${z}`) < (condition === 'ruins' ? .48 : condition === 'damaged' ? .2 : 0);
+            if (!collapse) add('floor', level, minX + x * unit + unit/2, minZ + z * unit + unit/2, unit, unit, .12,
+                { roof_enabled: false, visual_asset: style.floor });
+            else add('floor_opening', level, minX + x * unit + unit/2, minZ + z * unit + unit/2, unit, unit, .05);
+            if (!roofType && level === storeys - 1 && random(`roof:${x}:${z}`)
+                >= (condition === 'ruins' ? .85 : condition === 'damaged' ? .4 : condition === 'worn' ? .08 : 0)) {
+                add('roof', level, minX + x * 2 + 1, minZ + z * 2 + 1, 2, 2, .13,
+                    { elevation: 2.4, passable: true, color: wealth === 'poor' ? '#665b4c' : '#575b52' });
+            }
+            for (const [dx, dz] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+                if (occupied(x + dx, z + dz, level)) continue;
+                const entrance = x === entry.x && z === entry.z && dz === -1;
+                const roll = random(`wall:${level}:${x}:${z}:${dx}:${dz}`);
+                const broken = !entrance && level >= 0
+                    && roll < (condition === 'ruins' ? .72 : condition === 'damaged' ? .3 : 0);
+                if (broken && roll < (condition === 'ruins' ? .4 : .14)) continue;
+                const wx = minX + x * unit + unit/2 + dx*unit/2, wz = minZ + z * unit + unit/2 + dz*unit/2;
+                const rotation = dx ? -Math.PI / 2 : 0;
+                const height = broken ? .45 + roll : 2.4;
+                add('wall', level, wx, wz, unit, style.thickness, height,
+                    { rotation, color: style.color, visual_asset: style.wall });
+                if (entrance && level === 0) {
+                    add('door', level, wx, wz, Math.min(unit*.9,wealth === 'rich' ? 1.3 : 1), .18, 2,
+                        { rotation, is_open: true, ...(condition === 'ruins' ? { visual_asset: 'opening', interactions: [] } : {}) });
+                } else if (level >= 0 && !broken && !entrance && (wealth !== 'poor' || (x + z) % 2 === 0)) {
+                    const lost = condition !== 'intact' && random(`window:${level}:${x}:${z}:${dx}:${dz}`)
+                        < (condition === 'worn' ? .2 : .6);
+                    add('window', level, wx, wz, Math.min(unit*.8,style.window), .14, 1,
+                        { rotation, elevation: 1, ...(lost ? { is_open: true } : {}) });
+                }
+                if (wealth === 'rich' && !broken && !(entrance && level === 0)) {
+                    add('wall', level, wx, wz, unit, .34, .12,
+                        { rotation, elevation: 2.28, color: '#d4c9ae' });
+                }
+            }
+        }
+        if (level < highestStorey - 1) {
+            // Alternate shafts to preserve a landing at every level.
+            const x = serviceX + (Math.abs(level) % 2 ? 2.5 : 1.5), z = serviceZ + 2.5;
+            if(!occupied(Math.floor((x-minX)/unit),Math.floor((z-minZ)/unit),level+1))return {error:'Над входной зоной нет площадки следующего этажа: выровняйте этажность основного корпуса'};
+            const broken = condition === 'ruins' && level === highestStorey - 2;
+            if (!broken) add('ladder', level, x, z, .9, .9, 2.4);
+            add('floor_opening', level + 1, x, z, 1, 1, .05);
+        }
+    }
+    if(roofType) {
+        const roofing=planEditableRoofs(objects,roofBodies,{condition,seed,buildingId,group:`${buildingId}-roof`,groundHeight});
+        if(roofing.error)return roofing;
+        for(const {object,properties} of roofing.walls)Object.assign(object.properties,properties);
+        objects.push(...roofing.objects.map(o=>({...o,properties:{...o.properties,building_generation:generation}})));
+    }
+    return { objects, cells, footprint: { minX, minZ, width, depth }, generation };
+}
 
 function hashSeed(seed) {
     let hash = 2166136261;

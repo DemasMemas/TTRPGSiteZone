@@ -48,8 +48,11 @@ import { floorSlabParts, storeyPlan, stairStepPlan, doorOnWall, doorFrameStyle, 
     wallVisualPlan } from './locationArchitecture.js';
 import { applyInteriorFloorShade, createRoofVisual, roofOpacityForCamera, roofPlans,
     roofVisibleForCamera } from './locationRoof.js';
-import { generatedFloorBlueprint, houseBuildingId, houseFootprint, planResidentialHouse,
+import { generatedFloorBlueprint, houseBuildingId, houseFootprint, planResidentialHouse, planBuildingShell, shellBodyRects,
     restorableGeneratedFloor } from './locationHouseGenerator.js';
+import { createSavedRoofGeometry, planEditableRoofs, rebuildRoofSection, roofBodiesFromRects,
+    validateRoofBodies, wallRoofProperties, planRoofJoints, wallRoofMeshGeometry, roofBodyDefaults, roofSectionProperties, roofRect,
+    roofWallBasisObject, transformedRoofAnchor } from './locationRoofSections.js';
 import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
     updateLocationTerrainPixels } from './locationTerrainTexture.js';
 import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
@@ -604,6 +607,8 @@ let houseDrawStart = null;
 let houseDrawEnd = null;
 let houseDrawPointerId = null;
 let houseOutlineMesh = null;
+let houseShellDialog = null;
+let houseShellPreview = null;
 let houseCreationPending = false;
 let houseFloorRestorePending = false;
 let houseSceneEpoch = 0;
@@ -10164,6 +10169,13 @@ function createLocationObjectMesh(obj, forPreview = false) {
         group.add(createHouseholdModel(THREE, asset, {width, depth, height}, properties.color));
     } else if (['ladder','hatch','floor_opening'].includes(obj.type)) {
         group.add(createVerticalAccessModel(THREE,obj,{width,depth,height},material));
+    } else if (obj.type === 'roof' && Array.isArray(properties.roof_geometry)) {
+        const geometry=createSavedRoofGeometry(THREE,properties.roof_geometry);
+        const mesh=new THREE.Mesh(geometry,material);
+        const native=properties.roof_section?.nativeSize;
+        if(native)mesh.scale.set(width/native.width,height/native.height,depth/native.depth);
+        applySurfacePattern(material,getSurfaceTexture(THREE,'roof'),.22,'top');
+        group.add(mesh);
     } else if (obj.type === 'floor') {
         for (const part of floorSlabParts(obj, currentLocationData?.objects)) {
             const mesh = new THREE.Mesh(new THREE.BoxGeometry(part.width, height, part.depth), material);
@@ -10181,6 +10193,30 @@ function createLocationObjectMesh(obj, forPreview = false) {
         group.add(createFenceModel(THREE, width, height, depth, fenceColor));
     } else if (obj.type === 'wall') {
         const plan = wallVisualPlan(obj, currentLocationData?.objects || []);
+        const roofAnchor=properties.roof_ground_anchor?transformedRoofAnchor(obj):null;
+        let roofCeiling=Infinity;
+        if(properties.roof_wall) {
+            const p=structurePose(obj),floors=(currentLocationData?.objects||[]).filter(f=>f.type==='floor'
+                &&structureBuildingId(f)===structureBuildingId(obj)&&structureLevel(f)>structureLevel(obj));
+            const heights=[-.4,0,.4].map(t=>{
+                const x=p.x+p.axis.x*p.width*t,z=p.z+p.axis.z*p.width*t;
+                const covering=floors.filter(f=>{
+                    const q=structurePose(f);
+                    return [-.2,.2].some(n=>{const dx=x+n*p.normal.x-q.x,dz=z+n*p.normal.z-q.z;
+                        return Math.abs(dx*q.axis.x+dz*q.axis.z)<q.width/2&&Math.abs(dx*q.normal.x+dz*q.normal.z)<q.depth/2;});
+                });
+                return covering.length?Math.min(...covering.map(f=>getTileHeight(f.tile_x,f.tile_y)+structureLevelOffset(f)+Number(f.properties?.elevation||0)
+                    -getTileHeight(obj.tile_x,obj.tile_y)-structureLevelOffset(obj)-Number(properties.elevation||0))):Infinity;
+            });
+            if(heights.every(Number.isFinite))roofCeiling=Math.min(...heights);
+        }
+        const roofWallGeometry=properties.roof_wall ? wallRoofMeshGeometry(roofAnchor?{...obj,properties:{...properties,
+            roof_ground_delta:getTileHeight(roofAnchor.x,roofAnchor.z)-getTileHeight(obj.tile_x,obj.tile_y)}}:obj,plan.spans,roofCeiling):null;
+        if(roofWallGeometry?.length) {
+            const profileMesh=new THREE.Mesh(createSavedRoofGeometry(THREE,roofWallGeometry),material),frame=properties.roof_wall.frame;
+            if(frame)profileMesh.scale.set(width/frame.width,1,depth/frame.depth);
+            group.add(profileMesh);
+        } else {
         const start = plan.spans[0]?.start ?? -width / 2;
         const end = plan.spans[plan.spans.length - 1]?.end ?? width / 2;
         for (const span of plan.spans) {
@@ -10209,6 +10245,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
             }
             piece.position.set(centerX, centerY, 0);
             group.add(piece);
+        }
         }
     } else if (obj.type === 'window') {
         const frameMaterial = new THREE.MeshStandardMaterial({ color: '#6f756b' });
@@ -10335,6 +10372,9 @@ function createLocationObjectMesh(obj, forPreview = false) {
         main.position.y = height / 2;
         group.add(main);
     }
+    if(obj.type==='wall' && !properties.roof_wall && Array.isArray(properties.roof_wall_geometry) && properties.roof_wall_geometry.length) {
+        group.add(new THREE.Mesh(createSavedRoofGeometry(THREE,properties.roof_wall_geometry),material));
+    }
     if (obj.type === 'floor' && usePbrMaterial) {
         group.traverse(child => {
             if (child.isMesh && child.geometry?.attributes?.uv) {
@@ -10347,8 +10387,10 @@ function createLocationObjectMesh(obj, forPreview = false) {
     const objectPosition = getObjectGridPosition(obj);
     const tileX = objectPosition.x ?? 0;
     const tileY = objectPosition.y ?? 0;
+    const roofAnchor=properties.roof_ground_anchor?transformedRoofAnchor(obj):null;
     group.position.set(floorPose?.x ?? tileX + 0.5 + Number(properties.offset_x || 0),
-        getTileHeight(tileX, tileY) + structureLevelOffset(obj) + clampAssetElevation(properties.elevation)
+        (properties.roof_section && roofAnchor ? getTileHeight(roofAnchor.x,roofAnchor.z) : getTileHeight(tileX, tileY))
+            + structureLevelOffset(obj) + (properties.roof_section ? Number(properties.elevation)||0 : clampAssetElevation(properties.elevation))
             - (obj.type === 'floor' ? height - FLOOR_SURFACE_OFFSET : 0),
         floorPose?.z ?? tileY + 0.5 + Number(properties.offset_z || 0));
     alignFloorRugToSurface(group, obj);
@@ -11077,7 +11119,23 @@ function getLocationBuildingViews() {
                     + structureLevelOffset(object) + pose.height, rise: 0 };
             view.planLevel = level;
         }
+        if (object.type === 'floor' && (view.shellBounds || object.properties?.building_generation?.version === 1)) {
+            const p = structurePose(object);
+            const rx = (Math.abs(p.axis.x) * p.width + Math.abs(p.normal.x) * p.depth) / 2;
+            const rz = (Math.abs(p.axis.z) * p.width + Math.abs(p.normal.z) * p.depth) / 2;
+            const bounds = view.shellBounds || { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity, top: -Infinity };
+            bounds.minX = Math.min(bounds.minX, p.x - rx); bounds.maxX = Math.max(bounds.maxX, p.x + rx);
+            bounds.minZ = Math.min(bounds.minZ, p.z - rz); bounds.maxZ = Math.max(bounds.maxZ, p.z + rz);
+            bounds.top = Math.max(bounds.top, getTileHeight(object.tile_x, object.tile_y)
+                + structureLevelOffset(object) + Number(object.properties?.elevation || 0) + STOREY_HEIGHT);
+            view.shellBounds = bounds;
+        }
         views.set(id, view);
+    }
+    for (const view of views.values()) {
+        const b = view.shellBounds;
+        if (b) view.plan = { x: (b.minX + b.maxX) / 2, z: (b.minZ + b.maxZ) / 2,
+            width: b.maxX - b.minX, depth: b.maxZ - b.minZ, angle: 0, eaveY: b.top, rise: 0 };
     }
     for (const roof of roofMeshes) {
         const floor = byId.get(String(roof.userData.roofPlan?.floorId));
@@ -11254,6 +11312,8 @@ function updateRoofVisibility() {
     if (!camera || !controls) return;
     updateStoreyTerrainVisibility();
     const distance = camera.position.distanceTo(controls.target);
+    const wasDirty = locationBuildingViewsDirty;
+    const views = getLocationBuildingViews();
     // Independent panels use the existing roof cutaway rule, while remaining
     // visible and pickable in the manual editor.
     for (const mesh of locationObjectMeshes) {
@@ -11266,12 +11326,15 @@ function updateRoofVisibility() {
             const p=structurePose(floor),dx=pose.x-p.x,dz=pose.z-p.z;
             const top=getTileHeight(floor.tile_x,floor.tile_y)+structureLevelOffset(floor)
                 +Number(floor.properties?.elevation||0)+FLOOR_SURFACE_OFFSET;
-            return mesh.position.y <= top && mesh.position.y+pose.height >= top-p.height
-                && Math.abs(dx*p.axis.x+dz*p.axis.z)<p.width/2
-                && Math.abs(dx*p.normal.x+dz*p.normal.z)<p.depth/2;
+            const margin=object.properties?.roof_section?(object.properties.roof_section.bodies?.[object.properties.roof_section.owner]?.overhang||0)+.001:0;
+            return (object.properties?.roof_section||mesh.position.y <= top && mesh.position.y+pose.height >= top-p.height)
+                && Math.abs(dx*p.axis.x+dz*p.axis.z)<p.width/2+margin
+                && Math.abs(dx*p.normal.x+dz*p.normal.z)<p.depth/2+margin;
         });
+        const coveringPlan = object.properties?.building_generation?.version === 1
+            ? views.get(structureBuildingId(object))?.plan : null;
         const opacity = coveredBySlab || locationViewLevel < 0 && structureLevel(object) > locationViewLevel ? 0
-            : editMode ? Number(locationRoofsVisible) : roofOpacityForCamera({ ...pose, rise: 0,
+            : editMode ? Number(locationRoofsVisible) : roofOpacityForCamera(coveringPlan || { ...pose, rise: 0,
             eaveY: mesh.position.y + pose.height }, controls.target, distance,
             locationRoofsVisible, false, camera.position);
         mesh.traverse(child => {
@@ -11282,8 +11345,6 @@ function updateRoofVisibility() {
             child.castShadow = opacity === 1;
         });
     }
-    const wasDirty = locationBuildingViewsDirty;
-    const views = getLocationBuildingViews();
     let floorVisibilityChanged = wasDirty;
     for (const view of views.values()) {
         if (view.maxLevel === view.minLevel || !view.plan) continue;
@@ -11388,15 +11449,21 @@ function refreshArchitecturalMeshes() {
     refreshLocationDarkness();
 }
 
+let roofTerrainRefreshFrame=null;
 function updateLocationObjectHeight(tileX, tileZ) {
     const height = getTileHeight(tileX, tileZ);
     let floorChanged = false;
+    let roofWallChanged=false;
     locationObjectMeshes.forEach(mesh => {
         const object = mesh.userData.locationObject;
         if (!object) return;
         const position = getObjectGridPosition(object);
-        if (position.x === tileX && position.y === tileZ) {
-            mesh.position.y = height + structureLevelOffset(object) + clampAssetElevation(object.properties?.elevation)
+        const anchor=object.properties?.roof_ground_anchor?transformedRoofAnchor(object):null;
+        const ownTile=position.x === tileX && position.y === tileZ,anchorTile=anchor?.x===tileX&&anchor?.z===tileZ;
+        if(object.properties?.roof_wall&&(ownTile||anchorTile))roofWallChanged=true;
+        if (ownTile || object.properties?.roof_section&&anchorTile) {
+            mesh.position.y = (object.properties?.roof_section&&anchor?getTileHeight(anchor.x,anchor.z):height)
+                + structureLevelOffset(object) + (object.properties?.roof_section?Number(object.properties.elevation)||0:clampAssetElevation(object.properties?.elevation))
                 - (object.type === 'floor'
                     ? Number(object.properties?.dimensions?.height || 0.12) - FLOOR_SURFACE_OFFSET : 0);
             alignFloorRugToSurface(mesh, object);
@@ -11404,6 +11471,10 @@ function updateLocationObjectHeight(tileX, tileZ) {
         }
     });
     if (floorChanged) refreshFloorRugHeights();
+    if(roofWallChanged&&roofTerrainRefreshFrame===null) {
+        const epoch=houseSceneEpoch;
+        roofTerrainRefreshFrame=requestAnimationFrame(()=>{roofTerrainRefreshFrame=null;if(epoch===houseSceneEpoch)refreshArchitecturalMeshes();});
+    }
 }
 
 function clearBuildPreview() {
@@ -11442,6 +11513,7 @@ function updateHouseOutline() {
 }
 
 export function setLocationHouseDrawMode(enabled) {
+    houseShellDialog?.close();
     houseDrawMode = Boolean(enabled);
     houseDrawStart = null;
     houseDrawEnd = null;
@@ -11458,16 +11530,137 @@ export function setLocationHouseDrawMode(enabled) {
     return houseDrawMode;
 }
 
+function clearBuildingShellPreview() {
+    if (!houseShellPreview) return;
+    scene?.remove(houseShellPreview);
+    disposeLocationObject(houseShellPreview);
+    houseShellPreview = null;
+}
+
+function chooseBuildingShell(footprint) {
+    houseShellDialog?.close();
+    const dialog = document.createElement('dialog');
+    houseShellDialog = dialog;
+    dialog.className = 'modal-content';
+    dialog.style.cssText = 'position:fixed;left:auto;right:20px;top:70px;margin:0;width:340px;max-height:75vh;overflow:auto;padding:16px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;z-index:1100;';
+    dialog.innerHTML = `<form method="dialog" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <strong style="grid-column:1/-1;">Пустое здание</strong>
+        <label style="grid-column:1/-1;">Форма<select class="form-control" name="shape"><option value="rectangle">Прямоугольник</option><option value="L">Г</option><option value="T">Т</option><option value="U">П</option><option value="C">С</option><option value="cross">Крест</option><option value="compound">Три корпуса</option><option value="custom">Свои корпуса</option></select></label>
+        <label>Ширина, м<input class="form-control" name="width" type="number" min="6" max="16" step="2" required></label>
+        <label>Глубина, м<input class="form-control" name="depth" type="number" min="6" max="16" step="2" required></label>
+        <label>Наземных этажей<input class="form-control" name="storeys" type="number" min="1" max="4" value="1" required></label>
+        <label>Подвалов<input class="form-control" name="basements" type="number" min="0" max="2" value="0" required></label>
+        <label>Достаток<select class="form-control" name="wealth"><option value="poor">Бедное</option><option value="ordinary" selected>Обычное</option><option value="rich">Богатое</option></select></label>
+        <label>Состояние<select class="form-control" name="condition"><option value="intact">Целое</option><option value="worn">Ветхое</option><option value="damaged">Частично разрушенное</option><option value="ruins">Руины</option></select></label>
+        <label>Кровля<select class="form-control" name="roofType"><option value="flat">Плоская</option><option value="shed">Односкатная</option><option value="gable" selected>Двускатная</option></select></label>
+        <label>Уклон, °<input class="form-control" name="roofPitch" type="number" min="0" max="60" step="1" value="25" required></label>
+        <label>Высокая сторона / скаты<select class="form-control" name="roofDirection"><option value="auto">По корпусу</option><option value="north">Север / С–Ю</option><option value="south">Юг / С–Ю</option><option value="east">Восток / В–З</option><option value="west">Запад / В–З</option></select></label>
+        <label>Свес, м<input class="form-control" name="roofOverhang" type="number" min="0" max="0.6" step="0.05" value="0.25" required></label>
+        <details style="grid-column:1/-1;" data-shell-bodies><summary>Крыши и этажность корпусов</summary><div data-shell-body-rows></div><button type="button" data-shell-add-body>Добавить корпус</button></details>
+        <small style="grid-column:1/-1;">Фигурные контуры: от 10×10 м. Связи этажей — вертикальные лестницы. Повторная генерация создаёт здание только на свободном участке; существующие здания и ручные изменения сохраняются.</small>
+        <output style="grid-column:1/-1;" data-shell-summary></output>
+        <div style="grid-column:1/-1;position:sticky;bottom:0;background:#20251d;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:6px 0;">
+        <button type="button" data-shell-preview>Предпросмотр</button>
+        <button value="create" data-shell-create disabled>Создать</button>
+        <button style="grid-column:1/-1;" value="cancel" formnovalidate>Отмена</button>
+        </div>
+    </form>`;
+    const form = dialog.querySelector('form');
+    for (const key of ['width', 'depth']) form.elements[key].value = Math.min(16, Math.max(6, Math.ceil(footprint[key] / 2) * 2));
+    const appendBody = b => {
+        const row=document.createElement('fieldset');row.dataset.shellBody='';row.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:8px 0;';
+        row.innerHTML=`<legend>Корпус</legend>${[['x','X от угла',0,16,1],['z','Z от угла',0,16,1],['width','Ширина',2,16,1],['depth','Глубина',2,16,1],['storeys','Этажей',1,4,1],['eave','Стены, м',2.4,8,.1],['pitch','Уклон, °',0,60,1],['overhang','Свес, м',0,.6,.05]].map(([key,label,min,max,step])=>`<label>${label}<input class="form-control" data-body-field="${key}" type="number" min="${min}" max="${max}" step="${step}" required></label>`).join('')}
+            <label>Кровля<select class="form-control" data-body-field="type"><option value="flat">Плоская</option><option value="shed">Односкатная</option><option value="gable">Двускатная</option></select></label>
+            <label>Направление<select class="form-control" data-body-field="direction"><option value="auto">По корпусу</option><option value="north">Север / С–Ю</option><option value="south">Юг / С–Ю</option><option value="east">Восток / В–З</option><option value="west">Запад / В–З</option></select></label><button type="button" data-body-remove>Удалить корпус</button>`;
+        const defaults={x:0,z:0,width:4,depth:4,storeys:Number(form.elements.storeys.value),eave:2.4,pitch:Number(form.elements.roofPitch.value),type:form.elements.roofType.value,direction:form.elements.roofDirection.value,overhang:Number(form.elements.roofOverhang.value),...b};
+        for(const input of row.querySelectorAll('[data-body-field]'))input.value=defaults[input.dataset.bodyField];
+        row.querySelector('[data-body-remove]').onclick=()=>{row.remove();form.dispatchEvent(new Event('input'));};
+        form.querySelector('[data-shell-body-rows]').appendChild(row);
+    };
+    const resetBodies=()=>{
+        form.querySelector('[data-shell-body-rows]').replaceChildren();
+        for(const body of shellBodyRects(form.elements.shape.value,Number(form.elements.width.value),Number(form.elements.depth.value)))appendBody(body);
+    };
+    resetBodies();
+    form.querySelector('[data-shell-add-body]').onclick=()=>{appendBody({x:4,z:4});form.elements.shape.value='custom';form.dispatchEvent(new Event('input'));};
+    let approved = null;
+    form.addEventListener('input', () => {
+        approved = null;
+        dialog.querySelector('[data-shell-create]').disabled = true;
+        clearBuildingShellPreview();
+    });
+    form.addEventListener('change',event=>{
+        const name=event.target.name;
+        if(['shape','width','depth'].includes(name)&&form.elements.shape.value!=='custom')resetBodies();
+        const field={storeys:'storeys',roofType:'type',roofPitch:'pitch',roofDirection:'direction',roofOverhang:'overhang'}[name];
+        if(field)for(const input of form.querySelectorAll(`[data-body-field="${field}"]`))input.value=event.target.value;
+    });
+    dialog.querySelector('[data-shell-preview]').onclick = () => {
+        if (!form.reportValidity()) return;
+        const options = { ...footprint, seed: document.querySelector('[data-house-seed]')?.value || '0', buildingId: 'shell-preview' };
+        for (const key of ['width', 'depth', 'storeys', 'basements']) options[key] = Number(form.elements[key].value);
+        for (const key of ['shape', 'wealth', 'condition']) options[key] = form.elements[key].value;
+        for(const key of ['roofType','roofDirection'])options[key]=form.elements[key].value;
+        for(const key of ['roofPitch','roofOverhang'])options[key]=Number(form.elements[key].value);
+        options.bodies=[...form.querySelectorAll('[data-shell-body]')].map(row=>Object.fromEntries([...row.querySelectorAll('[data-body-field]')].map(input=>[input.dataset.bodyField,input.type==='number'?Number(input.value):input.value])));
+        options.bodies.forEach(b=>{if(b.direction==='auto')delete b.direction;});
+        const plan = planBuildingShell({...options,groundHeight:getTileHeight});
+        const summary = dialog.querySelector('[data-shell-summary]');
+        clearBuildingShellPreview();
+        if (plan.error) { summary.textContent = plan.error; return; }
+        if (options.minX + options.width > currentLocationData.grid_width || options.minZ + options.depth > currentLocationData.grid_height) {
+            summary.textContent = 'Контур выходит за границы локации'; return;
+        }
+        const original = currentLocationData.objects;
+        try {
+            const previewObjects = plan.objects.map((object, index) => ({ ...object, id: -index - 1 }));
+            currentLocationData.objects = [...(original || []), ...previewObjects];
+            houseShellPreview = new THREE.Group();
+            for (const object of previewObjects) {
+                const mesh = createLocationObjectMesh(object, true);
+                mesh.traverse(child => { child.raycast = () => {}; });
+                houseShellPreview.add(mesh);
+            }
+            scene.add(houseShellPreview);
+            approved = options;
+            summary.textContent = `${plan.objects.length} редактируемых элементов; уровни от ${-options.basements} до ${options.storeys - 1}. Подвалы видны после создания при выборе этажа.`;
+            dialog.querySelector('[data-shell-create]').disabled = false;
+        } finally { currentLocationData.objects = original; }
+    };
+    document.body.appendChild(dialog);
+    dialog.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { event.preventDefault(); dialog.close(); }
+    });
+    return new Promise(resolve => {
+        dialog.addEventListener('close', () => {
+            clearBuildingShellPreview();
+            const result = dialog.returnValue === 'create' ? approved : null;
+            dialog.remove();
+            if (houseShellDialog === dialog) houseShellDialog = null;
+            resolve(result);
+        }, { once: true });
+        dialog.show();
+    });
+}
+
 async function createResidentialHouse(start, end) {
     if (houseCreationPending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return;
     const lobbyId = window.currentLobbyId;
     const locationId = currentLocationId;
     const sceneEpoch = houseSceneEpoch;
-    const footprint = houseFootprint(start.x, start.z, end.x, end.z);
+    let footprint = houseFootprint(start.x, start.z, end.x, end.z);
+    const shell = document.querySelector('[data-house-kind]')?.value === 'shell';
+    const options = shell ? await chooseBuildingShell(footprint) : null;
+    if (shell && !options) return;
+    if (sceneEpoch !== houseSceneEpoch || locationId !== currentLocationId) return;
+    if (options) footprint = { minX: options.minX, minZ: options.minZ, width: options.width, depth: options.depth };
     const { minX, minZ, width, depth } = footprint;
-    const seed = document.querySelector('[data-house-seed]')?.value || '0';
-    const buildingId = houseBuildingId(locationId, footprint, seed);
-    const plan = planResidentialHouse({ ...footprint, seed, buildingId, assetById: findLocationAsset });
+    const seed = options?.seed ?? (document.querySelector('[data-house-seed]')?.value || '0');
+    const buildingId = shell
+        ? `shell-${locationId}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
+        : houseBuildingId(locationId, footprint, seed);
+    const plan = shell ? planBuildingShell({ ...options, seed, buildingId, groundHeight:getTileHeight })
+        : planResidentialHouse({ ...footprint, seed, buildingId, assetById: findLocationAsset });
     if (plan.error) return showNotification(plan.error, 'system');
     if (minX < 0 || minZ < 0 || minX + width > currentLocationData.grid_width
         || minZ + depth > currentLocationData.grid_height) {
@@ -11475,7 +11668,7 @@ async function createResidentialHouse(start, end) {
     }
     if ((currentLocationData.objects || []).some(object => {
         if (structureBuildingId(object) === buildingId) return true;
-        if (object.type !== 'floor') return false;
+        if (object.type !== 'floor' && !(shell && structureBuildingId(object))) return false;
         const pose = structurePose(object);
         const radiusX = (Math.abs(Math.cos(pose.angle)) * pose.width
             + Math.abs(Math.sin(pose.angle)) * pose.depth) / 2;
@@ -11507,7 +11700,8 @@ async function createResidentialHouse(start, end) {
         }
         window.dispatchEvent(new CustomEvent('location-editor-active-building',
             { detail: { buildingId, level: 0 } }));
-        showNotification(`Дом создан: ${plan.rooms.map(room => room.name).join(', ')}`, 'success');
+        showNotification(shell ? 'Пустое здание создано. Все элементы доступны для ручной правки.'
+            : `Дом создан: ${plan.rooms.map(room => room.name).join(', ')}`, 'success');
     } catch (error) {
         let remaining = 0;
         try {
@@ -11965,6 +12159,13 @@ function updateBuildPreview() {
                 ? structureLevelOffset(source) : structureLevelOffset({ properties: placementProperties }))
                 + (editorResizeMode ? editorResizeElevation
                     : clampAssetElevation(source.properties?.elevation ?? source.elevation)) - floorOffset;
+            if(source.properties?.roof_section) {
+                const original=buildPreviewMesh.userData.locationObject;
+                const previewObject=editorRotateMode?{...original,properties:{...original.properties,rotation:bearingToObjectRotation(editorRotateAngle)}}:original;
+                const anchor=transformedRoofAnchor(previewObject);
+                buildPreviewMesh.position.y=getTileHeight(anchor?.x??x,anchor?.z??z)+structureLevelOffset(previewObject)
+                    +(editorResizeMode?editorResizeElevation:Number(previewObject.properties.elevation)||0);
+            }
             alignFloorRugToSurface(buildPreviewMesh, buildPreviewMesh.userData.locationObject);
             if (wallMount) buildPreviewMesh.rotation.y = wallMount.rotation;
         }
@@ -12572,15 +12773,21 @@ function getPrimaryLocationEditorAsset() {
     if (!source) return null;
     const kind = editorSelection.kind;
     if (kind === 'structure') return {
-        kind, label: visualAssetForLocationObject(source.type, source.properties)?.label || source.name || source.type,
+        kind, label: source.properties?.roof_section ? `Корпус ${source.properties.roof_section.owner+1} · ${{flat:'Плоская кровля',shed:'Односкатная кровля',gable:'Двускатная кровля'}[source.properties.roof_section.bodies[source.properties.roof_section.owner]?.type]||'Кровля'}`
+            : visualAssetForLocationObject(source.type, source.properties)?.label || source.name || source.type,
         x: Number(source.tile_x) + 0.5 + Number(source.properties?.offset_x || 0),
         z: Number(source.tile_y) + 0.5 + Number(source.properties?.offset_z || 0),
         rotation: Math.round((objectRotationToBearing(source.properties?.rotation || 0) + 360) % 360),
-        elevation: clampAssetElevation(source.properties?.elevation),
+        elevation: source.properties?.roof_section ? Number(source.properties.elevation)||0 : clampAssetElevation(source.properties?.elevation),
         color: source.properties?.color || '#aa8866',
         buildingId: structureBuildingId(source) || '',
         level: structureLevel(source),
         structureType: source.type,
+        roofSection: source.properties?.roof_section ? {
+            ...source.properties.roof_section.bodies[source.properties.roof_section.owner],
+            owner:source.properties.roof_section.owner,
+        } : null,
+        roofWall: Boolean(source.properties?.roof_wall),
         ...(source.type === 'floor' ? { roofType: source.properties?.roof_enabled === false ? 'none'
             : source.properties?.roof_type === 'flat' ? 'flat' : 'gable' } : {}),
         dimensions: assetDimensions(source, 'structure', source.type),
@@ -12614,6 +12821,7 @@ export function getSelectedLocationEditorAsset() {
     const asset = getPrimaryLocationEditorAsset();
     const source = getSelectedEditorSource();
     return asset ? { ...asset, selectedCount: editorSelections.length,
+        roofEditing:roofEditPending,
         hidden: Boolean(editorSelection.kind === 'structure' ? source?.properties?.gm_hidden : source?.gm_hidden) } : null;
 }
 
@@ -13431,7 +13639,7 @@ export async function scaleSelectedLocationAssets(grow) {
     });
 }
 
-export async function updateSelectedLocationAssetDetails({ x, z, height, elevation, intensity, distance, color, rotation, dimensions, roofType, buildingId, level }) {
+export async function updateSelectedLocationAssetDetails({ x, z, height, elevation, intensity, distance, color, rotation, dimensions, roofType, buildingId, level, detachRoof }) {
     const source = getSelectedEditorSource();
     if (!source || !currentLocationData) return false;
     if (!Number.isFinite(x) || !Number.isFinite(z)
@@ -13439,7 +13647,7 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
         showNotification('Координаты вне подлокации', 'system');
         return false;
     }
-    if (elevation !== undefined && (!Number.isFinite(elevation) || elevation < (editorSelection.kind === 'lamp' ? lampDisplayLevel(source)*STOREY_HEIGHT : 0) || elevation > (editorSelection.kind === 'lamp' ? lampDisplayLevel(source)*STOREY_HEIGHT+10 : 10))) {
+    if (elevation !== undefined && (!Number.isFinite(elevation) || elevation < (editorSelection.kind === 'lamp' ? lampDisplayLevel(source)*STOREY_HEIGHT : 0) || elevation > (editorSelection.kind === 'lamp' ? lampDisplayLevel(source)*STOREY_HEIGHT+10 : source.properties?.roof_section?40:10))) {
         showNotification('Высота должна быть от 0 до 10 м', 'system');
         return false;
     }
@@ -13474,16 +13682,24 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
                     offset_x: x - Math.floor(x) - 0.5,
                     offset_z: z - Math.floor(z) - 0.5,
                     rotation: bearingToObjectRotation(rotation),
-                    elevation: elevation ?? clampAssetElevation(source.properties?.elevation),
+                    elevation: elevation ?? (source.properties?.roof_section?Number(source.properties.elevation)||0:clampAssetElevation(source.properties?.elevation)),
                     ...(color !== undefined ? { color } : {}),
                     ...(dimensions ? { dimensions } : {}),
                     ...(buildingId !== undefined ? { building_id: buildingId } : {}),
                     ...(level !== undefined ? { level } : {}),
                     ...(source.type === 'floor' && roofType !== undefined
                         ? { roof_type: roofType === 'flat' ? 'flat' : 'gable', roof_enabled: roofType !== 'none' } : {}),
+                    ...(source.type==='wall'&&source.properties?.roof_wall ? wallRoofProperties({...source,properties:{...source.properties,
+                        ...(dimensions?{dimensions}:{}),rotation:bearingToObjectRotation(rotation),elevation:elevation??source.properties.elevation,
+                        offset_x:x-Math.floor(x)-.5,offset_z:z-Math.floor(z)-.5},tile_x:Math.floor(x),tile_y:Math.floor(z)},source.properties.roof_wall.bodies):{}),
+                    ...(detachRoof?{roof_wall:null,roof_wall_geometry:[],roof_group:null}:{}),
                 },
             });
             updateLocationObject(object);
+            if(!detachRoof&&source.type==='wall'&&source.properties?.roof_wall&&!source.properties?.roof_joint
+                &&dimensions&&Math.abs(dimensions.height-source.properties.dimensions.height)>.0001) {
+                await updateSelectedLocationRoof({scope:'body',sourceId:object.id,wallHeightDelta:dimensions.height-source.properties.dimensions.height});
+            }
             notifyEditorSelection();
             return true;
         } catch (error) { showNotification(error.message || 'Не удалось сохранить объект', 'system'); }
@@ -13507,6 +13723,155 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
     if (editorSelections.length === 1) editorSelections = [editorSelection];
     sendDecorTileUpdates(old.x === next.x && old.z === next.z ? [old] : [old, next]);
     return true;
+}
+
+let roofEditPending=false;
+export async function updateSelectedLocationRoof(settings) {
+    let source=settings.sourceId!=null?(currentLocationData?.objects||[]).find(o=>o.id===settings.sourceId):getSelectedEditorSource();
+    if(roofEditPending||!source||!window.isGM)return false;
+    if(source.type==='roof'&&!source.properties?.roof_section) {
+        const conversionEpoch=houseSceneEpoch;
+        const p=structurePose(source),body=roofBodyDefaults({x:p.x-p.width/2,z:p.z-p.depth/2,width:p.width,depth:p.depth,
+            level:structureLevel(source),eave:2.4,type:'flat',overhang:0});
+        const properties=roofSectionProperties([body],roofRect(body.x,body.z,body.width,body.depth),p.x,p.z,body.level);
+        properties.elevation=Number(source.properties.elevation)||0;
+        properties.roof_group=`roof-section-${source.id}`;
+        roofEditPending=true;notifyEditorSelection();
+        try{source=await Server.updateLocationObject(window.currentLobbyId,source.id,{properties});if(conversionEpoch!==houseSceneEpoch)return false;updateLocationObject(source);}
+        catch(error){showNotification(error.message||'Не удалось преобразовать секцию','system');return false;}
+        finally{roofEditPending=false;}
+    }
+    let section=source?.properties?.roof_section,side=null;
+    if(!section&&source?.properties?.roof_wall&&Number.isFinite(settings.wallHeightDelta)) {
+        const basis=roofWallBasisObject(source),p=structurePose(basis),bodies=source.properties.roof_wall.bodies;
+        const owner=bodies.findIndex(b=>{
+            if(b.level!==structureLevel(basis))return false;
+            if(Math.abs(p.axis.x)>.98&&p.x>=b.x-.1&&p.x<=b.x+b.width+.1) {
+                if(Math.abs(p.z-b.z)<.2){side='north';return true;}
+                if(Math.abs(p.z-b.z-b.depth)<.2){side='south';return true;}
+            }
+            if(Math.abs(p.axis.z)>.98&&p.z>=b.z-.1&&p.z<=b.z+b.depth+.1) {
+                if(Math.abs(p.x-b.x)<.2){side='west';return true;}
+                if(Math.abs(p.x-b.x-b.width)<.2){side='east';return true;}
+            }
+            return false;
+        });
+        if(owner<0)return true;
+        section={bodies,owner};
+    }
+    if(roofEditPending||!section||!window.isGM)return false;
+    const bodies=JSON.parse(JSON.stringify(section.bodies));
+    const body=bodies[section.owner];
+    if(side) {
+        const plane=body.basePlane||[0,0,0],delta=settings.wallHeightDelta;
+        if(side==='east')plane[0]+=delta/body.width;
+        if(side==='west'){plane[0]-=delta/body.width;plane[2]+=delta;}
+        if(side==='south')plane[1]+=delta/body.depth;
+        if(side==='north'){plane[1]-=delta/body.depth;plane[2]+=delta;}
+        body.basePlane=plane;
+    }
+    for(const key of ['type','direction','pitch','eave','overhang'])if(settings[key]!==undefined)body[key]=settings[key];
+    const error=validateRoofBodies(bodies);if(error){showNotification(error,'system');return false;}
+    const peers=settings.scope==='section'?[source]:(currentLocationData.objects||[]).filter(o=>o.properties?.roof_group===source.properties.roof_group
+        &&structureBuildingId(o)===structureBuildingId(source));
+    const epoch=houseSceneEpoch,lobbyId=window.currentLobbyId;
+    roofEditPending=true;
+    notifyEditorSelection();
+    try {
+        const updates=peers.flatMap(object=>{
+            if(object.properties?.roof_section) {
+                const properties=rebuildRoofSection(object,bodies);
+                return properties?[{object,properties}]:[];
+            }
+            return object.type==='wall'&&object.properties?.roof_wall ? [{object,properties:wallRoofProperties(object,bodies)}]:[];
+        });
+        for(const {object,properties} of updates) {
+            if(epoch!==houseSceneEpoch)throw Error('Редактирование крыши прервано при выходе из локации');
+            const updated=await Server.updateLocationObject(lobbyId,object.id,{properties});
+            if(epoch!==houseSceneEpoch)throw Error('Редактирование крыши прервано при выходе из локации');
+            updateLocationObject(updated);
+        }
+        if(settings.scope!=='section') {
+            const joints=planRoofJoints(bodies,{buildingId:structureBuildingId(source),group:source.properties.roof_group,
+                anchor:source.properties.roof_ground_anchor,groundHeight:getTileHeight});
+            for(const spec of joints)if(!peers.some(o=>o.properties?.roof_joint===spec.properties.roof_joint)) {
+                if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');
+                const created=await Server.createLocationObject(lobbyId,currentLocationId,spec);
+                if(epoch===houseSceneEpoch)addLocationObject(created);
+            }
+        }
+        return true;
+    } catch(error){showNotification(error.message||'Не все секции сохранены. Повторите применение параметров крыши.','system');return false;}
+    finally {roofEditPending=false;if(epoch===houseSceneEpoch)notifyEditorSelection();}
+}
+
+export async function generateSelectedLocationRoof(settings) {
+    const source=getSelectedEditorSource(),buildingId=structureBuildingId(source);
+    if(roofEditPending||!buildingId||!window.isGM)return false;
+    const epoch=houseSceneEpoch,locationId=currentLocationId,lobbyId=window.currentLobbyId;
+    if(!settings) {
+        const dialog=document.createElement('dialog');dialog.className='modal-content';
+        dialog.style.cssText='max-width:400px;padding:18px;background:#20251d;color:#e7e4ce;';
+        dialog.innerHTML=`<form method="dialog" style="display:grid;gap:8px;"><strong>Крыша выбранного здания</strong>
+            <label>Тип<select class="form-control" name="type"><option value="gable">Двускатная</option><option value="shed">Односкатная</option><option value="flat">Плоская</option></select></label>
+            <label>Уклон, °<input class="form-control" name="pitch" type="number" min="0" max="60" value="25" required></label>
+            <label>Направление<select class="form-control" name="direction"><option value="south">Юг / С–Ю</option><option value="north">Север / С–Ю</option><option value="east">Восток / В–З</option><option value="west">Запад / В–З</option></select></label>
+            <p>Будут заменены все секции кровли только этого здания. Стены, полы, мебель и остальные здания сохраняются. Ручные изменения существующих секций кровли будут удалены.</p>
+            <button value="create">Подтвердить замену крыши</button><button value="cancel" formnovalidate>Отмена</button></form>`;
+        document.body.appendChild(dialog);
+        settings=await new Promise(resolve=>{dialog.addEventListener('close',()=>{const f=dialog.querySelector('form');resolve(dialog.returnValue==='create'?{type:f.elements.type.value,pitch:Number(f.elements.pitch.value),direction:f.elements.direction.value}:null);dialog.remove();},{once:true});dialog.showModal();});
+        if(!settings)return false;
+    }
+    if(epoch!==houseSceneEpoch)return false;
+    const peers=(currentLocationData.objects||[]).filter(o=>structureBuildingId(o)===buildingId);
+    const bodies=[];
+    for(const level of [...new Set(peers.filter(o=>o.type==='floor').map(structureLevel))].filter(l=>l>=0)) {
+        const floors=peers.filter(o=>o.type==='floor'&&structureLevel(o)===level);
+        const rects=[];
+        for(const f of floors) {
+            const p=structurePose(f);
+            if(Math.abs(Math.sin(2*p.angle))>.0001){showNotification('Сначала выровняйте корпуса по ортогональным осям. Наклонные в плане контуры не поддерживаются.','system');return false;}
+            const width=Math.abs(p.axis.x)*p.width+Math.abs(p.normal.x)*p.depth;
+            const depth=Math.abs(p.axis.z)*p.width+Math.abs(p.normal.z)*p.depth;
+            rects.push({x:p.x-width/2,z:p.z-depth/2,width,depth});
+        }
+        const plan=roofBodiesFromRects(rects,{...settings,level});if(plan.error){showNotification(plan.error,'system');return false;}
+        bodies.push(...plan.bodies.map((b,i)=>({...b,id:`level-${level}-${i}`})));
+    }
+    const reference=Math.max(...peers.filter(o=>o.type==='floor').map(o=>getTileHeight(o.tile_x,o.tile_y)),0);
+    for(const body of bodies)for(const wall of peers.filter(o=>o.type==='wall'&&structureLevel(o)===body.level&&!o.properties?.roof_joint)) {
+        const p=structurePose(wall);
+        if(p.x>=body.x-.2&&p.x<=body.x+body.width+.2&&p.z>=body.z-.2&&p.z<=body.z+body.depth+.2) {
+            body.eave=Math.max(body.eave,p.height+Number(wall.properties?.elevation||0)+getTileHeight(wall.tile_x,wall.tile_y)-reference,
+                ...(wall.properties?.roof_wall?.bodies||[]).filter(b=>b.level===body.level).map(b=>b.eave));
+        }
+    }
+    const plan=planEditableRoofs(peers,bodies,{buildingId,group:`roof-${Date.now()}`,condition:source.properties?.building_generation?.condition||'intact',groundHeight:getTileHeight});
+    if(plan.error){showNotification(plan.error,'system');return false;}
+    for(const wall of peers.filter(o=>o.properties?.generated_floor_spec)) {
+        const spec=JSON.parse(JSON.stringify(wall.properties.generated_floor_spec));
+        if(spec.type!=='floor'||!spec.properties)continue;
+        spec.properties.roof_enabled=false;
+        const update=plan.walls.find(item=>item.object.id===wall.id);
+        if(update)update.properties.generated_floor_spec=spec;
+        else plan.walls.push({object:wall,properties:{generated_floor_spec:spec}});
+    }
+    roofEditPending=true;
+    try {
+        // Explicit replacement is limited to this building's roof objects.
+        for(const object of peers.filter(o=>o.type==='roof'||o.properties?.roof_joint)) {if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');await Server.deleteLocationObject(lobbyId,object.id);if(epoch===houseSceneEpoch)removeLocationObject(object.id);}
+        for(const floor of peers.filter(o=>o.type==='floor'&&o.properties?.roof_enabled!==false)){
+            if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');
+            const updated=await Server.updateLocationObject(lobbyId,floor.id,{properties:{roof_enabled:false}});if(epoch===houseSceneEpoch)updateLocationObject(updated);
+        }
+        for(const {object,properties} of plan.walls){
+            if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');
+            const updated=await Server.updateLocationObject(lobbyId,object.id,{properties});if(epoch===houseSceneEpoch)updateLocationObject(updated);
+        }
+        for(const spec of plan.objects){if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');const object=await Server.createLocationObject(lobbyId,locationId,spec);if(epoch===houseSceneEpoch)addLocationObject(object);}
+        showNotification('Крыша создана: секции доступны в обычном редакторе','success');return true;
+    }catch(error){showNotification(error.message||'Создание крыши прервано; проверьте сохранённые секции','system');return false;}
+    finally{roofEditPending=false;}
 }
 
 export function previewSelectedLocationLamp(details) {
@@ -15942,6 +16307,11 @@ export function setupLocationEditing() {
             updateBuildPreview();
             return;
         }
+        if (!hoveredTileCoords && window.locationEditMode && window.locationEditorTool==='select'
+            && !editorMoveMode && !editorRotateMode && !editorResizeMode && !pendingCharacterPlacement && !pendingObjectMoveId) {
+            if(selectEditorAsset(e.clientX,e.clientY,e.shiftKey)){e.preventDefault();e.stopImmediatePropagation();}
+            return;
+        }
         if (!hoveredTileCoords) return;
         lastBrushTile = null;
         if (pendingCharacterPlacement) {
@@ -16442,6 +16812,8 @@ export function setLocationEditMode(enabled) {
     if (fogIsActive()) applyFogOfWar();
     if (darknessEditorOverlay) darknessEditorOverlay.visible = darknessOverlayRequested && enabled;
     if (!enabled) {
+        houseShellDialog?.close();
+        clearBuildingShellPreview();
         hideHighlight();
         clearBuildPreview();
         houseDrawStart = null;
@@ -16771,6 +17143,9 @@ export function destroyLocationScene() {
     staticFieldLastToggleFrame = null;
     staticFieldLastToggleWork = null;
     houseSceneEpoch++;
+    if(roofTerrainRefreshFrame!==null){cancelAnimationFrame(roofTerrainRefreshFrame);roofTerrainRefreshFrame=null;}
+    houseShellDialog?.close();
+    clearBuildingShellPreview();
     houseDrawMode = false;
     houseDrawStart = null;
     houseDrawEnd = null;
