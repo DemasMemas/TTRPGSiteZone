@@ -49,11 +49,17 @@ export function locationStaticLightFieldInputs(data, sources, tileHeightAt, incl
         y: tileHeightAt(object.tile_x, object.tile_y) + structureLevelOffset(object)
             + Number(object.properties?.elevation || 0) + 0.035,
     }));
-    const maxLevel = Math.max(0, ...objects.filter(object =>
-        ['wall', 'floor'].includes(object.type)).map(structureLevel));
-    const levels = Array.from({ length: maxLevel + 1 }, (_, id) => ({ id, y: id * STOREY_HEIGHT }));
+    const decorations = (data.tiles_data || []).flatMap(row=>row.flatMap(tile=>tile.objects || []));
+    const knownLevels = [...objects.map(structureLevel), ...decorations.map(structureLevel),
+        ...sources.filter(s=>Number.isInteger(s.level)).map(s=>s.level)];
+    const maxLevel = Math.max(0, ...knownLevels);
+    const minLevel = Math.min(0, ...knownLevels);
+    const levels = Array.from({ length: maxLevel - minLevel + 1 }, (_, index) => {
+        const id = minLevel + index;
+        return {id,y:id*STOREY_HEIGHT};
+    });
     const surfaceHeightAt = (x, z, level) => {
-        if (level > 0) {
+        if (level !== 0) {
             const floor = floors.find(item => item.level === level && insideFloor(x, z, item.pose));
             if (floor) return floor.y;
         }
@@ -63,7 +69,7 @@ export function locationStaticLightFieldInputs(data, sources, tileHeightAt, incl
         if (source.kind === 'spot' && !includeSpots) return [];
         const containing = floors.filter(floor => insideFloor(source.x, source.z, floor.pose)
             && source.y >= floor.y + 0.1).sort((a, b) => b.y - a.y);
-        return [{ ...source, id: index, level: containing[0]?.level || 0 }];
+        return [{ ...source, id: index, level: Number.isInteger(source.level) ? source.level : containing[0]?.level || 0 }];
     });
     const walls = [];
     const wallMountedDoors = new Set();

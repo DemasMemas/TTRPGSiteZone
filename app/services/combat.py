@@ -507,7 +507,7 @@ class CombatService:
         obj_type = str(getattr(obj, 'type', '') or '').lower()
         if properties.get('cover_enabled') is False:
             return False
-        if obj_type in {'floor', 'ground_item', 'campfire', 'torch', 'fire_barrel', 'anomaly', 'poster'}:
+        if obj_type in {'floor', 'ground_item', 'campfire', 'torch', 'fire_barrel', 'anomaly', 'poster', 'ladder', 'floor_opening'}:
             return False
         if obj_type in {'door', 'window'} and properties.get('is_open'):
             return False
@@ -659,6 +659,9 @@ class CombatService:
 
     @staticmethod
     def _cover_analysis(location_id, shooter, target):
+        from app.services.location_navigation import level_of, contains
+        shooter_level = getattr(shooter, 'floor_level', 0) or 0
+        target_level = getattr(target, 'floor_level', 0) or 0
         shooter_eye = {'standing': 1.65, 'sitting': 1.05, 'prone': 0.35}[
             CombatService._posture_key(shooter)
         ]
@@ -676,6 +679,8 @@ class CombatService:
                 'chest': 0.3, 'left_arm': 0.3, 'right_arm': 0.3, 'head': 0.4,
             },
         }[CombatService._posture_key(target)]
+        shooter_eye += shooter_level * 2.4
+        zone_heights = {zone: height + target_level * 2.4 for zone, height in zone_heights.items()}
         blocked = {}
         smoke = CombatService._smoke_blocks_line(location_id, shooter, target)
         if smoke:
@@ -693,20 +698,39 @@ class CombatService:
         objects = LocationObject.query.filter_by(location_id=location_id).all()
         doors = [item for item in objects if item.type == 'door' or (item.type == 'window' and (item.properties or {}).get('is_open'))]
         for obj in objects:
+            if obj.type == 'hatch' and (obj.properties or {}).get('is_open'):
+                continue
+            if obj.type in {'floor', 'ceiling', 'roof', 'hatch'} and shooter_level != target_level:
+                plane = level_of(obj) * 2.4 + float((obj.properties or {}).get('elevation', 0) or 0)
+                for zone, target_height in zone_heights.items():
+                    delta = target_height - shooter_eye
+                    t = (plane - shooter_eye) / delta if abs(delta) > .00001 else -1
+                    x = shooter.pos_x + .5 + (target.pos_x - shooter.pos_x) * t
+                    y = shooter.pos_y + .5 + (target.pos_y - shooter.pos_y) * t
+                    from app.services.location_navigation import opening_at
+                    stairwell = opening_at(objects, level_of(obj), x, y, (obj.properties or {}).get('building_id'))
+                    if 0 < t < 1 and contains(obj, x, y) and not stairwell:
+                        blocked[zone] = {'object_id': obj.id, 'object_name': obj.name or obj.type,
+                                         'object_height': plane, 'distance_factor': t,
+                                         **CombatService._cover_profile(obj)}
+                continue
+            if shooter_level == target_level and level_of(obj) != shooter_level:
+                continue
             if not CombatService._is_cover_object(obj):
                 continue
             entry = CombatService._line_object_entry(shooter, target, obj)
             if entry is None:
                 continue
-            height = CombatService._object_height(obj)
+            bottom = level_of(obj) * 2.4 + float((obj.properties or {}).get('elevation', 0) or 0)
+            height = bottom + CombatService._object_height(obj)
             for zone, target_height in zone_heights.items():
                 ray_height = shooter_eye + (target_height - shooter_eye) * entry
                 if obj.type == 'wall' and any(
-                    CombatService._line_through_door(shooter, target, door, obj, ray_height)
+                    CombatService._line_through_door(shooter, target, door, obj, ray_height - bottom)
                     for door in doors
                 ):
                     continue
-                if ray_height <= height:
+                if bottom <= ray_height <= height:
                     previous = blocked.get(zone)
                     if not previous or entry < previous['distance_factor']:
                         blocked[zone] = {
@@ -2921,6 +2945,8 @@ class CombatService:
 
     @staticmethod
     def _is_adjacent(first, second):
+        if (getattr(first, 'floor_level', 0) or 0) != (getattr(second, 'floor_level', 0) or 0):
+            return False
         return max(
             abs(first.pos_x - second.pos_x),
             abs(first.pos_y - second.pos_y),
@@ -6164,10 +6190,10 @@ class CombatService:
         return 0.1
 
     @staticmethod
-    def _resolve_flash(location_id, epicenter_x, epicenter_y, profile):
+    def _resolve_flash(location_id, epicenter_x, epicenter_y, profile, floor_level=0):
         results = []
         for target in LocationCharacter.query.filter_by(location_id=location_id).all():
-            if not target.character:
+            if not target.character or (getattr(target,'floor_level',0) or 0) != floor_level:
                 continue
             distance = CombatService._point_distance(
                 epicenter_x, epicenter_y, target.pos_x, target.pos_y,
@@ -6278,8 +6304,9 @@ class CombatService:
         return 'head'
 
     @staticmethod
-    def _explosion_cover(location_id, epicenter_x, epicenter_y, target):
+    def _explosion_cover(location_id, epicenter_x, epicenter_y, target, floor_level=0):
         source = type('ExplosionOrigin', (), {
+            'floor_level': floor_level,
             'pos_x': epicenter_x,
             'pos_y': epicenter_y,
             'posture': 'standing',
@@ -6424,7 +6451,8 @@ class CombatService:
         return result
 
     @staticmethod
-    def resolve_explosion(location_id, epicenter_x, epicenter_y, profile, *, round_number=0):
+    def resolve_explosion(location_id, epicenter_x, epicenter_y, profile, *, round_number=0, floor_level=0):
+        from app.services.location_navigation import level_of
         effect_type = str(profile.get('effect') or '').strip().lower()
         if effect_type == 'flash':
             return {
@@ -6433,7 +6461,7 @@ class CombatService:
                 'epicenter': {'x': int(epicenter_x), 'y': int(epicenter_y)},
                 'radius': CombatService._coerce_float(profile.get('radius'), 0),
                 'targets': CombatService._resolve_flash(
-                    location_id, epicenter_x, epicenter_y, profile,
+                    location_id, epicenter_x, epicenter_y, profile, **({'floor_level':floor_level} if floor_level else {}),
                 ),
                 'objects': [],
                 'area': None,
@@ -6442,6 +6470,8 @@ class CombatService:
             area = CombatService._area_from_profile(
                 profile, epicenter_x, epicenter_y, round_number,
             )
+            if floor_level:
+                area['floor_level'] = floor_level
             return {
                 'profile': profile['key'],
                 'name': profile['name'],
@@ -6456,7 +6486,7 @@ class CombatService:
         radius = max(0, CombatService._coerce_float(profile.get('radius'), 0))
         target_results = []
         for target in LocationCharacter.query.filter_by(location_id=location_id).all():
-            if not target.character:
+            if not target.character or (getattr(target,'floor_level',0) or 0) != floor_level:
                 continue
             posture_at_detonation = CombatService._posture_key(target)
             distance = CombatService._point_distance(
@@ -6465,7 +6495,7 @@ class CombatService:
             if distance > radius:
                 continue
             cover = CombatService._explosion_cover(
-                location_id, epicenter_x, epicenter_y, target,
+                location_id, epicenter_x, epicenter_y, target, **({'floor_level':floor_level} if floor_level else {}),
             )
             cover_multiplier = max(0, 1 - cover['protection'] / 100)
             target_data = target.character.data if isinstance(target.character.data, dict) else {}
@@ -6648,6 +6678,8 @@ class CombatService:
 
         object_results = []
         for obj in list(LocationObject.query.filter_by(location_id=location_id).all()):
+            if level_of(obj) != floor_level:
+                continue
             distance = CombatService._point_distance(
                 epicenter_x, epicenter_y, obj.tile_x, obj.tile_y,
             )
@@ -6692,6 +6724,7 @@ class CombatService:
             event.get('y'),
             profile,
             round_number=round_number,
+            **({'floor_level':event['floor_level']} if event.get('floor_level') else {}),
         )
         area = result.get('area')
         if isinstance(area, dict):
@@ -6739,6 +6772,8 @@ class CombatService:
 
     @staticmethod
     def _apply_area_effect_to_character(area, target, round_number):
+        if (getattr(target,'floor_level',0) or 0) != area.get('floor_level',0):
+            return None
         distance = CombatService._point_distance(
             area.get('x'), area.get('y'), target.pos_x, target.pos_y,
         )
@@ -7114,9 +7149,16 @@ class CombatService:
             triggered = False
             reason = None
             trigger_position = None
-            for before, after in zip(path_tiles, path_tiles[1:]):
+            surfaces = getattr(mover, '_movement_surfaces', [])
+            for step_index, (before, after) in enumerate(zip(path_tiles, path_tiles[1:])):
+                before_level = surfaces[step_index]['level'] if surfaces else (getattr(mover, 'floor_level', 0) or 0)
+                after_level = surfaces[step_index+1]['level'] if surfaces else before_level
                 before_distance = max(abs(before[0] - defender.pos_x), abs(before[1] - defender.pos_y))
                 after_distance = max(abs(after[0] - defender.pos_x), abs(after[1] - defender.pos_y))
+                if before_level != (getattr(defender, 'floor_level', 0) or 0):
+                    before_distance = math.inf
+                if after_level != (getattr(defender, 'floor_level', 0) or 0):
+                    after_distance = math.inf
                 if before_distance == 1 and after_distance > 1:
                     triggered = True
                     reason = 'opponent_left_reach'
@@ -9109,6 +9151,9 @@ class CombatService:
     def _door_is_in_wall(door, wall):
         if getattr(door, 'type', None) not in {'door', 'window'} or getattr(wall, 'type', None) != 'wall':
             return False
+        from app.services.location_navigation import level_of
+        if level_of(door) != level_of(wall):
+            return False
         wall_props = wall.properties or {}
         door_props = door.properties or {}
         wall_bottom = float(wall_props.get('elevation', 0) or 0)
@@ -9172,6 +9217,15 @@ class CombatService:
         )
 
     @staticmethod
+    def physical_position(character):
+        from app.services.location_navigation import surface, ground
+        level = getattr(character, 'floor_level', 0) or 0
+        location = character.location
+        node = surface(location, LocationObject.query.filter_by(location_id=location.id).all(), character.pos_x, character.pos_y, level)
+        height = node['height'] if node else ground(location, character.pos_x, character.pos_y) + level * 2.4
+        return {'floor_level': level, 'height': height}
+
+    @staticmethod
     def _grid_move_cost(start_x, start_y, end_x, end_y):
         return max(abs(end_x - start_x), abs(end_y - start_y))
 
@@ -9196,7 +9250,7 @@ class CombatService:
         if obj_type == 'anomaly':
             return {'blocked': False, 'climb_cost': 0}
 
-        if properties.get('passable') is True or obj_type in {'campfire', 'torch', 'fire_barrel', 'poster', 'floor'}:
+        if properties.get('passable') is True or obj_type in {'campfire', 'torch', 'fire_barrel', 'poster', 'floor', 'ladder', 'hatch', 'floor_opening'}:
             return {'blocked': False, 'climb_cost': 0}
 
         if obj_type == 'door':
@@ -9282,13 +9336,14 @@ class CombatService:
         return candidates
 
     @staticmethod
-    def _anomalies_at_tile(location, tile_x, tile_y, candidates=None):
+    def _anomalies_at_tile(location, tile_x, tile_y, candidates=None, floor_level=0):
+        from app.services.location_navigation import level_of
         if candidates is None:
             candidates = CombatService._anomaly_candidates(location)
         matches = [
             (origin_x != tile_x or origin_y != tile_y, entry)
             for obj, origin_x, origin_y, entry in candidates
-            if anomaly_covers_tile(obj, origin_x, origin_y, tile_x, tile_y)
+            if level_of(obj) == floor_level and anomaly_covers_tile(obj, origin_x, origin_y, tile_x, tile_y)
         ]
         matches.sort(key=lambda match: match[0])
         return [entry for _, entry in matches]
@@ -9369,7 +9424,7 @@ class CombatService:
         _, _, _, active = CombatService._active_anomaly(loc_char)
         if not active:
             return False
-        anomalies = CombatService._anomalies_at_tile(location, loc_char.pos_x, loc_char.pos_y)
+        anomalies = CombatService._anomalies_at_tile(location, loc_char.pos_x, loc_char.pos_y, floor_level=getattr(loc_char, 'floor_level', 0) or 0)
         if any(
             anomaly['key'] == active.get('key')
             and anomaly.get('object_id') == active.get('object_id')
@@ -9651,7 +9706,12 @@ class CombatService:
         location,
         moving_character_id=None,
         ignored_character_ids=None,
+        floor_level=None,
     ):
+        from app.services.location_navigation import level_of
+        if floor_level is None:
+            actor = LocationCharacter.query.filter_by(location_id=location.id, character_id=moving_character_id).first() if moving_character_id is not None else None
+            floor_level = getattr(actor, 'floor_level', 0) or 0
         blocked_tiles = set()
         climb_cost_tiles = {}
         ignored_ids = {
@@ -9669,6 +9729,8 @@ class CombatService:
                 if not isinstance(tile, dict):
                     continue
                 for obj in tile.get('objects') or []:
+                    if level_of(obj) != floor_level:
+                        continue
                     profile = CombatService._object_movement_profile(obj)
                     footprint_source = {
                         **obj,
@@ -9685,6 +9747,8 @@ class CombatService:
         location_objects = LocationObject.query.filter_by(location_id=location.id).all()
         open_doors = [obj for obj in location_objects if obj.type == 'door' and (obj.properties or {}).get('is_open')]
         for obj in location_objects:
+            if level_of(obj) != floor_level or obj.type in {'stairs', 'ladder', 'hatch', 'floor_opening'}:
+                continue
             profile = CombatService._object_movement_profile(obj)
             doorway_tiles = set()
             if obj.type == 'wall':
@@ -9703,6 +9767,8 @@ class CombatService:
         for character in CombatService._unique_location_characters(
             LocationCharacter.query.filter_by(location_id=location.id).all()
         ):
+            if (getattr(character, 'floor_level', 0) or 0) != floor_level:
+                continue
             if CombatService._coerce_int(character.character_id, -1) in ignored_ids:
                 continue
             blocked_tiles.add((character.pos_x, character.pos_y))
@@ -9774,7 +9840,33 @@ class CombatService:
         moving_character_id=None,
         ignored_character_ids=None,
         companion_offset=None,
+        start_level=None,
+        end_level=None,
     ):
+        from app.services.location_navigation import find_path, level_of
+        from flask import has_app_context
+        actor = LocationCharacter.query.filter_by(location_id=location.id, character_id=moving_character_id).first() if moving_character_id is not None and has_app_context() else None
+        start_level = (getattr(actor, 'floor_level', 0) or 0) if start_level is None else start_level
+        end_level = start_level if end_level is None else end_level
+        objects = LocationObject.query.filter_by(location_id=location.id).all() if has_app_context() else []
+        if start_level or end_level or any(level_of(o) or o.type in {'stairs', 'ladder'} for o in objects):
+            maps = {}
+            def movement_map(level):
+                if level not in maps:
+                    maps[level] = CombatService._build_movement_map(location, moving_character_id, ignored_character_ids, floor_level=level)
+                return maps[level]
+            result = find_path(location, objects, (start_x, start_y, start_level), (end_x, end_y, end_level), movement_map)
+            if result and companion_offset:
+                if any(a['x'] == b['x'] and a['y'] == b['y'] and a['level'] != b['level']
+                       for a,b in zip(result['surfaces'],result['surfaces'][1:])):
+                    return None
+                from app.services.location_navigation import surface
+                for node in result['surfaces']:
+                    cx, cy = node['x'] + companion_offset[0], node['y'] + companion_offset[1]
+                    blocked, costs = movement_map(node['level'])
+                    if not (0 <= cx < location.grid_width and 0 <= cy < location.grid_height) or (cx, cy) in blocked or costs.get((cx, cy), 0) or not surface(location, objects, cx, cy, node['level']):
+                        return None
+            return result
         if start_x == end_x and start_y == end_y:
             return {'cost': 0, 'path': [(start_x, start_y)], 'climb_cost': 0}
 
@@ -10044,6 +10136,7 @@ class CombatService:
             'team_color': loc_char.team_color,
             'x': loc_char.pos_x,
             'y': loc_char.pos_y,
+            **CombatService.physical_position(loc_char),
             'status': loc_char.status,
             'initiative_bonus': loc_char.initiative_bonus or 0,
             'initiative_roll': loc_char.initiative_roll,
@@ -15046,6 +15139,7 @@ class CombatService:
                     explosive_details['impact']['y'],
                     explosive_details['profile'],
                     round_number=current_round,
+                    **({'floor_level':character.floor_level} if character.floor_level else {}),
                 )
                 area = explosive_details['explosion'].get('area')
                 if isinstance(area, dict):
@@ -15059,6 +15153,7 @@ class CombatService:
                     'item_name': explosive_details['item_name'],
                     'x': explosive_details['impact']['x'],
                     'y': explosive_details['impact']['y'],
+                    **({'floor_level':character.floor_level} if character.floor_level else {}),
                     'profile': explosive_details['profile'],
                     'actor_id': character.id,
                     'trigger': 'turn_end' if fuse == 'turn_end' else 'round_start',
@@ -15606,6 +15701,7 @@ class CombatService:
         climb_mode=None,
         movement_mode=None,
         evasion=None,
+        floor_level=None,
     ):
         location = CombatService._get_location(location_id)
         is_gm = CombatService._ensure_access(location, user_id)
@@ -15652,6 +15748,53 @@ class CombatService:
         if state and state.status == 'active' and active_anomaly and special_action != 'climb':
             raise ValidationError("Use the anomaly escape action to move")
 
+        character._movement_fall = None
+        if special_action == 'drop_down':
+            if grapple_captive:
+                raise ValidationError('Release the grapple before jumping down')
+            if CombatService._posture_key(character) != 'standing':
+                raise ValidationError('Stand up before jumping down')
+            from app.services.location_navigation import drop_route
+            portal = LocationObject.query.filter_by(id=object_id,location_id=location_id).first() if type(object_id) is int else None
+            if not portal:
+                raise NotFoundError('Opening not found')
+            if not is_gm and (portal.properties or {}).get('gm_hidden'):
+                raise PermissionDenied('Hidden opening cannot be used')
+            if type(new_x) is not int or type(new_y) is not int or floor_level is not None and type(floor_level) is not int:
+                raise ValidationError('Invalid jump landing')
+            objects = LocationObject.query.filter_by(location_id=location_id).all()
+            plan = drop_route(location,objects,(character.pos_x,character.pos_y,character.floor_level or 0),portal,
+                              lambda level:CombatService._build_movement_map(location,character.character_id,floor_level=level))
+            if not plan:
+                raise ValidationError('No clear downward passage or landing')
+            landing = plan['landing']
+            if (new_x,new_y) != (landing['x'],landing['y']) or floor_level is not None and floor_level != landing['level']:
+                raise ValidationError('Invalid jump landing')
+            if state and state.status == 'active':
+                if character.action_points_current < 1:
+                    raise ValidationError('Not enough action points')
+                character.action_points_current -= 1
+            previous_position = (character.pos_x,character.pos_y)
+            character.pos_x,character.pos_y,character.floor_level = landing['x'],landing['y'],landing['level']
+            character._movement_surfaces = plan['surfaces']
+            character.cover_object_id = None
+            character.weapon_braced = False
+            character.braced_weapon_index = None
+            CombatService._clear_aim(character)
+            character._movement_fall = CombatService.resolve_fall(character,plan['height'],round_number=max(0,state.round_number or 0) if state else 0)
+            if active_anomaly:
+                CombatService._leave_anomaly(character)
+            if state and state.status == 'active':
+                anomalies = CombatService._anomalies_at_tile(location,character.pos_x,character.pos_y,floor_level=character.floor_level)
+                if anomalies:
+                    CombatService._enter_anomaly(character,anomalies[0],max(1,state.round_number or 1),previous_position=previous_position)
+            character.last_action = db.func.now()
+            CombatService._apply_periodic_health_effects(character,phase='movement_end')
+            CombatService._sync_location_effects_from_character(character)
+            CombatService._release_invalid_gunpoints(location_id)
+            db.session.commit()
+            return character,0,CombatService.get_state(location_id,user_id)
+
         if special_action == 'climb':
             if grapple_captive:
                 raise ValidationError("A character cannot climb while holding a grapple")
@@ -15665,6 +15808,10 @@ class CombatService:
                 ).first()
             if not climb_object:
                 raise NotFoundError("Object not found")
+
+            from app.services.location_navigation import level_of
+            if climb_object.type in {'stairs', 'ladder'} or level_of(climb_object) != (getattr(character, 'floor_level', 0) or 0):
+                raise ValidationError('Use ordinary movement on the same-floor stair route')
 
             landing = CombatService._find_climb_landing(location, climb_object, character)
             if not landing:
@@ -15723,6 +15870,9 @@ class CombatService:
             if grapple_captive
             else None
         )
+        target_level = (getattr(character, 'floor_level', 0) or 0) if floor_level is None else floor_level
+        if isinstance(target_level, bool) or not isinstance(target_level, int):
+            raise ValidationError('Invalid floor level')
         path = CombatService._find_movement_path(
             location,
             character.pos_x,
@@ -15732,6 +15882,7 @@ class CombatService:
             character.character_id,
             ignored_character_ids=ignored_character_ids,
             companion_offset=companion_offset,
+            end_level=target_level,
         )
         if not path:
             raise ValidationError("Path is blocked")
@@ -15739,9 +15890,10 @@ class CombatService:
         entered_anomaly = None
         if state and state.status == 'active':
             anomaly_candidates = CombatService._anomaly_candidates(location)
-            for step_x, step_y in (path.get('path') or [])[1:]:
+            for step_index, (step_x, step_y) in enumerate((path.get('path') or [])[1:], 1):
                 anomalies = CombatService._anomalies_at_tile(
                     location, step_x, step_y, anomaly_candidates,
+                    floor_level=path.get('surfaces', [{}] * len(path['path']))[step_index].get('level', getattr(character, 'floor_level', 0) or 0),
                 )
                 if not anomalies:
                     continue
@@ -15756,6 +15908,7 @@ class CombatService:
                     character.character_id,
                     ignored_character_ids=ignored_character_ids,
                     companion_offset=companion_offset,
+                    end_level=next((n['level'] for n in path.get('surfaces', []) if n['x'] == new_x and n['y'] == new_y), target_level),
                 )
                 if not path:
                     raise ValidationError("Path to the anomaly is blocked")
@@ -15894,6 +16047,8 @@ class CombatService:
         previous_x, previous_y = character.pos_x, character.pos_y
         character.pos_x = new_x
         character.pos_y = new_y
+        character.floor_level = path['surfaces'][-1]['level'] if path.get('surfaces') else target_level
+        character._movement_surfaces = path.get('surfaces', [])
         anomaly_changed = False
         if not state or state.status != 'active':
             anomaly_changed = CombatService._sync_anomaly_after_relocation(
@@ -15907,6 +16062,7 @@ class CombatService:
                 previous_position=(previous_x, previous_y),
             )
         if grapple_captive and companion_offset:
+            grapple_captive.floor_level = character.floor_level
             grapple_captive.pos_x = new_x + companion_offset[0]
             grapple_captive.pos_y = new_y + companion_offset[1]
             grapple_captive.cover_object_id = None

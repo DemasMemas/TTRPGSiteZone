@@ -10,6 +10,7 @@ class LocationCharacter(db.Model):
     character_id = db.Column(db.Integer, db.ForeignKey('lobby_characters.id'), nullable=False)
     pos_x = db.Column(db.Integer, nullable=False, default=0)
     pos_y = db.Column(db.Integer, nullable=False, default=0)
+    floor_level = db.Column(db.Integer, nullable=False, default=0, server_default='0')
     status = db.Column(db.String(20), default='idle')
     last_action = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     controlled_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)

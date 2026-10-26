@@ -16,7 +16,10 @@ test('terrain decorations and structures remain visible outside line of sight', 
     const wall = { visible: false, userData: { locationObject: { type: 'wall', x: 4, y: 4 } } };
     const item = { visible: true, userData: { locationObject: { type: 'ground_item', x: 5, y: 5 } } };
     const character = { model: { visible: true }, label: { visible: true } };
+    for (const mesh of [tree, anomaly, wall, item, character.model]) mesh.position = {x:0,z:0};
     const context = vm.createContext({
+        locationLevelVisible: () => true, decorDisplayLevel: () => 0,
+        structureLevel: () => 0, structureBuildingId: () => null,
         scene: {}, currentLocationData: {}, locationProfiler: null,
         fogIsActive: () => true, loadFogMemory() {}, getFogVisionSources: () => [],
         fogMemory: new Map(), objectMeshes: [tree, anomaly], locationObjectMeshes: [wall, item],

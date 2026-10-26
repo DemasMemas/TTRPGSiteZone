@@ -347,9 +347,9 @@ test('near roof cuts away while distant roof remains complete on any viewed floo
     const context = vm.createContext({
         camera: { position: { x: 5, y: 8, z: 5,
             distanceTo(target) { return Math.hypot(this.x - target.x, this.y - target.y, this.z - target.z); } } },
-        controls: { target: { x: 5, y: 0, z: 5 } }, roofMeshes: [roof],
+        controls: { target: { x: 5, y: 0, z: 5 } }, roofMeshes: [roof], locationObjectMeshes: [],
         roofOpacityForCamera, roofVisibleForCamera, locationRoofsVisible: true,
-        editMode: false, locationViewLevel: 0,
+        updateStoreyTerrainVisibility() {}, editMode: false, locationViewLevel: 0,
         THREE: { FrontSide: 0, DoubleSide: 2 },
         locationBuildingViewsDirty: false, getLocationBuildingViews: () => new Map([['house-a', view]]),
         applyFogOfWar: () => visibilityUpdates++, updateLocationLampFixtureFloors() {},

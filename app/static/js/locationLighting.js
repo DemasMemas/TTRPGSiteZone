@@ -58,6 +58,7 @@ export function sameLocationLightingSettings(left, right) {
         const source = a.local_lights[index];
         const saved = b.local_lights[index];
         if ((source.kind || 'point') !== (saved.kind || 'point')
+            || Number(source.level || 0) !== Number(saved.level || 0)
             || Boolean(source.gm_hidden) !== Boolean(saved.gm_hidden)
             || !colorEqual(source.color, saved.color)) return false;
         for (const key of ['x', 'z', 'height', 'intensity', 'distance', 'azimuth']) {

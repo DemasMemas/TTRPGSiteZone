@@ -99,6 +99,7 @@ def handle_join_location(data):
             'character_id': character_id if loc_char else None,
             'x': loc_char.pos_x if loc_char else 0,
             'y': loc_char.pos_y if loc_char else 0,
+            **(CombatService.physical_position(loc_char) if loc_char else {'floor_level': 0}),
         },
         room=request.sid,
     )
@@ -123,6 +124,7 @@ def handle_join_location(data):
             'effects': lc.effects,
             'x': lc.pos_x,
             'y': lc.pos_y,
+            **CombatService.physical_position(lc),
             'status': lc.status,
             'posture': lc.posture,
             'prone_on_back': bool(lc.prone_on_back),
@@ -187,6 +189,7 @@ def handle_move_in_location(data):
             climb_mode,
             movement_mode,
             evasion=data.get('evasion'),
+            floor_level=data.get('floor_level'),
         )
     except ServiceError as exc:
         db.session.rollback()
@@ -200,6 +203,7 @@ def handle_move_in_location(data):
                 'character_id': character_id,
                 'x': current_character.pos_x if current_character else None,
                 'y': current_character.pos_y if current_character else None,
+                **(CombatService.physical_position(current_character) if current_character else {}),
                 'message': str(exc),
             },
             room=request.sid,
@@ -212,6 +216,9 @@ def handle_move_in_location(data):
             'character_id': character_id,
             'x': moved_character.pos_x,
             'y': moved_character.pos_y,
+            **CombatService.physical_position(moved_character),
+            'path': getattr(moved_character, '_movement_surfaces', []),
+            'fall': getattr(moved_character, '_movement_fall', None),
             'movement_cost': cost,
             'movement_mode': movement_mode,
         },
@@ -245,6 +252,7 @@ def handle_move_in_location(data):
                     'character_id': captive.character_id,
                     'x': captive.pos_x,
                     'y': captive.pos_y,
+                    **CombatService.physical_position(captive),
                     'movement_cost': 0,
                     'movement_mode': movement_mode,
                     'moved_with_grapple': True,

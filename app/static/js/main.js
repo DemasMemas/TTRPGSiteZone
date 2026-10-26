@@ -398,8 +398,8 @@ window.enterLocation = async function(locationId) {
                             <button type="button" id="loc-structure-new-building">Новое здание</button>
                             <button type="button" id="loc-restore-generated-floor" hidden>Восстановить пол дома</button>
                             <input id="loc-structure-building-id" type="hidden" value="${editorBuildingId}">
-                            <label>Этаж размещения <select id="loc-structure-level" class="form-control" style="width:auto;"><option value="0">1</option><option value="1">2</option></select></label>
-                            <label id="loc-structure-roof-type-field" style="display:none;">Крыша <select id="loc-structure-roof-type" class="form-control" style="width:auto;"><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
+                            <label>Этаж размещения <input id="loc-structure-level" class="form-control" type="number" step="1" value="0" style="width:90px;"></label>
+                            <label id="loc-structure-roof-type-field" style="display:none;">Крыша <select id="loc-structure-roof-type" class="form-control" style="width:auto;"><option value="gable">Двускатная</option><option value="flat">Плоская</option><option value="none">Без автоматической крыши</option></select></label>
                             <label id="loc-structure-rotation-field">Поворот, ° <input id="loc-structure-rotation" class="form-control" type="number" min="0" max="359" step="15" value="0" style="width:72px;" title="Q / E: поворот на 15°"></label>
                             <label>Класс укрытия <select id="loc-structure-cover-class" class="form-control" style="width:auto;">
                                 <option value="conditional">Условное</option>
@@ -604,8 +604,8 @@ window.enterLocation = async function(locationId) {
                         <label data-placement-building-field style="display:none;">Здание <select class="form-control" data-placement-building></select></label>
                         <button type="button" data-placement-new-building style="display:none;">Новое здание</button>
                         <input type="hidden" data-placement-building-id value="${editorBuildingId}">
-                        <label data-placement-level-field style="display:none;">Этаж размещения <select class="form-control" data-placement-level><option value="0">1</option><option value="1">2</option></select></label>
-                        <label data-placement-roof-type-field style="display:none;">Крыша <select class="form-control" data-placement-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
+                        <label data-placement-level-field style="display:none;">Этаж размещения <input class="form-control" type="number" step="1" value="0" data-placement-level></label>
+                        <label data-placement-roof-type-field style="display:none;">Крыша <select class="form-control" data-placement-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option><option value="none">Без автоматической крыши</option></select></label>
                         <span data-placement-angle style="display:none;">Поворот: 0° · Q/E: 15°</span>
                         <span class="location-asset-placement-hint">Наведите на карту и кликните для размещения · ПКМ: отмена</span>
                     </div>
@@ -648,7 +648,7 @@ window.enterLocation = async function(locationId) {
                     placementHeight.value = activeAsset.kind === 'lamp'
                         ? activeAsset.height : activeAsset.elevation ?? 0;
                     placementHeight.max = activeAsset.kind === 'lamp'
-                        ? String(10 - activeLevel * STOREY_HEIGHT) : '10';
+                        ? String(10) : '10';
                     assetPlacement.querySelector('[data-placement-height-label]').textContent = activeAsset.kind === 'lamp'
                         ? 'Высота над полом этажа, м' : 'Высота от уровня этажа, м';
                     assetPlacement.querySelector('[data-placement-size]').hidden = activeAsset.id?.startsWith('anomaly_');
@@ -735,7 +735,7 @@ window.enterLocation = async function(locationId) {
                     renderPlacementSettings();
                 };
                 let activeBuildingId = editorBuildingId;
-                let activeLevel = Math.min(1, getLocationViewLevel());
+                let activeLevel = getLocationViewLevel();
                 const buildingSelectors = [document.getElementById('loc-structure-building'),
                     assetPlacement.querySelector('[data-placement-building]')];
                 const buildingFields = [document.getElementById('loc-structure-building-id'),
@@ -757,10 +757,10 @@ window.enterLocation = async function(locationId) {
                 };
                 const setActiveBuilding = (id, level = activeLevel) => {
                     activeBuildingId = id || '';
-                    activeLevel = level === 1 ? 1 : 0;
+                    activeLevel = Number.isInteger(Number(level)) ? Number(level) : 0;
                     renderBuildingControls();
                     if (activeAsset?.kind === 'lamp') {
-                        const maxHeight = 10 - activeLevel * STOREY_HEIGHT;
+                        const maxHeight = 10;
                         if (activeAsset.height > maxHeight) {
                             activeAsset.height = maxHeight;
                             setLocationAssetElevation(maxHeight);
@@ -828,10 +828,10 @@ window.enterLocation = async function(locationId) {
                             <span data-fit-floor-reason hidden></span>
                             <details><summary>Принадлежность вручную</summary>
                                 <label>ID здания <input class="form-control" type="text" maxlength="64" data-selected-building-id></label>
-                                <label>Этаж <select class="form-control" data-selected-level><option value="0">1</option><option value="1">2</option></select></label>
+                                <label>Этаж <input class="form-control" type="number" step="1" data-selected-level></label>
                             </details>
                         </div>
-                        <label data-selected-roof-type-field style="display:none;">Крыша <select class="form-control" data-selected-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option></select></label>
+                        <label data-selected-roof-type-field style="display:none;">Крыша <select class="form-control" data-selected-roof-type><option value="gable">Двускатная</option><option value="flat">Плоская</option><option value="none">Без автоматической крыши</option></select></label>
                         <div class="location-asset-resize-tools" data-resize-tools hidden>
                             <strong data-resize-status></strong>
                             <span>Ось размера:</span>
@@ -871,6 +871,8 @@ window.enterLocation = async function(locationId) {
                     if (keepPreciseOpen) assetInspector.querySelector('.location-asset-precise').open = true;
                     assetInspector.querySelector('[data-asset-position]').textContent = `Клетка ${Math.floor(selection.x)}, ${Math.floor(selection.z)}`;
                     const heightInput = assetInspector.querySelector('[data-asset-elevation]');
+                    heightInput.min = selection.kind === 'lamp' ? String((selection.level || 0)*STOREY_HEIGHT) : '0';
+                    heightInput.max = selection.kind === 'lamp' ? String((selection.level || 0)*STOREY_HEIGHT+10) : '10';
                     heightInput.value = selection.elevation ?? 0;
                     assetInspector.querySelectorAll('[data-lamp-field]').forEach(field => {
                         field.hidden = selection.kind !== 'lamp';
@@ -889,11 +891,10 @@ window.enterLocation = async function(locationId) {
                         levelInput.value = String(selection.level);
                         const buildingNumber = getLocationBuildingIds().indexOf(selection.buildingId) + 1;
                         assetInspector.querySelector('[data-selected-building-label]').textContent = buildingNumber
-                            ? `Здание ${buildingNumber} · этаж ${selection.level + 1}` : 'Старая постройка · без ID';
+                            ? `Здание ${buildingNumber} · этаж ${selection.level}` : 'Старая постройка · без ID';
                     }
                     const addFloorButton = assetInspector.querySelector('[data-add-floor]');
-                    addFloorButton.hidden = selection.selectedCount !== 1 || selection.structureType !== 'floor'
-                        || selection.level !== 0;
+                    addFloorButton.hidden = selection.selectedCount !== 1 || !selection.buildingId;
                     addFloorButton.onclick = () => addFloorAboveSelectedLocationAsset();
                     const fitFloorButton = assetInspector.querySelector('[data-fit-floor]');
                     const fitFloorReason = assetInspector.querySelector('[data-fit-floor-reason]');
@@ -1645,7 +1646,7 @@ if (socket) {
             window.currentLocationCharacterId = data.character_id;
             localStorage.setItem('selectedLocationCharacterId', String(data.character_id));
         }
-        updateCharacterPosition(data.character_id, data.x, data.y);
+        updateCharacterPosition(data.character_id, data.x, data.y, data);
     });
     socket.on('location_state', (state) => {
         state.forEach(s => {
@@ -1670,16 +1671,22 @@ if (socket) {
                     s.mutant_type,
                     s.posture,
                     s.prone_on_back,
+                    s.floor_level,
+                    s.height,
                 );
             });
         });
     });
     socket.on('character_moved', (data) => {
-        updateCharacterPosition(data.character_id, data.x, data.y);
+        updateCharacterPosition(data.character_id, data.x, data.y, data);
+        if (data.fall) {
+            const damage = (data.fall.legs || []).reduce((sum,leg)=>sum+Number(leg.damage || 0),0);
+            showNotification(`Падение с ${Number(data.fall.height).toFixed(1)} м · урон ногам: ${damage}`, 'system');
+        }
     });
     socket.on('movement_rejected', (data) => {
         if (Number.isFinite(Number(data.x)) && Number.isFinite(Number(data.y))) {
-            updateCharacterPosition(data.character_id, Number(data.x), Number(data.y));
+            updateCharacterPosition(data.character_id, Number(data.x), Number(data.y), data);
         }
         showNotification(`Ошибка: ${data.message || 'Перемещение недоступно'}`, 'error');
     });
@@ -1729,6 +1736,8 @@ if (socket) {
                 data.character.mutant_type,
                 data.character.posture,
                 data.character.prone_on_back,
+                data.character.floor_level,
+                data.character.height,
             );
         });
     });

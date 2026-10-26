@@ -146,7 +146,7 @@ test('changing viewed floor updates fog, fixtures and roofs without changing pla
     const context = vm.createContext({
         locationViewLevel: 0, editorSelection: { kind: 'structure', id: 7 },
         lampRenderSources: [],
-        locationFloorCount: () => 3,
+        locationFloorCount: () => 3, locationMinimumLevel: () => 0, hideHighlight() {},
         document: { getElementById: () => null },
         clearEditorSelection() { calls.push('selection'); this.editorSelection = null; },
         applyFogOfWar: () => calls.push('fog'),
@@ -172,7 +172,7 @@ test('GM floor menu synchronizes the existing placement level without editing sa
         dispatchEvent() { changes++; } };
     const context = vm.createContext({
         locationViewLevel: 0, editorSelection: null, lampRenderSources: [],
-        locationFloorCount: () => 3,
+        locationFloorCount: () => 3, locationMinimumLevel: () => 0, hideHighlight() {},
         document: { getElementById: () => placementLevel }, Event: class {},
         applyFogOfWar() {}, updateLocationLampFixtureFloors() {},
         updateRoofVisibility() {}, refreshLocationFloorMenu() {},
@@ -195,6 +195,7 @@ test('floor menu releases keyboard focus after choosing a level or using its but
     });
     const chosen = [];
     const context = vm.createContext({
+        window: { isGM: true }, addFloorAboveSelectedLocationAsset() {},
         locationViewLevel: 0,
         document: { createElement: makeElement, getElementById(id) {
             return id === 'location-container' ? { appendChild(element) { menu = element; } } : null;

@@ -139,6 +139,15 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         if(process.env.VTT_GPU_PROBE==='1'){
             console.log('GPU',await page.evaluate(`(()=>{const gl=sceneModule.renderer.getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');return ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)})()`));return;
         }
+        if(process.env.VTT_MANUAL_BUILDING==='1'){
+            await require('./location_manual_building.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
+        if(process.env.VTT_STOREYS==='1'){
+            await require('./location_storeys.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
+        if(process.env.VTT_VERTICAL_ACCESS==='1'){
+            await require('./location_vertical_access.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
         if(process.env.VTT_WORLD_PERF==='1'){
             await require('./world_perf.browser.cjs')({page});return;
         }

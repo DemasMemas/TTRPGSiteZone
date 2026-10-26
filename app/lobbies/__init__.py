@@ -2393,6 +2393,25 @@ def get_location_detail(lobby_id, location_id, lobby, participant):
     }), 200
 
 
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/movement-preview', methods=['POST'])
+@jwt_required()
+@requires_participant
+def preview_location_movement(lobby_id, location_id, lobby, participant):
+    location = Location.query.get_or_404(location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+    payload = request.get_json() or {}
+    actor = LocationCharacter.query.filter_by(location_id=location_id, character_id=payload.get('character_id')).first_or_404()
+    user_id = int(get_jwt_identity())
+    if lobby.gm_id != user_id and actor.controlled_by not in (None, user_id):
+        return jsonify({'error': 'Access denied'}), 403
+    x, y, level = payload.get('x'), payload.get('y'), payload.get('floor_level', actor.floor_level)
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (x, y, level)) or not (0 <= x < location.grid_width and 0 <= y < location.grid_height):
+        return jsonify({'error': 'Invalid position'}), 400
+    path = CombatService._find_movement_path(location, actor.pos_x, actor.pos_y, x, y, actor.character_id, end_level=level)
+    return jsonify({'route': path}), 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>', methods=['PUT'])
 @jwt_required()
 @requires_gm
@@ -2583,6 +2602,39 @@ def update_location_object(lobby_id, object_id, lobby, participant):
     if not isinstance(data, dict):
         raise ValidationError('Object update must be an object')
     properties = data.get('properties') if isinstance(data.get('properties'), dict) else {}
+    if obj.type == 'hatch':
+        is_gm = participant.user_id == lobby.gm_id
+        if not is_gm and (set(data) - {'properties','actor_character_id'} or set(properties) != {'is_open'}):
+            raise PermissionDenied('Players can only open or close hatches')
+        if 'is_open' in properties:
+            if type(properties['is_open']) is not bool:
+                raise ValidationError('is_open must be a boolean')
+            actor_id = data.get('actor_character_id')
+            if actor_id is not None or not is_gm:
+                if type(actor_id) is not int:
+                    raise ValidationError('actor_character_id is required')
+                actor = LocationCharacter.query.filter_by(location_id=location.id,character_id=actor_id).first()
+                if not actor or not (is_gm or actor.character.owner_id == participant.user_id or actor.controlled_by == participant.user_id):
+                    raise PermissionDenied('Character is not controlled by this player')
+                CombatService.ensure_character_can_act(actor)
+                state = LocationCombatState.query.filter_by(location_id=location.id).first()
+                if state and state.status == 'active' and not is_gm and state.current_location_character_id != actor.id:
+                    raise PermissionDenied("It is not this character's turn")
+                from app.services.location_navigation import level_of, contains
+                level = level_of(obj)
+                actor_level = actor.floor_level or 0
+                footprint = CombatService._object_footprint_tiles(obj)
+                if actor_level not in {level,level-1} or not footprint or min(max(abs(actor.pos_x-x),abs(actor.pos_y-y)) for x,y in footprint) > 1:
+                    raise ValidationError('Too far from hatch')
+                if actor_level == level-1 and not any(o.type == 'ladder' and level_of(o) == actor_level
+                        and (o.properties or {}).get('building_id') == (obj.properties or {}).get('building_id')
+                        and contains(obj,o.tile_x+.5+(o.properties or {}).get('offset_x',0),o.tile_y+.5+(o.properties or {}).get('offset_z',0))
+                        for o in LocationObject.query.filter_by(location_id=location.id).all()):
+                    raise ValidationError('A ladder is required to reach the hatch from below')
+                if (obj.properties or {}).get('locked') and properties['is_open']:
+                    raise ValidationError('Hatch is locked')
+                if not is_gm and (obj.properties or {}).get('gm_hidden'):
+                    raise PermissionDenied('Hidden hatch cannot be used')
     if obj.type in {'ceiling_bulb', 'wall_bulb'} and participant.user_id != lobby.gm_id:
         raise PermissionDenied('Only GM can edit electric fixtures')
     if 'is_lit' in properties:
@@ -2733,6 +2785,7 @@ def spawn_character_in_location(lobby_id, location_id):
         previous_position = (existing.pos_x, existing.pos_y)
         existing.pos_x = tile_x
         existing.pos_y = tile_y
+        existing.floor_level = 0
         combat_state = LocationCombatState.query.filter_by(location_id=location_id).first()
         anomaly_changed = False
         if not combat_state or combat_state.status != 'active':
@@ -2795,6 +2848,7 @@ def spawn_character_in_location(lobby_id, location_id):
             'effects': loc_char.effects,
             'pos_x': loc_char.pos_x,
             'pos_y': loc_char.pos_y,
+            **CombatService.physical_position(loc_char),
             'posture': loc_char.posture,
             'prone_on_back': bool(loc_char.prone_on_back),
             'gm_hidden': bool(loc_char.gm_hidden),

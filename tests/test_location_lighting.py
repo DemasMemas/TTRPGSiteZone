@@ -173,7 +173,9 @@ def test_visual_test_scene_is_created_only_once_in_selected_lobby(client, create
         r"id: '([^']+)'[^\n]*kind: '(structure|decor|lamp)'[^\n]*color: '(#[0-9a-fA-F]{6})'",
         catalog,
     )
-    assert {obj.type for obj in location.objects} == {
+    # This fixed lighting fixture need not grow whenever the editor adds a part.
+    # Its required contents are asserted above; every saved type must still exist.
+    assert {obj.type for obj in location.objects} <= {
         asset_id for asset_id, kind, _ in assets if kind == 'structure'
     }
     assert {obj['type'] for row in location.tiles_data for tile in row for obj in tile['objects']} == {

@@ -83,7 +83,7 @@ test('fitting a floor persists only its geometry and retains material, elevation
         wall(4, 2, 4), wall(4, 6, 4), wall(2, 4, 4, Math.PI / 2), wall(6, 4, 4, Math.PI / 2)] };
     const sceneSource = read('locationScene.js');
     const start = sceneSource.indexOf('export function getSelectedLocationFloorFit()');
-    const end = sceneSource.indexOf('export async function addFloorAboveSelectedLocationAsset()', start);
+    const end = sceneSource.indexOf('export async function addFloorAboveSelectedLocationAsset(', start);
     assert.ok(start > 0 && end > start);
     let saved;
     const context = vm.createContext({ currentLocationData: data, currentLocationId: 3,

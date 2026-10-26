@@ -3,13 +3,105 @@ const DEFAULT_DIMENSIONS = {
     door: { width: 0.9, depth: 0.18, height: 2 },
     window: { width: 1.2, depth: 0.14, height: 1 },
     floor: { width: 2, depth: 2, height: 0.12 },
+    ceiling: { width: 2, depth: 2, height: 0.12 },
+    roof: { width: 2, depth: 2, height: 0.13 },
+    stairs: { width: 1.2, depth: 3.6, height: 2.4 },
+    ladder: { width: 0.9, depth: 0.9, height: 2.4 },
+    hatch: { width: 1, depth: 1, height: 0.08 },
+    floor_opening: { width: 1, depth: 1, height: 0.05 },
 };
+
+// Bottom-centred geometry, shared by placement previews and saved objects.
+export function stairStepPlan({ width, depth, height }) {
+    const count = Math.max(1, Math.ceil(height / 0.2));
+    return Array.from({ length: count }, (_, index) => ({
+        width, depth: depth / count, height: height * (index + 1) / count,
+        z: -depth / 2 + depth * (index + 0.5) / count,
+    }));
+}
 
 export const STOREY_HEIGHT = 2.4;
 
 export function structureLevel(object) {
-    const level = Number(object?.properties?.level);
-    return Number.isInteger(level) && level > 0 ? level : 0;
+    const level = Number(object?.properties?.level ?? object?.level);
+    return Number.isInteger(level) ? level : 0;
+}
+
+export function storeyPlan({ buildingId, sourceLevel, targetLevel, mode = 'copy', seed = 0 }, objects) {
+    if (!buildingId || !Number.isInteger(sourceLevel) || !Number.isInteger(targetLevel)) return { error: 'Укажите здание и целочисленные уровни' };
+    const peers = (objects || []).filter(o => structureBuildingId(o) === buildingId);
+    if (peers.some(o => structureLevel(o) === targetLevel)) return { error: 'Этот этаж уже существует' };
+    const source = peers.filter(o => structureLevel(o) === sourceLevel);
+    const floors = source.filter(o => o.type === 'floor');
+    if (!floors.length) return { error: 'На исходном этаже нет пола' };
+    if (!['copy', 'empty', 'layout'].includes(mode)) return { error: 'Неизвестный вариант этажа' };
+    const inside = (x, z) => floors.some(f => {
+        const p = structurePose(f), dx = x - p.x, dz = z - p.z;
+        return Math.abs(dx * p.axis.x + dz * p.axis.z) < p.width / 2 - .001
+            && Math.abs(dx * p.normal.x + dz * p.normal.z) < p.depth / 2 - .001;
+    });
+    const exterior = source.filter(o => o.type === 'wall' && (() => {
+        const p = structurePose(o), distance = p.depth / 2 + .05;
+        // Sample the whole segment: a wall can border several floor sections.
+        return [-.4, 0, .4].some(t => {
+            const x = p.x + p.axis.x * p.width * t, z = p.z + p.axis.z * p.width * t;
+            return inside(x + p.normal.x * distance, z + p.normal.z * distance)
+                !== inside(x - p.normal.x * distance, z - p.normal.z * distance);
+        });
+    })());
+    const copy = o => {
+        const properties = JSON.parse(JSON.stringify(o.properties || {}));
+        delete properties.generated_floor_spec;
+        if (Array.isArray(properties.contents)) properties.contents = [];
+        properties.level = targetLevel;
+        properties.building_id = buildingId;
+        return { name: o.name || o.type, type: o.type, tile_x: o.tile_x, tile_y: o.tile_y, properties };
+    };
+    const selected = mode === 'copy' ? source : source.filter(o => ['floor','roof','ceiling'].includes(o.type) || exterior.includes(o)
+        || ['door', 'window'].includes(o.type) && exterior.some(w => doorOnWall(o, w)));
+    const result = selected.map(copy);
+    if (mode === 'layout') floors.forEach((floor, index) => {
+        const p = structurePose(floor);
+        if (p.width < 3 || p.depth < 3) return;
+        const shift = ((Number(seed) + index) % 2 ? -.15 : .15) * p.depth;
+        const x = p.x + p.normal.x * shift, z = p.z + p.normal.z * shift;
+        const tile_x = Math.floor(x), tile_y = Math.floor(z);
+        const common = { building_id: buildingId, level: targetLevel, rotation: p.angle,
+            offset_x: x - tile_x - .5, offset_z: z - tile_y - .5,
+            elevation: floor.properties?.elevation || 0 };
+        result.push({ type: 'wall', name: 'Перегородка нового этажа', tile_x, tile_y,
+            properties: { ...common, dimensions: {width:p.width, depth:.12, height:STOREY_HEIGHT}, visual_asset:'inner_wall' } },
+        { type: 'door', name: 'Проём перегородки', tile_x, tile_y,
+            properties: { ...common, dimensions:{width:.9,depth:.18,height:2}, visual_asset:'opening', is_open:true, interactions:[] } });
+    });
+    return { objects: result };
+}
+
+export function floorSlabParts(floor, objects) {
+    const p = floorVisualPose(floor, objects);
+    let parts = [{x:0,z:0,width:p.width,depth:p.depth}];
+    for (const stair of objects || []) {
+        if (!(['stairs','ladder'].includes(stair.type) && structureLevel(stair) + 1 === structureLevel(floor)
+            || ['hatch','floor_opening'].includes(stair.type) && structureLevel(stair) === structureLevel(floor))
+            || structureBuildingId(stair) !== structureBuildingId(floor)) continue;
+        const s = structurePose(stair), corners = [];
+        for (const a of [-1,1]) for (const b of [-1,1]) {
+            const dx = s.x + a*s.width/2*s.axis.x + b*s.depth/2*s.normal.x - p.x;
+            const dz = s.z + a*s.width/2*s.axis.z + b*s.depth/2*s.normal.z - p.z;
+            corners.push([dx*p.axis.x+dz*p.axis.z, dx*p.normal.x+dz*p.normal.z]);
+        }
+        const minX=Math.min(...corners.map(c=>c[0])),maxX=Math.max(...corners.map(c=>c[0]));
+        const minZ=Math.min(...corners.map(c=>c[1])),maxZ=Math.max(...corners.map(c=>c[1]));
+        parts = parts.flatMap(r => {
+            const x0=r.x-r.width/2,x1=r.x+r.width/2,z0=r.z-r.depth/2,z1=r.z+r.depth/2;
+            const a=Math.max(x0,minX),b=Math.min(x1,maxX),c=Math.max(z0,minZ),d=Math.min(z1,maxZ);
+            if(a>=b||c>=d)return [r];
+            return [[x0,a,z0,z1],[b,x1,z0,z1],[a,b,z0,c],[a,b,d,z1]]
+                .filter(([l,h,t,u])=>h-l>.001&&u-t>.001)
+                .map(([l,h,t,u])=>({x:(l+h)/2,z:(t+u)/2,width:h-l,depth:u-t}));
+        });
+    }
+    return parts;
 }
 
 export function structureLevelOffset(object) {
@@ -45,11 +137,8 @@ export function nextStoreyFloors(source, objects) {
     const missing = lower.filter((object, index) => !upper.some(other => sameFootprint(object, other))
         && !lower.slice(0, index).some(other => sameFootprint(object, other)));
     if (!missing.length) return { error: 'Перекрытие второго этажа уже существует' };
-    return { objects: missing.map(floor => ({
-        name: floor.name || 'floor', type: 'floor', tile_x: floor.tile_x, tile_y: floor.tile_y,
-        properties: { ...floor.properties, building_id: buildingId, level: 1,
-            dimensions: floor.properties?.dimensions ? { ...floor.properties.dimensions } : undefined },
-    })) };
+    // Compatibility entry point for old integrations that fill missing upper slabs.
+    return storeyPlan({buildingId,sourceLevel:0,targetLevel:1,mode:'copy'}, missing);
 }
 
 export function structurePose(object) {
