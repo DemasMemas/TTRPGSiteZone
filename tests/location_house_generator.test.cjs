@@ -7,6 +7,43 @@ const vm = require('node:vm');
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const asUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 
+test('eraser intersects a wide slab away from its anchor and deletes only the active level in one batch',async()=>{
+    const {architecture}=await modules();
+    const objects=[-2,-1,0,1,2].map((level,i)=>({id:i+1,type:'floor',tile_x:8,tile_y:8,
+        properties:{level,building_id:'house',dimensions:{width:10,depth:10,height:.12}}}));
+    const scene=read('locationScene.js'),start=scene.indexOf('async function removeStructuresAtTile(');
+    const calls=[];
+    const context=vm.createContext({...architecture,window:{currentLobbyId:1},currentLocationId:1,
+        currentLocationData:{objects},locationViewLevel:-2,structureDeletionInFlight:new Set(),
+        Server:{changeLocationObjects:async(...args)=>{calls.push(args);return {deleted_ids:args[2].object_ids}}},
+        applyLocationObjectsChange(){},showNotification(){throw Error('Unexpected error');}});
+    vm.runInContext(scene.slice(start,scene.indexOf('export function setLocationBuildMode',start)),context);
+    await context.removeStructuresAtTile(4,4);
+    assert.equal(calls.length,1);
+    assert.deepEqual(Array.from(calls[0][2].object_ids),[1]);
+    assert.equal(calls[0][2].level,-2);
+    assert.equal(calls[0][3],'DELETE');
+    assert.equal(context.structureDeletionInFlight.size,0);
+});
+
+test('intact rectangular shells compact slabs and walls without duplicating coverage',async()=>{
+    const {house}=await modules();
+    const plan=house.planBuildingShell({minX:2,minZ:2,width:12,depth:12,storeys:2,basements:2,buildingId:'compact'});
+    assert.equal(plan.objects.filter(o=>o.type==='floor').length,4);
+    assert.equal(plan.objects.filter(o=>o.type==='roof').length,1);
+    assert.equal(plan.objects.filter(o=>o.type==='wall').length,16);
+    assert.ok(plan.objects.filter(o=>o.type==='window').length<24);
+    for (const roofType of ['flat','shed','gable']) {
+        const edge=house.planBuildingShell({minX:0,minZ:0,width:12,depth:12,storeys:2,basements:2,
+            buildingId:'edge',roofType});
+        assert.ok(edge.objects.every(o=>o.tile_x>=0&&o.tile_x<12&&o.tile_y>=0&&o.tile_y<12), 'boundary anchors include overhanging eaves');
+    }
+    for(const level of [-2,-1,0,1]){
+        const floors=plan.objects.filter(o=>o.type==='floor'&&o.properties.level===level);
+        assert.equal(floors.reduce((n,o)=>n+o.properties.dimensions.width*o.properties.dimensions.depth,0),144);
+    }
+});
+
 test('empty shells preserve orthogonal boundaries, independent wealth/damage, and valid editable openings', async () => {
     const { house, architecture, catalog } = await modules();
     const base = { minX: 2, minZ: 2, width: 10, depth: 12, storeys: 3, basements: 2,
@@ -30,11 +67,12 @@ test('empty shells preserve orthogonal boundaries, independent wealth/damage, an
                     assert.equal(plan.objects.filter(w => w.type === 'wall' && architecture.doorOnWall(object,w)).length, 1);
                 }
             }
+            const area=(p,type)=>p.objects.filter(o=>o.type===type).reduce((n,o)=>n+o.properties.dimensions.width*o.properties.dimensions.depth,0);
             const original = house.planBuildingShell({ ...options, condition: 'intact' });
             if (condition === 'damaged' || condition === 'ruins') {
-                assert.ok(plan.objects.filter(o=>o.type==='roof').length < original.objects.filter(o=>o.type==='roof').length);
+                assert.ok(area(plan, 'roof') < area(original, 'roof'));
                 assert.ok(plan.objects.some(o=>o.type==='wall'&&o.properties.dimensions.height<1));
-                assert.ok(plan.objects.filter(o=>o.type==='floor').length < original.objects.filter(o=>o.type==='floor').length);
+                assert.ok(area(plan, 'floor') < area(original, 'floor'));
             }
             for (const floor of plan.objects.filter(o=>o.type==='floor')) {
                 assert.equal(floor.properties.roof_enabled, false);
@@ -47,7 +85,7 @@ test('empty shells preserve orthogonal boundaries, independent wealth/damage, an
     assert.ok(house.planBuildingShell({...base, storeys:5}).error);
 });
 
-test('failed shell creation rolls back its own objects and preserves unrelated manual objects', async () => {
+test('failed atomic shell creation preserves unrelated manual objects', async () => {
     const {house, architecture} = await modules();
     const scene = read('locationScene.js');
     const source = scene.slice(scene.indexOf('async function createResidentialHouse('),
@@ -57,24 +95,21 @@ test('failed shell creation rolls back its own objects and preserves unrelated m
     const saved = [], deleted = [];
     let requests = 0;
     const context = vm.createContext({
-        houseCreationPending:false,currentLocationData:data,currentLocationId:1,houseSceneEpoch:1,
+        performance,houseCreationPending:false,currentLocationData:data,currentLocationId:1,houseSceneEpoch:1,
         window:{currentLobbyId:2},crypto:{randomUUID:()=> 'unique-run'},
         document:{querySelector:s=>({value:s==='[data-house-kind]'?'shell':'0'})},
         houseFootprint:house.houseFootprint,houseBuildingId:house.houseBuildingId,
         planBuildingShell:house.planBuildingShell,structureBuildingId:architecture.structureBuildingId,
         structurePose:architecture.structurePose,
         chooseBuildingShell:async footprint=>({...footprint,storeys:2,basements:1}),getTileHeight:()=>0,
-        Server:{createLocationObject:async(lobby,location,spec)=>{
-            if(++requests===4)throw Error('save failed');
-            const object={...spec,id:requests};saved.push(object);return object;
-        },getLocationDetail:async()=>({objects:[manual,...saved]}),
-        deleteLocationObject:async(lobby,id)=>deleted.push(id)},
-        addLocationObject:o=>data.objects.push(o),removeLocationObject:id=>{data.objects=data.objects.filter(o=>o.id!==id)},
+        Server:{changeLocationObjects:async()=>{requests++;throw Error('save failed');}},
+        applyLocationObjectsChange(){throw Error('Failed transaction must not update scene');},
         showNotification(){},
     });
     vm.runInContext(source,context);
     await context.createResidentialHouse({x:2,z:2},{x:11,z:11});
-    assert.deepEqual(deleted,[1,2,3]);
+    assert.equal(requests,1);
+    assert.deepEqual(deleted,[]);
     assert.equal(data.objects.length,1);
     assert.equal(data.objects[0],manual);
     assert.equal(context.houseCreationPending,false);
@@ -114,6 +149,22 @@ test('a wall across a courtyard cannot shrink an unrelated floor section on the 
     assert.equal(actual.width,original.width);assert.equal(actual.depth,original.depth);
     wall.tile_x=floor.tile_x;
     assert.ok(architecture.floorVisualPose(floor,[floor,wall]).depth<original.depth);
+});
+
+test('generated L-shaped slabs meet across the wing junction without a ground gap', async () => {
+    const {house,architecture}=await modules();
+    for(const wealth of ['poor','ordinary','rich']) {
+        const plan=house.planBuildingShell({minX:2,minZ:2,width:10,depth:10,shape:'L',storeys:2,basements:1,
+            condition:'intact',wealth,buildingId:'joined',seed:'joint'});
+        for(const level of [-1,0,1])for(const z of [5.99,6,6.01]) {
+            const covered=plan.objects.filter(o=>o.type==='floor'&&o.properties.level===level).some(f=>{
+                const p=architecture.floorVisualPose(f,plan.objects),dx=3.5-p.x,dz=z-p.z;
+                return Math.abs(dx*p.axis.x+dz*p.axis.z)<=p.width/2+1e-6
+                    && Math.abs(dx*p.normal.x+dz*p.normal.z)<=p.depth/2+1e-6;
+            });
+            assert.ok(covered,`${wealth}, level ${level}: floor must reach joint at z=${z}`);
+        }
+    }
 });
 
 async function modules() {
@@ -312,9 +363,7 @@ test('house draw uses the existing editor pointer and object persistence paths',
     const main = read('main.js');
     assert.match(scene, /houseDrawStart = \{ \.\.\.hoveredTileCoords \}/);
     assert.match(scene, /void createResidentialHouse\(start, end\)/);
-    assert.match(scene, /Server\.createLocationObject\(lobbyId, locationId, spec\)/);
-    assert.match(scene, /Server\.getLocationDetail\(lobbyId, locationId\)/);
-    assert.match(scene, /Server\.deleteLocationObject\(lobbyId, object\.id\)/);
+    assert.match(scene, /Server\.changeLocationObjects\(lobbyId, locationId, \{ objects: plan.objects \}\)/);
     assert.match(main, /data-house-draw/);
     assert.match(main, /setLocationHouseDrawMode\(enabled\)/);
 });

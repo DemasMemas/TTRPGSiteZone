@@ -2571,6 +2571,103 @@ def add_location_object(lobby_id, location_id, lobby):
     return jsonify(payload), 201
 
 
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/objects/batch', methods=['POST', 'DELETE'])
+@jwt_required()
+@requires_gm
+def change_location_objects_batch(lobby_id, location_id, lobby):
+    """One committed edit and one room event, including for the initiating client."""
+    from app.services.location_navigation import level_of, contains, surface, pose
+    from time import perf_counter
+    started = perf_counter()
+    timings = {}
+    location = Location.query.get_or_404(location_id)
+    if location.lobby_id != lobby_id:
+        return jsonify({'error': 'Access denied'}), 403
+    data = request.get_json() or {}
+    if not isinstance(data, dict):
+        raise ValidationError('Batch must be an object')
+    schema = LocationObjectSchema()
+    created, deleted = [], []
+    if request.method == 'POST':
+        specs = data.get('objects')
+        if not isinstance(specs, list) or not 1 <= len(specs) <= 5000:
+            raise ValidationError('Expected 1 to 5000 objects')
+        specs = schema.load(specs, many=True)
+        for spec in specs:
+            if not all(k in spec for k in ('name', 'type', 'tile_x', 'tile_y')) or not (
+                    0 <= spec['tile_x'] < location.grid_width and 0 <= spec['tile_y'] < location.grid_height):
+                raise ValidationError('Invalid object position or missing fields')
+        timings['validation_ms'] = (perf_counter() - started) * 1000
+        phase = perf_counter()
+        created = [LocationObject(location_id=location_id, **{k: v for k, v in spec.items()
+                   if k != 'location_id'}) for spec in specs]
+        db.session.add_all(created)
+        timings['objects_ms'] = (perf_counter() - phase) * 1000
+    else:
+        objects = LocationObject.query.filter_by(location_id=location_id).all()
+        building_id, level, ids = data.get('building_id'), data.get('level'), data.get('object_ids')
+        if level is not None and type(level) is not int:
+            raise ValidationError('level must be an integer')
+        if ids is not None:
+            if not isinstance(ids, list) or not ids or len(ids) > 5000 or any(type(i) is not int for i in ids) or level is None:
+                raise ValidationError('Object deletion requires IDs and an active level')
+            selected = set(ids)
+            deleted = [o for o in objects if o.id in selected and level_of(o) == level]
+            if {o.id for o in deleted} != selected:
+                raise ValidationError('Objects must belong to this location and active level')
+        elif isinstance(building_id, str) and building_id.strip():
+            peers = [o for o in objects if (o.properties or {}).get('building_id') == building_id]
+            if level is not None:
+                levels = {level_of(o) for o in peers}
+                if level == 0:
+                    return jsonify({'error': 'Этаж 0 — обязательный базовый уровень. Удалите здание целиком.'}), 409
+                if level not in levels:
+                    return jsonify({'error': 'В выбранном здании нет этого этажа.'}), 409
+                if level > 0 and level != max(levels):
+                    return jsonify({'error': 'Можно удалить только самый верхний наземный этаж здания.'}), 409
+                if level < 0 and level != min(levels):
+                    return jsonify({'error': 'Можно удалить только самый нижний подвальный этаж здания.'}), 409
+            deleted = [o for o in peers if level is None or level_of(o) == level]
+            if level is not None:
+                # A stair is owned by its lower level but depends on the upper landing.
+                deleted += [o for o in peers if o.type in {'stairs', 'ladder'} and level_of(o) + 1 == level]
+                shafts = [o for o in deleted if o.type in {'stairs', 'ladder'} and level_of(o) == level]
+                deleted += [o for o in peers if o.type in {'hatch', 'floor_opening'} and level_of(o) == level+1
+                            and any(contains(o, *pose(stair)[:2]) for stair in shafts)]
+        else:
+            raise ValidationError('Specify building_id or object_ids with level')
+        removed = {o.id for o in deleted}
+        remaining = [o for o in objects if o.id not in removed]
+        actors = LocationCharacter.query.filter_by(location_id=location_id).all()
+        for actor in actors:
+            if any(o.type == 'floor' and level_of(o) == (actor.floor_level or 0)
+                   and contains(o, actor.pos_x + .5, actor.pos_y + .5) for o in deleted):
+                return jsonify({'error': 'Сначала переместите персонажей с удаляемого этажа'}), 409
+            if surface(location, objects, actor.pos_x, actor.pos_y, actor.floor_level or 0) and not surface(
+                    location, remaining, actor.pos_x, actor.pos_y, actor.floor_level or 0):
+                return jsonify({'error': 'Удаление лишит персонажа опоры; сначала переместите его'}), 409
+        for actor in actors:
+            if actor.cover_object_id in removed:
+                actor.cover_object_id = None
+                actor.weapon_braced = False
+                actor.braced_weapon_index = None
+        for obj in deleted:
+            db.session.delete(obj)
+    phase = perf_counter()
+    db.session.commit()
+    timings['persist_ms'] = (perf_counter() - phase) * 1000
+    phase = perf_counter()
+    payload = {'location_id': location_id, 'objects': schema.dump(created, many=True),
+               'deleted_ids': [o.id for o in deleted]}
+    timings['serialize_ms'] = (perf_counter() - phase) * 1000
+    payload['timings'] = timings
+    phase = perf_counter()
+    socketio.emit('location_objects_changed', payload, room=f'location_{location_id}')
+    # Enqueue time is server work, not a claim about delivery latency.
+    timings['emit_ms'] = (perf_counter() - phase) * 1000
+    return jsonify(payload), 201 if request.method == 'POST' else 200
+
+
 @lobbies_bp.route('/<int:lobby_id>/locations/objects/<int:object_id>', methods=['DELETE'])
 @jwt_required()
 @requires_gm

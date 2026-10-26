@@ -178,13 +178,14 @@ export function floorVisualPose(object, objects) {
         const along = dx * pose.axis.x + dz * pose.axis.z;
         const across = dx * pose.normal.x + dz * pose.normal.z;
         const parallel = Math.abs(edge.axis.x * pose.axis.x + edge.axis.z * pose.axis.z);
-        if (parallel >= 0.98 && edge.width >= pose.width * 0.5
-            && Math.abs(along) < (edge.width + pose.width) / 2 - wallGap
+        // Trimming a whole slab edge is safe only when the wall covers it
+        // completely. A partial wall can border a courtyard while the rest of
+        // that edge joins another wing; shortening it all opens a floor gap.
+        if (parallel >= 0.98 && Math.abs(along) + pose.width / 2 <= edge.width / 2 + wallGap
             && Math.abs(Math.abs(across) - pose.depth / 2) <= 0.2) {
             if (across < 0) minAcross = Math.max(minAcross, across + edge.depth / 2 + wallGap);
             else maxAcross = Math.min(maxAcross, across - edge.depth / 2 - wallGap);
-        } else if (parallel <= 0.02 && edge.width >= pose.depth * 0.5
-            && Math.abs(across) < (edge.width + pose.depth) / 2 - wallGap
+        } else if (parallel <= 0.02 && Math.abs(across) + pose.depth / 2 <= edge.width / 2 + wallGap
             && Math.abs(Math.abs(along) - pose.width / 2) <= 0.2) {
             if (along < 0) minAlong = Math.max(minAlong, along + edge.depth / 2 + wallGap);
             else maxAlong = Math.min(maxAlong, along - edge.depth / 2 - wallGap);

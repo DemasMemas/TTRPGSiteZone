@@ -768,6 +768,7 @@ function getPointerWorldPoint(clientX, clientY, planeY = 0) {
     const rect = canvas.getBoundingClientRect();
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    camera.updateMatrixWorld(true);
     raycaster.setFromCamera(mouse, camera);
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY);
     const point = new THREE.Vector3();
@@ -1010,7 +1011,9 @@ function getMovementPointerPoint(clientX, clientY, entry) {
     const point = getPointerWorldPoint(clientX, clientY, entry.model.position.y);
     const roots = locationObjectMeshes.filter(m => m.visible
         && ['floor','stairs','ladder','hatch','floor_opening'].includes(m.userData.locationObject?.type));
-    const hits = raycaster.intersectObjects(roots, true).filter(h=>h.object.visible);
+    const terrainHit = raycaster.intersectObjects(tileCubes, false)[0];
+    const hits = raycaster.intersectObjects(roots, true).filter(h=>h.object.visible
+        && !locationHitOccludedByTerrain(h, terrainHit));
     if (hits.length) {
         let root = hits[0].object;
         while (root.parent && !root.userData.locationObject) root = root.parent;
@@ -4083,7 +4086,7 @@ function getLocationTileAtScreen(clientX, clientY) {
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
     const hit = profiledLocationRaycast(tileCubes, false, 'surface')[0];
-    const coords = hitTileCoords(hit);
+    const coords = hoveredEditorTile(clientX, clientY, hitTileCoords(hit));
     return coords ? { x: coords.x, y: coords.z } : null;
 }
 
@@ -5834,7 +5837,7 @@ function applyFogOfWar() {
         const displayLevel = ['hatch','floor_opening'].includes(object.type) && structureLevel(object)-1 === locationViewLevel
             ? locationViewLevel : structureLevel(object);
         if (!locationLevelVisible(displayLevel, structureBuildingId(object),
-            mesh.position.x, mesh.position.z)) {
+            mesh.position.x, mesh.position.z, object)) {
             mesh.visible = false;
             return;
         }
@@ -7629,8 +7632,13 @@ function updateHighlight(x, z, height) {
     }
     const size = 1 + brushRadius * 2;
     highlightBox.scale.set(size, 0.1, size);
-    const levelOffset = window.locationEditMode ? editorHoverLevelOffset() : locationViewLevel*STOREY_HEIGHT;
-    highlightBox.position.set(x + 0.5, height + levelOffset + 0.1, z + 0.5);
+    // Clear the ground overlays without raising indoor/upper-storey highlights
+    // enough to shift the visible cell away from the cursor under an oblique camera.
+    const onGroundLevel = editorHoverLevelOffset() === 0;
+    const onFloor = onGroundLevel && (currentLocationData?.objects || []).some(o => o.type === 'floor'
+        && structureLevel(o) === 0 && cutawayContains([structurePose(o)], x+.5, z+.5));
+    const lift = onGroundLevel && !onFloor ? 0.06 : 0;
+    highlightBox.position.set(x + 0.5, locationPointerSurfaceHeight(x, z) - 0.004 + lift, z + 0.5);
     highlightBox.visible = true;
 }
 
@@ -7648,7 +7656,9 @@ function getLocationObjectAtScreen(clientX, clientY) {
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
-    const hit = profiledLocationRaycast(locationObjectMeshes.filter(mesh => mesh.visible), true, 'structure')[0];
+    const terrainHit = profiledLocationRaycast(tileCubes, false, 'surface')[0];
+    const hit = profiledLocationRaycast(locationObjectMeshes.filter(mesh => mesh.visible), true, 'structure')
+        .find(hit => !locationHitOccludedByTerrain(hit, terrainHit));
     if (!hit) return null;
     let mesh = hit.object;
     while (mesh && !mesh.userData.locationObjectId) mesh = mesh.parent;
@@ -10003,23 +10013,36 @@ function wallBulbPlacement(x, z, asset, client = hoveredPointerClient) {
 }
 
 function editorHoverLevelOffset() {
-    if (!window.locationEditMode) return 0;
+    if (!window.locationEditMode) return locationViewLevel * STOREY_HEIGHT;
     if (editorMoveMode && ['structure','decor'].includes(editorSelection?.kind)) {
         return structureLevelOffset(getSelectedEditorSource());
     }
     const tool = window.locationEditorTool;
-    if (tool === 'select' && editorSelection && editorSelection.kind !== 'structure') return 0;
-    if (tool !== 'select' && !(tool === 'assets' && ['structure', 'lamp', 'decor'].includes(selectedLocationAsset?.kind))
-        && !(tool !== 'assets' && buildMode === 'structure')) return 0;
-    return structureLevelOffset({ properties: getStructurePlacementProperties() });
+    if (tool === 'select' || eraserMode || tool === 'assets' || buildMode === 'structure') {
+        return locationViewLevel * STOREY_HEIGHT;
+    }
+    return 0;
+}
+
+function locationPointerSurfaceHeight(x, z) {
+    const offset = editorHoverLevelOffset();
+    const level = Math.round(offset / STOREY_HEIGHT);
+    const floor = (currentLocationData?.objects || []).find(o => o.type === 'floor'
+        && structureLevel(o) === level && cutawayContains([structurePose(o)], x+.5, z+.5));
+    return floor ? getTileHeight(floor.tile_x, floor.tile_y) + offset
+        + Number(floor.properties?.elevation || 0) + FLOOR_SURFACE_OFFSET : getTileHeight(x, z) + offset;
 }
 
 function hoveredEditorTile(clientX, clientY, groundCoords) {
     const levelOffset = editorHoverLevelOffset();
-    if (!levelOffset) return groundCoords;
-    let { x, z } = groundCoords;
-    for (let attempt = 0; attempt < 2; attempt++) {
-        const point = getPointerWorldPoint(clientX, clientY, getTileHeight(x, z) + levelOffset);
+    if (!levelOffset && !(currentLocationData?.objects || []).some(o => o.type === 'floor' && structureLevel(o) === 0)) return groundCoords;
+    if (!groundCoords && !levelOffset) return null;
+    let { x, z } = groundCoords || {
+        x: Math.min(currentLocationData.grid_width-1, Math.max(0, Math.floor(controls.target.x))),
+        z: Math.min(currentLocationData.grid_height-1, Math.max(0, Math.floor(controls.target.z))),
+    };
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const point = getPointerWorldPoint(clientX, clientY, locationPointerSurfaceHeight(x, z));
         if (!point) break;
         const nextX = Math.floor(point.x);
         const nextZ = Math.floor(point.z);
@@ -10130,6 +10153,46 @@ function quietHouseColor(color, type) {
     return result;
 }
 
+function locationObjectMaterialColor(object) {
+    const properties = object.properties || {};
+    const asset = visualAssetForLocationObject(object.type, properties);
+    const quiet = ['wall', 'floor'].includes(object.type) && (asset?.visual?.renderMode !== 'pbr'
+        || asset.id === 'art_worn_plaster' || asset.id === 'art_aged_wood');
+    return quiet && !properties.material_color_exact ? quietHouseColor(properties.color, object.type)
+        : new THREE.Color(properties.color || '#aa8866');
+}
+
+// Batch static pieces within one editable object. Materials and object IDs remain
+// independent for darkness, selection, openings and roof cutaway.
+function batchStructureParts(group) {
+    const byMaterial = new Map();
+    for (const child of group.children) {
+        if (!child.isMesh || Array.isArray(child.material) || !child.geometry?.index) continue;
+        const parts = byMaterial.get(child.material) || [];
+        parts.push(child); byMaterial.set(child.material, parts);
+    }
+    for (const [material, parts] of byMaterial) {
+        if (parts.length < 2) continue;
+        const names = Object.keys(parts[0].geometry.attributes);
+        if (!parts.every(p => Object.keys(p.geometry.attributes).join() === names.join())) continue;
+        const geometries = parts.map(part => {
+            part.updateMatrix();
+            return part.geometry.toNonIndexed().applyMatrix4(part.matrix);
+        });
+        const merged = new THREE.BufferGeometry();
+        for (const name of names) {
+            const attributes = geometries.map(g => g.getAttribute(name));
+            const array = new Float32Array(attributes.reduce((n, a) => n + a.array.length, 0));
+            let offset = 0;
+            for (const attribute of attributes) { array.set(attribute.array, offset); offset += attribute.array.length; }
+            merged.setAttribute(name, new THREE.BufferAttribute(array, attributes[0].itemSize, attributes[0].normalized));
+        }
+        for (const part of parts) { group.remove(part); part.geometry.dispose(); }
+        geometries.forEach(g => g.dispose());
+        group.add(new THREE.Mesh(merged, material));
+    }
+}
+
 function createLocationObjectMesh(obj, forPreview = false) {
     const properties = obj.properties || {};
     const asset = visualAssetForLocationObject(obj.type, properties);
@@ -10148,8 +10211,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         || properties.is_ground_item || isFireObject(obj) || isElectricFixture(obj);
     const material = hasSeparateMaterials ? null
         : new THREE.MeshStandardMaterial({
-            color: quietHouseFinish ? quietHouseColor(properties.color, obj.type)
-                : properties.color || '#aa8866',
+            color: locationObjectMaterialColor(obj),
             roughness: 0.93,
             vertexColors: obj.type === 'wall' && quietHouseFinish,
         });
@@ -10384,6 +10446,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         });
     }
 
+    if (['wall', 'floor', 'window', 'stairs'].includes(obj.type)) batchStructureParts(group);
     const objectPosition = getObjectGridPosition(obj);
     const tileX = objectPosition.x ?? 0;
     const tileY = objectPosition.y ?? 0;
@@ -11065,7 +11128,7 @@ function refreshLocationDarkness(profile = activeLightingProfile, lightOnly = fa
     if (!lightOnly || fogIsActive()) applyFogOfWar();
 }
 
-function addLocationObjectMesh(obj, refreshFog = true) {
+function addLocationObjectMesh(obj, refreshFog = true, refreshMenu = true) {
     if (locationObjectMeshes.some(mesh => mesh.userData.locationObjectId === obj.id)) return;
     locationBuildingViewsDirty = true;
     const mesh = createLocationObjectMesh(obj);
@@ -11073,8 +11136,8 @@ function addLocationObjectMesh(obj, refreshFog = true) {
     scene.add(mesh);
     locationObjectMeshes.push(mesh);
     mesh.visible = locationLevelVisible(structureLevel(obj), structureBuildingId(obj),
-        mesh.position.x, mesh.position.z);
-    refreshLocationFloorMenu();
+        mesh.position.x, mesh.position.z, obj);
+    if (refreshMenu) refreshLocationFloorMenu();
     if (refreshFog) applyFogOfWar();
 }
 
@@ -11174,9 +11237,19 @@ function locationBuildingAt(x, z) {
     return nearest;
 }
 
-function locationLevelVisible(level, buildingId, x, z) {
+function locationLevelVisible(level, buildingId, x, z, object = null) {
     const view = (buildingId && getLocationBuildingViews().get(buildingId)) || locationBuildingAt(x, z);
-    if (locationViewLevel < 0) return level <= locationViewLevel;
+    if (level < 0 && locationViewLevel >= 0) {
+        // Terrain/lids still occlude these meshes. Keep the structure behind
+        // a surface opening so looking down does not reveal an empty void.
+        // Picking remains restricted to the active level in visibleEditorHit.
+        return Boolean(object) && (currentLocationData?.objects || []).some(portal =>
+            structureBuildingId(portal) === buildingId && (
+                ['floor_opening','hatch'].includes(portal.type) && structureLevel(portal) === 0
+                || ['stairs','ladder'].includes(portal.type) && structureLevel(portal) === -1));
+    }
+    if (locationViewLevel < 0) return level <= locationViewLevel
+        || object?.type === 'wall' && level < 0 && (object.properties?.exterior_wall === true || object.properties?.building_generation?.version === 1);
     return !view || view.maxLevel === view.minLevel || view.distant || level <= locationViewLevel;
 }
 
@@ -11207,6 +11280,27 @@ function locationFloorCount() {
     return Math.max(highest + 1, globalThis.window?.isGM ? 2 : 1);
 }
 
+function locationFloorDeletionReason(buildingId, level) {
+    if (!buildingId) return 'Выберите элемент нужного здания.';
+    const levels = (currentLocationData?.objects || []).filter(o => structureBuildingId(o) === buildingId).map(structureLevel);
+    if (level === 0) return 'Этаж 0 — обязательный базовый уровень. Удалите здание целиком.';
+    if (!levels.includes(level)) return 'В выбранном здании нет этого этажа.';
+    if (level > 0 && level !== Math.max(...levels)) return 'Можно удалить только самый верхний наземный этаж здания.';
+    if (level < 0 && level !== Math.min(...levels)) return 'Можно удалить только самый нижний подвальный этаж здания.';
+    return '';
+}
+
+function refreshLocationFloorDeleteAction() {
+    const button = document.querySelector('#location-floor-menu [data-floor-delete]');
+    if (!button) return;
+    const buildingId = structureBuildingId(getSelectedEditorSource()) || getStructurePlacementProperties().building_id;
+    const reason = locationFloorDeletionReason(buildingId, locationViewLevel);
+    button.disabled = Boolean(reason);
+    button.title = reason || `Удалить этаж ${locationViewLevel} выбранного здания`;
+    const explanation = document.querySelector('#location-floor-menu [data-floor-delete-reason]');
+    if (explanation) { explanation.textContent = reason; explanation.hidden = !reason; }
+}
+
 function refreshLocationFloorMenu() {
     const menu = document.getElementById('location-floor-menu');
     if (!menu) return;
@@ -11230,6 +11324,7 @@ function refreshLocationFloorMenu() {
     select.value = String(locationViewLevel);
     menu.querySelector('[data-floor-down]').disabled = locationViewLevel === minimum;
     menu.querySelector('[data-floor-up]').disabled = locationViewLevel >= count - 1;
+    refreshLocationFloorDeleteAction();
 }
 
 function updateLocationLampFixtureFloors(sources = currentLocationData?.lighting?.local_lights || []) {
@@ -11266,17 +11361,27 @@ let basementCutaway = null;
 let basementContour = null;
 let basementContourSignature = '';
 
-function updateStoreyTerrainVisibility() {
-    if (!currentLocationData || !scene) return;
-    basementCutaway ||= createBasementCutaway(THREE);
-    const objects = currentLocationData.objects || [];
+function locationTerrainCutawayFootprints() {
+    const objects = currentLocationData?.objects || [];
     // The ordinary surface also needs an open mouth above stairs from -1.
     const floors = objects.filter(o => o.type === 'floor' && structureLevel(o) === locationViewLevel);
     const basementFloors = objects.filter(o => o.type === 'floor' && structureLevel(o) < 0).map(structurePose);
-    const footprints = locationViewLevel < 0 ? floors.map(structurePose)
+    return locationViewLevel < 0 ? floors.map(structurePose)
         : objects.filter(o => ['stairs','ladder'].includes(o.type) && structureLevel(o) === -1
             || ['hatch','floor_opening'].includes(o.type) && structureLevel(o) === 0).map(structurePose)
             .filter(p => cutawayContains(basementFloors,p.x,p.z));
+}
+
+function locationHitOccludedByTerrain(hit, terrainHit) {
+    return Boolean(terrainHit && terrainHit.distance < hit.distance - .001
+        && !cutawayContains(locationTerrainCutawayFootprints(), terrainHit.point.x, terrainHit.point.z));
+}
+
+function updateStoreyTerrainVisibility() {
+    if (!currentLocationData || !scene) return;
+    basementCutaway ||= createBasementCutaway(THREE);
+    const floors = (currentLocationData.objects || []).filter(o => o.type === 'floor' && structureLevel(o) === locationViewLevel);
+    const footprints = locationTerrainCutawayFootprints();
     const changed = basementCutaway.update(footprints);
     for (const mesh of [groundPlaneMesh, locationTileMesh, waterTileMesh, smoothTerrainMesh,
         terrainSurfaceMesh, waterSurfaceMesh, waterBankMesh, sandBankMesh, waterDetailGroup,
@@ -11315,7 +11420,7 @@ function updateRoofVisibility() {
     const wasDirty = locationBuildingViewsDirty;
     const views = getLocationBuildingViews();
     // Independent panels use the existing roof cutaway rule, while remaining
-    // visible and pickable in the manual editor.
+    // visible and pickable when explicitly shown in the manual editor.
     for (const mesh of locationObjectMeshes) {
         const object = mesh.userData.locationObject;
         if (!['roof', 'ceiling'].includes(object?.type)) continue;
@@ -11334,7 +11439,7 @@ function updateRoofVisibility() {
         const coveringPlan = object.properties?.building_generation?.version === 1
             ? views.get(structureBuildingId(object))?.plan : null;
         const opacity = coveredBySlab || locationViewLevel < 0 && structureLevel(object) > locationViewLevel ? 0
-            : editMode ? Number(locationRoofsVisible) : roofOpacityForCamera(coveringPlan || { ...pose, rise: 0,
+            : editMode && !coveringPlan ? Number(locationRoofsVisible) : roofOpacityForCamera(coveringPlan || { ...pose, rise: 0,
             eaveY: mesh.position.y + pose.height }, controls.target, distance,
             locationRoofsVisible, false, camera.position);
         mesh.traverse(child => {
@@ -11429,12 +11534,15 @@ function rebuildLocationRoofs() {
     updateRoofVisibility();
 }
 
-function refreshArchitecturalMeshes() {
+function refreshArchitecturalMeshes(affected = null, alreadyBuilt = new Set()) {
     if (!scene || !currentLocationData) return;
     for (let index = 0; index < locationObjectMeshes.length; index++) {
         const oldMesh = locationObjectMeshes[index];
         const source = (currentLocationData.objects || []).find(item => item.id === oldMesh.userData.locationObjectId);
         if (!source || !['wall', 'door', 'window', 'floor', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(source.type)) continue;
+        if (alreadyBuilt.has(Number(source.id))) continue;
+        if (affected && !affected.some(object => object && structureLevel(object) === structureLevel(source)
+            && structureBuildingId(object) === structureBuildingId(source))) continue;
         scene.remove(oldMesh);
         disposeLocationObject(oldMesh);
         const newMesh = createLocationObjectMesh(source);
@@ -11659,8 +11767,10 @@ async function createResidentialHouse(start, end) {
     const buildingId = shell
         ? `shell-${locationId}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
         : houseBuildingId(locationId, footprint, seed);
+    const planningStarted = performance.now();
     const plan = shell ? planBuildingShell({ ...options, seed, buildingId, groundHeight:getTileHeight })
         : planResidentialHouse({ ...footprint, seed, buildingId, assetById: findLocationAsset });
+    performance.measure('location-building:plan', { start: planningStarted, end: performance.now() });
     if (plan.error) return showNotification(plan.error, 'system');
     if (minX < 0 || minZ < 0 || minX + width > currentLocationData.grid_width
         || minZ + depth > currentLocationData.grid_height) {
@@ -11692,31 +11802,15 @@ async function createResidentialHouse(start, end) {
     houseCreationPending = true;
     showNotification('Создаётся дом; дождитесь завершения сохранения', 'system');
     try {
-        for (const spec of plan.objects) {
-            if (sceneEpoch !== houseSceneEpoch) throw new Error('Создание дома прервано при выходе из локации');
-            const object = await Server.createLocationObject(lobbyId, locationId, spec);
-            if (sceneEpoch !== houseSceneEpoch) throw new Error('Создание дома прервано при выходе из локации');
-            addLocationObject(object);
-        }
+        const change = await Server.changeLocationObjects(lobbyId, locationId, { objects: plan.objects });
+        if (sceneEpoch !== houseSceneEpoch) return;
+        applyLocationObjectsChange(change);
         window.dispatchEvent(new CustomEvent('location-editor-active-building',
             { detail: { buildingId, level: 0 } }));
         showNotification(shell ? 'Пустое здание создано. Все элементы доступны для ручной правки.'
             : `Дом создан: ${plan.rooms.map(room => room.name).join(', ')}`, 'success');
     } catch (error) {
-        let remaining = 0;
-        try {
-            const fresh = await Server.getLocationDetail(lobbyId, locationId);
-            const generated = (fresh.objects || []).filter(object => structureBuildingId(object) === buildingId);
-            for (const object of generated) {
-                try {
-                    await Server.deleteLocationObject(lobbyId, object.id);
-                    if (sceneEpoch === houseSceneEpoch) removeLocationObject(object.id);
-                } catch { remaining++; }
-            }
-        } catch { remaining = -1; }
-        showNotification(remaining
-            ? 'Не удалось завершить дом; проверьте оставшиеся элементы этого здания'
-            : error.message || 'Не удалось создать дом; изменения отменены', 'system');
+        showNotification(error.message || 'Не удалось создать дом', 'system');
     } finally {
         houseCreationPending = false;
     }
@@ -12298,54 +12392,33 @@ async function removeStructuresAtTile(x, z, radius = 0) {
     if (!window.currentLobbyId || !currentLocationData) return;
     const locationData = currentLocationData;
     const objects = (locationData.objects || []).filter(object => {
-        const position = getObjectGridPosition(object);
-        return Math.abs(position.x - x) <= radius && Math.abs(position.y - z) <= radius
+        const p = structurePose(object), half = radius + .5;
+        const dx = x + .5 - p.x, dz = z + .5 - p.z;
+        const overlaps = Math.abs(dx) < half + (Math.abs(p.axis.x)*p.width + Math.abs(p.normal.x)*p.depth)/2 - 1e-6
+            && Math.abs(dz) < half + (Math.abs(p.axis.z)*p.width + Math.abs(p.normal.z)*p.depth)/2 - 1e-6
+            && Math.abs(dx*p.axis.x + dz*p.axis.z) < p.width/2 + half*(Math.abs(p.axis.x)+Math.abs(p.axis.z)) - 1e-6
+            && Math.abs(dx*p.normal.x + dz*p.normal.z) < p.depth/2 + half*(Math.abs(p.normal.x)+Math.abs(p.normal.z)) - 1e-6;
+        return structureLevel(object) === locationViewLevel && overlaps
             && !structureDeletionInFlight.has(object.id);
     });
     if (!objects.length) return;
 
     objects.forEach(object => structureDeletionInFlight.add(object.id));
-    const results = await Promise.allSettled(
-        objects.map(object => Server.deleteLocationObject(window.currentLobbyId, object.id))
-    );
-    let removedFloor = false;
-    let removedArchitecture = false;
-    let removedFire = false;
-    let removedAny = false;
-    results.forEach((result, index) => {
-        const object = objects[index];
-        const objectId = object.id;
-        structureDeletionInFlight.delete(objectId);
-        if (result.status === 'fulfilled') {
-            if (currentLocationData !== locationData) return;
-            removeLocationObjectMesh(objectId, false);
-            locationData.objects = locationData.objects.filter(item => item.id !== objectId);
-            removedAny = true;
-            removedFloor ||= object.type === 'floor';
-            removedArchitecture ||= ['wall', 'door', 'window', 'floor', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(object.type);
-            removedFire ||= isObjectLightSource(object);
-            if (isObjectLightSource(object)) syncFireObjectLight(null, objectId, false);
-        } else {
-            showNotification(result.reason?.message || 'Не удалось удалить объект');
-        }
-    });
-    if (!removedAny) return;
-    locationBuildingViewsDirty = true;
-    refreshLocationFloorMenu();
-    if (removedFloor) rebuildGrassDetailMesh();
-    if (removedArchitecture) {
-        refreshArchitecturalMeshes();
-    } else if (removedFire && activeLightingProfile?.dark_tiles?.length) {
-        refreshLocationDarkness(activeLightingProfile, true);
-    } else if (fogIsActive()) {
-        applyFogOfWar();
+    try {
+        const change = await Server.changeLocationObjects(window.currentLobbyId, currentLocationId,
+            { object_ids: objects.map(o => o.id), level: locationViewLevel }, 'DELETE');
+        if (currentLocationData === locationData) applyLocationObjectsChange(change);
+    } catch (error) {
+        showNotification(error.message || 'Не удалось удалить объекты', 'system');
+    } finally {
+        objects.forEach(object => structureDeletionInFlight.delete(object.id));
     }
-    invalidateMovementMapCache();
 }
 
 export function setLocationBuildMode(mode) { buildMode = mode; updateBuildPreview(); }
 export function setLocationStructurePreset(value) { structurePreset = value; updateBuildPreview(); }
 export function refreshLocationBuildPreview() {
+    refreshLocationFloorDeleteAction();
     if (hoveredTileCoords && currentLocationData) {
         const { x, z } = hoveredTileCoords;
         updateHighlight(x, z, getTileHeight(x, z));
@@ -12422,6 +12495,56 @@ export function isLocationEditorTransformActive() {
     return Boolean(window.locationEditMode && (editorMoveMode || editorRotateMode || editorResizeMode));
 }
 
+export function applyLocationObjectsChange({ location_id, objects = [], deleted_ids = [] }) {
+    if (!currentLocationData || Number(location_id) !== Number(currentLocationId)) return;
+    const existing = new Set((currentLocationData.objects || []).map(o => Number(o.id)));
+    const added = objects.filter(o => !existing.has(Number(o.id)));
+    const removed = new Set(deleted_ids.filter(id => existing.has(Number(id))).map(Number));
+    const removedObjects = (currentLocationData.objects || []).filter(o => removed.has(Number(o.id)));
+    if (!added.length && !removed.size) return; // REST response and socket echo are identical.
+    const started = performance.now();
+    currentLocationData.objects = (currentLocationData.objects || []).filter(o => !removed.has(Number(o.id)));
+    currentLocationData.objects.push(...added);
+    for (const id of removed) removeLocationObjectMesh(id, false);
+    for (const object of added) addLocationObjectMesh(object, false, false);
+    performance.measure('location-building:meshes', { start: started, end: performance.now() });
+    if (removed.size && editorSelections.some(s => s.kind === 'structure' && removed.has(Number(s.id)))) clearEditorSelection();
+    locationBuildingViewsDirty = true;
+    refreshArchitecturalMeshes([...added, ...removedObjects], new Set(added.map(o => Number(o.id))));
+    for (const object of removedObjects) if (isObjectLightSource(object)) syncFireObjectLight(null, object.id, false);
+    for (const object of added) if (isObjectLightSource(object)) syncFireObjectLight(object, object.id, false);
+    rebuildGrassDetailMesh();
+    refreshLocationFloorMenu();
+    invalidateMovementMapCache();
+    notifyEditorBuildingsChanged();
+    queueStaticLightFieldRefresh();
+    performance.measure('location-building:scene', { start: started, end: performance.now() });
+}
+
+export async function deleteSelectedLocationBuilding(wholeBuilding = false) {
+    const source = getSelectedEditorSource();
+    const buildingId = structureBuildingId(source) || getStructurePlacementProperties().building_id;
+    if (!buildingId) return showNotification('Выберите элемент нужного здания', 'system');
+    if (!wholeBuilding) {
+        const reason = locationFloorDeletionReason(buildingId, locationViewLevel);
+        if (reason) { showNotification(reason, 'system'); return false; }
+    }
+    if (!(currentLocationData?.objects || []).some(o => structureBuildingId(o) === buildingId
+        && (wholeBuilding || structureLevel(o) === locationViewLevel))) return false;
+    if (!confirm(wholeBuilding ? `Удалить здание «${buildingId}» целиком?`
+        : `Удалить этаж ${locationViewLevel} здания «${buildingId}»? Остальные этажи будут сохранены.`)) return false;
+    const locationId = currentLocationId, epoch = houseSceneEpoch;
+    try {
+        const change = await Server.changeLocationObjects(window.currentLobbyId, locationId,
+            { building_id: buildingId, ...(wholeBuilding ? {} : { level: locationViewLevel }) }, 'DELETE');
+        if (epoch === houseSceneEpoch) applyLocationObjectsChange(change);
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось удалить здание или этаж', 'system');
+        return false;
+    }
+}
+
 export function addLocationObject(object) {
     if (!currentLocationData) return;
     currentLocationData.objects = currentLocationData.objects || [];
@@ -12430,7 +12553,7 @@ export function addLocationObject(object) {
     const fire = isObjectLightSource(object);
     addLocationObjectMesh(object, !fire);
     if (object.type === 'floor') { refreshFloorRugHeights(); rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
-    if (['wall', 'door', 'window', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(object.type)) refreshArchitecturalMeshes();
+    if (['wall', 'door', 'window', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(object.type)) refreshArchitecturalMeshes([object]);
     if (fire) {
         syncFireObjectLight(object);
         if ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive()) applyFogOfWar();
@@ -12451,7 +12574,7 @@ export function removeLocationObject(objectId) {
     locationBuildingViewsDirty = true;
     refreshLocationFloorMenu();
     if (removed?.type === 'floor') { refreshFloorRugHeights(); rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
-    if (['wall', 'door', 'window', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(removed?.type)) refreshArchitecturalMeshes();
+    if (['wall', 'door', 'window', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(removed?.type)) refreshArchitecturalMeshes([removed]);
     const fire = isObjectLightSource(removed);
     if (fire) syncFireObjectLight(null, objectId);
     invalidateMovementMapCache();
@@ -12477,7 +12600,7 @@ export function updateLocationObject(object) {
         rebuildGrassDetailMesh();
         rebuildLocationRoofs();
     }
-    if (['wall', 'door', 'window', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(object.type)) refreshArchitecturalMeshes();
+    if (['wall', 'door', 'window', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(object.type)) refreshArchitecturalMeshes([object, previous]);
     if (fire) {
         syncFireObjectLight(object);
         if ((!activeLightingProfile?.dark_tiles?.length || !locationLightGroup) && fogIsActive()) applyFogOfWar();
@@ -12779,7 +12902,7 @@ function getPrimaryLocationEditorAsset() {
         z: Number(source.tile_y) + 0.5 + Number(source.properties?.offset_z || 0),
         rotation: Math.round((objectRotationToBearing(source.properties?.rotation || 0) + 360) % 360),
         elevation: source.properties?.roof_section ? Number(source.properties.elevation)||0 : clampAssetElevation(source.properties?.elevation),
-        color: source.properties?.color || '#aa8866',
+        color: `#${locationObjectMaterialColor(source).getHexString()}`,
         buildingId: structureBuildingId(source) || '',
         level: structureLevel(source),
         structureType: source.type,
@@ -12829,6 +12952,7 @@ function notifyEditorSelection() {
     window.dispatchEvent(new CustomEvent('location-editor-selection', {
         detail: getSelectedLocationEditorAsset(),
     }));
+    refreshLocationFloorDeleteAction();
 }
 
 export function getLocationBuildingIds() {
@@ -13122,9 +13246,15 @@ function updateEditorSelectionVisual(lightingOverride = null) {
 function visibleEditorHit(hit) {
     for (let item = hit.object; item && item !== scene; item = item.parent) {
         if (!item.visible) return false;
+        const source = item.userData?.locationObject;
+        if (source && structureLevel(source) !== locationViewLevel) return false;
+        const decor = item.userData?.sourceObject;
+        if (decor && decorDisplayLevel(decor) !== locationViewLevel) return false;
+        const lampIndex = item.userData?.locationLampIndex;
+        if (Number.isInteger(lampIndex) && lampDisplayLevel(currentLocationData?.lighting?.local_lights?.[lampIndex]) !== locationViewLevel) return false;
         if (item.isMesh && item.material) {
             const materials = Array.isArray(item.material) ? item.material : [item.material];
-            if (materials.every(material => material.visible === false)) return false;
+            if (materials.every(material => material.visible === false || material.opacity === 0)) return false;
         }
     }
     return true;
@@ -13137,6 +13267,7 @@ function projectedEditorLamp(clientX, clientY, rect, maxDistance) {
         const index = fixture.userData?.locationLampIndex;
         if (!Number.isInteger(index) || !fixture.visible
             || !currentLocationData?.lighting?.local_lights?.[index]
+            || lampDisplayLevel(currentLocationData.lighting.local_lights[index]) !== locationViewLevel
             || !fixture.children.some(child => child.userData.locationLampBulb && child.visible)) continue;
         const position = fixture.getWorldPosition(new THREE.Vector3());
         const distance = raycaster.ray.origin.distanceTo(position);
@@ -13683,7 +13814,8 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
                     offset_z: z - Math.floor(z) - 0.5,
                     rotation: bearingToObjectRotation(rotation),
                     elevation: elevation ?? (source.properties?.roof_section?Number(source.properties.elevation)||0:clampAssetElevation(source.properties?.elevation)),
-                    ...(color !== undefined ? { color } : {}),
+                    ...(color !== undefined && color.toLowerCase() !== `#${locationObjectMaterialColor(source).getHexString()}`
+                        ? { color, material_color_exact: true } : {}),
                     ...(dimensions ? { dimensions } : {}),
                     ...(buildingId !== undefined ? { building_id: buildingId } : {}),
                     ...(level !== undefined ? { level } : {}),
@@ -13896,7 +14028,7 @@ function updateEditorRotatePreview(clientX, clientY, snap = false, aroundGroup =
         editorGroupRotateWithPivot = aroundGroup;
         const pivot = editorGroupRotatePivot;
         const point = getPointerWorldPoint(clientX, clientY,
-            getTileHeight(Math.floor(pivot.x), Math.floor(pivot.z)));
+            getTileHeight(Math.floor(pivot.x), Math.floor(pivot.z)) + editorHoverLevelOffset());
         if (!point || Math.hypot(point.x - pivot.x, point.z - pivot.z) < 0.25) {
             if (modeChanged) updateBuildPreview();
             return;
@@ -13918,7 +14050,7 @@ function updateEditorRotatePreview(clientX, clientY, snap = false, aroundGroup =
     if (!selection) return;
     const centerX = selection.x;
     const centerZ = selection.z;
-    const point = getPointerWorldPoint(clientX, clientY, getTileHeight(Math.floor(centerX), Math.floor(centerZ)));
+    const point = getPointerWorldPoint(clientX, clientY, getTileHeight(Math.floor(centerX), Math.floor(centerZ)) + editorHoverLevelOffset());
     if (!point || Math.hypot(point.x - centerX, point.z - centerZ) < 0.25) return;
     const nextAngle = bearingFromDelta(point.x - centerX, point.z - centerZ, snap);
     if (nextAngle === editorRotateAngle) return;
@@ -15503,7 +15635,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 }
             }
             if (updates.objects !== undefined && updates.objects.length === 0 && !brushObjectMode) {
-                tile.objects = [];
+                tile.objects = (tile.objects || []).filter(object => decorDisplayLevel(object) !== locationViewLevel);
                 needUpdate = true;
             }
             if (needUpdate) {
@@ -16184,10 +16316,16 @@ export function setupLocationEditing() {
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
         const intersects = profiledLocationRaycast(tileCubes, false, 'surface');
-        if (intersects.length > 0) {
+        // An upper-storey ray can leave the map before reaching the ground.
+        // Its intersection with the active editing plane is still valid.
+        const hoverSeed = intersects.length ? hitTileCoords(intersects[0])
+            : editorHoverLevelOffset() !== 0 ? {
+                x: Math.min(currentLocationData.grid_width-1, Math.max(0, Math.floor(controls.target.x))),
+                z: Math.min(currentLocationData.grid_height-1, Math.max(0, Math.floor(controls.target.z))),
+            } : null;
+        if (hoverSeed) {
             locationPointerProfile?.count('tileHits');
-            const hit = intersects[0];
-            const groundCoords = hitTileCoords(hit);
+            const groundCoords = hoverSeed;
             const movePoint = editorMoveMode && groundCoords
                 ? editorMovePointerPoint(e.clientX, e.clientY, groundCoords) : null;
             const coords = editorMoveMode
@@ -17124,6 +17262,17 @@ export function addLocationFloorMenu() {
         create.title = 'Добавить этаж или подвал выбранного здания';
         create.onclick = () => addFloorAboveSelectedLocationAsset();
         menu.appendChild(create);
+        for (const [whole, text] of [[false, 'Удалить этаж'], [true, 'Удалить здание']]) {
+            const button = document.createElement('button');
+            button.type = 'button'; button.textContent = text;
+            button.dataset[whole ? 'buildingDelete' : 'floorDelete'] = '';
+            button.onclick = () => deleteSelectedLocationBuilding(whole);
+            menu.appendChild(button);
+        }
+        const reason = document.createElement('small');
+        reason.dataset.floorDeleteReason = '';
+        reason.style.cssText = 'position:absolute;right:0;bottom:calc(100% + 40px);width:300px;white-space:normal;padding:4px 8px;background:#20251d;';
+        menu.appendChild(reason);
     }
     document.getElementById('location-container').appendChild(menu);
     refreshLocationFloorMenu();

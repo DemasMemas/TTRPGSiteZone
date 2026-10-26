@@ -6,6 +6,86 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
 
+test('cutaway keeps basement boundary walls and renders below surface openings without exposing labels', () => {
+    const context=vm.createContext({locationViewLevel:-2,
+        currentLocationData:{objects:[]},structureLevel:o=>o.properties?.level||0,
+        structureBuildingId:o=>o.properties?.building_id||null,
+        getLocationBuildingViews:()=>new Map(),locationBuildingAt:()=>null});
+    vm.runInContext(functionSource('locationLevelVisible','lampDisplayLevel'),context);
+    assert.equal(context.locationLevelVisible(-1,null,0,0,{type:'wall',properties:{exterior_wall:true}}),true);
+    assert.equal(context.locationLevelVisible(-1,null,0,0,{type:'floor'}),false);
+    assert.equal(context.locationLevelVisible(-1,null,0,0,{type:'wall'}),false);
+    assert.equal(context.locationLevelVisible(-2,null,0,0,{type:'floor'}),true);
+    context.locationViewLevel=0;
+    assert.equal(context.locationLevelVisible(-1,null,0,0,{type:'wall',properties:{exterior_wall:true}}),false);
+    context.currentLocationData.objects.push({type:'floor_opening',properties:{building_id:'house',level:0}});
+    assert.equal(context.locationLevelVisible(-1,'house',0,0,{type:'floor'}),true);
+    assert.equal(context.locationLevelVisible(-2,'house',0,0,{type:'wall'}),true);
+    assert.equal(context.locationLevelVisible(-1,'neighbor',0,0,{type:'floor'}),false);
+    assert.equal(context.locationLevelVisible(-1,'house',0,0),false,'basement labels stay hidden on the surface');
+});
+
+test('terrain occludes basement interaction rays except through the rendered cutaway', () => {
+    const context=vm.createContext({locationTerrainCutawayFootprints:()=>[],cutawayContains:rects=>rects.length>0});
+    vm.runInContext(functionSource('locationHitOccludedByTerrain','updateStoreyTerrainVisibility'),context);
+    const terrain={distance:4,point:{x:2,z:3}},basement={distance:8};
+    assert.equal(context.locationHitOccludedByTerrain(basement,terrain),true);
+    assert.equal(context.locationHitOccludedByTerrain({distance:2},terrain),false);
+    context.locationTerrainCutawayFootprints=()=>[{}];
+    assert.equal(context.locationHitOccludedByTerrain(basement,terrain),false);
+});
+
+test('picking rejects other floors, hidden ancestors, and fully transparent materials', () => {
+    const context=vm.createContext({scene:{},locationViewLevel:-2,
+        structureLevel:o=>o.properties?.level||0,decorDisplayLevel:o=>o.level||0,
+        lampDisplayLevel:o=>o.level||0,currentLocationData:{lighting:{local_lights:[{level:-1}]}}});
+    vm.runInContext(functionSource('visibleEditorHit','projectedEditorLamp'),context);
+    const root={visible:true,userData:{locationObject:{properties:{level:-1}}}};
+    const hit={object:{visible:true,isMesh:true,material:{opacity:1},parent:root}};
+    assert.equal(context.visibleEditorHit(hit),false);
+    root.userData.locationObject.properties.level=-2;
+    assert.equal(context.visibleEditorHit(hit),true);
+    root.visible=false;assert.equal(context.visibleEditorHit(hit),false);root.visible=true;
+    hit.object.material.opacity=0;assert.equal(context.visibleEditorHit(hit),false);
+    delete root.userData.locationObject;root.userData.locationLampIndex=0;
+    hit.object.material.opacity=1;assert.equal(context.visibleEditorHit(hit),false);
+});
+
+test('select and eraser pointer planes follow all five signed levels', () => {
+    const context=vm.createContext({window:{locationEditMode:true,locationEditorTool:'select'},
+        locationViewLevel:0,STOREY_HEIGHT:2.4,editorMoveMode:false,eraserMode:false,buildMode:'terrain',
+        currentLocationData:{grid_width:40,grid_height:40},structureLevelOffset:()=>0,getTileHeight:()=>1,
+        getPointerWorldPoint:(x,y,height)=>({x:12+height,z:12+height})});
+    vm.runInContext(functionSource('editorHoverLevelOffset','editorMovePointerPoint'),context);
+    for(const level of [-2,-1,0,1,2]){
+        context.locationViewLevel=level;
+        assert.equal(context.editorHoverLevelOffset(),level*2.4);
+        const tile=context.hoveredEditorTile(0,0,{x:13,z:13});
+        assert.equal(tile.x,Math.floor(13+level*2.4));
+    }
+    context.window.locationEditorTool='terrain';context.eraserMode=true;context.locationViewLevel=-2;
+    assert.equal(context.editorHoverLevelOffset(),-4.8);
+    context.window.locationEditMode=false;
+    for(const level of [-2,-1,0,1,2]) {
+        context.locationViewLevel=level;
+        assert.equal(context.editorHoverLevelOffset(),level*2.4,'ordinary game mode uses the same plane');
+    }
+});
+
+test('delete policy uses the selected building and protects the base and intermediate storeys', () => {
+    const objects=[-2,-1,0,1,2].map(level=>({properties:{building_id:'A',level}}));
+    objects.push({properties:{building_id:'B',level:4}},{properties:{building_id:'B',level:-4}});
+    const context=vm.createContext({currentLocationData:{objects},
+        structureBuildingId:o=>o.properties.building_id,structureLevel:o=>o.properties.level});
+    vm.runInContext(functionSource('locationFloorDeletionReason','refreshLocationFloorDeleteAction'),context);
+    for(const level of [-1,0,1])assert.ok(context.locationFloorDeletionReason('A',level));
+    for(const level of [-2,2])assert.equal(context.locationFloorDeletionReason('A',level),'');
+    assert.ok(context.locationFloorDeletionReason('A',3));
+    context.currentLocationData.objects=objects.filter(o=>o.properties.building_id!=='A'||Math.abs(o.properties.level)!==2);
+    for(const level of [-1,1])assert.equal(context.locationFloorDeletionReason('A',level),'');
+    assert.ok(context.locationFloorDeletionReason('A',0));
+});
+
 function functionSource(name, nextName) {
     const start = source.indexOf(`function ${name}(`);
     const end = source.indexOf(`function ${nextName}(`, start);

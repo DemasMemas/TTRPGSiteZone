@@ -597,6 +597,12 @@ export const Server = {
         });
     },
 
+    async changeLocationObjects(lobbyId, locationId, data, method = 'POST') {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/objects/batch`, {
+            method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+        });
+    },
+
     async deleteLocationObject(lobbyId, objectId) {
         return apiFetch(`/lobbies/${lobbyId}/locations/objects/${objectId}`, {
             method: 'DELETE'

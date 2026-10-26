@@ -121,3 +121,100 @@ def test_generated_objects_keep_rest_socket_permissions_and_round_trip(client, a
     finally:
         for connection in clients:
             connection.disconnect()
+
+
+def test_atomic_building_edits_isolate_levels_and_clients(client, app, create_user, auth_headers):
+    gm, player = create_user('batch-gm'), create_user('batch-player')
+    headers = auth_headers(gm)
+    lobby = client.post('/lobbies/', headers=headers, json=dict(name='batch', map_type='empty',
+        chunks_width=1, chunks_height=1)).get_json()
+    api = f"/lobbies/{lobby['id']}"
+    client.post(api+'/join', headers=auth_headers(player))
+    loc = client.post(api+'/locations', headers=headers, json=dict(name='batch', world_tile_x=1,
+        world_tile_z=1, grid_width=16, grid_height=16)).get_json()
+    url = f"{api}/locations/{loc['id']}"
+    batch = url + '/objects/batch'
+    terrain = client.get(url, headers=headers).get_json()['tiles_data']
+    from app.sockets.location import handle_join_location
+    socketio.on_event('join_location', handle_join_location)
+    connections = [socketio.test_client(app), socketio.test_client(app)]
+    try:
+        for connection, user in zip(connections, [gm, player]):
+            connection.emit('join_location', dict(token=user['token'], location_id=loc['id']))
+            connection.get_received()
+        specs = shell(basements=2)
+        assert client.post(batch, headers=auth_headers(player), json={'objects': specs}).status_code == 403
+        # Validate the entire batch before adding anything or emitting an event.
+        assert client.post(batch, headers=headers, json={'objects': specs + [dict(name='bad', type='wall', tile_x=99, tile_y=0)]}).status_code == 400
+        assert not client.get(url, headers=headers).get_json()['objects']
+        result = client.post(batch, headers=headers, json={'objects': specs})
+        assert result.status_code == 201
+        saved = result.get_json()['objects']
+        for connection in connections:
+            events = connection.get_received()
+            assert [e['name'] for e in events] == ['location_objects_changed']
+            assert events[0]['args'][0]['objects'] == saved
+        # The same building has two storeys and two basements: zero and the
+        # intermediate basement cannot be removed, even by a direct API call.
+        for level in [0, -1]:
+            rejected = client.delete(batch, headers=headers, json={'building_id':'shell', 'level':level})
+            assert rejected.status_code == 409
+            assert rejected.get_json()['error']
+            assert client.get(url, headers=headers).get_json()['objects'] == saved
+        # An unrelated building's higher/lower storeys must not define our limits.
+        extra_specs = [dict(name='Extra', type='floor', tile_x=14, tile_y=14,
+            properties={'building_id':bid,'level':level}) for bid, level in [('neighbor',3),('neighbor',-3),('shell',2)]]
+        extra = client.post(batch, headers=headers, json={'objects':extra_specs}).get_json()['objects']
+        for connection in connections:
+            connection.get_received()
+        previous = client.get(url, headers=headers).get_json()['objects']
+        assert client.delete(batch, headers=headers, json={'building_id':'shell','level':1}).status_code == 409
+        assert client.get(url, headers=headers).get_json()['objects'] == previous
+        assert all(not connection.get_received() for connection in connections)
+        assert client.delete(batch, headers=headers, json={'building_id':'shell','level':2}).status_code == 200
+        # Remove fixture objects through ordinary element editing, then continue
+        # testing the basement operation and whole-building deletion below.
+        for item in extra:
+            if item['properties']['building_id'] == 'neighbor':
+                assert client.delete(f"{api}/locations/objects/{item['id']}", headers=headers).status_code == 204
+        saved = client.get(url, headers=headers).get_json()['objects']
+        for connection in connections:
+            connection.get_received()
+        lower = next(o for o in saved if o['type'] == 'floor' and o['properties']['level'] == -2)
+        upper = next(o for o in saved if o['type'] == 'floor' and o['properties']['level'] == -1)
+        # A stale or forged cross-floor eraser operation is rejected atomically.
+        assert client.delete(batch, headers=headers, json={'object_ids':[lower['id'], upper['id']], 'level':-2}).status_code == 400
+        assert len(client.get(url, headers=headers).get_json()['objects']) == len(saved)
+        result = client.delete(batch, headers=headers, json={'object_ids':[lower['id']], 'level':-2})
+        assert result.status_code == 200
+        assert result.get_json()['deleted_ids'] == [lower['id']]
+        assert client.delete(batch, headers=auth_headers(player), json={'building_id':'shell'}).status_code == 403
+        for connection in connections:
+            assert len(connection.get_received()) == 1
+        before = client.get(url, headers=headers).get_json()['objects']
+        removed = client.delete(batch, headers=headers, json={'building_id':'shell', 'level':-2}).get_json()['deleted_ids']
+        after = client.get(url, headers=headers).get_json()['objects']
+        assert {o['id'] for o in after} == {o['id'] for o in before} - set(removed)
+        assert {o['id'] for o in before if o['properties']['level'] == -2} <= set(removed)
+        # Only the portal belonging to the removed shaft may change on the upper floor.
+        assert all(o['type'] == 'floor_opening' and o['properties']['level'] == -1
+                   for o in before if o['id'] in removed and o['properties']['level'] != -2)
+        # Keep the neighboring building and terrain, even for an entire-building delete.
+        neighbor = client.post(url+'/objects', headers=headers, json=dict(type='floor', name='neighbor',
+            tile_x=14, tile_y=14, properties={'building_id':'neighbor'})).get_json()
+        actor = client.post(api+'/characters', headers=headers, json={'name':'Resident','data':{}}).get_json()
+        client.post(url+'/spawn_character', headers=headers, json={'character_id':actor['id'],'tile_x':3,'tile_y':3})
+        assert client.delete(batch, headers=headers, json={'building_id':'shell'}).status_code == 409
+        assert len(client.get(url, headers=headers).get_json()['objects']) == len(after)+1
+        with app.app_context():
+            resident = LocationCharacter.query.filter_by(location_id=loc['id'], character_id=actor['id']).one()
+            resident.pos_x = resident.pos_y = 14
+            db.session.commit()
+        assert client.delete(batch, headers=headers, json={'building_id':'shell'}).status_code == 200
+        db.session.remove()
+        reloaded = client.get(url, headers=headers).get_json()
+        assert [o['id'] for o in reloaded['objects']] == [neighbor['id']]
+        assert reloaded['tiles_data'] == terrain
+    finally:
+        for connection in connections:
+            connection.disconnect()

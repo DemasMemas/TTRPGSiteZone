@@ -99,6 +99,7 @@ test('floor menu uses the actual signed levels with zero as ground',()=>{
     const down={},up={};
     const menu={querySelector:s=>s==='select'?select:s==='[data-floor-down]'?down:up};
     const context=vm.createContext({locationViewLevel:-1,locationFloorCount:()=>3,locationMinimumLevel:()=>-3,
+        refreshLocationFloorDeleteAction(){},
         document:{getElementById:()=>menu},Option:class{constructor(text,value){this.text=text;this.value=value;}}});
     vm.runInContext(part('refreshLocationFloorMenu','updateLocationLampFixtureFloors'),context);
     context.refreshLocationFloorMenu();

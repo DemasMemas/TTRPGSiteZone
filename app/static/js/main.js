@@ -586,9 +586,9 @@ window.enterLocation = async function(locationId) {
                     <input class="form-control location-asset-search" type="search" placeholder="Найти ассет или аномалию" aria-label="Поиск по ассетам">
                     <div class="location-house-generator">
                         <button type="button" data-house-draw aria-pressed="false">Нарисовать здание</button>
-                        <label>Генератор <select class="form-control" data-house-kind><option value="shell">Пустое здание</option><option value="residential">Прежний жилой дом</option></select></label>
+                        <label>Генератор <select class="form-control" data-house-kind><option value="shell">Пустая оболочка · формы, этажи, подвалы</option><option value="residential">Жилой дом с мебелью · прямоугольник</option></select></label>
                         <label>Seed <input class="form-control" data-house-seed type="text" value="0" maxlength="32"></label>
-                        <span>Растяните область ЛКМ по ровному участку. Затем выберите форму, размеры и этажность, проверьте предпросмотр и нажмите «Создать».</span>
+                        <span>Растяните область ЛКМ по ровному участку. Пустая оболочка: 6–16 м, сложные формы от 10×10 м, этажи и подвалы, без мебели. Жилой дом: прямоугольник 4–12 м с прежней планировкой и мебелью.</span>
                     </div>
                     <div class="location-asset-tabs"></div>
                     <div class="location-asset-grid"></div>
@@ -1729,6 +1729,11 @@ if (socket) {
             import('./locationScene.js').then(module => {
                 module.applyLocationTilesUpdate(data.location_id, data.updates);
             });
+        }
+    });
+    socket.on('location_objects_changed', (data) => {
+        if (Number(data.location_id) === Number(getCurrentLocationId())) {
+            import('./locationScene.js').then(module => module.applyLocationObjectsChange(data));
         }
     });
     socket.on('location_object_created', (data) => {

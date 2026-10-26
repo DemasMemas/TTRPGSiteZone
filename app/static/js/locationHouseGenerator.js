@@ -101,7 +101,7 @@ export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle
             const collapse = level > -basements && !protectedCell
                 && random(`slab:${level}:${x}:${z}`) < (condition === 'ruins' ? .48 : condition === 'damaged' ? .2 : 0);
             if (!collapse) add('floor', level, minX + x * unit + unit/2, minZ + z * unit + unit/2, unit, unit, .12,
-                { roof_enabled: false, visual_asset: style.floor });
+                { roof_enabled: false, visual_asset: style.floor, color: '#776d5d' });
             else add('floor_opening', level, minX + x * unit + unit/2, minZ + z * unit + unit/2, unit, unit, .05);
             if (!roofType && level === storeys - 1 && random(`roof:${x}:${z}`)
                 >= (condition === 'ruins' ? .85 : condition === 'damaged' ? .4 : condition === 'worn' ? .08 : 0)) {
@@ -119,11 +119,14 @@ export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle
                 const rotation = dx ? -Math.PI / 2 : 0;
                 const height = broken ? .45 + roll : 2.4;
                 add('wall', level, wx, wz, unit, style.thickness, height,
-                    { rotation, color: style.color, visual_asset: style.wall });
+                    { rotation, color: style.color, visual_asset: style.wall, exterior_wall: true });
                 if (entrance && level === 0) {
                     add('door', level, wx, wz, Math.min(unit*.9,wealth === 'rich' ? 1.3 : 1), .18, 2,
                         { rotation, is_open: true, ...(condition === 'ruins' ? { visual_asset: 'opening', interactions: [] } : {}) });
-                } else if (level >= 0 && !broken && !entrance && (wealth !== 'poor' || (x + z) % 2 === 0)) {
+                } else if (level >= 0 && !broken && !entrance
+                    && (x + z) % (wealth === 'poor' ? 3 : 2) === 1
+                    && occupied(x + (dz ? -1 : 0), z + (dx ? -1 : 0), level)
+                    && occupied(x + (dz ? 1 : 0), z + (dx ? 1 : 0), level)) {
                     const lost = condition !== 'intact' && random(`window:${level}:${x}:${z}:${dx}:${dz}`)
                         < (condition === 'worn' ? .2 : .6);
                     add('window', level, wx, wz, Math.min(unit*.8,style.window), .14, 1,
@@ -144,13 +147,66 @@ export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle
             add('floor_opening', level + 1, x, z, 1, 1, .05);
         }
     }
+    // Compact only compatible rectangles. Openings remain separate editable objects;
+    // the existing wall/floor geometry cuts them out of the resulting spans.
+    compactShellObjects(objects, condition);
     if(roofType) {
         const roofing=planEditableRoofs(objects,roofBodies,{condition,seed,buildingId,group:`${buildingId}-roof`,groundHeight});
         if(roofing.error)return roofing;
         for(const {object,properties} of roofing.walls)Object.assign(object.properties,properties);
         objects.push(...roofing.objects.map(o=>({...o,properties:{...o.properties,building_generation:generation}})));
     }
+    // Walls and eaves can lie on/outside the boundary, but their saved tile
+    // anchor must stay inside the footprint. Offsets retain the exact geometry.
+    for (const object of objects) {
+        const x = object.tile_x + .5 + (object.properties.offset_x || 0);
+        const z = object.tile_y + .5 + (object.properties.offset_z || 0);
+        object.tile_x = Math.max(minX, Math.min(minX+width-1, object.tile_x));
+        object.tile_y = Math.max(minZ, Math.min(minZ+depth-1, object.tile_y));
+        object.properties.offset_x = x-object.tile_x-.5;
+        object.properties.offset_z = z-object.tile_y-.5;
+    }
     return { objects, cells, footprint: { minX, minZ, width, depth }, generation };
+}
+
+function compactShellObjects(objects, condition) {
+    const groups = new Map();
+    for (const object of objects) {
+        if (!['floor', 'wall', 'roof'].includes(object.type)
+            || object.type === 'roof' && !['intact', 'worn'].includes(condition)) continue;
+        const { dimensions, offset_x, offset_z, ...properties } = object.properties;
+        const key = JSON.stringify([object.type, dimensions.height, properties]);
+        const group = groups.get(key) || [];
+        group.push(object); groups.set(key, group);
+    }
+    const removed = new Set();
+    const pose = o => ({ x:o.tile_x+.5+o.properties.offset_x, z:o.tile_y+.5+o.properties.offset_z,
+        w:o.properties.dimensions.width, d:o.properties.dimensions.depth });
+    for (const group of groups.values()) {
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (let i=0;i<group.length;i++) {
+                const a=group[i]; if(removed.has(a))continue;
+                for(let j=i+1;j<group.length;j++) {
+                    const b=group[j]; if(removed.has(b))continue;
+                    const p=pose(a),q=pose(b), rotated=Math.abs(a.properties.rotation||0)>.1;
+                    const aw=rotated?p.d:p.w,ad=rotated?p.w:p.d,bw=rotated?q.d:q.w,bd=rotated?q.w:q.d;
+                    const horizontal=Math.abs(p.z-q.z)<1e-6 && Math.abs(ad-bd)<1e-6 && Math.abs(Math.abs(p.x-q.x)-(aw+bw)/2)<1e-6;
+                    const vertical=Math.abs(p.x-q.x)<1e-6 && Math.abs(aw-bw)<1e-6 && Math.abs(Math.abs(p.z-q.z)-(ad+bd)/2)<1e-6;
+                    if(!horizontal&&!vertical)continue;
+                    const minX=Math.min(p.x-aw/2,q.x-bw/2),maxX=Math.max(p.x+aw/2,q.x+bw/2);
+                    const minZ=Math.min(p.z-ad/2,q.z-bd/2),maxZ=Math.max(p.z+ad/2,q.z+bd/2);
+                    const x=(minX+maxX)/2,z=(minZ+maxZ)/2;
+                    a.tile_x=Math.floor(x);a.tile_y=Math.floor(z);
+                    a.properties.offset_x=x-a.tile_x-.5;a.properties.offset_z=z-a.tile_y-.5;
+                    a.properties.dimensions={width:rotated?maxZ-minZ:maxX-minX,depth:rotated?maxX-minX:maxZ-minZ,height:a.properties.dimensions.height};
+                    removed.add(b);changed=true;
+                }
+            }
+        }
+    }
+    for(let i=objects.length-1;i>=0;i--)if(removed.has(objects[i]))objects.splice(i,1);
 }
 
 function hashSeed(seed) {
