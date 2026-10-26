@@ -3,10 +3,10 @@ import { showNotification } from './utils.js';
 import { loadLobbyCharacters, updateMutantHealthInList } from './characters.js';
 import { loadLobbyInfo, loadAllChunks, updateDisplayedLobbyTime } from './lobbyData.js';
 import { addMessage, updateParticipantsList, onlineUserIds, lobbyParticipants } from './ui.js';
-import { updateTileInChunk } from './lobby3d.js';
+import { updateTileInChunk, chunksMap, removeChunk } from './lobby3d.js';
 import { applyWeather } from './weather.js';
 import { setUserColor } from './colors.js';
-import { applyLocationLighting, refreshUserColor } from './locationScene.js';
+import { applyLocationLighting, refreshUserColor, getLocationViewLevel, setLocationViewLevel } from './locationScene.js';
 import AppState from './ui_interactions.js';
 
 let socket;
@@ -68,6 +68,7 @@ function startNetworkMonitor() {
 
 export function initSocket(lobbyId, token) {
     currentLobbyId = lobbyId;
+    let authenticatedOnce = false;
     socket = io();
     const originalEmit = socket.emit.bind(socket);
     socket.emit = (event, ...args) => {
@@ -89,7 +90,10 @@ export function initSocket(lobbyId, token) {
     socket.io.on('reconnect_attempt', () => updateNetworkStatus('connecting'));
     socket.io.on('reconnect_failed', () => updateNetworkStatus('offline'));
 
-    socket.on('authenticated', (data) => {
+    socket.on('authenticated', async (data) => {
+        const connectionId = socket.id;
+        const reconnecting = authenticatedOnce;
+        authenticatedOnce = true;
         showNotification(`Вы вошли как ${data.username}`, 'system', 'bottom-left');
         window.isGM = data.is_gm === true;
         AppState.setIsGM(window.isGM);
@@ -97,12 +101,36 @@ export function initSocket(lobbyId, token) {
         onlineUserIds.add(myId);
         loadLobbyInfo();
         loadLobbyCharacters();
+        if (reconnecting) {
+            await loadAllChunks();
+            if (!socket.connected || socket.id !== connectionId) return;
+            window.clearDirectWorldObjectSelection?.();
+            for (const key of [...chunksMap.keys()]) removeChunk(...key.split(',').map(Number));
+        }
         loadAllChunks();
         if (window.isLocationActive && window.currentLocationId) {
+            const locationId = window.currentLocationId;
+            const characterId = window.currentLocationCharacterId || null;
+            if (reconnecting) {
+                // Room membership alone cannot recover edits missed while offline.
+                const level = getLocationViewLevel();
+                const position = window.locationControls?.object.position.clone();
+                const target = window.locationControls?.target.clone();
+                await window.enterLocation(locationId);
+                if (!socket.connected || socket.id !== connectionId
+                    || !window.isLocationActive || window.currentLocationId !== locationId) return;
+                setLocationViewLevel(level);
+                if (position && target && window.locationControls) {
+                    window.locationControls.object.position.copy(position);
+                    window.locationControls.target.copy(target);
+                    window.locationControls.update();
+                }
+                window.currentLocationCharacterId = characterId;
+            }
             socket.emit('join_location', {
                 token,
-                location_id: window.currentLocationId,
-                character_id: window.currentLocationCharacterId || null,
+                location_id: locationId,
+                character_id: characterId,
             });
             if (window.isGM) {
                 import('./locationScene.js').then(module => module.loadCombatStartRequests());

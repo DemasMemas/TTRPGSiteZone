@@ -176,20 +176,28 @@ test('one chunk batch retains every returned tile chunk', async () => {
     assert.equal(metrics.chunks, 4);
 });
 
-test('re-authentication rejoins an open sublocation for character and fog state', () => {
+test('re-authentication reloads missed edits and rejoins the selected character', async () => {
     const source = read('socketHandlers.js');
-    const start = source.indexOf("socket.on('authenticated', (data) => {");
+    const start = source.indexOf("socket.on('authenticated', async (data) => {");
     const end = source.indexOf("\n    socket.on('new_message'", start);
     assert.ok(start >= 0 && end > start);
     const handlers = new Map();
     const emitted = [];
+    const reloaded = [];
     const context = vm.createContext({
         socket: {
+            connected: true, id: 'test-connection',
             on(name, handler) { handlers.set(name, handler); },
             emit(name, payload) { emitted.push([name, payload]); },
         },
         token: 'token',
-        window: { isLocationActive: true, currentLocationId: 8, currentLocationCharacterId: 17 },
+        authenticatedOnce: false,
+        chunksMap: new Map([['0,0', {}]]),
+        removeChunk(x, y) { context.chunksMap.delete(`${x},${y}`); },
+        getLocationViewLevel() { return -1; },
+        setLocationViewLevel(level) { assert.equal(level, -1); },
+        window: { isLocationActive: true, currentLocationId: 8, currentLocationCharacterId: 17,
+            async enterLocation(id) { reloaded.push(id); this.currentLocationCharacterId = null; } },
         localStorage: { getItem() { return '42'; } },
         onlineUserIds: new Set(),
         AppState: { setIsGM(value) { this.isGM = value; } },
@@ -197,15 +205,20 @@ test('re-authentication rejoins an open sublocation for character and fog state'
         showNotification() {}, loadLobbyInfo() {}, loadLobbyCharacters() {}, loadAllChunks() {},
     });
     vm.runInContext(source.slice(start, end).replace("import('./locationScene.js')", 'Promise.resolve(locationScene)'), context);
-    handlers.get('authenticated')({ username: 'Player', is_gm: true });
+    await handlers.get('authenticated')({ username: 'Player', is_gm: true });
     assert.equal(emitted.length, 1);
     assert.equal(emitted[0][0], 'join_location');
     assert.equal(emitted[0][1].location_id, 8);
     assert.equal(emitted[0][1].character_id, 17);
     assert.equal(context.AppState.isGM, true);
+    await handlers.get('authenticated')({ username: 'Player', is_gm: true });
+    assert.deepEqual(reloaded, [8]);
+    assert.equal(context.window.currentLocationCharacterId, 17);
+    assert.equal(emitted[1][1].character_id, 17);
+    assert.equal(context.chunksMap.size, 0);
     context.window.isLocationActive = false;
-    handlers.get('authenticated')({ username: 'Player', is_gm: false });
-    assert.equal(emitted.length, 1);
+    await handlers.get('authenticated')({ username: 'Player', is_gm: false });
+    assert.equal(emitted.length, 2);
     assert.equal(context.AppState.isGM, false);
 });
 

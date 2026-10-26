@@ -16,6 +16,7 @@ class Config:
     LOG_MAX_BYTES = 5 * 1024 * 1024
     LOG_BACKUP_COUNT = 3
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SOCKETIO_ASYNC_MODE = None  # socketio.run selects the installed server.
     JSON_AS_ASCII = False
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=30)
 
@@ -44,6 +45,7 @@ class TestingConfig(Config):
     """Isolated configuration used by the automated test suite."""
 
     TESTING = True
+    SOCKETIO_ASYNC_MODE = 'threading'  # In-process unit tests; browser tests use the real server.
     LOG_TO_FILE = False
     SQLALCHEMY_DATABASE_URI = 'sqlite://'
     JWT_SECRET_KEY = 'test-jwt-secret-that-is-at-least-32-bytes'

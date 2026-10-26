@@ -15,6 +15,7 @@ async function connect(url) {
     let nextId = 0;
     const waiting = new Map();
     const events = new Map();
+    const networkEvents = [];
     socket.onclose = () => {
         for (const callback of waiting.values()) callback({ closed: true, result: {} });
         waiting.clear();
@@ -27,6 +28,7 @@ async function connect(url) {
             (file&&fs.existsSync(file)?call('Fetch.fulfillRequest',{requestId:p.requestId,responseCode:200,responseHeaders:[{name:'Content-Type',value:'application/javascript'}],body:fs.readFileSync(file).toString('base64')}):call('Fetch.continueRequest',{requestId:p.requestId})).catch(console.error);
         }
         if (message.method) events.set(message.method, message.params);
+        if (process.env.VTT_NETWORK === '1' && /^(Network\.webSocket|Runtime\.exceptionThrown|Log\.entryAdded)/.test(message.method || '')) networkEvents.push(message);
         if (message.method === 'Runtime.exceptionThrown') console.error('Browser exception:', JSON.stringify(message.params.exceptionDetails));
         if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
             console.error('Browser console:', message.params.args.map(arg => arg.description || arg.value).join(' '));
@@ -57,7 +59,8 @@ async function connect(url) {
         console.error(await evaluate(`JSON.stringify({url:location.href,gm:window.isGM,token:Boolean(localStorage.getItem('access_token')),body:document.body.innerText.slice(0,500)})`));
         throw new Error(`Timed out: ${label}`);
     };
-    return { call, evaluate, until, events, close: () => socket.close() };
+    if (process.env.VTT_NETWORK === '1') await call('Network.enable');
+    return { call, evaluate, until, events, networkEvents, close: () => socket.close() };
 }
 
 (async () => {
@@ -69,18 +72,32 @@ async function connect(url) {
     const base = `http://127.0.0.1:${port}`;
     const python = path.join(root, '.venv/Scripts/python.exe');
     const server = spawn(python, ['-u', '-c', `import tempfile
-from app.config import TestingConfig
+from app.config import TestingConfig, DevelopmentConfig
 test_directory = tempfile.TemporaryDirectory(prefix='vtt-browser-db-')
 TestingConfig.SQLALCHEMY_DATABASE_URI = 'sqlite:///' + test_directory.name + '/test.sqlite'
+DevelopmentConfig.SQLALCHEMY_DATABASE_URI = TestingConfig.SQLALCHEMY_DATABASE_URI
+# Browser tests must use the same server selection as run.py, not Werkzeug.
+TestingConfig.SOCKETIO_ASYNC_MODE = ${process.env.VTT_NETWORK_WERKZEUG === '1' ? "'threading'" : 'None'}
 from app import create_app, socketio
 from app.extensions import db
-app = create_app('testing')
-with app.app_context():
-    db.create_all()
-socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
-`], { cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+import os, runpy
+original_run = socketio.run
+def run_with_database(app, **kwargs):
+    with app.app_context():
+        db.create_all()
+    print('NETWORK SERVER', socketio.async_mode, flush=True)
+    original_run(app, **kwargs)
+socketio.run = run_with_database
+if ${process.env.VTT_NETWORK_NORMAL === '1' ? 'True' : 'False'}:
+    os.environ.update(FLASK_ENV='development', FLASK_HOST='127.0.0.1', FLASK_PORT='${port}', FLASK_DEBUG='0')
+    runpy.run_path('run.py', run_name='__main__')
+else:
+    app = create_app('testing')
+    socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+`], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let serverErrors = '';
-    server.stderr.on('data', data => { serverErrors = (serverErrors + data).slice(-10000); });
+    server.stderr.on('data', data => { serverErrors = process.env.VTT_NETWORK === '1' ? serverErrors + data : (serverErrors + data).slice(-10000); });
+    server.stdout.on('data', data => { if(process.env.VTT_NETWORK === '1' && String(data).includes('NETWORK SERVER')) console.log(String(data).trim()); });
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'vtt-object-editor-'));
     let browser, page, observer, playerPage, browserProtocol;
     try {
@@ -136,6 +153,19 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===${waterGeometry?4:2} && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if(process.env.VTT_NETWORK==='1'){
+            await require('./network_transport.browser.cjs')({page,request,token,lobby,base,connect,debugPort});
+            let httpAborts=0;
+            const unexpected=serverErrors.replace(/Traceback[\s\S]*?(?=\[\d{4}-|Removing descriptor|$)/g, failure=>{
+                // Chrome cancels HTTP asset requests when changing scenes on Windows.
+                if(failure.includes('eventlet\\wsgi.py')&&/Connection(?:Aborted|Reset)Error: \[WinError 1005[34]\]/.test(failure)&&!failure.includes('\\app\\')){httpAborts++;return '';}
+                return failure;
+            });
+            console.log('SERVER LOG',JSON.stringify({http_connection_aborts:httpAborts,unexpected_errors:/Traceback|Invalid frame|AssertionError|Error on request/.test(unexpected)}));
+            for(const failure of unexpected.match(/Traceback[\s\S]*?(?=\[\d{4}-|Removing descriptor|$)/g)||[]) console.error('UNEXPECTED SERVER FAILURE',failure);
+            assert.doesNotMatch(unexpected, /Traceback|Invalid frame|AssertionError|Error on request/);
+            return;
+        }
         if(process.env.VTT_GPU_PROBE==='1'){
             console.log('GPU',await page.evaluate(`(()=>{const gl=sceneModule.renderer.getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');return ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)})()`));return;
         }

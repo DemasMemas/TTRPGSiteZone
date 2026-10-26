@@ -36,13 +36,13 @@ def handle_connect():
     def timeout_disconnect(sid):
         if sid in pending_auth:
             logger.warning(f"Client {sid} timed out waiting for authentication")
-            socketio.disconnect(sid)
+            socketio.server.disconnect(sid, namespace='/')
             pending_auth.pop(sid, None)
 
     timer = threading.Timer(AUTH_TIMEOUT, timeout_disconnect, args=[request.sid])
     timer.daemon = True
-    timer.start()
     pending_auth[request.sid] = timer
+    timer.start()
 
 @socketio.on('disconnect')
 def handle_disconnect():

@@ -128,7 +128,7 @@ def create_app(config_name='default'):
     socketio.init_app(
         app,
         cors_allowed_origins="*",
-        async_mode="threading" if app.testing else None,
+        async_mode=app.config['SOCKETIO_ASYNC_MODE'],
     )
 
     # Регистрация blueprint'ов
