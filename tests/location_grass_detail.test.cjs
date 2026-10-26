@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationGrassDetail.js'), 'utf8');
 const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
@@ -177,10 +178,31 @@ test('grass and reeds feather across land borders but never enter water', async 
     assert.ok(new Set(grassFringe.map(value => Math.round(value * 100))).size > 4);
 });
 
-test('local terrain rebuilds instanced plants and water uses continuous world coordinates', () => {
+test('local terrain rebuilds instanced plants', () => {
     assert.match(scene, /createGrassDetailGroup\(THREE, tiles/);
     assert.match(scene, /createTerrainSurfaceHeightSampler\(tiles\)/);
     assert.match(scene, /rebuildGrassDetailMesh\(\)/);
-    assert.match(water, /vWaterWorldXZ \* 0\.16 \+ waterPatternOffset/);
-    assert.match(water, /waterWorld = instanceMatrix \* waterWorld/);
+});
+
+test('world and local water shaders keep continuous world coordinates at their respective scales', () => {
+    const context = vm.createContext({
+        THREE: {
+            MeshStandardMaterial: class { constructor(options) { Object.assign(this, options); } },
+            Vector2: class { constructor(x, y) { Object.assign(this, { x, y }); } },
+        },
+        createWaterTexture: () => ({ offset: { x: 0, y: 0 } }),
+    });
+    // Exercise the material factory and its generated shader, not template literals.
+    vm.runInContext(water.slice(water.indexOf('export function createWaterMaterial('))
+        .replace('export function', 'function'), context);
+    for (const [world, scale] of [[true, '0.16'], [false, '0.36']]) {
+        const material = context.createWaterMaterial({ world });
+        const shader = { uniforms: {}, vertexShader: '#include <common>\n#include <project_vertex>',
+            fragmentShader: '#include <common>\n#include <map_fragment>\n#include <normal_fragment_maps>' };
+        material.onBeforeCompile(shader);
+        assert.match(shader.vertexShader, /waterWorld = instanceMatrix \* waterWorld/);
+        assert.match(shader.vertexShader, /vWaterWorldXZ = \(modelMatrix \* waterWorld\)\.xz/);
+        assert.ok(shader.fragmentShader.includes(`vWaterWorldXZ * ${scale} + waterPatternOffset`));
+        assert.equal(shader.uniforms.waterPatternOffset.value, material.map.offset);
+    }
 });

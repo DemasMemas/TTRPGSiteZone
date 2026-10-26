@@ -93,9 +93,9 @@ export function naturalGrassPlacements(tiles, isCovered = () => false, chunk = n
                     count('blendRejected', local);
                     continue;
                 }
-                if (isCovered(px, pz) || isCovered(px - 0.14, pz)
-                    || isCovered(px + 0.14, pz) || isCovered(px, pz - 0.14)
-                    || isCovered(px, pz + 0.14)) {
+                // The whole clump must clear the floor, including diagonal
+                // leaves at maximum random scale, rotation and slope lean.
+                if (isCovered(px, pz, 0.45)) {
                     count('floorRejected', local);
                     continue;
                 }

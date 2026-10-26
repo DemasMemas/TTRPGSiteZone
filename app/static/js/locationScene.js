@@ -15218,11 +15218,15 @@ function rebuildGrassDetailMesh(changedTiles = null) {
     const objects = currentLocationData.objects || [];
     const floors = objects.filter(object => object.type === 'floor')
         .map(object => floorVisualPose(object, objects));
-    const isCovered = (x, z) => floors.some(floor => {
+    const isCovered = (x, z, radius = 0) => floors.some(floor => {
         const dx = x - floor.x;
         const dz = z - floor.z;
-        return Math.abs(dx * floor.axis.x + dz * floor.axis.z) < floor.width / 2
-            && Math.abs(dx * floor.normal.x + dz * floor.normal.z) < floor.depth / 2;
+        // Distance to the rotated slab, rather than a few samples around
+        // the root: leaves can otherwise enter through its edges and corners.
+        const along = Math.abs(dx * floor.axis.x + dz * floor.axis.z) - floor.width / 2;
+        const across = Math.abs(dx * floor.normal.x + dz * floor.normal.z) - floor.depth / 2;
+        return along < 0 && across < 0
+            || radius > 0 && Math.hypot(Math.max(0, along), Math.max(0, across)) <= radius;
     });
     const getHeight = createTerrainSurfaceHeightSampler(tiles);
     const details = createGrassDetailGroup(THREE, tiles, getHeight, isCovered, true);

@@ -2,10 +2,38 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const pause = ms => new Promise(resolve=>setTimeout(resolve,ms));
+async function runGrassFloorRegression({page,request,token,lobby,loc}) {
+    await page.until('L.getLocationGrassDiagnostics().kinds.medium01?.added>0','grass model loaded');
+    const url=`/lobbies/${lobby.id}/locations/${loc.id}`;
+    const objects=await page.evaluate(`(async()=>{const G=await import('/static/js/locationHouseGenerator.js');
+        const objects=G.planBuildingShell({minX:2,minZ:2,width:10,depth:10,shape:'L',storeys:1,basements:0,wealth:'ordinary',condition:'intact',roofType:'gable',buildingId:'grass',seed:'grass',groundHeight:()=>1}).objects;
+        objects.push({type:'floor',tile_x:17,tile_y:16,name:'Rotated floor',properties:{level:0,rotation:.63,dimensions:{width:5,depth:4,height:.12}}});return objects})()`);
+    await request(url+'/objects/batch',{objects},token);
+    await pause(700);
+    for(const camera of [[17,18,22],[6,12,20]]) {
+        const result=await page.evaluate(`(async()=>{L.setLocationEditMode(false);L.setLocationViewLevel(0);
+            locationControls.target.set(11,1,11);locationControls.object.position.set(${camera.join(',')});locationControls.update();
+            const A=await import('/static/js/locationArchitecture.js'),s=shellRender.s;
+            const objects=s.children.map(m=>m.userData.locationObject).filter(Boolean);
+            const floors=objects.filter(o=>o.type==='floor'&&o.properties.level===0).map(o=>A.floorVisualPose(o,objects));
+            const inside=p=>floors.some(f=>{const dx=p.x-f.x,dz=p.z-f.z;return Math.abs(dx*f.axis.x+dz*f.axis.z)<f.width/2-.001&&Math.abs(dx*f.normal.x+dz*f.normal.z)<f.depth/2-.001});
+            let instances=0,intruding=0;const matrix=new T.Matrix4(),point=new T.Vector3();s.updateMatrixWorld(true);
+            s.traverse(m=>{if(!m.userData.naturalGrassKind)return;const positions=m.geometry.attributes.position;
+                for(let i=0;i<m.count;i++){instances++;m.getMatrixAt(i,matrix);matrix.premultiply(m.matrixWorld);
+                    for(let j=0;j<positions.count;j++){point.fromBufferAttribute(positions,j).applyMatrix4(matrix);
+                        if(point.y>1.036&&inside(point)){intruding++;break}}}});
+            shellRender.r.render(s,shellRender.c);return {instances,intruding,floors:floors.length};})()`);
+        console.log('GRASS FLOOR GEOMETRY',JSON.stringify({camera,...result}));
+        assert.ok(result.instances>100,'outside grass remains populated');
+        assert.ok(result.floors>=3,'L wings and rotated floor are present');
+        assert.equal(result.intruding,0,'no rendered grass vertices protrude above floor zero');
+    }
+    console.log('GRASS FLOOR PASS');
+}
 module.exports = async ({page,request,token,lobby,base,connect,debugPort}) => {
     const api = `/lobbies/${lobby.id}`;
     const loc = await request(`${api}/locations`, { name:'Shell acceptance', world_tile_x:12,world_tile_z:12,
-        grid_width:24,grid_height:24,tiles_data:Array.from({length:24},()=>Array.from({length:24},()=>({terrain:'bare_dirt',height:1,objects:[]}))) },token);
+        grid_width:24,grid_height:24,tiles_data:Array.from({length:24},()=>Array.from({length:24},()=>({terrain:process.env.VTT_BUILDING_GRASS==='1'?'grass':'bare_dirt',height:1,objects:[]}))) },token);
     const detail = ()=>request(`${api}/locations/${loc.id}`,null,token,'GET');
     await page.evaluate(`(async()=>{
         window.T=await import('three');const old=T.Scene.prototype.add;
@@ -20,6 +48,7 @@ module.exports = async ({page,request,token,lobby,base,connect,debugPort}) => {
     await page.until('window.shellRender&&document.querySelector("[data-house-draw]")','local renderer');
     if(process.env.VTT_BUILDING_FIX2==='1')return runFloorFix2({page,request,token,lobby,loc});
     if(process.env.VTT_BUILDING_APERTURE==='1')return runApertureRegression({page,request,token,lobby,loc});
+    if(process.env.VTT_BUILDING_GRASS==='1')return runGrassFloorRegression({page,request,token,lobby,loc});
     const stats=()=>page.evaluate(`(async()=>{const frames=[],cpu=[],gpu=[],queries=[];const r=shellRender.r,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2'),render=r.render;
         r.render=function(...args){const q=ext?gl.createQuery():null;if(q)gl.beginQuery(ext.TIME_ELAPSED_EXT,q);const start=performance.now();const result=render.apply(this,args);cpu.push(performance.now()-start);if(q){gl.endQuery(ext.TIME_ELAPSED_EXT);queries.push(q)}return result};
         let last=performance.now();try{for(let i=0;i<90;i++)await new Promise(resolve=>requestAnimationFrame(t=>{frames.push(t-last);last=t;resolve()}));

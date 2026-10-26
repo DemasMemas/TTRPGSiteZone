@@ -101,6 +101,7 @@ async function harness(tiles, objects = []) {
         currentLocationData: { tiles_data: tiles, objects, grid_width: tiles[0].length, grid_height: tiles.length },
         scene: new Object3D(),
         grassDetailGroup: null, naturalGrassBuild: null, naturalGrassAssets: assets,
+        locationWaterProfiles: null,
         naturalGrassLoading: false, grassGroundReady: true, grassGroundLoading: false,
         naturalGrassReported: true, renderer: { outputEncoding: 0 }, pendingTerrainRefresh: null,
         activeLightingProfile: { local_lights: [] }, characterModels: new Map(), editorSelection: null,
@@ -302,6 +303,8 @@ test('network water-height changes refresh neighboring grass slope probes throug
     const tiles = tilesFor(40);
     for (const row of tiles) row[11].terrain = 'water';
     const h = await harness(tiles);
+    const profileUpdates = [];
+    h.context.locationWaterProfiles = { updateRegion(x, z) { profileUpdates.push([x, z]); } };
     const initial = meshes(h).reduce((sum, mesh) => sum + mesh.count, 0);
     h.context.applyLocationTilesUpdate(1, Array.from({ length: 10 }, (_, z) => ({ x: 11, z, height: 3 })));
     h.context.flushPendingTerrainRefresh();
@@ -311,4 +314,6 @@ test('network water-height changes refresh neighboring grass slope probes throug
     h.context.flushPendingTerrainRefresh();
     await assertFullEquivalent(h);
     assert.equal(meshes(h).reduce((sum, mesh) => sum + mesh.count, 0), initial);
+    const expectedRegions = Array.from({ length: 10 }, (_, z) => [11, z]);
+    assert.deepEqual(profileUpdates, [...expectedRegions, ...expectedRegions]);
 });
