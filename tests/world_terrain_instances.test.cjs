@@ -5,6 +5,27 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/lobby3d.js'), 'utf8');
+
+test('smooth terrain picking retains full triangle order and restores render indices on failure', () => {
+    const start = source.indexOf('function raycastSmoothTerrain(');
+    const end = source.indexOf('\nconst groundMat', start);
+    const indices = { array: [3, 4, 5] };
+    const geometry = { index: indices, setIndex(index) { this.index = index; } };
+    let fail = false;
+    const context = vm.createContext({ THREE: { Mesh: { prototype: { raycast(ray, hits) {
+        assert.equal(this.geometry.index, null);
+        if (fail) throw new Error('pick failed');
+        hits.push({ faceIndex: 0 });
+    } } } } });
+    vm.runInContext(source.slice(start, end), context);
+    const hits = [];
+    context.raycastSmoothTerrain.call({ geometry }, {}, hits);
+    assert.equal(hits[0].faceIndex, 0);
+    assert.equal(geometry.index, indices);
+    fail = true;
+    assert.throws(() => context.raycastSmoothTerrain.call({ geometry }, {}, []), /pick failed/);
+    assert.equal(geometry.index, indices);
+});
 const fillStart = source.indexOf('function fillChunkTerrainInstances(');
 const fillEnd = source.indexOf('\n// --- Функции для чанков ---', fillStart);
 const updateStart = source.indexOf('export function updateTileInChunk(');
@@ -413,6 +434,7 @@ test('slope overlay hides only its cube and restores it when the slope disappear
     class Geometry {
         constructor() { this.attributes = {}; }
         setAttribute(name, attribute) { this.attributes[name] = attribute; }
+        setIndex(index) { this.index = index; }
         getAttribute(name) { return this.attributes[name]; }
         computeVertexNormals() {}
         dispose() { disposed = true; }
@@ -429,6 +451,7 @@ test('slope overlay hides only its cube and restores it when the slope disappear
         CHUNK_SIZE: 2, chunksMap: new Map([['0,0', entry]]), chunkBounds: [],
         scene: { add() {}, remove() {} }, terrainColors: { grass: 0x123456 }, smoothGroundMat: {},
         refreshWorldTerrainSurface() {},
+        raycastSmoothTerrain() {},
         buildSmoothTerrainData: () => sloped ? {
             positions: [1, 1, 1, 2, 1.5, 1, 1, 1, 2], topByVertex: [1, 1, 1],
             tileByFace: [{ x: 1, z: 1 }],

@@ -19,20 +19,26 @@ test('the asset library offers storage crates but no new chests', async () => {
     assert.match(main, /military_crate: \{ width: 1\.1, depth: 0\.8, height: 0\.65 \}/);
 });
 
-test('new and existing crates expose container actions', () => {
+test('new and existing storage objects expose container actions even in old saves', async () => {
+    const { findLocationAsset } = await import(`data:text/javascript,${encodeURIComponent(read('locationAssetCatalog.js'))}`);
     const source = read('locationScene.js');
     const start = source.indexOf('function getObjectActions(');
     const end = source.indexOf('\nfunction getStructureActions(', start);
     const interactionsStart = source.indexOf('const objectInteractions = {');
     const interactionsEnd = source.indexOf('\n};', interactionsStart);
     assert.ok(start >= 0 && end > start && interactionsStart >= 0 && interactionsEnd > interactionsStart);
-    const context = vm.createContext({ isFireObject: () => false });
+    const context = vm.createContext({ isFireObject: () => false, findLocationAsset });
     vm.runInContext(source.slice(interactionsStart, interactionsEnd + 3), context);
     vm.runInContext(source.slice(start, end), context);
-    for (const type of ['box', 'military_crate']) {
+    for (const type of ['box', 'military_crate', 'shelf', 'chest',
+        ...['nightstand','wardrobe','dresser','wall_shelf','storage_rack','refrigerator','cooker',
+            'kitchen_cabinet','sink','wood_stove','wood_crate','cardboard_box'].map(id => 'household_'+id)]) {
         assert.ok(context.getObjectActions({ type }).includes('open_container'));
         assert.ok(context.getObjectActions({ type, properties: { interactions: ['move', 'climb'] } })
             .includes('open_container'));
     }
-    assert.match(source, /contents: \['shelf', 'box', 'military_crate', 'chest'\]\.includes\(placedType\) \? \[\] : undefined/);
+    for (const type of ['table','chair','household_bed_single','household_generator','household_toilet']) {
+        assert.ok(!context.getObjectActions({type}).includes('open_container'),type);
+    }
+    assert.match(source, /contents: \(findLocationAsset\(placedType\)\?\.container/);
 });

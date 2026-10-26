@@ -41,6 +41,30 @@ def transfer(client, pair, obj, headers, payload):
                        headers=headers, json=payload)
 
 
+@pytest.mark.parametrize('object_type', [
+    'household_nightstand', 'household_wardrobe', 'household_dresser',
+    'household_wall_shelf', 'household_storage_rack', 'household_refrigerator',
+    'household_cooker', 'household_kitchen_cabinet', 'household_sink',
+    'household_wood_stove', 'household_wood_crate', 'household_cardboard_box',
+])
+def test_household_storage_without_legacy_contents_supports_round_trip(
+    client, pair, auth_headers, object_type,
+):
+    obj = container(pair)
+    obj.type = object_type
+    obj.properties = {}  # Already placed furniture does not have contents yet.
+    db.session.commit()
+    headers = auth_headers(pair['actor_user'])
+    deposited = transfer(client, pair, obj, headers, transfer_payload(pair, obj))
+    assert deposited.status_code == 200, deposited.json
+    assert obj.properties['contents'][0]['quantity'] == 1
+    taken = transfer(client, pair, obj, headers, transfer_payload(pair, obj, take=True))
+    assert taken.status_code == 200, taken.json
+    assert obj.properties['contents'] == []
+    assert db.session.get(LocationObject, obj.id).type == object_type
+    assert sum(item['quantity'] for item in pair['actor_character'].data['inventory']['backpack']) == 2
+
+
 @pytest.mark.parametrize('take', [False, True])
 def test_transfer_splits_stack_and_rejects_replay(client, pair, auth_headers, take):
     obj = container(pair)

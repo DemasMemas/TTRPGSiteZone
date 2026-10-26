@@ -1,0 +1,38 @@
+const assert=require('node:assert/strict');
+module.exports=async page=>{
+ const result=await page.evaluate(`(async()=>{
+  const {createWorldInstanceBatches}=await import('/static/js/worldInstanceBatches.js'),T=threeModule;
+  const scene=new T.Scene(),geometry=new T.BoxGeometry(),material=new T.MeshStandardMaterial();
+  const make=(x)=>{const m=new T.InstancedMesh(geometry,material,2);m.count=1;m.castShadow=true;m.setMatrixAt(0,new T.Matrix4().makeTranslation(x,0,0));m.setColorAt(0,new T.Color('#446633'));scene.add(m);return m};
+  const a=make(1),b=make(4);b.position.x=10;scene.updateMatrixWorld(true);
+  const chunks=new Map([['a',{terrainVisible:true,trees:a}],['b',{terrainVisible:true,trees:b}]]);
+  const batcher=createWorldInstanceBatches(T,scene,chunks),checks=[];
+  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name)};
+  const batch=()=>scene.children.find(m=>m.userData.worldInstanceBatch);
+  const originalMatrix=a.instanceMatrix,originalColor=a.instanceColor;
+  batcher.prepare();let merged=batch();const matrix=new T.Matrix4();merged.getMatrixAt(1,matrix);
+  check(merged.count===2&&!a.visible&&!b.visible&&merged.visible,'two chunks share one draw');
+  check(matrix.elements[12]===14&&merged.castShadow,'world transform and shadows retained');
+  const camera=new T.PerspectiveCamera(60,1,0.1,100);camera.position.set(8,8,20);camera.lookAt(8,0,0);
+  sceneModule.renderer.render(scene,camera);
+  check(sceneModule.renderer.info.render.calls===1&&!sceneModule.renderer.info.programs.some(p=>p.diagnostics?.runnable===false),'one real GPU draw without shader errors');
+  check(a.instanceMatrix===originalMatrix&&a.instanceColor===originalColor&&a.count===1,'source indices and attributes retained');
+  const version=merged.instanceMatrix.version;batcher.restore();
+  check(a.visible&&b.visible&&!merged.visible,'source visibility restored for picking');
+  batcher.prepare();check(batch().instanceMatrix.version===version,'unchanged frame does not upload instances');batcher.restore();
+  b.setMatrixAt(0,new T.Matrix4().makeTranslation(7,0,0));b.instanceMatrix.needsUpdate=true;
+  b.setColorAt(0,new T.Color('#aa8844'));b.instanceColor.needsUpdate=true;
+  batcher.prepare();merged=batch();merged.getMatrixAt(1,matrix);const color=new T.Color();merged.getColorAt(1,color);
+  check(matrix.elements[12]===17&&Math.abs(color.r-new T.Color('#aa8844').r)<1e-6,'editing matrix and color refreshes batch');batcher.restore();
+  a.setMatrixAt(1,new T.Matrix4().makeTranslation(2,0,0));a.setColorAt(1,new T.Color('#446633'));a.count=2;
+  batcher.prepare();check(batch().count===3,'insertion grows the batch');batcher.restore();
+  b.visible=false;batcher.prepare();check(!batch()&&a.visible&&!b.visible,'culling removes hidden source and disposes unused batch');batcher.restore();
+  b.visible=true;batcher.prepare();batcher.restore();chunks.delete('b');batcher.prepare();check(!batch()&&a.visible,'chunk unload releases batch');batcher.restore();
+  chunks.set('b',{terrainVisible:true,trees:b});b.castShadow=false;batcher.prepare();check(!batch(),'different shadow settings remain separate');batcher.restore();
+  b.castShadow=true;material.transparent=true;batcher.prepare();check(!batch(),'transparent objects retain sorting');batcher.restore();
+  geometry.dispose();material.dispose();a.dispose();b.dispose();return checks;
+ })()`);
+ assert.equal(result.length,12);
+ assert.equal(await page.evaluate('sceneModule.renderer.capabilities.isWebGL2'),process.env.VTT_FORCE_WEBGL1!=='1');
+ console.log('PASS instance batches:',process.env.VTT_FORCE_WEBGL1==='1'?'WebGL1':'WebGL2',result.join('; '));
+};

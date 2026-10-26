@@ -1,4 +1,5 @@
 import { createWaterProfileLayer } from './waterProfiles.js';
+import { createWorldInstanceBatches } from './worldInstanceBatches.js';
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { updateRain } from './weather.js';
@@ -237,6 +238,11 @@ const houseMat = new THREE.MeshStandardMaterial();
 const fenceMat = po2Fence.material;
 
 const scene = new THREE.Scene();
+// Keep chunk meshes/instance indices for picking and editing, but submit identical
+// visible object instances together. Terrain, water and road meshes are untouched.
+const worldInstanceBatches = createWorldInstanceBatches(THREE, scene, chunksMap);
+scene.onBeforeRender = () => worldInstanceBatches.prepare();
+scene.onAfterRender = () => worldInstanceBatches.restore();
 scene.background = new THREE.Color(0x050510);
 scene.fog = new THREE.FogExp2(0x050510, 0.0015);
 
@@ -1119,6 +1125,18 @@ function raycastGroundInstances(raycaster, intersections) {
         this.geometry = renderedGeometry;
     }
 }
+
+function raycastSmoothTerrain(raycaster, intersections) {
+    // Rendering omits top triangles already covered by terrainSurface. Picking
+    // keeps the original triangle order, including tileByFace/brush metadata.
+    const renderedIndex = this.geometry.index;
+    this.geometry.setIndex(null);
+    try {
+        THREE.Mesh.prototype.raycast.call(this, raycaster, intersections);
+    } finally {
+        this.geometry.setIndex(renderedIndex);
+    }
+}
 const groundMat = new THREE.MeshStandardMaterial({ map: getSurfaceTexture(THREE, 'local_terrain') });
 const smoothGroundMat = new THREE.MeshStandardMaterial({
     map: getSurfaceTexture(THREE, 'local_terrain'), vertexColors: true, side: THREE.DoubleSide,
@@ -1471,12 +1489,24 @@ function refreshWorldTerrainChunk(entry, neighborOnly = false, preview = false) 
     geometry.setAttribute('terrainTileCoord', new THREE.Float32BufferAttribute(coords, 2));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3));
+    // Every terrainTop triangle is also drawn by refreshWorldTerrainSurface,
+    // slightly above this mesh. Submit exposed sides once instead of shading
+    // the same opaque land top twice. All CPU attributes remain unchanged.
+    const sideIndices = [];
+    for (let i = 0; i < data.topByVertex.length; i += 3) {
+        if (data.topByVertex[i] < 0.5) sideIndices.push(i, i + 1, i + 2);
+    }
+    const maxIndex = sideIndices[sideIndices.length - 1] || 0;
+    if (maxIndex < 65535 || renderer.capabilities.isWebGL2 || renderer.extensions.has('OES_element_index_uint')) {
+        geometry.setIndex(sideIndices);
+    }
     // Retain references to the existing CPU attributes, not a second geometry.
     entry.smoothTerrainData = { ...data,
         positions: geometry.getAttribute('position').array,
         normals: geometry.getAttribute('normal').array,
         topByVertex: geometry.getAttribute('terrainTop').array };
     const mesh = new THREE.Mesh(geometry, smoothGroundMat);
+    mesh.raycast = raycastSmoothTerrain;
     mesh.position.set(chunkX * CHUNK_SIZE - 1, 0, chunkY * CHUNK_SIZE - 1);
     mesh.frustumCulled = false;
     mesh.receiveShadow = true;

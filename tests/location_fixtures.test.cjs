@@ -114,6 +114,13 @@ test('wall bulb mounting plate meets solid wall faces on the selected storey', a
     assert.ok(back);
     assert.ok(Math.abs(back.z - (5.4 - 0.4 * 0.38 - 0.055 / 2)) < 1e-6);
     assert.equal(back.rotation, Math.PI);
+    const shelf = { width: 1.15, depth: 0.26, height: 0.38 };
+    const shelfFront = context.wallBulbMountAt(5.5, 5.75, 0, 1.34, shelf, 0.9, true);
+    assert.ok(Math.abs(shelfFront.z - 5.738) < 1e-6);
+    const shelfBack = context.wallBulbMountAt(5.5, 5.25, 0, 1.34, shelf, 0.9, true);
+    assert.ok(Math.abs(shelfBack.z - 5.262) < 1e-6);
+    assert.equal(shelfBack.rotation, Math.PI);
+    assert.equal(context.wallBulbMountAt(5.5, 5.75, 0, 2.5, shelf, 0.9, true), null);
     assert.equal(context.wallBulbMountAt(5.5, 5.75, 1, 1.8, dimensions), null);
     assert.equal(context.wallBulbMountAt(8, 8, 0, 1.8, dimensions), null);
     wall.properties.rotation = Math.PI / 2;

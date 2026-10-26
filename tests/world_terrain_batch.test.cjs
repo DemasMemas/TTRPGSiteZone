@@ -42,6 +42,7 @@ async function harness(keys = ['0,0'], size = 32) {
     class Geometry {
         constructor() { this.attributes = {}; }
         setAttribute(name, attribute) { this.attributes[name] = attribute; }
+        setIndex(index) { this.index = index; }
         getAttribute(name) { return this.attributes[name]; }
         computeVertexNormals() {}
         dispose() { this.disposed = true; }
@@ -61,8 +62,11 @@ async function harness(keys = ['0,0'], size = 32) {
         scene: { add() {}, remove() {} },
         terrainColors: { grass: 0x3a5f0b, sand: 0xc2b280, rock: 0x808080, water: 0x1e90ff },
         smoothGroundMat: {}, waterMat: {}, worldWaterBankMat: {},
+        raycastSmoothTerrain() {},
         worldGrassGroundPixelsEnabled: false, worldGrassDetail: { apply() {} },
         ...pixels, ...water, ...worldWater, ...topology, isSmoothTerrainTile: terrain.isSmoothTerrainTile,
+        // These CPU comparisons inspect expanded water vertices, as before.
+        indexWaterGeometry() {},
         buildSmoothTerrainData(padded, ...args) {
             const key = padded[1][1].chunkKey;
             let included = 0;
@@ -702,6 +706,9 @@ test('batched steep sand retains generated positions, normals, foundations and p
         (x, z) => x > 0 && x <= 4 && z > 0 && z <= 4).positions.length);
     assert.deepEqual(Array.from(entry.smoothTerrain.geometry.attributes.position.array), Array.from(new Float32Array(expected.positions)));
     assert.deepEqual(Array.from(entry.smoothTerrain.geometry.attributes.normal.array), Array.from(new Float32Array(expected.normals)));
+    const rendered = entry.smoothTerrain.geometry.index;
+    assert.ok(rendered.length < expected.positions.length / 3, 'covered land tops are not submitted twice');
+    assert.ok(rendered.every(index => expected.topByVertex[index] < 0.5), 'all exposed side triangles remain in the original attributes');
     assert.ok(result.positions.length > 0);
     for (const [index, foundation] of entry.smoothTileFoundation) {
         const x = index % 4, z = Math.floor(index / 4);

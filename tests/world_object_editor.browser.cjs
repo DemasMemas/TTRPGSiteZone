@@ -111,6 +111,7 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await request(`/lobbies/${lobby.id}/chunks/1/0/tile/0/10`, { objects: [{ type: 'house', x: -0.4, z: -0.4 }] }, token, 'PATCH');
         browser = spawn(process.env.BROWSER_EXECUTABLE || 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
             '--headless=new', '--no-sandbox', '--no-first-run', '--ignore-certificate-errors',
+            ...(process.env.VTT_PERF_UNCAPPED==='1'?['--disable-frame-rate-limit','--disable-gpu-vsync']:[]),
             ...(process.env.VTT_BROWSER_GPU==='1'?[]:['--use-angle=swiftshader','--enable-unsafe-swiftshader']), '--window-size=1440,900',
             '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
         ], { windowsHide: true, stdio: 'ignore' });
@@ -137,6 +138,18 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
         if(process.env.VTT_GPU_PROBE==='1'){
             console.log('GPU',await page.evaluate(`(()=>{const gl=sceneModule.renderer.getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');return ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)})()`));return;
+        }
+        if(process.env.VTT_WORLD_PERF==='1'){
+            await require('./world_perf.browser.cjs')({page});return;
+        }
+        if(process.env.VTT_INSTANCE_BATCH_TEST==='1'){
+            await require('./world_instance_batches.browser.cjs')(page);return;
+        }
+        if(process.env.VTT_HOUSEHOLD_FIX==='1'){
+            await require('./location_household_fix.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
+        if(process.env.VTT_HOUSEHOLD==='1'){
+            await require('./location_household.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
         }
         if(process.env.VTT_WATER_PROFILES==='1'){
             await require('./water_profiles.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
@@ -521,6 +534,7 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
             assert.equal(await client.evaluate(`sceneModule.scene.children.some(m=>m.userData.commonMapMeasure)`),false);
         };
         await page.evaluate(`window.toggleEditMode();void window.socket.on('map_ping',p=>window.lastCommonPing=p)`);
+        if (process.env.VTT_PERF_EDITOR_ONLY !== '1') {
         await exerciseCommonTools(page);
         await request('/auth/register',{username:'browser-player',email:'browser-player@example.test',password:'browser-test-password'});
         const playerLogin=await request('/auth/login',{username:'browser-player',password:'browser-test-password'});
@@ -548,6 +562,10 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
         await browserProtocol.call('Target.disposeBrowserContext',{browserContextId:browserContext.browserContextId});
         await page.evaluate(`window.toggleEditMode()`);
         console.log('PASS: GM and actual player use ping, ruler, marker and dice without editor; player editor hidden, shared ping received and map unchanged');
+        } else {
+            // Focus this regression run on picking, editing and chunk updates.
+            await page.evaluate(`window.toggleEditMode()`);
+        }
         if (process.env.VTT_UI_ONLY === '1') return;
         const centerY = await page.evaluate(`1+sceneModule.getObjectHeightOffset('factory')`);
         const start = await project(31.5, centerY, 10.5);
@@ -809,7 +827,7 @@ socketio.run(app, host='127.0.0.1', port=${port}, debug=False, use_reloader=Fals
             const after=sample();
             const meshes=()=>[...sceneModule.chunksMap.values()].flatMap(e=>[e.trees,e.landmarks.forest]).filter(Boolean);
             const active=meshes();const geometry=new Set(active.map(m=>m.geometry));
-            const stale=()=>sceneModule.scene.children.filter(m=>m.isInstancedMesh&&geometry.has(m.geometry)&&!meshes().includes(m)).length;
+            const stale=()=>sceneModule.scene.children.filter(m=>m.isInstancedMesh&&geometry.has(m.geometry)&&!m.userData.worldInstanceBatch&&!meshes().includes(m)).length;
             for(let pass=0;pass<3;pass++){
                 for(let y=0;y<100;y++)for(let x=0;x<100;x++)if((Math.imul(x,31)+Math.imul(y,17))%10<6)
                     sceneModule.updateTileInChunk(Math.floor(x/32),Math.floor(y/32),x%32,y%32,{objects:[{type:x<50?'tree':'forest',scale:1+pass*0.01,rotation:pass}]});

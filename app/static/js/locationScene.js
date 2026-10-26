@@ -1,6 +1,7 @@
 import { createWaterProfileLayer, connectedWaterCells, normalizeWaterProfile } from './waterProfiles.js';
 // static/js/locationScene.js
 import * as THREE from 'three';
+import { createHouseholdModel } from './locationHouseholdModels.js';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'https://unpkg.com/three@0.128.0/examples/jsm/renderers/CSS2DRenderer.js';
 import {
@@ -733,7 +734,7 @@ function disposeObject(obj) {
     if (obj.userData?.naturalGrassResources) disposeNaturalGrassInstances(obj);
     releaseLocationModel(obj);
     if (obj.isLight && obj.shadow?.map) obj.shadow.map.dispose();
-    if (obj.geometry && !isSharedLocationModelGeometry(obj.geometry)) obj.geometry.dispose();
+    if (obj.geometry && !obj.geometry.userData?.householdShared && !isSharedLocationModelGeometry(obj.geometry)) obj.geometry.dispose();
     if (obj.material) {
         if (Array.isArray(obj.material)) {
             obj.material.forEach(mat => { releaseLocationPbrMaterial(mat); mat.dispose(); });
@@ -7529,7 +7530,8 @@ function getLocationObjectAtScreen(clientX, clientY) {
 function getObjectActions(object) {
     const actions = [...(object.properties?.interactions || objectInteractions[object.type] || [])];
     if (isFireObject(object) && !actions.includes('toggle_fire')) actions.push('toggle_fire');
-    if (['box', 'military_crate'].includes(object.type) && !actions.includes('open_container')) {
+    if ((findLocationAsset(object.type)?.container || object.type === 'chest')
+        && !actions.includes('open_container')) {
         actions.push('open_container');
     }
     const hasContainerContents = Array.isArray(object?.properties?.contents) && object.properties.contents.length >= 0;
@@ -9769,7 +9771,7 @@ function getStructurePlacementProperties() {
     return { building_id: String(buildingId || '').trim(), level: level === '1' ? 1 : 0 };
 }
 
-function wallBulbMountAt(x, z, level, elevation, dimensions, maxDistance = 0.9) {
+function wallBulbMountAt(x, z, level, elevation, dimensions, maxDistance = 0.9, bottomPivot = false) {
     let nearest = null;
     for (const wall of currentLocationData?.objects || []) {
         if (wall.type !== 'wall' || structureLevel(wall) !== level) continue;
@@ -9783,7 +9785,7 @@ function wallBulbMountAt(x, z, level, elevation, dimensions, maxDistance = 0.9) 
         const { spans } = wallVisualPlan(wall, currentLocationData.objects);
         const side = across < 0 ? -1 : 1;
         // The model's mounting plate sits behind its origin on local -Z.
-        const mountOffset = pose.depth / 2 + dimensions.depth * 0.38 + 0.055 / 2;
+        const mountOffset = pose.depth / 2 + (bottomPivot ? dimensions.depth / 2 + 0.008 : dimensions.depth * 0.38 + 0.055 / 2);
         for (const span of spans) {
             if (span.end - span.start < dimensions.width) continue;
             const onWall = Math.max(span.start + dimensions.width / 2,
@@ -9815,7 +9817,8 @@ function wallBulbPlacement(x, z, asset, client = hoveredPointerClient) {
         getTileHeight(x, z) + structureLevelOffset({ properties: { level } })) : null;
     const dimensions = assetDimensions(asset, 'structure', asset.id);
     return wallBulbMountAt(point?.x ?? x + 0.5, point?.z ?? z + 0.5,
-        level, clampAssetElevation(asset.elevation), dimensions);
+        level, clampAssetElevation(asset.elevation) + (asset.mount === 'wall' ? dimensions.height / 2 : 0),
+        dimensions, 0.9, asset.mount === 'wall');
 }
 
 function editorHoverLevelOffset() {
@@ -9889,6 +9892,33 @@ function editorMovePointerPoint(clientX, clientY, coords) {
 
 const FLOOR_SURFACE_OFFSET = 0.035;
 
+function alignFloorRugToSurface(mesh, object) {
+    if (object?.type !== 'household_floor_rug') return;
+    for (const floor of currentLocationData?.objects || []) {
+        if (floor.type !== 'floor' || structureLevel(floor) !== structureLevel(object)) continue;
+        const pose = floorVisualPose(floor, currentLocationData.objects);
+        const dx = mesh.position.x - pose.x, dz = mesh.position.z - pose.z;
+        if (Math.abs(dx * pose.axis.x + dz * pose.axis.z) > pose.width / 2
+            || Math.abs(dx * pose.normal.x + dz * pose.normal.z) > pose.depth / 2) continue;
+        const top = getTileHeight(floor.tile_x, floor.tile_y) + structureLevelOffset(floor)
+            + clampAssetElevation(floor.properties?.elevation) + FLOOR_SURFACE_OFFSET;
+        // Preserve explicit elevations already above the floor, including the
+        // old manual +0.04 m workaround. Never modify the saved object.
+        mesh.position.y = Math.max(mesh.position.y, top + 0.001);
+    }
+}
+
+function refreshFloorRugHeights() {
+    for (const mesh of locationObjectMeshes) {
+        const object = mesh.userData.locationObject;
+        if (object?.type !== 'household_floor_rug') continue;
+        const position = getObjectGridPosition(object);
+        mesh.position.y = getTileHeight(position.x, position.y) + structureLevelOffset(object)
+            + clampAssetElevation(object.properties?.elevation);
+        alignFloorRugToSurface(mesh, object);
+    }
+}
+
 function usesStaticLightField(object) {
     return Boolean(object?.type);
 }
@@ -9922,9 +9952,10 @@ function quietHouseColor(color, type) {
 function createLocationObjectMesh(obj, forPreview = false) {
     const properties = obj.properties || {};
     const asset = visualAssetForLocationObject(obj.type, properties);
+    const household = asset?.visual?.family === 'household';
     const floorPose = obj.type === 'floor' ? floorVisualPose(obj, currentLocationData?.objects) : null;
     const dimensions = properties.dimensions || floorPose
-        || (isFireObject(obj) ? baseAssetDimensions(obj.type, 'structure') : getStructureDimensions(obj.type));
+        || (household || isFireObject(obj) ? baseAssetDimensions(obj.type, 'structure') : getStructureDimensions(obj.type));
     const width = floorPose?.width || dimensions.width || 1;
     const depth = floorPose?.depth || dimensions.depth || 1;
     const height = dimensions.height || 1;
@@ -9932,7 +9963,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         && (asset?.visual?.renderMode !== 'pbr'
             || asset.id === 'art_worn_plaster' || asset.id === 'art_aged_wood');
     const usePbrMaterial = asset?.visual?.renderMode === 'pbr' && !quietHouseFinish;
-    const hasSeparateMaterials = ['fence', 'window', 'box', 'military_crate', 'shelf', 'ground_item'].includes(obj.type)
+    const hasSeparateMaterials = household || ['fence', 'window', 'box', 'military_crate', 'shelf', 'ground_item'].includes(obj.type)
         || properties.is_ground_item || isFireObject(obj) || isElectricFixture(obj);
     const material = hasSeparateMaterials ? null
         : new THREE.MeshStandardMaterial({
@@ -9953,7 +9984,9 @@ function createLocationObjectMesh(obj, forPreview = false) {
     const group = new THREE.Group();
     let main;
 
-    if (obj.type === 'fence') {
+    if (household) {
+        group.add(createHouseholdModel(THREE, asset, {width, depth, height}, properties.color));
+    } else if (obj.type === 'fence') {
         const fenceColor = properties.color === '#67745d' ? '#8b7458' : (properties.color || '#8b7458');
         group.add(createFenceModel(THREE, width, height, depth, fenceColor));
     } else if (obj.type === 'wall') {
@@ -10124,6 +10157,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         getTileHeight(tileX, tileY) + structureLevelOffset(obj) + clampAssetElevation(properties.elevation)
             - (obj.type === 'floor' ? height - FLOOR_SURFACE_OFFSET : 0),
         floorPose?.z ?? tileY + 0.5 + Number(properties.offset_z || 0));
+    alignFloorRugToSurface(group, obj);
     if (obj.type === 'ground_item' || properties.is_ground_item) {
         group.position.y += 0.04;
     }
@@ -10136,13 +10170,13 @@ function createLocationObjectMesh(obj, forPreview = false) {
     }
     group.traverse(child => {
         if (!child.isMesh) return;
-        child.castShadow = obj.type !== 'floor' && !child.userData.fireFlame;
+        child.castShadow = obj.type !== 'floor' && obj.type !== 'household_floor_rug' && !child.userData.fireFlame;
         child.receiveShadow = true;
     });
     group.userData = { ...group.userData, locationObjectId: obj.id, locationObject: obj };
     if (properties.gm_hidden && window.isGM) makeGmHiddenGhost(group);
     const customColor = properties.color && String(properties.color).toLowerCase() !== asset?.color?.toLowerCase();
-    if (asset?.visual?.renderMode === 'glb' && !customColor) {
+    if (asset?.visual?.renderMode === 'glb' && (!customColor || household)) {
         const fallback = [...group.children];
         mountLocationModel(group, asset, { width, depth, height }, model => {
             fallback.forEach(child => {
@@ -10151,6 +10185,9 @@ function createLocationObjectMesh(obj, forPreview = false) {
             });
             model.traverse(child => {
                 if (!child.isMesh) return;
+                if (household && customColor) {
+                    for (const mat of [].concat(child.material)) mat.color?.set(properties.color);
+                }
                 child.castShadow = !forPreview && !child.userData.importedNoShadow;
                 child.receiveShadow = !forPreview;
             });
@@ -11016,7 +11053,7 @@ function rebuildLocationRoofs() {
     for (const object of locationObjectMeshes) {
         const enclosed = enclosedFloors.has(object.userData.locationObjectId);
         object.traverse(child => {
-            if (child.isMesh && child.material?.userData.interiorShade) {
+            if (child.isMesh && child.material?.userData?.interiorShade) {
                 child.material.userData.interiorShade.value = enclosed ? 1 : 0;
             }
         });
@@ -11060,6 +11097,7 @@ function refreshArchitecturalMeshes() {
         scene.add(newMesh);
         locationObjectMeshes[index] = newMesh;
     }
+    refreshFloorRugHeights();
     rebuildLocationRoofs();
     rebuildLocationGrid();
     applyFogOfWar();
@@ -11068,6 +11106,7 @@ function refreshArchitecturalMeshes() {
 
 function updateLocationObjectHeight(tileX, tileZ) {
     const height = getTileHeight(tileX, tileZ);
+    let floorChanged = false;
     locationObjectMeshes.forEach(mesh => {
         const object = mesh.userData.locationObject;
         if (!object) return;
@@ -11076,8 +11115,11 @@ function updateLocationObjectHeight(tileX, tileZ) {
             mesh.position.y = height + structureLevelOffset(object) + clampAssetElevation(object.properties?.elevation)
                 - (object.type === 'floor'
                     ? Number(object.properties?.dimensions?.height || 0.12) - FLOOR_SURFACE_OFFSET : 0);
+            alignFloorRugToSurface(mesh, object);
+            if (object.type === 'floor') floorChanged = true;
         }
     });
+    if (floorChanged) refreshFloorRugHeights();
 }
 
 function clearBuildPreview() {
@@ -11520,7 +11562,7 @@ function updateBuildPreview() {
         && ['door', 'window'].includes(placementForLocationAsset(source).type);
     const movableStructurePreview = placingAsset && !editingSelection && source?.kind === 'structure'
         && !openingPlacementPreview;
-    const wallBulbPreview = movableStructurePreview && source.id === 'wall_bulb';
+    const wallBulbPreview = movableStructurePreview && (source.id === 'wall_bulb' || source.mount === 'wall');
     const wallMount = wallBulbPreview ? wallBulbPlacement(x, z, source) : null;
     if (wallBulbPreview && !wallMount) { clearBuildPreview(); return; }
     const mountOffsetX = !editingSelection ? Math.sin(structureRotation) * Number(source?.offsetZ || 0) : 0;
@@ -11547,6 +11589,7 @@ function updateBuildPreview() {
                     + structureLevelOffset({ properties: placementProperties })
                     + clampAssetElevation(source.elevation) - floorOffset,
                 wallMount?.z ?? z + 0.5 + mountOffsetZ);
+            alignFloorRugToSurface(buildPreviewMesh, buildPreviewMesh.userData.locationObject);
             if (wallMount) buildPreviewMesh.rotation.y = wallMount.rotation;
         }
         return;
@@ -11636,6 +11679,7 @@ function updateBuildPreview() {
                 ? structureLevelOffset(source) : structureLevelOffset({ properties: placementProperties }))
                 + (editorResizeMode ? editorResizeElevation
                     : clampAssetElevation(source.properties?.elevation ?? source.elevation)) - floorOffset;
+            alignFloorRugToSurface(buildPreviewMesh, buildPreviewMesh.userData.locationObject);
             if (wallMount) buildPreviewMesh.rotation.y = wallMount.rotation;
         }
         if (editorRotateMode) {
@@ -11697,10 +11741,11 @@ async function placeStructureAtTile(x, z, client = null) {
     const placement = window.locationEditorTool === 'assets' && selectedLocationAsset?.id === structurePreset
         ? placementForLocationAsset(selectedLocationAsset) : { type: structurePreset, visualAsset: null };
     const placedType = placement.type;
-    const wallMount = placedType === 'wall_bulb' && selectedLocationAsset?.kind === 'structure'
+    const needsWallMount = placedType === 'wall_bulb' || selectedLocationAsset?.mount === 'wall';
+    const wallMount = needsWallMount && selectedLocationAsset?.kind === 'structure'
         ? wallBulbPlacement(x, z, selectedLocationAsset, client) : null;
-    if (placedType === 'wall_bulb' && !wallMount) {
-        showNotification('Для настенной лампы выберите место у сплошной стены этого этажа', 'system');
+    if (needsWallMount && !wallMount) {
+        showNotification('Для настенного предмета выберите место у сплошной стены этого этажа', 'system');
         return;
     }
     const building = getStructurePlacementProperties();
@@ -11744,11 +11789,13 @@ async function placeStructureAtTile(x, z, client = null) {
                     rules[action] = interactionRequirements[action];
                     return rules;
                 }, {}),
-                contents: ['shelf', 'box', 'military_crate', 'chest'].includes(placedType) ? [] : undefined,
+                contents: (findLocationAsset(placedType)?.container
+                    || ['shelf', 'box', 'military_crate', 'chest'].includes(placedType)) ? [] : undefined,
                 is_open: false,
                 ...(isFireObject({ type: placedType }) ? { is_lit: true } : {}),
                 ...(isElectricFixture({ type: placedType }) ? { is_on: true } : {}),
-                passable: isObjectLightSource({ type: placedType }),
+                passable: selectedLocationAsset?.passable === true || isObjectLightSource({ type: placedType }),
+                ...(selectedLocationAsset?.passable ? { cover_enabled: false } : {}),
                 cover_enabled: !isObjectLightSource({ type: placedType }),
             }
         });
@@ -11894,7 +11941,7 @@ export function addLocationObject(object) {
     currentLocationData.objects.push(object);
     const fire = isObjectLightSource(object);
     addLocationObjectMesh(object, !fire);
-    if (object.type === 'floor') { rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
+    if (object.type === 'floor') { refreshFloorRugHeights(); rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
     if (['wall', 'door', 'window'].includes(object.type)) refreshArchitecturalMeshes();
     if (fire) {
         syncFireObjectLight(object);
@@ -11915,7 +11962,7 @@ export function removeLocationObject(objectId) {
     currentLocationData.objects = (currentLocationData.objects || []).filter(object => Number(object.id) !== Number(objectId));
     locationBuildingViewsDirty = true;
     refreshLocationFloorMenu();
-    if (removed?.type === 'floor') { rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
+    if (removed?.type === 'floor') { refreshFloorRugHeights(); rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
     if (['wall', 'door', 'window'].includes(removed?.type)) refreshArchitecturalMeshes();
     const fire = isObjectLightSource(removed);
     if (fire) syncFireObjectLight(null, objectId);
@@ -11937,6 +11984,7 @@ export function updateLocationObject(object) {
     const fire = isObjectLightSource(object) || isObjectLightSource(previous);
     replaceLocationObjectMesh(object, !fire);
     if (object.type === 'floor' || previous?.type === 'floor') {
+        refreshFloorRugHeights();
         rebuildLocationGrid();
         rebuildGrassDetailMesh();
         rebuildLocationRoofs();

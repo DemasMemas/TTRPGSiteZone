@@ -638,7 +638,7 @@ window.enterLocation = async function(locationId) {
                     id: `anomaly_${anomaly.key}`, group: 'Аномалии', kind: 'decor',
                     label: anomaly.name, icon: '✧', color: '#79d7dd',
                 }));
-                const allLocationAssets = [...LOCATION_ASSETS, ...anomalyAssets];
+                const allLocationAssets = [...LOCATION_ASSETS, ...anomalyAssets].filter(asset => !asset.hidden);
                 const groups = [...new Set(allLocationAssets.map(asset => asset.group))];
                 let activeGroup = 'Свет';
                 const renderPlacementSettings = () => {

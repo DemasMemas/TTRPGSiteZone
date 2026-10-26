@@ -16,6 +16,34 @@ await variants.evaluate();
 const { placementForLocationAsset, visualAssetForLocationObject } = variants.namespace;
 const { findLocationAsset } = modules.get('locationAssetCatalog.js').namespace;
 
+test('replacement furniture keeps both generations of saved IDs and original dimensions', () => {
+    for (const [canonical, alias, model, oldSize, newSize] of [
+        ['table', 'household_dining_table', 'dining_table', [1.4,.8,1], [1.25,.75,.76]],
+        ['chair', 'household_wood_chair', 'wood_chair', [.55,.55,1], [.45,.48,.88]],
+    ]) {
+        const original = findLocationAsset(canonical), replacement = findLocationAsset(alias);
+        assert.equal(original.visual.family, 'household');
+        assert.equal(original.visual.modelId, model);
+        assert.deepEqual(Array.from(original.dimensions), oldSize);
+        assert.deepEqual(Array.from(replacement.dimensions), newSize);
+        assert.equal(replacement.hidden, true);
+        for (const id of [canonical, alias]) {
+            assert.equal(visualAssetForLocationObject(id, {}).id, id);
+            assert.equal(placementForLocationAsset(findLocationAsset(id)).type, id);
+        }
+    }
+});
+
+test('plumbing is a separate category and leaves the kitchen sink available', () => {
+    const assets = modules.get('locationAssetCatalog.js').namespace.LOCATION_ASSETS;
+    assert.equal(assets.filter(a => a.group === 'Сантехника' && !a.hidden).length, 3);
+    for (const id of ['household_washbasin', 'household_toilet', 'household_bathtub']) {
+        assert.equal(findLocationAsset(id).group, 'Сантехника');
+        assert.equal(findLocationAsset(id).visual.pivot, 'bottom-center');
+    }
+    assert.equal(findLocationAsset('household_sink').group, 'Кухня и быт');
+});
+
 test('artistic variants keep the existing gameplay type and stable visual id', () => {
     for (const [id, type] of [
         ['art_rusty_barrel', 'barrel'],
