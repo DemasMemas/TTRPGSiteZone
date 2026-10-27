@@ -45,6 +45,12 @@ export function releaseLocationPbrMaterial(material) {
     if (material?.userData) material.userData.pbrActive = false;
 }
 
+// Called after all local materials have been released. Keep the downloaded
+// images cached, but remove renderer dispose callbacks and GPU allocations.
+export function releaseLocationPbrTextures() {
+    for (const pending of textureCache.values()) pending.then(texture => texture.dispose()).catch(() => {});
+}
+
 export function tileLocationPbrBoxUvs(geometry, width, height, depth, metersPerTile = 2) {
     const uv = geometry.attributes.uv;
     if (!uv || uv.count !== 24) return;

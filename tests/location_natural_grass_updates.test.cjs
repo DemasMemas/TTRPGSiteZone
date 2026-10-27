@@ -95,7 +95,7 @@ async function harness(tiles, objects = []) {
         import(moduleUrl('locationGrassDetail.js')), import(moduleUrl('locationArchitecture.js')),
     ]);
     const geometry = new Geometry(); geometry.index = { count: 457 * 3 };
-    const atlas = { disposals: 0, dispose() { this.disposals++; } };
+    const atlas = { disposals: 0, clone() { return {...this, disposals:0}; }, dispose() { this.disposals++; } };
     const assets = { medium01: { geometry, material: new Material({ map: atlas }), bottom: -0.2, scale: 0.1, spread: 0.3 } };
     const context = vm.createContext({ THREE, ...grass, ...terrain, ...detail, ...architecture,
         currentLocationData: { tiles_data: tiles, objects, grid_width: tiles[0].length, grid_height: tiles.length },
@@ -153,6 +153,23 @@ async function assertFullEquivalent(h) {
         full.context.grassDetailGroup.userData.detailCounts.tufts);
     full.context.disposeObject(full.context.grassDetailGroup);
 }
+
+test('building slab replacement updates only affected grass chunks and matches a full rebuild',async()=>{
+    const tiles=Array.from({length:48},()=>Array.from({length:48},()=>({terrain:'grass',height:1,objects:[]})));
+    const floor={id:1,type:'floor',tile_x:8,tile_y:8,properties:{building_id:'b',level:0,rotation:.4,dimensions:{width:6,depth:5,height:.12}}};
+    const h=await harness(tiles,[floor]);
+    vm.runInContext(functionSource('buildingGrassChangedTiles'),h.context);
+    // The helper uses the same structure accessors as floorVisualPose.
+    const architecture=await import(moduleUrl('locationArchitecture.js'));
+    Object.assign(h.context,architecture);
+    const old=snapshot(h),moved={...floor,tile_x:15};
+    const changed=h.context.buildingGrassChangedTiles([floor],[moved],[floor,moved]);
+    h.context.currentLocationData.objects=[moved];h.context.rebuildGrassDetailMesh(changed);
+    const after=snapshot(h);
+    assert.ok([...old].some(([k,m])=>after.get(k)===m),'far chunks retain their instances');
+    await assertFullEquivalent(h);
+    h.context.disposeObject(h.context.grassDetailGroup);
+});
 
 test('rotated grass roots sit just below flat and edited sloped terrain without moving the soil', async () => {
     const tiles = tilesFor(20);
@@ -241,6 +258,8 @@ test('removing the last grass chunk releases owned resources once and permits re
     const h = await harness(tiles);
     assert.equal(meshes(h).length, 1);
     const old = meshes(h)[0], geometry = old.geometry, material = old.material;
+    assert.notEqual(material.map, h.atlas, 'chunks share a group-owned atlas wrapper');
+    assert.equal(material.map.needsUpdate, true, 'cloned grass texture must be uploaded to the renderer');
     const changed = [];
     for (let z = 0; z < 12; z++) for (let x = 0; x < 12; x++) {
         tiles[z][x].terrain = 'water'; changed.push({ x, z });
@@ -248,6 +267,7 @@ test('removing the last grass chunk releases owned resources once and permits re
     h.edit(changed);
     assert.equal(meshes(h).length, 0); assert.equal(old.disposals, 1);
     assert.equal(geometry.disposals, 1); assert.equal(material.disposals, 1);
+    assert.equal(material.map.disposals, 1, 'last chunk releases renderer texture callbacks');
     assert.equal(h.assets.medium01.geometry.disposals, 0); assert.equal(h.atlas.disposals, 0);
     await assertFullEquivalent(h);
     tiles[6][6].terrain = 'grass'; h.edit([{ x: 6, z: 6 }]);
@@ -256,6 +276,7 @@ test('removing the last grass chunk releases owned resources once and permits re
     const replacement = meshes(h)[0]; h.context.disposeObject(h.context.grassDetailGroup);
     assert.equal(replacement.disposals, 1);
     assert.equal(replacement.geometry.disposals, 1); assert.equal(replacement.material.disposals, 1);
+    assert.equal(replacement.material.map.disposals, 1);
     assert.equal(geometry.disposals, 1); assert.equal(h.atlas.disposals, 0);
 });
 

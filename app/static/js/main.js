@@ -55,7 +55,7 @@ import {
     getLocationLightingPreset, setLocationAssetPreset, clearLocationAssetPreset,
     setLocationAssetElevation,
     setLocationAssetDimensions, getSelectedLocationEditorAsset, getLocationBuildingIds,
-    canRestoreGeneratedLocationFloor, restoreGeneratedLocationFloor,
+    canRestoreGeneratedLocationFloor, restoreGeneratedLocationFloor, generateLocationFloorInterior, generateLocationFurniture,
     getSelectedLocationFloorFit, fitSelectedLocationFloorToBuilding,
     addFloorAboveSelectedLocationAsset, beginMoveSelectedLocationAsset,
     beginRotateSelectedLocationAsset, beginResizeSelectedLocationAsset, cancelLocationAssetResize,
@@ -258,7 +258,20 @@ function setLocationViewActive(active) {
     document.getElementById('location-container').style.display = active ? 'block' : 'none';
 }
 
+function clearLocationEditorSubscriptions() {
+    for (const [event, key] of [
+        ['location-editor-selection', 'locationAssetSelectionHandler'],
+        ['location-editor-buildings-changed', 'locationBuildingListHandler'],
+        ['location-editor-active-building', 'locationActiveBuildingHandler'],
+        ['location-editor-resize', 'locationAssetResizeHandler'],
+    ]) {
+        if (window[key]) window.removeEventListener(event, window[key]);
+        delete window[key];
+    }
+}
+
 window.enterLocation = async function(locationId) {
+    clearLocationEditorSubscriptions();
     window.cancelCommonMapTool?.();
     window.clearDirectWorldObjectSelection?.();
     const loadingToken = showSceneLoading('location');
@@ -328,7 +341,8 @@ window.enterLocation = async function(locationId) {
             const toolsPanel = document.getElementById('panel-tools');
             if (toolsPanel) {
                 toolsPanel.style.display = 'flex';
-                const editorBuildingId = `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+                const editorBuildingId = getLocationBuildingIds()[0]
+                    || `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
                 toolsPanel.classList.add('is-location-editor');
                 if (!window._originalToolsContent) {
                     window._originalToolsContent = toolsPanel.querySelector('.panel-content').innerHTML;
@@ -397,6 +411,8 @@ window.enterLocation = async function(locationId) {
                             <label>Здание <select id="loc-structure-building" class="form-control" style="width:auto;"></select></label>
                             <button type="button" id="loc-structure-new-building">Новое здание</button>
                             <button type="button" id="loc-restore-generated-floor" hidden>Восстановить пол дома</button>
+                            <button type="button" id="loc-generate-interior">Планировка выбранного этажа</button>
+                            <button type="button" id="loc-generate-furniture">Меблировка · комната / этаж / здание</button>
                             <input id="loc-structure-building-id" type="hidden" value="${editorBuildingId}">
                             <label>Этаж размещения <input id="loc-structure-level" class="form-control" type="number" step="1" value="0" style="width:90px;"></label>
                             <label id="loc-structure-roof-type-field" style="display:none;">Крыша <select id="loc-structure-roof-type" class="form-control" style="width:auto;"><option value="gable">Двускатная</option><option value="flat">Плоская</option><option value="none">Без автоматической крыши</option></select></label>
@@ -586,9 +602,9 @@ window.enterLocation = async function(locationId) {
                     <input class="form-control location-asset-search" type="search" placeholder="Найти ассет или аномалию" aria-label="Поиск по ассетам">
                     <div class="location-house-generator">
                         <button type="button" data-house-draw aria-pressed="false">Нарисовать здание</button>
-                        <label>Генератор <select class="form-control" data-house-kind><option value="shell">Пустая оболочка · формы, этажи, подвалы</option><option value="residential">Жилой дом с мебелью · прямоугольник</option></select></label>
+                        <label>Генератор <select class="form-control" data-house-kind><option value="shell">Здание · формы, этажи, помещения и мебель</option><option value="residential">Классический жилой дом · прямоугольник</option></select></label>
                         <label>Seed <input class="form-control" data-house-seed type="text" value="0" maxlength="32"></label>
-                        <span>Растяните область ЛКМ по ровному участку. Пустая оболочка: 6–16 м, сложные формы от 10×10 м, этажи и подвалы, без мебели. Жилой дом: прямоугольник 4–12 м с прежней планировкой и мебелью.</span>
+                        <span>Растяните область ЛКМ по ровному участку. В диалоге выберите форму и наполнение: пустое здание, помещения или помещения с мебелью. Размеры 6–16 м, сложные формы от 10×10 м. Классический дом: прежний прямоугольник 4–12 м.</span>
                     </div>
                     <div class="location-asset-tabs"></div>
                     <div class="location-asset-grid"></div>
@@ -613,6 +629,16 @@ window.enterLocation = async function(locationId) {
                     <div class="location-asset-inspector"></div>
                 `;
                 toolsRoot.appendChild(assetSection);
+                const buildingTools = document.createElement('div');
+                buildingTools.className = 'location-house-generator';
+                buildingTools.innerHTML = '<strong>Здания · планировка и мебель</strong><span>Выберите здание и этаж. Меблировка доступна для комнаты, этажа или всего здания.</span>';
+                for (const id of ['loc-structure-building', 'loc-structure-level']) {
+                    buildingTools.appendChild(document.getElementById(id).closest('label'));
+                }
+                for (const id of ['loc-structure-new-building', 'loc-generate-interior', 'loc-generate-furniture', 'loc-restore-generated-floor']) {
+                    buildingTools.appendChild(document.getElementById(id));
+                }
+                assetSection.querySelector('.location-house-generator').after(buildingTools);
                 assetSection.hidden = window.locationEditorTool !== 'assets';
                 const assetTabs = assetSection.querySelector('.location-asset-tabs');
                 const assetGrid = assetSection.querySelector('.location-asset-grid');
@@ -755,6 +781,8 @@ window.enterLocation = async function(locationId) {
                     for (const input of levelFields) input.value = String(activeLevel);
                     document.getElementById('loc-restore-generated-floor').hidden =
                         !canRestoreGeneratedLocationFloor(activeBuildingId, activeLevel);
+                    document.getElementById('loc-generate-interior').disabled = !ids.includes(activeBuildingId);
+                    document.getElementById('loc-generate-furniture').disabled = !ids.includes(activeBuildingId);
                 };
                 const setActiveBuilding = (id, level = activeLevel) => {
                     activeBuildingId = id || '';
@@ -785,6 +813,17 @@ window.enterLocation = async function(locationId) {
                     button.disabled = true;
                     try { await restoreGeneratedLocationFloor(activeBuildingId, activeLevel); }
                     finally { button.disabled = false; renderBuildingControls(); }
+                };
+                document.getElementById('loc-generate-interior').onclick = async event => {
+                    const button=event.currentTarget;
+                    button.disabled=true;
+                    try { await generateLocationFloorInterior(activeBuildingId,activeLevel); }
+                    finally {button.disabled=false;renderBuildingControls();}
+                };
+                document.getElementById('loc-generate-furniture').onclick = async event => {
+                    const button=event.currentTarget;button.disabled=true;
+                    try {await generateLocationFurniture(activeBuildingId,activeLevel);}
+                    finally {button.disabled=false;renderBuildingControls();}
                 };
                 renderBuildingControls();
                 const renderAssetSelection = () => {
@@ -1342,6 +1381,7 @@ async function deleteCurrentLocation(locationId) {
 }
 
 window.exitLocation = function() {
+    clearLocationEditorSubscriptions();
     window.cancelCommonMapTool?.();
     closeMapEditorQuickMenu();
     // Очищаем события локации, если они были установлены

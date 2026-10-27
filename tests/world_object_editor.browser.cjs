@@ -175,6 +175,9 @@ else:
         if(process.env.VTT_ROOF_SECTIONS==='1'){
             await require('./location_roof_sections.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
         }
+        if(process.env.VTT_FURNITURE==='1'){
+            await require('./location_furniture.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
+        }
         if(process.env.VTT_BUILDING_SHELL==='1'){
             await require('./location_building_shell.browser.cjs')({page,request,token,lobby,base,connect,debugPort});return;
         }

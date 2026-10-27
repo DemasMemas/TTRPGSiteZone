@@ -4,6 +4,15 @@ const caches = new WeakMap();
 const wood='#77604a', edge='#463e33', cloth='#77715c', iron='#444a44', enamel='#b2b2a0', dark='#272d29';
 const ceramicModels = new Set(['washbasin', 'toilet', 'bathtub']);
 
+// Keep reusable CPU geometry and atlas pixels, release the departed renderer's
+// GPU allocations and its dispose subscriptions on these cached resources.
+export function releaseHouseholdRendererResources(T) {
+    const cache = caches.get(T);
+    if (!cache) return;
+    cache.texture.dispose();
+    cache.geometries.forEach(geometry => geometry.dispose());
+}
+
 function resources(T) {
     if(caches.has(T))return caches.get(T);
     const canvas=document.createElement('canvas');canvas.width=canvas.height=256;

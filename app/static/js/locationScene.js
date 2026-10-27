@@ -3,7 +3,7 @@ import { createWaterProfileLayer, connectedWaterCells, normalizeWaterProfile } f
 import * as THREE from 'three';
 import { createVerticalAccessModel } from './locationVerticalAccess.js';
 import { createBasementCutaway, cutawayContains } from './locationBasementCutaway.js';
-import { createHouseholdModel } from './locationHouseholdModels.js';
+import { createHouseholdModel, releaseHouseholdRendererResources } from './locationHouseholdModels.js';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'https://unpkg.com/three@0.128.0/examples/jsm/renderers/CSS2DRenderer.js';
 import {
@@ -33,7 +33,7 @@ import { createLocationLightingEchoTracker, DEFAULT_LOCATION_LIGHTING, resolveLo
 import { findLocationAsset } from './locationAssetCatalog.js';
 import { placementForLocationAsset, visualAssetForLocationObject } from './locationAssetVariants.js';
 import {
-    alignLocationPbrFloorUvs, applyLocationPbrMaterial, releaseLocationPbrMaterial,
+    alignLocationPbrFloorUvs, applyLocationPbrMaterial, releaseLocationPbrMaterial, releaseLocationPbrTextures,
     tileLocationPbrBoxUvs,
 } from './locationPbrMaterials.js';
 import {
@@ -60,7 +60,7 @@ import { activeStaticLightFieldPointSlots, activeStaticLightFieldSpotSlots,
     createLocationDirectionalLightField,
     remapStaticLightFieldSlots, LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER } from './locationStaticLightField.js';
 import { applySurfaceDarkness, writeDarknessPixels } from './locationDarknessSurface.js';
-import { applySurfacePattern, getSurfaceTexture } from './locationTerrainDetail.js';
+import { applySurfacePattern, getSurfaceTexture, releaseSurfaceTextures } from './locationTerrainDetail.js';
 import { createGrassDetailGroup } from './locationGrassDetail.js';
 import { addNaturalGrassInstances, disposeNaturalGrassInstances, loadNaturalGrassAssets, updateNaturalGrassInstances,
     naturalGrassPlacements } from './locationNaturalGrass.js';
@@ -11536,13 +11536,15 @@ function rebuildLocationRoofs() {
 
 function refreshArchitecturalMeshes(affected = null, alreadyBuilt = new Set()) {
     if (!scene || !currentLocationData) return;
+    const byId = new Map((currentLocationData.objects || []).map(object => [object.id, object]));
+    const scopeKey = object => JSON.stringify([structureBuildingId(object), structureLevel(object)]);
+    const scopes = affected ? new Set(affected.filter(Boolean).map(scopeKey)) : null;
     for (let index = 0; index < locationObjectMeshes.length; index++) {
         const oldMesh = locationObjectMeshes[index];
-        const source = (currentLocationData.objects || []).find(item => item.id === oldMesh.userData.locationObjectId);
+        const source = byId.get(oldMesh.userData.locationObjectId);
         if (!source || !['wall', 'door', 'window', 'floor', 'stairs', 'ladder', 'hatch', 'floor_opening'].includes(source.type)) continue;
         if (alreadyBuilt.has(Number(source.id))) continue;
-        if (affected && !affected.some(object => object && structureLevel(object) === structureLevel(source)
-            && structureBuildingId(object) === structureBuildingId(source))) continue;
+        if (scopes && !scopes.has(scopeKey(source))) continue;
         scene.remove(oldMesh);
         disposeLocationObject(oldMesh);
         const newMesh = createLocationObjectMesh(source);
@@ -11645,6 +11647,25 @@ function clearBuildingShellPreview() {
     houseShellPreview = null;
 }
 
+async function planNewBuilding(options) {
+    const plan = planBuildingShell(options);
+    if (plan.error || !options.contents || options.contents === 'empty') return plan;
+    const { planBuildingInterior } = await import('./locationInteriorGenerator.js');
+    const levels = [...new Set(plan.objects.filter(o => o.type === 'floor').map(structureLevel))];
+    for (const level of levels) {
+        const layout = planBuildingInterior(plan.objects, { ...options, level });
+        if (!layout.error) plan.objects.push(...layout.objects);
+    }
+    if (options.contents === 'furnished') {
+        const { planBuildingFurniture } = await import('./locationFurnitureGenerator.js');
+        const furniture = planBuildingFurniture(plan.objects, { ...options, scope:'building',
+            occupiedCells:[...characterModels.values()].map(c=>({x:c.posX,z:c.posY,level:c.floorLevel||0})) });
+        if (furniture.error) return furniture;
+        plan.objects.push(...furniture.objects);
+    }
+    return plan;
+}
+
 function chooseBuildingShell(footprint) {
     houseShellDialog?.close();
     const dialog = document.createElement('dialog');
@@ -11652,8 +11673,9 @@ function chooseBuildingShell(footprint) {
     dialog.className = 'modal-content';
     dialog.style.cssText = 'position:fixed;left:auto;right:20px;top:70px;margin:0;width:340px;max-height:75vh;overflow:auto;padding:16px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;z-index:1100;';
     dialog.innerHTML = `<form method="dialog" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-        <strong style="grid-column:1/-1;">Пустое здание</strong>
+        <strong style="grid-column:1/-1;">Новое здание</strong>
         <label style="grid-column:1/-1;">Форма<select class="form-control" name="shape"><option value="rectangle">Прямоугольник</option><option value="L">Г</option><option value="T">Т</option><option value="U">П</option><option value="C">С</option><option value="cross">Крест</option><option value="compound">Три корпуса</option><option value="custom">Свои корпуса</option></select></label>
+        <label style="grid-column:1/-1;">Наполнение<select class="form-control" name="contents"><option value="empty">Пустое здание</option><option value="rooms">С помещениями</option><option value="furnished">С помещениями и мебелью</option></select></label>
         <label>Ширина, м<input class="form-control" name="width" type="number" min="6" max="16" step="2" required></label>
         <label>Глубина, м<input class="form-control" name="depth" type="number" min="6" max="16" step="2" required></label>
         <label>Наземных этажей<input class="form-control" name="storeys" type="number" min="1" max="4" value="1" required></label>
@@ -11691,9 +11713,10 @@ function chooseBuildingShell(footprint) {
     };
     resetBodies();
     form.querySelector('[data-shell-add-body]').onclick=()=>{appendBody({x:4,z:4});form.elements.shape.value='custom';form.dispatchEvent(new Event('input'));};
-    let approved = null;
+    let approved = null, previewVersion = 0;
     form.addEventListener('input', () => {
         approved = null;
+        previewVersion++;
         dialog.querySelector('[data-shell-create]').disabled = true;
         clearBuildingShellPreview();
     });
@@ -11703,16 +11726,21 @@ function chooseBuildingShell(footprint) {
         const field={storeys:'storeys',roofType:'type',roofPitch:'pitch',roofDirection:'direction',roofOverhang:'overhang'}[name];
         if(field)for(const input of form.querySelectorAll(`[data-body-field="${field}"]`))input.value=event.target.value;
     });
-    dialog.querySelector('[data-shell-preview]').onclick = () => {
+    dialog.querySelector('[data-shell-preview]').onclick = async () => {
         if (!form.reportValidity()) return;
+        const version = ++previewVersion, epoch = houseSceneEpoch;
+        approved = null;
+        dialog.querySelector('[data-shell-create]').disabled = true;
         const options = { ...footprint, seed: document.querySelector('[data-house-seed]')?.value || '0', buildingId: 'shell-preview' };
         for (const key of ['width', 'depth', 'storeys', 'basements']) options[key] = Number(form.elements[key].value);
         for (const key of ['shape', 'wealth', 'condition']) options[key] = form.elements[key].value;
+        options.contents = form.elements.contents.value;
         for(const key of ['roofType','roofDirection'])options[key]=form.elements[key].value;
         for(const key of ['roofPitch','roofOverhang'])options[key]=Number(form.elements[key].value);
         options.bodies=[...form.querySelectorAll('[data-shell-body]')].map(row=>Object.fromEntries([...row.querySelectorAll('[data-body-field]')].map(input=>[input.dataset.bodyField,input.type==='number'?Number(input.value):input.value])));
         options.bodies.forEach(b=>{if(b.direction==='auto')delete b.direction;});
-        const plan = planBuildingShell({...options,groundHeight:getTileHeight});
+        const plan = await planNewBuilding({...options,groundHeight:getTileHeight});
+        if (version !== previewVersion || epoch !== houseSceneEpoch || !dialog.isConnected) return;
         const summary = dialog.querySelector('[data-shell-summary]');
         clearBuildingShellPreview();
         if (plan.error) { summary.textContent = plan.error; return; }
@@ -11732,6 +11760,7 @@ function chooseBuildingShell(footprint) {
             scene.add(houseShellPreview);
             approved = options;
             summary.textContent = `${plan.objects.length} редактируемых элементов; уровни от ${-options.basements} до ${options.storeys - 1}. Подвалы видны после создания при выборе этажа.`;
+            if (options.contents === 'furnished') summary.textContent += ` Мебель: ${plan.objects.filter(o=>o.properties.furniture_generation).length} предметов. Тесные и разрушенные участки могут остаться пустыми.`;
             dialog.querySelector('[data-shell-create]').disabled = false;
         } finally { currentLocationData.objects = original; }
     };
@@ -11751,6 +11780,168 @@ function chooseBuildingShell(footprint) {
     });
 }
 
+export async function generateLocationFurniture(buildingId, level = locationViewLevel) {
+    if(!editMode||houseCreationPending||!currentLocationData||!window.isGM)return false;
+    const {getFurnitureRooms,planBuildingFurniture}=await import('./locationFurnitureGenerator.js');
+    const rooms=getFurnitureRooms(currentLocationData.objects,buildingId).filter(r=>r.level===level);
+    const epoch=houseSceneEpoch,locationId=currentLocationId,lobbyId=window.currentLobbyId;
+    houseShellDialog?.close();
+    const dialog=document.createElement('dialog');houseShellDialog=dialog;
+    dialog.className='modal-content';
+    dialog.style.cssText='position:fixed;left:auto;right:20px;top:70px;margin:0;width:360px;max-height:75vh;overflow:auto;padding:16px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;z-index:1100;';
+    dialog.innerHTML=`<form method="dialog" style="display:grid;gap:8px;">
+        <strong>Меблировка · этаж <span data-furniture-level></span></strong>
+        <label>Область<select class="form-control" name="scope"><option value="room">Выбранная комната</option><option value="floor" selected>Этот этаж</option><option value="building">Всё здание, включая подвалы</option></select></label>
+        <label>Комната<select class="form-control" name="roomId"></select></label>
+        <label>Назначение комнаты<select class="form-control" name="role"><option value="auto">Из планировки</option><option value="living">Гостиная</option><option value="bedroom">Спальня</option><option value="kitchen">Кухня</option><option value="bathroom">Санузел</option><option value="office">Кабинет</option><option value="storage">Кладовая / склад</option><option value="technical">Техническая</option><option value="shop">Торговый зал</option></select></label>
+        <label>Достаток<select class="form-control" name="wealth"><option value="auto">Из планировки каждого этажа</option><option value="poor">Бедное</option><option value="ordinary">Обычное</option><option value="rich">Богатое</option></select></label>
+        <label>Состояние<select class="form-control" name="condition"><option value="auto">Из планировки каждого этажа</option><option value="intact">Целое</option><option value="worn">Ветхое</option><option value="damaged">Частично разрушенное</option><option value="ruins">Руины</option></select></label>
+        <label>Seed<input class="form-control" name="seed" value="0" maxlength="32"></label>
+        <label><input type="checkbox" name="empty"> Оставить область без мебели генератора</label>
+        <small>Заменяется только неизменённая мебель генератора в выбранной области. Ручные и отредактированные предметы, заполненные контейнеры, стены и все межэтажные связи сохраняются. Предпросмотр показывает текущий этаж.</small>
+        <output data-furniture-summary></output>
+        <button type="button" data-furniture-preview>Предпросмотр</button>
+        <button value="create" data-furniture-create disabled>Применить меблировку</button>
+        <button value="cancel" formnovalidate>Отмена</button></form>`;
+    dialog.querySelector('[data-furniture-level]').textContent=String(level);
+    const form=dialog.querySelector('form'),summary=dialog.querySelector('[data-furniture-summary]');
+    form.elements.roomId.replaceChildren(...rooms.map(r=>new Option(`${r.name} (${r.id})`,r.id)));
+    const selection=getSelectedLocationEditorAsset();
+    const selected=rooms.find(r=>r.cells.some(c=>c.x===Math.floor(selection?.x)&&c.z===Math.floor(selection?.z)));
+    if(selected)form.elements.roomId.value=selected.id;
+    const sync=()=>{form.elements.roomId.disabled=form.elements.scope.value!=='room';form.elements.role.disabled=form.elements.scope.value!=='room';};
+    sync();
+    let approved=null,scopeLabel='';
+    const hidden=[];
+    const clear=()=>{
+        clearBuildingShellPreview();
+        for(const mesh of hidden)if(epoch===houseSceneEpoch&&!mesh.parent&&locationObjectMeshes.includes(mesh))scene?.add(mesh);
+        hidden.length=0;
+    };
+    const invalidate=()=>{approved=null;dialog.querySelector('[data-furniture-create]').disabled=true;clear();sync();};
+    form.addEventListener('input',invalidate);
+    form.addEventListener('change',invalidate);
+    dialog.querySelector('[data-furniture-preview]').onclick=()=>{
+        invalidate();
+        if(epoch!==houseSceneEpoch||locationId!==currentLocationId)return dialog.close();
+        const start=performance.now();
+        const options={...Object.fromEntries(new FormData(form)),buildingId,level,empty:form.elements.empty.checked,groundHeight:getTileHeight,
+            occupiedCells:[...characterModels.values()].map(c=>({x:c.posX,z:c.posY,level:c.floorLevel||0}))};
+        const plan=planBuildingFurniture(currentLocationData.objects,options);
+        performance.measure('location-furniture:plan',{start,end:performance.now()});
+        if(plan.error){summary.textContent=plan.error;return;}
+        const ids=new Set(plan.replacedIds);
+        for(const mesh of locationObjectMeshes)if(ids.has(mesh.userData.locationObjectId)&&structureLevel(mesh.userData.locationObject)===locationViewLevel) {
+            hidden.push(mesh);scene.remove(mesh);
+        }
+        houseShellPreview=new THREE.Group();
+        for(const [index,o] of plan.objects.entries())if(structureLevel(o)===locationViewLevel) {
+            const mesh=createLocationObjectMesh({...o,id:-index-1},true);mesh.traverse(c=>{c.raycast=()=>{};});houseShellPreview.add(mesh);
+        }
+        scene.add(houseShellPreview);
+        scopeLabel=options.scope==='building'?'всё здание, включая подвалы':options.scope==='floor'?`этаж ${level}`
+            :`комната «${rooms.find(r=>r.id===options.roomId)?.name||options.roomId}», этаж ${level}`;
+        summary.textContent=`Область: ${scopeLabel}. Новых предметов: ${plan.objects.length}; заменяемых: ${plan.replacedIds.length}; сохранённых ручных правок: ${plan.diagnostics.preservedEdits}. Не поместившиеся предметы пропущены. Стены и полы не изменяются.`;
+        approved=plan;dialog.querySelector('[data-furniture-create]').disabled=false;
+    };
+    dialog.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();dialog.close();}});
+    document.body.appendChild(dialog);
+    const result=await new Promise(resolve=>{
+        dialog.addEventListener('close',()=>{clear();dialog.remove();if(houseShellDialog===dialog)houseShellDialog=null;
+            resolve(dialog.returnValue==='create'?approved:null);},{once:true});
+        dialog.show();
+    });
+    if(!result||epoch!==houseSceneEpoch||locationId!==currentLocationId)return false;
+    if(!confirm(`Меблировка здания «${buildingId}»: ${scopeLabel}. Заменить ${result.replacedIds.length} неизменённых предметов генератора и создать ${result.objects.length}? Ручные и отредактированные предметы сохраняются.`))return false;
+    houseCreationPending=true;
+    try {
+        const change=await Server.changeLocationObjects(lobbyId,locationId,{objects:result.objects,replace_furniture:result.replacement});
+        if(epoch===houseSceneEpoch)applyLocationObjectsChange(change);
+        showNotification(`Меблировка сохранена: ${result.objects.length} предметов. Все доступны для ручной правки.`,'success');
+        return true;
+    } catch(error){showNotification(error.message||'Не удалось сохранить мебель','system');return false;}
+    finally {houseCreationPending=false;}
+}
+
+export async function generateLocationFloorInterior(buildingId, level = locationViewLevel) {
+    if (!editMode || houseCreationPending || !currentLocationData || !window.isGM) return false;
+    const { planBuildingInterior } = await import('./locationInteriorGenerator.js');
+    const locationId=currentLocationId,lobbyId=window.currentLobbyId,epoch=houseSceneEpoch;
+    houseShellDialog?.close();
+    const dialog=document.createElement('dialog');
+    houseShellDialog=dialog;
+    dialog.className='modal-content';
+    dialog.style.cssText='position:fixed;left:auto;right:20px;top:70px;margin:0;width:340px;max-height:75vh;overflow:auto;padding:16px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;z-index:1100;';
+    dialog.innerHTML=`<form method="dialog" style="display:grid;gap:8px;">
+        <strong>Планировка этажа <span data-layout-level></span></strong>
+        <label>Назначение<select class="form-control" name="buildingType"><option value="residential">Жилое здание</option><option value="shop">Магазин</option><option value="warehouse">Склад</option></select></label>
+        <label>Достаток<select class="form-control" name="wealth"><option value="poor">Бедное</option><option value="ordinary">Обычное</option><option value="rich">Богатое</option></select></label>
+        <label>Состояние<select class="form-control" name="condition"><option value="intact">Целое</option><option value="worn">Ветхое</option><option value="damaged">Частично разрушенное</option><option value="ruins">Руины</option></select></label>
+        <label>Seed<input class="form-control" name="seed" maxlength="32"></label>
+        <small>Заменяются только стены и двери ранее сгенерированной планировки этого этажа, включая их ручные правки. Ручные объекты, оболочка, повреждения перекрытий, лестницы, люки и остальные этажи сохраняются.</small>
+        <output data-layout-summary></output>
+        <button type="button" data-layout-preview>Предпросмотр</button>
+        <button value="create" data-layout-create disabled>Применить к этому этажу</button>
+        <button value="cancel" formnovalidate>Отмена</button></form>`;
+    dialog.querySelector('[data-layout-level]').textContent=String(level);
+    const form=dialog.querySelector('form'),summary=dialog.querySelector('[data-layout-summary]');
+    const saved=currentLocationData.objects.find(o=>structureBuildingId(o)===buildingId && structureLevel(o)===level
+        && o.properties?.layout_generation)?.properties.layout_generation;
+    const shell=currentLocationData.objects.find(o=>structureBuildingId(o)===buildingId && o.properties?.building_generation)?.properties.building_generation;
+    form.elements.wealth.value=saved?.wealth||shell?.wealth||'ordinary';
+    form.elements.condition.value=saved?.condition||shell?.condition||'intact';
+    form.elements.buildingType.value=saved?.buildingType||'residential';
+    form.elements.seed.value=saved?.seed||shell?.seed||'0';
+    let approved=null;
+    const hidden=[];
+    const clear=()=>{clearBuildingShellPreview();for(const mesh of hidden) if(!mesh.parent)scene?.add(mesh);hidden.length=0;};
+    form.oninput=()=>{approved=null;dialog.querySelector('[data-layout-create]').disabled=true;clear();};
+    dialog.querySelector('[data-layout-preview]').onclick=()=>{
+        approved=null;
+        dialog.querySelector('[data-layout-create]').disabled=true;
+        clear();
+        if(epoch!==houseSceneEpoch || locationId!==currentLocationId) return dialog.close();
+        const options={buildingId,level,...Object.fromEntries(new FormData(form))};
+        const plan=planBuildingInterior(currentLocationData.objects,options);
+        if(plan.error){summary.textContent=plan.error;return;}
+        const original=currentLocationData.objects;
+        try {
+            const ids=new Set(plan.replacedIds);
+            const preview=plan.objects.map((o,i)=>({...o,id:-i-1}));
+            currentLocationData.objects=[...original.filter(o=>!ids.has(o.id)),...preview];
+            for(const mesh of locationObjectMeshes) if(ids.has(mesh.userData.locationObjectId)){hidden.push(mesh);scene.remove(mesh);}
+            houseShellPreview=new THREE.Group();
+            for(const o of preview){const mesh=createLocationObjectMesh(o,true);mesh.traverse(c=>{c.raycast=()=>{};});houseShellPreview.add(mesh);}
+            scene.add(houseShellPreview);
+            approved=plan;
+            summary.textContent=`Помещений: ${plan.rooms.length}; новых элементов: ${plan.objects.length}; заменяемых: ${plan.replacedIds.length}. Мебель не создаётся. Разрушенные участки пола сохраняются.`;
+            dialog.querySelector('[data-layout-create]').disabled=false;
+        } finally {currentLocationData.objects=original;}
+    };
+    dialog.addEventListener('keydown',event=>{
+        if(event.key==='Escape'){event.preventDefault();dialog.close();}
+    });
+    document.body.appendChild(dialog);
+    const result=await new Promise(resolve=>{
+        dialog.addEventListener('close',()=>{
+            clear();dialog.remove();if(houseShellDialog===dialog)houseShellDialog=null;
+            resolve(dialog.returnValue==='create'?approved:null);
+        },{once:true});
+        dialog.show();
+    });
+    if(!result || epoch!==houseSceneEpoch || locationId!==currentLocationId) return false;
+    if(!confirm(`Применить планировку к этажу ${level} здания «${buildingId}»? Будут заменены ${result.replacedIds.length} элементов прежней планировки, включая их ручные правки. Остальные объекты сохраняются.`)) return false;
+    houseCreationPending=true;
+    try {
+        const change=await Server.changeLocationObjects(lobbyId,locationId,{objects:result.objects,
+            replace_layout:{building_id:buildingId,level,object_ids:result.replacedIds}});
+        if(epoch===houseSceneEpoch)applyLocationObjectsChange(change);
+        showNotification('Планировка этажа сохранена. Стены и двери доступны для ручной правки.','success');
+        return true;
+    } catch(error){showNotification(error.message||'Не удалось сохранить планировку','system');return false;}
+    finally {houseCreationPending=false;}
+}
+
 async function createResidentialHouse(start, end) {
     if (houseCreationPending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return;
     const lobbyId = window.currentLobbyId;
@@ -11768,8 +11959,9 @@ async function createResidentialHouse(start, end) {
         ? `shell-${locationId}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
         : houseBuildingId(locationId, footprint, seed);
     const planningStarted = performance.now();
-    const plan = shell ? planBuildingShell({ ...options, seed, buildingId, groundHeight:getTileHeight })
+    const plan = shell ? await planNewBuilding({ ...options, seed, buildingId, groundHeight:getTileHeight })
         : planResidentialHouse({ ...footprint, seed, buildingId, assetById: findLocationAsset });
+    if (sceneEpoch !== houseSceneEpoch || locationId !== currentLocationId) return;
     performance.measure('location-building:plan', { start: planningStarted, end: performance.now() });
     if (plan.error) return showNotification(plan.error, 'system');
     if (minX < 0 || minZ < 0 || minX + width > currentLocationData.grid_width
@@ -11807,7 +11999,7 @@ async function createResidentialHouse(start, end) {
         applyLocationObjectsChange(change);
         window.dispatchEvent(new CustomEvent('location-editor-active-building',
             { detail: { buildingId, level: 0 } }));
-        showNotification(shell ? 'Пустое здание создано. Все элементы доступны для ручной правки.'
+        showNotification(shell ? `${options.contents === 'furnished' ? 'Здание с помещениями и мебелью' : options.contents === 'rooms' ? 'Здание с помещениями' : 'Пустое здание'} создано. Все элементы доступны для ручной правки.`
             : `Дом создан: ${plan.rooms.map(room => room.name).join(', ')}`, 'success');
     } catch (error) {
         showNotification(error.message || 'Не удалось создать дом', 'system');
@@ -12495,6 +12687,33 @@ export function isLocationEditorTransformActive() {
     return Boolean(window.locationEditMode && (editorMoveMode || editorRotateMode || editorResizeMode));
 }
 
+// Grass cover depends on slab footprints and walls that trim them, not on
+// furniture or openings. Feed changed coverage into the existing 12m chunks.
+function buildingGrassChangedTiles(previous, next, changed) {
+    const scopeKey = o => JSON.stringify([structureBuildingId(o), structureLevel(o)]);
+    const walls = new Set(changed.filter(o => o.type === 'wall').map(scopeKey));
+    const floors = new Set(changed.filter(o => o.type === 'floor').map(o => o.id));
+    if (!walls.size && !floors.size) return [];
+    const coverage = objects => new Map(objects.filter(o => o.type === 'floor'
+        && (floors.has(o.id) || walls.has(scopeKey(o)))).map(o => {
+            const p = floorVisualPose(o, objects);
+            return [JSON.stringify([p.x, p.z, p.width, p.depth, p.angle]), p];
+        }));
+    const before = coverage(previous), after = coverage(next), tiles = new Map();
+    const differing = [...before].filter(([key]) => !after.has(key))
+        .concat([...after].filter(([key]) => !before.has(key)));
+    for (const [,p] of differing) {
+        const rx = (Math.abs(p.axis.x)*p.width + Math.abs(p.normal.x)*p.depth)/2;
+        const rz = (Math.abs(p.axis.z)*p.width + Math.abs(p.normal.z)*p.depth)/2;
+        for (let z=Math.max(0,Math.floor(p.z-rz)); z<Math.min(currentLocationData.grid_height,Math.ceil(p.z+rz)); z++) {
+            for (let x=Math.max(0,Math.floor(p.x-rx)); x<Math.min(currentLocationData.grid_width,Math.ceil(p.x+rx)); x++) {
+                tiles.set(`${x}:${z}`,{x,z});
+            }
+        }
+    }
+    return [...tiles.values()];
+}
+
 export function applyLocationObjectsChange({ location_id, objects = [], deleted_ids = [] }) {
     if (!currentLocationData || Number(location_id) !== Number(currentLocationId)) return;
     const existing = new Set((currentLocationData.objects || []).map(o => Number(o.id)));
@@ -12503,6 +12722,7 @@ export function applyLocationObjectsChange({ location_id, objects = [], deleted_
     const removedObjects = (currentLocationData.objects || []).filter(o => removed.has(Number(o.id)));
     if (!added.length && !removed.size) return; // REST response and socket echo are identical.
     const started = performance.now();
+    const previousObjects = currentLocationData.objects || [];
     currentLocationData.objects = (currentLocationData.objects || []).filter(o => !removed.has(Number(o.id)));
     currentLocationData.objects.push(...added);
     for (const id of removed) removeLocationObjectMesh(id, false);
@@ -12510,14 +12730,18 @@ export function applyLocationObjectsChange({ location_id, objects = [], deleted_
     performance.measure('location-building:meshes', { start: started, end: performance.now() });
     if (removed.size && editorSelections.some(s => s.kind === 'structure' && removed.has(Number(s.id)))) clearEditorSelection();
     locationBuildingViewsDirty = true;
-    refreshArchitecturalMeshes([...added, ...removedObjects], new Set(added.map(o => Number(o.id))));
+    const changed = [...added, ...removedObjects];
+    const architecture = changed.filter(o => ['floor','wall','door','window','stairs','ladder','hatch','floor_opening','roof','ceiling'].includes(o.type));
+    if (architecture.length) refreshArchitecturalMeshes(architecture, new Set(added.map(o => Number(o.id))));
+    else { applyFogOfWar(); refreshLocationDarkness(); }
     for (const object of removedObjects) if (isObjectLightSource(object)) syncFireObjectLight(null, object.id, false);
     for (const object of added) if (isObjectLightSource(object)) syncFireObjectLight(object, object.id, false);
-    rebuildGrassDetailMesh();
+    const grassTiles = buildingGrassChangedTiles(previousObjects, currentLocationData.objects, architecture);
+    if (grassTiles.length) rebuildGrassDetailMesh(grassTiles);
     refreshLocationFloorMenu();
     invalidateMovementMapCache();
     notifyEditorBuildingsChanged();
-    queueStaticLightFieldRefresh();
+    if (architecture.length || changed.some(isObjectLightSource)) queueStaticLightFieldRefresh();
     performance.measure('location-building:scene', { start: started, end: performance.now() });
 }
 
@@ -16741,13 +16965,23 @@ export function setupLocationEditing() {
             window.removeEventListener('pointercancel', handlers.window.charDragPointerCancel);
             delete handlers.window.charDragPointerCancel;
         }
-        // Удаляем все обработчики из хранилища
+        // Keys describe handler roles; several are not DOM event names.
+        // Remove each subscription before dropping its function reference.
+        const windowEvents = {
+            cameraBlur: ['blur'], pointerMove: ['pointermove'], pointerMoveWithDrag: ['pointermove'],
+            combatHudPointerMove: ['pointermove'], combatHudPointerUp: ['pointerup', 'pointercancel'],
+        };
         Object.keys(handlers.window).forEach(key => {
-            window.removeEventListener(key, handlers.window[key]);
+            for (const type of windowEvents[key] || [key]) window.removeEventListener(type, handlers.window[key]);
             delete handlers.window[key];
         });
+        const canvasEvents = {
+            charPointerDown: 'pointerdown', charPointerMove: 'pointermove', charPointerUp: 'pointerup',
+            charPointerCancel: 'pointercancel', editPointerDown: 'pointerdown', editPointerUp: 'pointerup',
+            cameraRotatePointerDown: 'pointerdown',
+        };
         Object.keys(handlers.canvas).forEach(key => {
-            canvas.removeEventListener(key, handlers.canvas[key]);
+            canvas.removeEventListener(canvasEvents[key] || key, handlers.canvas[key], key === 'cameraRotatePointerDown');
             delete handlers.canvas[key];
         });
         canvas.removeEventListener('pointerdown', onCameraRotatePointerDown, { capture: true });
@@ -17428,6 +17662,9 @@ export function destroyLocationScene() {
             scene.remove(obj);
         });
         clearUnusedLocationModels();
+        releaseLocationPbrTextures();
+        releaseHouseholdRendererResources(THREE);
+        releaseSurfaceTextures(['wall', 'floor', 'roof']);
         tileCubes = [];
         locationTileMesh = null;
         waterTileMesh = null;
@@ -17499,6 +17736,7 @@ export function destroyLocationScene() {
     }
     if (renderer) {
         renderer.dispose();
+        renderer.forceContextLoss?.();
         if (renderer.domElement && renderer.domElement.parentNode) {
             renderer.domElement.parentNode.removeChild(renderer.domElement);
         }
@@ -17507,6 +17745,7 @@ export function destroyLocationScene() {
 
     // Камера и контролы
     camera = null;
+    raycaster.camera = null;
     if (controls) {
         controls.dispose();
         controls = null;

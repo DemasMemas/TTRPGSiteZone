@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 class TextureLoader {
-    load(url, onLoad) { onLoad({ url }); }
+    load(url, onLoad) { onLoad({ url, disposals:0, dispose(){this.disposals++;} }); }
 }
 
 class Vector3 {
@@ -30,7 +30,7 @@ await module.link(specifier => {
     return three;
 });
 await module.evaluate();
-const { alignLocationPbrFloorUvs, applyLocationPbrMaterial, releaseLocationPbrMaterial,
+const { alignLocationPbrFloorUvs, applyLocationPbrMaterial, releaseLocationPbrMaterial, releaseLocationPbrTextures,
     tileLocationPbrBoxUvs } = module.namespace;
 
 test('PBR texture slots use color sRGB and share the packed ARM map', async () => {
@@ -65,6 +65,20 @@ test('PBR box UVs repeat by physical dimensions without changing base UV2 refere
     assert.equal(coords[16][0], 2);
     assert.equal(coords[16][1], 1);
     assert.notEqual(geometry.attributes.uv2, uv);
+});
+
+test('scene exit releases cached GPU texture listeners while reopening reuses loaded images',async()=>{
+    const create=()=>({userData:{},color:{set(){}}}),maps={color:'/exit-color.jpg',normal:'/exit-normal.jpg',arm:'/exit-arm.jpg'};
+    const first=create();applyLocationPbrMaterial(first,maps);
+    await new Promise(resolve=>setImmediate(resolve));
+    releaseLocationPbrMaterial(first);releaseLocationPbrTextures();
+    await new Promise(resolve=>setImmediate(resolve));
+    for(const texture of [first.map,first.normalMap,first.aoMap])assert.equal(texture.disposals,1);
+    const reopened=create();applyLocationPbrMaterial(reopened,maps);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(reopened.map,first.map);assert.equal(reopened.aoMap,first.aoMap);
+    assert.equal(reopened.userData.pbrActive,true);
+    releaseLocationPbrMaterial(reopened);
 });
 
 test('neighboring PBR floors share the same UV phase at their world-space edge', () => {

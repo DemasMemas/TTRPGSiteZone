@@ -121,6 +121,10 @@ export function getSurfaceTexture(THREE, kind) {
     return textureCache.get(kind);
 }
 
+export function releaseSurfaceTextures(kinds) {
+    for (const kind of kinds) textureCache.get(kind)?.dispose();
+}
+
 export function applySurfacePattern(material, texture, scale = 0.25, projection = 'sides') {
     const previousCompile = material.onBeforeCompile;
     const previousKey = material.customProgramCacheKey?.bind(material);

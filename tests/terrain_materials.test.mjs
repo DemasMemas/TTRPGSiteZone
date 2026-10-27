@@ -97,7 +97,8 @@ function environment(fail = false) {
     } };
     class Texture {
         constructor(data, width, height) { this.image = { data, width, height }; }
-        dispose() { this.disposed = true; }
+        clone() { return Object.assign(new Texture(), this); }
+        dispose() { this.disposed = true; this.disposeCount = (this.disposeCount || 0) + 1; }
     }
     const THREE = { CanvasTexture: class extends Texture { constructor(canvas) { super(); this.image = canvas; } }, DataTexture: Texture,
         Vector2: class { constructor(x, y) { this.set(x, y); } set(x, y) { this.x = x; this.y = y; } },
@@ -144,9 +145,9 @@ test('shore shoulders reuse existing grass resources and select UV projection fr
     assert.match(bank.fragmentShader,/shoreGrassWeight>0.005/);
 });
 
-test('world and local layers share atlases, update only lookup bytes, and release their own lookups', async () => {
+test('world and local layers share atlas images and release local renderer texture wrappers independently', async () => {
     const { THREE, loaded, contexts } = environment();
-    const world = createTerrainMaterialLayer(THREE), local = createTerrainMaterialLayer(THREE);
+    const world = createTerrainMaterialLayer(THREE, {world:true}), local = createTerrainMaterialLayer(THREE);
     await world.ready;
     assert.equal(loaded.length, 32, 'Snow001 loads two resources instead of duplicating three atlas maps');
     assert.equal(contexts.length, 5);
@@ -155,10 +156,11 @@ test('world and local layers share atlases, update only lookup bytes, and releas
     world.resize(64, 32); local.resize(20, 20);
     world.fill([[{ terrain: 'rock' }, { terrain: 'sand' }]], 31, 10);
     const a = compile(world), b = compile(local);
-    assert.equal(a.uniforms.terrainAtlasColor.value, b.uniforms.terrainAtlasColor.value);
-    assert.equal(a.uniforms.terrainAtlasNormal.value, b.uniforms.terrainAtlasNormal.value);
-    assert.equal(a.uniforms.terrainSnowColorRoughness.value, b.uniforms.terrainSnowColorRoughness.value);
-    assert.equal(a.uniforms.terrainSnowNormal.value, b.uniforms.terrainSnowNormal.value);
+    for (const name of ['terrainAtlasColor','terrainAtlasNormal','terrainAtlasArm','terrainSnowColorRoughness','terrainSnowNormal']) {
+        assert.notEqual(a.uniforms[name].value, b.uniforms[name].value);
+        assert.equal(a.uniforms[name].value.image, b.uniforms[name].value.image);
+        assert.equal(b.uniforms[name].value.needsUpdate, true, 'local wrapper receives completed asynchronous atlas');
+    }
     const lookup = a.uniforms.terrainKinds.value;
     assert.deepEqual([...lookup.image.data.slice((10 * 64 + 31) * 4, (10 * 64 + 31) * 4 + 2)], [1, 8]);
     assert.deepEqual([...lookup.image.data.slice((10 * 64 + 32) * 4, (10 * 64 + 32) * 4 + 2)], [2, 2]);
@@ -175,6 +177,18 @@ test('world and local layers share atlases, update only lookup bytes, and releas
     assert.equal(lookup.disposed, true);
     assert.notEqual(a.uniforms.terrainAtlasColor.value.disposed, true);
     assert.equal(local.diagnostics().lookupBytes, 1600);
+    local.dispose(); local.dispose();
+    for (const name of ['terrainAtlasColor','terrainAtlasNormal','terrainAtlasArm','terrainSnowColorRoughness','terrainSnowNormal']) {
+        assert.equal(b.uniforms[name].value.disposeCount, 1, 'local renderer callbacks are released exactly once');
+        assert.notEqual(a.uniforms[name].value.disposed, true, 'world textures stay valid');
+    }
+    const reopened = createTerrainMaterialLayer(THREE);
+    await reopened.ready;
+    const c = compile(reopened);
+    assert.equal(c.uniforms.terrainAtlasColor.value.image, a.uniforms.terrainAtlasColor.value.image);
+    assert.notEqual(c.uniforms.terrainAtlasColor.value, b.uniforms.terrainAtlasColor.value);
+    assert.equal(loaded.length, 32, 'reopening reuses loaded images');
+    reopened.dispose();
 });
 
 test('PBR shader retains scene callbacks and uses continuous gradients, geometric normals and side ownership', async () => {
@@ -222,7 +236,7 @@ test('temporary Base PBR retains source Normal ARM and leaves local swamp settin
     const local = createTerrainMaterialLayer(THREE);
     await world.ready;
     const a = compile(world), b = compile(local);
-    assert.equal(a.uniforms.terrainAtlasColor.value, b.uniforms.terrainAtlasColor.value);
+    assert.equal(a.uniforms.terrainAtlasColor.value.image, b.uniforms.terrainAtlasColor.value.image);
     assert.doesNotMatch(a.fragmentShader, /float wet = smoothstep/);
     assert.match(a.fragmentShader, /if \(id == 3\.0\) return vec4\(4\.000,0\.550,0\.000,0\.000\)/);
     assert.match(b.fragmentShader, /if \(id == 3\.0\) return vec4\(4\.000,0\.550,0\.000,0\.000\)/);

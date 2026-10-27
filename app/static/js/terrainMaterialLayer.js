@@ -97,12 +97,21 @@ function sharedAtlases(THREE) {
 // A world layer spans the map, so adjacent chunks use precisely the same lookup.
 export function createTerrainMaterialLayer(THREE, { world = false } = {}) {
     const atlas = sharedAtlases(THREE);
-    const uniforms = { terrainAtlasColor: { value: atlas.textures[0] },
-        terrainSnowColorRoughness: { value: atlas.snowTextures[0] },
-        terrainSnowNormal: { value: atlas.snowTextures[1] },
-        terrainAtlasNormal: { value: atlas.textures[1] }, terrainAtlasArm: { value: atlas.textures[2] },
+    // Keep CPU images shared, but give a disposable local renderer its own
+    // texture wrappers. Otherwise cached textures retain every renderer's
+    // onTextureDispose listener, its WebGL context and its detached canvas.
+    const textures = world ? atlas.textures : atlas.textures.map(texture => texture.clone());
+    const snowTextures = world ? atlas.snowTextures : atlas.snowTextures.map(texture => texture.clone());
+    let disposed = false;
+    if (!world) atlas.promise.then(() => {
+        if (!disposed) [...textures, ...snowTextures].forEach(texture => { texture.needsUpdate = true; });
+    });
+    const uniforms = { terrainAtlasColor: { value: textures[0] },
+        terrainSnowColorRoughness: { value: snowTextures[0] },
+        terrainSnowNormal: { value: snowTextures[1] },
+        terrainAtlasNormal: { value: textures[1] }, terrainAtlasArm: { value: textures[2] },
         terrainAtlasReady: atlas.ready, terrainKinds: { value: null },
-        terrainMaterialDarkness: { value: atlas.textures[0] }, terrainMaterialHasDarkness: { value: 0 },
+        terrainMaterialDarkness: { value: textures[0] }, terrainMaterialHasDarkness: { value: 0 },
         terrainKindsSize: { value: new THREE.Vector2(1, 1) } };
     let texture = null;
     const layer = {
@@ -113,7 +122,7 @@ export function createTerrainMaterialLayer(THREE, { world = false } = {}) {
             uniforms.terrainShoreGrassReady=detail.ready;
         },
         setDarkness(texture) {
-            uniforms.terrainMaterialDarkness.value = texture || atlas.textures[0];
+            uniforms.terrainMaterialDarkness.value = texture || textures[0];
             uniforms.terrainMaterialHasDarkness.value = texture ? 1 : 0;
         },
         resize(width, height) {
@@ -147,7 +156,12 @@ export function createTerrainMaterialLayer(THREE, { world = false } = {}) {
                 layer.update(originX + x, originZ + z, null);
             }
         },
-        dispose() { texture?.dispose(); texture = null; uniforms.terrainKinds.value = null; },
+        dispose() {
+            if (disposed) return;
+            disposed = true;
+            texture?.dispose(); texture = null; uniforms.terrainKinds.value = null;
+            if (!world) [...textures, ...snowTextures].forEach(texture => texture.dispose());
+        },
         diagnostics() { return { ready: atlas.ready.value === 1, error: atlas.error,
             atlasBytes: TERRAIN_ATLAS_CELL ** 2 * TERRAIN_ATLAS_COLUMNS * TERRAIN_ATLAS_ROWS * 4 * 4,
             snowBytes: Math.ceil(2 * 1024 ** 2 * 4 * 4 / 3),
@@ -161,8 +175,8 @@ export function createTerrainMaterialLayer(THREE, { world = false } = {}) {
                 previousCompile?.(shader);
                 Object.assign(shader.uniforms, uniforms);
                 if(shore){
-                    shader.uniforms.terrainShoreEarth ||= {value:atlas.textures[0]};
-                    shader.uniforms.terrainShoreForest ||= {value:atlas.textures[0]};
+                    shader.uniforms.terrainShoreEarth ||= {value:textures[0]};
+                    shader.uniforms.terrainShoreForest ||= {value:textures[0]};
                     shader.uniforms.terrainShoreGrassReady ||= {value:0};
                 }
                 const topAttribute = smooth && !shader.vertexShader.includes('attribute float terrainTop;')

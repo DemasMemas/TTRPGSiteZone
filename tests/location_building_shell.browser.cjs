@@ -30,10 +30,85 @@ async function runGrassFloorRegression({page,request,token,lobby,loc}) {
     }
     console.log('GRASS FLOOR PASS');
 }
+async function runFurnishedBuilding({page,request,token,lobby,loc,base,connect,debugPort,draw}) {
+    const detail=()=>request(`/lobbies/${lobby.id}/locations/${loc.id}`,null,token,'GET');
+    const grass=async()=>{
+        await page.until('L.getLocationGrassDiagnostics().kinds.medium01?.added>0','grass tufts loaded');
+        return page.evaluate(`(()=>{const {r,s,c}=shellRender;r.render(s,c);let count=0,uploaded=0;s.traverse(m=>{
+            if(!m.userData.naturalGrassKind)return;count+=m.count;
+            if(['map','alphaMap','normalMap'].every(key=>m.material[key].version>0&&r.properties.get(m.material[key]).__webglTexture))uploaded++;
+        });return {count,uploaded}})()`);
+    };
+    const initial=await grass();assert.ok(initial.count>100&&initial.uploaded>0,'tufts must upload their actual color, alpha and normal textures');
+    const frame=async name=>{const file=path.join(os.tmpdir(),`vtt-combined-${name}.png`);fs.writeFileSync(file,Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));console.log('COMBINED FRAME',file)};
+    await page.evaluate('locationControls.target.set(6,1,6);locationControls.object.position.set(10,6,12);locationControls.update();true');
+    await pause(200);await frame('grass');
+    const visiblePixels=await page.evaluate(`(()=>{const {r,s,c}=shellRender,gl=r.getContext(),w=r.domElement.width,h=r.domElement.height;
+        const before=new Uint8Array(w*h*4),after=new Uint8Array(before.length),tufts=[];s.traverse(m=>{if(m.userData.naturalGrassKind)tufts.push(m)});
+        r.render(s,c);gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,before);
+        tufts.forEach(m=>m.visible=false);r.render(s,c);gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,after);
+        tufts.forEach(m=>m.visible=true);r.render(s,c);let different=0;
+        for(let i=0;i<before.length;i+=4)if(Math.abs(before[i]-after[i])+Math.abs(before[i+1]-after[i+1])+Math.abs(before[i+2]-after[i+2])>12)different++;
+        return different})()`);
+    assert.ok(visiblePixels>100,'tufts must visibly affect the actual game frame, not only exist in mesh diagnostics');
+    console.log('VISIBLE GRASS PIXELS',visiblePixels);
+    await page.evaluate('locationControls.target.set(8,1,8);locationControls.object.position.set(17,18,22);locationControls.update();true');
+    const target=await page.call('Target.createTarget',{url:`${base}/lobbies/${lobby.id}/page`,background:true});
+    const tabs=await(await fetch(`http://127.0.0.1:${debugPort}/json`)).json(),peer=await connect(tabs.find(t=>t.id===target.targetId).webSocketDebuggerUrl);
+    try {
+        await peer.until('window.enterLocation&&window.socket?.connected','combined peer ready');
+        await peer.call('Page.bringToFront');
+        await peer.evaluate(`(async()=>{const T=await import('three');window.L=await import('/static/js/locationScene.js');
+            const add=T.Scene.prototype.add;T.Scene.prototype.add=function(...roots){if(roots.some(r=>r.userData.locationObjectId))window.combinedScene=this;return add.apply(this,roots)};
+            window.combinedBatches=[];socket.on('location_objects_changed',d=>combinedBatches.push(d));socket.on('joined_location',d=>window.combinedJoined=d);await enterLocation(${loc.id});true})()`);
+        await peer.until(`combinedJoined?.location_id===${loc.id}&&socket.io.engine.transport.name==='websocket'`,'peer joined via WebSocket');
+        await page.call('Page.bringToFront');
+        let original=[];
+        for(const [index,shape] of ['L','U'].entries()){
+            if(index)await page.evaluate('locationControls.target.set(19,1,19);locationControls.object.position.set(28,18,33);locationControls.update();true');
+            await pause(180);
+            await draw(index?14.5:2.5,index?23.5:11.5);
+            const configure=()=>page.evaluate(`(()=>{const f=document.querySelector('dialog form');
+                f.elements.shape.value='${shape}';f.elements.width.value=10;f.elements.depth.value=10;f.elements.storeys.value=2;f.elements.basements.value=1;
+                f.elements.contents.value='furnished';f.elements.wealth.value='rich';f.elements.shape.dispatchEvent(new Event('change',{bubbles:true}));
+                f.dispatchEvent(new Event('input'));document.querySelector('[data-shell-preview]').click();true})()`);
+            await configure();await page.until('!document.querySelector("[data-shell-create]").disabled','furnished preview ready');
+            assert.deepEqual((await detail()).objects,original,'preview does not change saved architecture');
+            if(!index){
+                await page.evaluate("document.querySelector('dialog').close();true");
+                assert.equal((await detail()).objects.length,0,'cancel creates nothing');
+                await draw();await configure();await page.until('!document.querySelector("[data-shell-create]").disabled','second furnished preview ready');
+            }
+            const count=await peer.evaluate('combinedBatches.length');
+            await page.evaluate("document.querySelector('dialog form').requestSubmit(document.querySelector('[data-shell-create]'));true");
+            await page.until(`L.getLocationBuildingIds().length===${index+1}`,'combined building saved');
+            const saved=(await detail()).objects,added=saved.filter(o=>!original.some(p=>p.id===o.id));
+            assert.ok(added.some(o=>o.properties.layout_rooms?.length),'saved rooms exist');
+            const furniture=added.filter(o=>o.properties.furniture_generation);assert.ok(furniture.length>0,'furniture saved in the creation batch');
+            assert.deepEqual([...new Set(furniture.map(o=>o.properties.level))].sort((a,b)=>a-b),[-1,0,1]);
+            assert.deepEqual(saved.filter(o=>original.some(p=>p.id===o.id)),original,'next creation preserves existing house and furniture');
+            const ids=saved.map(o=>o.id).sort((a,b)=>a-b);
+            await peer.until(`JSON.stringify(combinedScene.children.filter(m=>m.userData.locationObjectId).map(m=>m.userData.locationObjectId).sort((a,b)=>a-b))===${JSON.stringify(JSON.stringify(ids))}`,'complete house and furniture synchronize together');
+            assert.equal(await peer.evaluate('combinedBatches.length'),count+1,'one atomic creation event');
+            await frame(shape);original=saved;
+        }
+        await page.evaluate(`(async()=>{exitLocation();await enterLocation(${loc.id});selectLocationEditorTool('assets');document.querySelector('#panel-tools.collapsed .toggle-btn')?.click();true})()`);
+        const shown=await page.evaluate(`(()=>{const b=document.getElementById('loc-generate-furniture');b.scrollIntoView();const r=b.getBoundingClientRect();return !b.closest('[hidden]')&&!b.disabled&&r.width>0&&r.height>0})()`);
+        assert.equal(shown,true,'furniture action is visible and selects an existing building after reopening');
+        const after=await grass();assert.ok(after.uploaded>0&&after.count>100,'tufts survive location exit and reload');
+        assert.deepEqual((await detail()).objects,original,'reopening preserves combined generation');
+        await page.evaluate(`window.retiredCombined=[new WeakRef(shellRender.s),new WeakRef(locationControls.object),new WeakRef(document.querySelector('#location-canvas canvas'))];exitLocation();window.shellRender=null;true`);
+        await page.evaluate('document.body.getBoundingClientRect();new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+        await pause(80);await page.call('HeapProfiler.collectGarbage');
+        assert.equal(await page.evaluate('retiredCombined.every(ref=>ref.deref()===undefined)'),true,'uploaded grass and furnished building do not retain the departed renderer');
+        console.log('FURNISHED BUILDING PASS',JSON.stringify({initial,after,objects:original.length}));
+    }finally{peer.close();await page.call('Target.closeTarget',{targetId:target.targetId}).catch(()=>{});}
+}
+
 module.exports = async ({page,request,token,lobby,base,connect,debugPort}) => {
     const api = `/lobbies/${lobby.id}`;
     const loc = await request(`${api}/locations`, { name:'Shell acceptance', world_tile_x:12,world_tile_z:12,
-        grid_width:24,grid_height:24,tiles_data:Array.from({length:24},()=>Array.from({length:24},()=>({terrain:process.env.VTT_BUILDING_GRASS==='1'?'grass':'bare_dirt',height:1,objects:[]}))) },token);
+        grid_width:24,grid_height:24,tiles_data:Array.from({length:24},()=>Array.from({length:24},()=>({terrain:process.env.VTT_BUILDING_GRASS==='1'||process.env.VTT_BUILDING_FURNISHED==='1'?'grass':'bare_dirt',height:1,objects:[]}))) },token);
     const detail = ()=>request(`${api}/locations/${loc.id}`,null,token,'GET');
     await page.evaluate(`(async()=>{
         window.T=await import('three');const old=T.Scene.prototype.add;
@@ -46,6 +121,7 @@ module.exports = async ({page,request,token,lobby,base,connect,debugPort}) => {
         document.querySelector('#panel-characters:not(.collapsed) .toggle-btn')?.click();
     })()`);
     await page.until('window.shellRender&&document.querySelector("[data-house-draw]")','local renderer');
+    if(process.env.VTT_BUILDING_INTERIOR==='1')return runInterior({page,request,token,lobby,loc});
     if(process.env.VTT_BUILDING_FIX2==='1')return runFloorFix2({page,request,token,lobby,loc});
     if(process.env.VTT_BUILDING_APERTURE==='1')return runApertureRegression({page,request,token,lobby,loc});
     if(process.env.VTT_BUILDING_GRASS==='1')return runGrassFloorRegression({page,request,token,lobby,loc});
@@ -68,6 +144,7 @@ module.exports = async ({page,request,token,lobby,base,connect,debugPort}) => {
         await page.call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,clickCount:1,...b});
         await page.until('!!document.querySelector("dialog[open] [data-shell-preview]")','shell options after drag');
     };
+    if(process.env.VTT_BUILDING_FURNISHED==='1')return runFurnishedBuilding({page,request,token,lobby,loc,base,connect,debugPort,draw});
     await draw();
     await page.evaluate(`(()=>{const f=document.querySelector('dialog form');f.elements.shape.value='L';f.elements.width.value=10;f.elements.depth.value=10;
         f.elements.storeys.value=2;f.elements.basements.value=2;f.elements.wealth.value='rich';f.elements.condition.value='damaged';
@@ -237,6 +314,62 @@ module.exports = async ({page,request,token,lobby,base,connect,debugPort}) => {
         console.log('BUILDING SHELL PASS',JSON.stringify({objects:built.objects.length,levels:[-2,-1,0,1],transport:'websocket',preview:true,manualEdit:true,reload:true,overlapPreserved:true,characterMovement:true}));
     } finally {peer.close();await page.call('Target.closeTarget',{targetId:target.targetId});}
 };
+
+async function runInterior({page,request,token,lobby,loc}) {
+    const url=`/lobbies/${lobby.id}/locations/${loc.id}`;
+    const detail=()=>request(url,null,token,'GET');
+    const specs=await page.evaluate(`(async()=>{const H=await import('/static/js/locationHouseGenerator.js');
+        return H.planBuildingShell({minX:2,minZ:2,width:12,depth:12,shape:'L',storeys:2,basements:1,
+            wealth:'rich',condition:'intact',buildingId:'interior',roofType:'gable',seed:'test',groundHeight:()=>1}).objects})()`);
+    const shell=await request(url+'/objects/batch',{objects:specs},token);
+    await page.until(`L.getLocationBuildingIds().includes('interior')`,'building received');
+    const open=async level=>{
+        await page.evaluate(`L.setLocationViewLevel(${level});window.dispatchEvent(new CustomEvent('location-editor-active-building',{detail:{buildingId:'interior',level:${level}}}));document.getElementById('loc-generate-interior').click();true`);
+        await page.until('!!document.querySelector("[data-layout-preview]")','layout dialog');
+        await page.evaluate(`document.querySelector('[data-layout-preview]').click();true`);
+        assert.equal(await page.evaluate(`document.querySelector('[data-layout-create]').disabled`),false);
+    };
+    const save=async()=>{
+        // Schedule the submit so the protocol can accept its native confirmation.
+        page.events.delete('Page.javascriptDialogOpening');
+        await page.evaluate(`setTimeout(()=>document.querySelector('dialog form').requestSubmit(document.querySelector('[data-layout-create]')),0);true`);
+        for(let i=0;i<100&&!page.events.has('Page.javascriptDialogOpening');i++)await pause(50);
+        assert.ok(page.events.get('Page.javascriptDialogOpening')?.message.includes('Остальные объекты сохраняются'));
+        await page.call('Page.handleJavaScriptDialog',{accept:true});
+        await page.until(`!document.getElementById('loc-generate-interior').disabled`,'layout batch saved');
+    };
+    await open(0);
+    assert.equal((await detail()).objects.length,shell.objects.length,'preview does not persist');
+    await page.evaluate(`document.querySelector('dialog').close();true`);
+    assert.equal((await detail()).objects.length,shell.objects.length,'cancel preserves scene');
+    await open(0);await save();
+    const first=await detail();
+    const layout=first.objects.filter(o=>o.properties.layout_generation);
+    assert.ok(layout.length>0);
+    assert.ok(shell.objects.every(o=>first.objects.some(p=>p.id===o.id)));
+    const manual=await request(url+'/objects',{type:'wall',name:'Manual partition',tile_x:12,tile_y:4,
+        properties:{building_id:'interior',level:0,dimensions:{width:1,depth:.14,height:2.4}}},token);
+    await open(1);await save();
+    const upper=(await detail()).objects.filter(o=>o.properties.layout_generation&&o.properties.level===1);
+    await open(-1);await save();
+    await open(0);
+    await page.evaluate(`document.querySelector('dialog form').elements.seed.value='another';document.querySelector('dialog form').dispatchEvent(new Event('input'));document.querySelector('[data-layout-preview]').click();true`);
+    await save();
+    const regenerated=await detail();
+    assert.ok(regenerated.objects.some(o=>o.id===manual.id));
+    assert.ok(upper.every(o=>regenerated.objects.some(p=>p.id===o.id)));
+    assert.ok(layout.every(o=>!regenerated.objects.some(p=>p.id===o.id)));
+    for(const level of [0,1,-1])for(const camera of [[10,12,13],[4,10,13]]) {
+        await page.evaluate(`L.setLocationEditMode(false);L.setLocationViewLevel(${level});locationControls.target.set(5,${1+level*2.4},5);locationControls.object.position.set(${camera[0]},${camera[1]+level*2.4},${camera[2]});locationControls.update();true`);
+        await pause(250);
+        const file=path.join(os.tmpdir(),`vtt-interior-${level}-${camera[0]}.png`);
+        fs.writeFileSync(file,Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
+        console.log('INTERIOR FRAME',file);
+    }
+    await page.evaluate(`(async()=>{exitLocation();await enterLocation(${loc.id});return true})()`);
+    assert.deepEqual((await detail()).objects.map(o=>o.id).sort((a,b)=>a-b),regenerated.objects.map(o=>o.id).sort((a,b)=>a-b));
+    console.log('INTERIOR PASS',JSON.stringify({shell:shell.objects.length,layout:layout.length,upper:upper.length,total:regenerated.objects.length}));
+}
 
 async function runFloorFix2({page,request,token,lobby,loc}) {
     const url=`/lobbies/${lobby.id}/locations/${loc.id}`;

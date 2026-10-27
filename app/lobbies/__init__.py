@@ -2589,19 +2589,59 @@ def change_location_objects_batch(lobby_id, location_id, lobby):
     schema = LocationObjectSchema()
     created, deleted = [], []
     if request.method == 'POST':
+        replacement = data.get('replace_layout')
+        furniture_replacement = data.get('replace_furniture')
+        if replacement is not None and furniture_replacement is not None:
+            raise ValidationError('Replace layout and furniture separately')
+        if replacement is not None:
+            if (not isinstance(replacement, dict) or not isinstance(replacement.get('building_id'), str)
+                    or not replacement['building_id'].strip() or type(replacement.get('level')) is not int):
+                raise ValidationError('Layout replacement requires building_id and integer level')
+            ids = replacement.get('object_ids')
+            if (not isinstance(ids, list) or len(ids) > 5000
+                    or any(type(i) is not int for i in ids) or len(set(ids)) != len(ids)):
+                raise ValidationError('Layout replacement requires unique object IDs')
+            # A stale client must never replace a newer layout or arbitrary manual geometry.
+            peers = LocationObject.query.filter_by(location_id=location_id).all()
+            deleted = [o for o in peers if (o.properties or {}).get('building_id') == replacement['building_id']
+                       and level_of(o) == replacement['level']
+                       and isinstance((o.properties or {}).get('layout_generation'), dict)
+                       and o.properties['layout_generation'].get('version') == 1
+                       and o.type in {'wall', 'door'}]
+            if {o.id for o in deleted} != set(ids):
+                return jsonify({'error': 'Планировка изменилась. Обновите локацию и повторите предпросмотр.'}), 409
         specs = data.get('objects')
-        if not isinstance(specs, list) or not 1 <= len(specs) <= 5000:
+        if not isinstance(specs, list) or not (0 if replacement is not None or furniture_replacement is not None else 1) <= len(specs) <= 5000:
             raise ValidationError('Expected 1 to 5000 objects')
         specs = schema.load(specs, many=True)
         for spec in specs:
             if not all(k in spec for k in ('name', 'type', 'tile_x', 'tile_y')) or not (
                     0 <= spec['tile_x'] < location.grid_width and 0 <= spec['tile_y'] < location.grid_height):
                 raise ValidationError('Invalid object position or missing fields')
+            if replacement is not None:
+                props = spec.get('properties') or {}
+                generation = props.get('layout_generation')
+                if (spec['type'] not in {'wall', 'door'} or props.get('building_id') != replacement['building_id']
+                        or type(props.get('level')) is not int or props['level'] != replacement['level']
+                        or not isinstance(generation, dict) or generation.get('version') != 1):
+                    raise ValidationError('Replacement must contain only layout walls and doors on the selected floor')
+        if furniture_replacement is not None:
+            from app.services.location_furniture import validate_furniture_replacement
+            deleted = validate_furniture_replacement(location, furniture_replacement, specs)
         timings['validation_ms'] = (perf_counter() - started) * 1000
         phase = perf_counter()
         created = [LocationObject(location_id=location_id, **{k: v for k, v in spec.items()
                    if k != 'location_id'}) for spec in specs]
         db.session.add_all(created)
+        removed = {o.id for o in deleted}
+        if removed:
+            for actor in LocationCharacter.query.filter_by(location_id=location_id).all():
+                if actor.cover_object_id in removed:
+                    actor.cover_object_id = None
+                    actor.weapon_braced = False
+                    actor.braced_weapon_index = None
+            for obj in deleted:
+                db.session.delete(obj)
         timings['objects_ms'] = (perf_counter() - phase) * 1000
     else:
         objects = LocationObject.query.filter_by(location_id=location_id).all()

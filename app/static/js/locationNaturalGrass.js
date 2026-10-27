@@ -195,7 +195,13 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
             const geometry = source.geometry.clone();
             // Instance coordinates are chunk-local; keep the existing conservative bound.
             geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(6, 0, 6), 9.5);
-            resources[kind] = { geometry, material: source.material.clone() };
+            const material = source.material.clone();
+            const textures = ['map', 'alphaMap', 'normalMap'].filter(key => material[key]).map(key => {
+                material[key] = material[key].clone();
+                material[key].needsUpdate = true;
+                return material[key];
+            });
+            resources[kind] = { geometry, material, textures };
         }
         const { geometry, material } = resources[kind];
         const chunks = new Map();
@@ -267,7 +273,9 @@ function releaseUnusedGrassResources(group) {
     for (const [kind, resources] of Object.entries(group.userData.naturalGrassResources || {})) {
         if (group.children.some(mesh => mesh.userData.naturalGrassKind === kind)) continue;
         resources.geometry.dispose();
-        resources.material.dispose(); // Texture atlases belong to the loaded asset, not the chunk.
+        resources.material.dispose();
+        // One wrapper set per group, shared by its chunks; CPU atlas images stay cached.
+        resources.textures.forEach(texture => texture.dispose());
         delete group.userData.naturalGrassResources[kind];
     }
 }
