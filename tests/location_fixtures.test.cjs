@@ -136,6 +136,7 @@ test('wall bulb mounting plate meets solid wall faces on the selected storey', a
 });
 
 test('placing a wall bulb saves the snapped pose and rejects an unmatched wall', async () => {
+    const {findLocationAsset}=await importSource(read('locationAssetCatalog.js'));
     const scene = read('locationScene.js');
     const start = scene.indexOf('async function placeStructureAtTile(');
     const end = scene.indexOf('async function removeStructuresAtTile(', start);
@@ -158,7 +159,7 @@ test('placing a wall bulb saves the snapped pose and rejects an unmatched wall',
         Server: { async createLocationObject(_lobbyId, _locationId, object) {
             saved.push(object); return { id: 42, ...object };
         } },
-        addLocationObject() {}, clampAssetElevation: Number,
+        addLocationObject() {}, clampAssetElevation: Number, findLocationAsset,
         THROWABLE_OBJECT_WEIGHTS: {}, objectInteractions: {}, interactionRequirements: {},
         isFireObject: () => false, isElectricFixture: () => true,
         isObjectLightSource: () => true,

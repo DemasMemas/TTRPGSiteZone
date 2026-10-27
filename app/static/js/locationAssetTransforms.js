@@ -50,7 +50,7 @@ export function anchoredResizeCenter(x, z, bearing, axis, oldSize, newSize, side
 
 export function volumeResize({ dimensions, center, elevation, rotation, axis, side,
     distance, symmetric = false, snap = 0, floor = false }) {
-    const limits = { width: [0.05, 30], depth: [0.02, 30], height: [0.05, 20] };
+    const limits = { width: [0.005, 30], depth: [0.005, 30], height: [0.005, 20] };
     if (!limits[axis] || ![-1, 1].includes(side)) return null;
     const oldSize = Number(dimensions[axis]);
     const elevationFactor = axis !== 'height' ? 0 : floor

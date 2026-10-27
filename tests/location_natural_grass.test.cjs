@@ -9,6 +9,14 @@ const detailSource = fs.readFileSync(path.join(root, 'locationGrassDetail.js'), 
 const detailUrl = `data:text/javascript;base64,${Buffer.from(detailSource).toString('base64')}`;
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(source.replace(
     "'./locationGrassDetail.js'", `'${detailUrl}'`)).toString('base64')}`;
+test('whole natural grass clumps clear hard paving, not only their centre roots',async()=>{
+    const {naturalGrassPlacements}=await import(moduleUrl);
+    for(const terrain of ['concrete','granite_tiles','metal','wood_floor']){
+        const tiles=Array.from({length:10},()=>Array.from({length:10},(_,x)=>({terrain:x<5?'grass':terrain})));
+        const plan=naturalGrassPlacements(tiles);assert.ok(plan.medium01.length>0);
+        for(const p of plan.medium01)for(const dx of [-.4,0,.4])for(const dz of [-.4,0,.4])assert.notEqual(tiles[Math.floor(p.z+dz)]?.[Math.floor(p.x+dx)]?.terrain,terrain);
+    }
+});
 
 test('optimized game grass keeps a small UV-mapped Poly Haven mesh', () => {
     const binary = fs.readFileSync(path.join(__dirname,

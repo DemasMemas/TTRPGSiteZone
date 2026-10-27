@@ -68,14 +68,57 @@ async function runFurnishedBuilding({page,request,token,lobby,loc,base,connect,d
             if(index)await page.evaluate('locationControls.target.set(19,1,19);locationControls.object.position.set(28,18,33);locationControls.update();true');
             await pause(180);
             await draw(index?14.5:2.5,index?23.5:11.5);
+            if(!index) {
+                assert.equal(await page.evaluate(`document.querySelector('dialog form').elements.contents.value`),'furnished');
+                assert.deepEqual(await page.evaluate(`[...document.querySelector('dialog form').elements.buildingType.options].map(o=>o.value)`),['residential','shop','warehouse','workshop','cafe','clinic','office','school','garage','bathhouse']);
+                assert.equal(await page.evaluate(`!!document.querySelector('[data-house-seed], [data-house-kind]')`),false);
+                assert.equal(await page.evaluate(`document.querySelector('.location-asset-tabs').hidden`),true);
+                const density=()=>page.evaluate(`({hidden:document.querySelector('[data-anomaly-density]').hidden,disabled:document.querySelector('dialog form').elements.anomalyDensity.disabled})`);
+                assert.deepEqual(await density(),{hidden:true,disabled:true});
+                await page.evaluate(`(()=>{const a=document.querySelector('dialog form').elements.anomalies;a.checked=true;a.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+                assert.deepEqual(await density(),{hidden:false,disabled:false});
+                assert.ok(await page.evaluate(`(()=>{const c=document.querySelector('dialog form').elements.anomalies,r=c.getBoundingClientRect(),l=c.parentElement.getBoundingClientRect();return r.x>l.x+l.width/2&&Math.abs((r.y+r.height/2)-(l.y+l.height/2))<2})()`),'checkbox is aligned to the right of its label');
+                await page.evaluate(`(()=>{const a=document.querySelector('dialog form').elements.anomalies;a.checked=false;a.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+                assert.deepEqual(await density(),{hidden:true,disabled:true});
+                if(process.env.VTT_SHELL_INSPECT==='1')fs.writeFileSync(path.join(os.tmpdir(),'vtt-new-building-dialog.png'),Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
+                const camera=await page.evaluate(`({position:locationControls.object.position.toArray(),target:locationControls.target.toArray()})`);
+                const position=()=>page.evaluate('locationControls.object.position.toArray()');
+                assert.equal(await page.evaluate(`document.activeElement===document.querySelector('[data-shell-preview]')`),true,'opening the building menu leaves camera controls available');
+                for(const [code,key,vk] of [['KeyW','w',87],['KeyA','a',65],['KeyS','s',83],['KeyD','d',68]]) {
+                    const start=await position();
+                    await page.call('Input.dispatchKeyEvent',{type:'keyDown',code,key,windowsVirtualKeyCode:vk});
+                    await pause(150);
+                    assert.notDeepEqual(await position(),start,`${key} moves the camera with the new building menu open`);
+                    await page.call('Input.dispatchKeyEvent',{type:'keyUp',code,key,windowsVirtualKeyCode:vk});
+                    await pause(80);const stopped=await position();await pause(150);
+                    assert.deepEqual(await position(),stopped,`${key} stops on release with the menu open`);
+                }
+                await page.evaluate(`document.querySelector('dialog form').elements.width.focus();true`);
+                const start=await position();
+                await page.call('Input.dispatchKeyEvent',{type:'keyDown',code:'KeyW',key:'w',windowsVirtualKeyCode:87});
+                await pause(150);
+                await page.call('Input.dispatchKeyEvent',{type:'keyUp',code:'KeyW',key:'w',windowsVirtualKeyCode:87});
+                assert.deepEqual(await position(),start,'editing a field does not move the camera');
+                await page.evaluate(`locationControls.object.position.fromArray(${JSON.stringify(camera.position)});locationControls.target.fromArray(${JSON.stringify(camera.target)});locationControls.update();document.querySelector('[data-shell-preview]').focus();true`);
+                console.log('NEW BUILDING MENU WASD PASS');
+            }
             const configure=()=>page.evaluate(`(()=>{const f=document.querySelector('dialog form');
+                f.elements.buildingType.value='${index===0?'shop':'warehouse'}';f.elements.buildingType.dispatchEvent(new Event('change',{bubbles:true}));
                 f.elements.shape.value='${shape}';f.elements.width.value=10;f.elements.depth.value=10;f.elements.storeys.value=2;f.elements.basements.value=1;
+                if(!f.dataset.polishChecked){if(f.elements.anomalies.checked)throw Error('Anomalies must be off by default');f.dataset.polishChecked='1';}
+                f.elements.anomalies.checked=${index===0};f.elements.anomalyDensity.value='1';
                 f.elements.contents.value='furnished';f.elements.wealth.value='rich';f.elements.shape.dispatchEvent(new Event('change',{bubbles:true}));
                 f.dispatchEvent(new Event('input'));document.querySelector('[data-shell-preview]').click();true})()`);
             await configure();await page.until('!document.querySelector("[data-shell-create]").disabled','furnished preview ready');
             assert.deepEqual((await detail()).objects,original,'preview does not change saved architecture');
             if(!index){
-                await page.evaluate("document.querySelector('dialog').close();true");
+                await page.evaluate("L.setLocationAssetPreset('wall');document.querySelector('[data-shell-preview]').focus();true");
+                assert.equal(await page.evaluate(`document.activeElement===document.querySelector('[data-shell-preview]')`),true);
+                await page.call('Input.dispatchKeyEvent',{type:'keyDown',code:'KeyE',key:'e',windowsVirtualKeyCode:69});
+                await page.call('Input.dispatchKeyEvent',{type:'keyUp',code:'KeyE',key:'e',windowsVirtualKeyCode:69});
+                assert.equal(await page.evaluate('L.getLocationEditMode()'),false,'E exits editing from the preview button');
+                assert.equal(await page.evaluate('!!document.querySelector("dialog[open]")'),false,'leaving editing closes the building preview');
+                console.log('BUILDING PREVIEW E PASS');
                 assert.equal((await detail()).objects.length,0,'cancel creates nothing');
                 await draw();await configure();await page.until('!document.querySelector("[data-shell-create]").disabled','second furnished preview ready');
             }
@@ -84,7 +127,14 @@ async function runFurnishedBuilding({page,request,token,lobby,loc,base,connect,d
             await page.until(`L.getLocationBuildingIds().length===${index+1}`,'combined building saved');
             const saved=(await detail()).objects,added=saved.filter(o=>!original.some(p=>p.id===o.id));
             assert.ok(added.some(o=>o.properties.layout_rooms?.length),'saved rooms exist');
+            assert.ok(added.filter(o=>o.properties.building_generation).every(o=>o.properties.building_generation.buildingType===(index===0?'shop':'warehouse')));
             const furniture=added.filter(o=>o.properties.furniture_generation);assert.ok(furniture.length>0,'furniture saved in the creation batch');
+            assert.ok(furniture.some(o=>o.properties.furniture_generation.role===(index===0?'shop':'storage')),'purpose controls the furniture');
+            assert.ok(!furniture.some(o=>o.type==='household_cooker'||o.type.startsWith('household_bed_')),'commercial buildings have no residential furniture');
+            assert.ok(added.some(o=>o.type==='stairs'&&o.properties.level===0));
+            assert.ok(added.filter(o=>o.type==='ladder').every(o=>o.properties.level<0));
+            assert.ok(added.some(o=>o.type==='hatch'&&o.properties.level===0&&o.properties.is_open===false));
+            assert.equal(added.some(o=>o.type==='anomaly'),index===0,'anomalies follow opt-in in the atomic creation batch');
             assert.deepEqual([...new Set(furniture.map(o=>o.properties.level))].sort((a,b)=>a-b),[-1,0,1]);
             assert.deepEqual(saved.filter(o=>original.some(p=>p.id===o.id)),original,'next creation preserves existing house and furniture');
             const ids=saved.map(o=>o.id).sort((a,b)=>a-b);
@@ -92,7 +142,7 @@ async function runFurnishedBuilding({page,request,token,lobby,loc,base,connect,d
             assert.equal(await peer.evaluate('combinedBatches.length'),count+1,'one atomic creation event');
             await frame(shape);original=saved;
         }
-        await page.evaluate(`(async()=>{exitLocation();await enterLocation(${loc.id});selectLocationEditorTool('assets');document.querySelector('#panel-tools.collapsed .toggle-btn')?.click();true})()`);
+        await page.evaluate(`(async()=>{exitLocation();await enterLocation(${loc.id});selectLocationEditorTool('building');document.querySelector('#panel-tools.collapsed .toggle-btn')?.click();true})()`);
         const shown=await page.evaluate(`(()=>{const b=document.getElementById('loc-generate-furniture');b.scrollIntoView();const r=b.getBoundingClientRect();return !b.closest('[hidden]')&&!b.disabled&&r.width>0&&r.height>0})()`);
         assert.equal(shown,true,'furniture action is visible and selects an existing building after reopening');
         const after=await grass();assert.ok(after.uploaded>0&&after.count>100,'tufts survive location exit and reload');
@@ -136,7 +186,7 @@ module.exports = async ({page,request,token,lobby,base,connect,debugPort}) => {
     const emptyStats=await stats();
     const aim=(x,z)=>page.evaluate(`(()=>{const p=new T.Vector3(${x},1.05,${z}).project(locationControls.object),r=document.querySelector('#location-canvas canvas').getBoundingClientRect();return{x:r.left+(p.x+1)*r.width/2,y:r.top+(1-p.y)*r.height/2}})()`);
     const draw=async(min=2.5,max=11.5)=>{
-        await page.evaluate(`L.setLocationEditMode(true);selectLocationEditorTool('assets');L.setLocationHouseDrawMode(true);document.querySelector('#panel-tools:not(.collapsed) .toggle-btn')?.click();true`);
+        await page.evaluate(`L.setLocationEditMode(true);selectLocationEditorTool('building');L.setLocationHouseDrawMode(true);document.querySelector('#panel-tools:not(.collapsed) .toggle-btn')?.click();true`);
         const a=await aim(min,min),b=await aim(max,max);
         await page.call('Input.dispatchMouseEvent',{type:'mouseMoved',...a});await pause(100);
         await page.call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,clickCount:1,...a});

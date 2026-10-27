@@ -3567,3 +3567,56 @@ input[type=range]::-webkit-slider-thumb {
 .world-selection-editor [hidden] { display: none; }
 .world-selection-editor small { width: 100%; }
 #world-vegetation-options[hidden] { display: none; }
+
+.location-house-generator[hidden] { display: none; }
+.location-asset-library > .location-building-management { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; font-size: .85rem; }
+.location-building-management > strong, .location-building-management > p,
+.location-building-management > .location-building-anomaly-controls,
+.location-building-management > #loc-building-floor-controls { grid-column: 1 / -1; }
+.location-building-management > p { margin: 0; color: var(--text-secondary); line-height: 1.4; }
+.location-building-management > label { display: grid; gap: 6px; }
+.location-building-management > label .form-control { width: 100% !important; box-sizing: border-box; }
+.location-building-anomaly-controls { display: block; border-top: 1px solid var(--panel-border); padding-top: 10px; }
+.location-building-anomaly-controls summary { cursor: pointer; margin-bottom: 8px; }
+.location-building-dialog {
+  position: fixed;
+  left: auto;
+  right: 20px;
+  top: 70px;
+  margin: 0;
+  width: 360px;
+  max-width: calc(100vw - 40px);
+  max-height: 75vh;
+  overflow: auto;
+  padding: 16px;
+  background: var(--panel-bg);
+  color: var(--text-color);
+  border: 1px solid var(--panel-border);
+  border-radius: 9px;
+  z-index: 1100;
+}
+.location-building-dialog label { display: grid; gap: 5px; }
+.location-new-building-form { display: flex; flex-direction: column; max-height: calc(75vh - 34px); gap: 8px; }
+.location-new-building-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 4px; }
+.location-building-dialog [hidden], .location-asset-library [hidden] { display: none; }
+.location-building-section-title { grid-column: 1 / -1; padding-top: 8px; border-top: 1px solid var(--panel-border); }
+.location-building-dialog .location-building-checkbox { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.location-building-checkbox input { margin: 0; flex: 0 0 auto; }
+.location-building-advanced { grid-column: 1 / -1; border: 1px solid var(--panel-border); padding: 8px; border-radius: 7px; }
+.location-building-advanced summary { cursor: pointer; }
+.location-building-advanced label { margin-top: 8px; }
+.location-building-advanced p { font-size: .85em; color: var(--text-secondary); }
+.location-building-dialog .form-control,
+.location-building-dialog button {
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: var(--input-bg);
+  color: var(--text-color);
+  font: inherit;
+}
+.location-building-dialog button { cursor: pointer; }
+.location-building-dialog button:disabled { opacity: .5; cursor: default; }
+.location-building-dialog button:focus-visible,
+.location-building-dialog .form-control:focus-visible { outline: 2px solid var(--username-color); }

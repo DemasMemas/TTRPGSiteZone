@@ -46,14 +46,74 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
             }
             await page.call('Page.bringToFront');
             if(stress)await page.until(`L.getLocationGrassDiagnostics().kinds.medium01?.added>0`,'natural grass ready');
-            await page.evaluate(`L.setLocationEditMode(true);selectLocationEditorTool('assets');L.setLocationViewLevel(0);
+            await page.evaluate(`L.setLocationEditMode(true);selectLocationEditorTool('building');L.setLocationViewLevel(0);
                 locationControls.target.set(5,1,5);locationControls.object.position.set(10,12,13);locationControls.update();
                 document.querySelector('#panel-tools:not(.collapsed) .toggle-btn')?.click();document.querySelector('#panel-characters:not(.collapsed) .toggle-btn')?.click();true`);
             await pause(250);
+            if(index===0) {
+                assert.ok(await page.evaluate(`!!document.querySelector('[data-location-tool="building"]')`));
+                await page.evaluate(`selectLocationEditorTool('assets');true`);
+                assert.equal(await page.evaluate(`document.getElementById('loc-generate-furniture').closest('.location-house-generator').hidden`),true);
+                await page.evaluate(`selectLocationEditorTool('building');document.activeElement?.blur();true`);
+                const floorPosition=await page.evaluate(`(()=>{const r=document.getElementById('location-floor-menu').getBoundingClientRect();return [r.x,r.y,r.width,r.height]})()`);
+                assert.equal(await page.evaluate(`document.getElementById('location-floor-menu').parentElement.id`),'location-container');
+                assert.equal(await page.evaluate(`document.getElementById('location-building-actions').parentElement.id`),'loc-building-floor-controls');
+                assert.equal(await page.evaluate(`!!document.getElementById('loc-structure-new-building')`),false);
+                assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('.location-building-management')).display`),'grid');
+                assert.deepEqual(await page.evaluate(`[...document.getElementById('loc-structure-level').options].map(o=>o.textContent)`),['Подвал 1','1-й этаж','2-й этаж']);
+                assert.equal(await page.evaluate(`document.querySelectorAll('#location-floor-menu [data-floor-create],#location-floor-menu [data-floor-delete],#location-floor-menu [data-building-delete]').length`),0);
+                await page.evaluate(`L.setLocationEditMode(false);true`);
+                assert.equal(await page.evaluate(`document.getElementById('location-floor-menu').parentElement.id`),'location-container');
+                assert.deepEqual(await page.evaluate(`(()=>{const r=document.getElementById('location-floor-menu').getBoundingClientRect();return [r.x,r.y,r.width,r.height]})()`),floorPosition,'floor navigation keeps the same screen position outside editing');
+                assert.equal(await page.evaluate(`document.getElementById('location-building-actions').hidden`),true);
+                await page.evaluate(`L.setLocationEditMode(true);true`);
+                const position=()=>page.evaluate('locationControls.object.position.toArray()');
+                const start=await position();
+                await page.call('Input.dispatchKeyEvent',{type:'keyDown',code:'KeyW',key:'w',windowsVirtualKeyCode:87});
+                await pause(200);
+                assert.notDeepEqual(await position(),start,'held W pans the camera');
+                await page.evaluate(`document.getElementById('loc-generate-furniture').click();true`);
+                await page.until('!!document.querySelector("dialog[open]")','dialog interrupts movement');
+                await page.call('Input.dispatchKeyEvent',{type:'keyUp',code:'KeyW',key:'w',windowsVirtualKeyCode:87});
+                await pause(100);const stopped=await position();await pause(220);
+                assert.deepEqual(await position(),stopped,'releasing W after opening construction dialog stops movement');
+                await page.evaluate(`document.querySelector('dialog').close();document.querySelector('[data-house-draw]').focus();true`);
+                await page.call('Input.dispatchKeyEvent',{type:'keyDown',code:'KeyD',key:'d',windowsVirtualKeyCode:68});
+                await pause(100);
+                await page.evaluate(`document.querySelector('[data-house-draw]').addEventListener('keyup',e=>e.stopPropagation(),{once:true});true`);
+                await page.call('Input.dispatchKeyEvent',{type:'keyUp',code:'KeyD',key:'d',windowsVirtualKeyCode:68});
+                await pause(100);const released=await position();await pause(220);
+                assert.deepEqual(await position(),released,'UI cannot swallow the movement key release');
+                assert.equal(await page.evaluate(`document.querySelectorAll('.location-asset-card').length`),0,'construction contains no asset cards');
+                assert.equal(await page.evaluate(`['.location-asset-search','.location-asset-tabs','.location-asset-grid'].every(s=>getComputedStyle(document.querySelector(s)).display==='none')`),true,'construction hides the asset library');
+                await page.evaluate(`selectLocationEditorTool('assets');document.querySelector('.location-asset-search').focus();true`);
+                assert.equal(await page.evaluate(`document.querySelector('.location-asset-grid').hidden`),false);
+                assert.ok(await page.evaluate(`document.querySelectorAll('.location-asset-card').length`)>0,'assets remain available in Assets');
+                assert.equal(await page.evaluate(`['Постройки','PBR-материалы'].every(name=>[...document.querySelectorAll('.location-asset-tabs button')].some(b=>b.textContent===name))`),true);
+                await page.call('Input.dispatchKeyEvent',{type:'keyDown',code:'KeyW',key:'w',text:'w',windowsVirtualKeyCode:87});
+                await page.call('Input.dispatchKeyEvent',{type:'keyUp',code:'KeyW',key:'w',windowsVirtualKeyCode:87});
+                await pause(150);assert.deepEqual(await position(),released,'text input does not pan');
+                await page.evaluate(`document.querySelector('.location-asset-search').value='';document.activeElement.blur();locationControls.target.set(5,1,5);locationControls.object.position.set(10,12,13);locationControls.update();true`);
+                console.log('BUILDING KEYBOARD PASS');
+                await page.evaluate(`selectLocationEditorTool('assets');
+                    document.querySelector('.location-asset-search').value='Стена';document.querySelector('.location-asset-search').dispatchEvent(new Event('input'));
+                    [...document.querySelectorAll('.location-asset-card')].find(c=>c.textContent.trim().endsWith('Стена')).click();
+                    locationControls.target.set(20,1,20);locationControls.object.position.set(20,14,28);locationControls.update();
+                    document.getElementById('panel-tools').style.visibility='hidden';true`);
+                await pause(250);
+                const point=await page.evaluate(`(()=>{const p=new T.Vector3(20.5,1.04,20.5).project(locationControls.object),r=furnitureRender.r.domElement.getBoundingClientRect();return {x:r.left+(p.x+1)*r.width/2,y:r.top+(1-p.y)*r.height/2}})()`);
+                await page.call('Input.dispatchMouseEvent',{type:'mouseMoved',...point});await pause(100);
+                for(const type of ['mousePressed','mouseReleased'])await page.call('Input.dispatchMouseEvent',{type,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1,...point});
+                await page.until(`furnitureRender.s.children.some(m=>m.userData.locationObject?.type==='wall'&&m.userData.locationObject.tile_x===20&&m.userData.locationObject.tile_y===20)`,'manual wall from Assets');
+                original.push((await detail()).objects.find(o=>o.type==='wall'&&o.tile_x===20&&o.tile_y===20));
+                await page.evaluate(`L.clearLocationAssetPreset();document.getElementById('panel-tools').style.visibility='';selectLocationEditorTool('building');
+                    locationControls.target.set(5,1,5);locationControls.object.position.set(10,12,13);locationControls.update();true`);
+                console.log('BUILDING MANUAL WALL PASS');
+            }
             const stats=()=>page.evaluate(`(()=>{const {r,s,c}=furnitureRender;r.render(s,c);return {calls:r.info.render.calls,triangles:r.info.render.triangles,geometries:r.info.memory.geometries,textures:r.info.memory.textures,camera:c.position.toArray(),target:locationControls.target.toArray(),level:L.getLocationViewLevel()}})()`);
             const before=await stats();
             const open=async(scope='floor',level=0,roomId=null,empty=false)=>{
-                await page.evaluate(`L.setLocationEditMode(true);selectLocationEditorTool('assets');L.setLocationViewLevel(${level});window.dispatchEvent(new CustomEvent('location-editor-active-building',{detail:{buildingId:'${buildingId}',level:${level}}}));document.querySelector('#panel-tools.collapsed .toggle-btn')?.click();document.getElementById('loc-generate-furniture').scrollIntoView({block:'center'});true`);
+                await page.evaluate(`L.setLocationEditMode(true);selectLocationEditorTool('building');L.setLocationViewLevel(${level});window.dispatchEvent(new CustomEvent('location-editor-active-building',{detail:{buildingId:'${buildingId}',level:${level}}}));document.querySelector('#panel-tools.collapsed .toggle-btn')?.click();document.getElementById('loc-generate-furniture').scrollIntoView({block:'center'});true`);
                 await pause(180);
                 const button=await page.evaluate(`(()=>{const b=document.getElementById('loc-generate-furniture'),r=b.getBoundingClientRect();return {visible:!b.closest('[hidden]')&&r.width>0&&r.height>0,x:r.x+r.width/2,y:r.y+r.height/2}})()`);
                 assert.equal(button.visible,true,'furniture button is visible in the normal editor');
@@ -96,6 +156,22 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
             assert.deepEqual(after.camera,before.camera,'performance uses the same camera');
             assert.deepEqual(after.target,before.target);
             assert.equal(after.level,before.level);
+            if(!stress) {
+                const generated=await page.evaluate(`(async()=>{
+                    const before=furnitureRender.s.children.filter(m=>m.userData.locationObjectId).map(m=>[m.userData.locationObjectId,m.uuid]);
+                    const success=await L.generateLocationBuildingAnomalies('${buildingId}',{seed:'browser-anomalies'});
+                    const objects=furnitureRender.s.children.filter(m=>m.userData.locationObject?.type==='anomaly');
+                    return {success,ids:objects.map(m=>m.userData.locationObjectId),levels:objects.map(m=>m.userData.locationObject.properties.level),
+                        effects:objects.every(m=>m.children.some(c=>c.userData.anomalyEffect)),
+                        preserved:before.every(([id,uuid])=>furnitureRender.s.children.some(m=>m.userData.locationObjectId===id&&m.uuid===uuid))};
+                })()`);
+                assert.equal(generated.success,true);assert.equal(generated.effects,true);assert.equal(generated.preserved,true);
+                assert.ok(generated.ids.length>0);
+                await peer.until(`furnitureRender.s.children.filter(m=>m.userData.locationObject?.type==='anomaly').length===${generated.ids.length}`,'anomalies reach peer');
+                assert.equal(await page.evaluate(`L.generateLocationBuildingAnomalies('${buildingId}',{seed:'browser-anomalies'})`),false,'repeating generation adds no duplicates');
+                assert.equal(await page.evaluate(`socket.io.engine.transport.name`),'websocket');
+                console.log('BUILDING ANOMALIES PASS',JSON.stringify({spec,...generated}));
+            }
             if(stress){
                 const samples=[],memory=[];
                 for(let iteration=0;iteration<cycles;iteration++){
@@ -217,11 +293,13 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
             }
             for(const level of [0,1,-1])for(const view of [[10,12,13],[4,10,13]]){
                 await page.evaluate(`L.setLocationEditMode(false);L.setLocationViewLevel(${level});locationControls.target.set(5,${1+level*2.4},5);locationControls.object.position.set(${view[0]},${view[1]+level*2.4},${view[2]});locationControls.update();true`);
+                await page.evaluate(`document.getElementById('panel-tools').style.visibility='hidden';true`);
                 await pause(160);
                 const file=path.join(os.tmpdir(),`vtt-furniture-${index}-${level}-${view[0]}.png`);
                 fs.writeFileSync(file,Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
                 console.log('FURNITURE FRAME',file);
             }
+            await page.evaluate(`document.getElementById('panel-tools').style.visibility='';true`);
             const saved=(await detail()).objects;
             for(const p of [page,peer]){
                 await p.call('Page.bringToFront');

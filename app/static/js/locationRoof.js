@@ -173,7 +173,7 @@ export function roofOpacityForCamera(plan, target, cameraDistance, enabled, edit
     const edgeX = Math.max(0, Math.abs(along) - plan.width / 2);
     const edgeZ = Math.max(0, Math.abs(across) - plan.depth / 2);
     const height = cameraPosition ? Math.max(0, cameraPosition.y - plan.eaveY - plan.rise) : cameraDistance;
-    const threshold = Math.max(5, Math.max(plan.width, plan.depth) * 0.85);
+    const threshold = Math.max(10, Math.max(plan.width, plan.depth) * 0.85);
     const fadeHalfWidth = Math.max(1.5, threshold * 0.2);
     const t = Math.max(0, Math.min(1,
         (Math.hypot(edgeX, edgeZ, height) - threshold + fadeHalfWidth) / (fadeHalfWidth * 2)));

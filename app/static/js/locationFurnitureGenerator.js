@@ -1,5 +1,50 @@
 import { structurePose, structureLevel, structureBuildingId, floorVisualPose, floorSlabParts, doorOnWall } from './locationArchitecture.js';
 import { findLocationAsset } from './locationAssetCatalog.js';
+import { planBuildingInterior } from './locationInteriorGenerator.js';
+
+// Check surviving geometry, rather than the original room or wall bounds.
+export function hasFurnitureSupport(source, object, groundHeight=()=>0) {
+    const asset=findLocationAsset(object.type),wallMounted=asset?.mount==='wall'||object.type==='poster';
+    if(!wallMounted&&object.type!=='ceiling_bulb')return true;
+    const p=structurePose(object),level=structureLevel(object),building=structureBuildingId(object);
+    const y=level*2.4+Number(object.properties?.elevation||0)+Number(groundHeight(object.tile_x,object.tile_y));
+    const peers=source.filter(o=>structureBuildingId(o)===building);
+    if(wallMounted)return peers.some(o=>{
+        if(o.type!=='wall'||structureLevel(o)!==level)return false;
+        const w=structurePose(o),base=level*2.4+Number(o.properties?.elevation||0)+Number(groundHeight(o.tile_x,o.tile_y));
+        if(y<base-.06||y+p.height>base+w.height+.02)return false;
+        if(Math.abs(p.axis.x*w.axis.x+p.axis.z*w.axis.z)<.99)return false;
+        return [-.5,0,.5].every(t=>{
+            const dx=p.x+p.axis.x*p.width*t-w.x,dz=p.z+p.axis.z*p.width*t-w.z;
+            return Math.abs(dx*w.axis.x+dz*w.axis.z)<=w.width/2-.01
+                && Math.abs(dx*w.normal.x+dz*w.normal.z)<=w.depth/2+p.depth/2+.06;
+        });
+    });
+    return peers.some(o=>{
+        if(!['floor','ceiling','roof'].includes(o.type))return false;
+        const base=structureLevel(o)*2.4+Number(o.properties?.elevation||0)+Number(groundHeight(o.tile_x,o.tile_y));
+        if(base<y-.12||base>y+1.5)return false;
+        const q=structurePose(o);
+        const contains=(x,z,r)=>Math.abs((x-r.x)*r.axis.x+(z-r.z)*r.axis.z)<=r.width/2-.01
+            &&Math.abs((x-r.x)*r.normal.x+(z-r.z)*r.normal.z)<=r.depth/2-.01;
+        if(o.type==='floor'){
+            const f=floorVisualPose(o,source),dx=p.x-f.x,dz=p.z-f.z;
+            const x=dx*f.axis.x+dz*f.axis.z,z=dx*f.normal.x+dz*f.normal.z;
+            return floorSlabParts(o,source).some(r=>Math.abs(x-r.x)<=r.width/2-.01&&Math.abs(z-r.z)<=r.depth/2-.01);
+        }
+        if(!contains(p.x,p.z,q))return false;
+        const vertices=o.properties?.roof_geometry;
+        if(!Array.isArray(vertices))return true;
+        const dx=p.x-q.x,dz=p.z-q.z,x=dx*q.axis.x+dz*q.axis.z,z=dx*q.normal.x+dz*q.normal.z;
+        for(let i=0;i<vertices.length;i+=9){
+            const ax=vertices[i],az=vertices[i+2],bx=vertices[i+3],bz=vertices[i+5],cx=vertices[i+6],cz=vertices[i+8];
+            const det=(bx-ax)*(cz-az)-(bz-az)*(cx-ax);if(Math.abs(det)<1e-8)continue;
+            const u=((x-ax)*(cz-az)-(z-az)*(cx-ax))/det,v=((bx-ax)*(z-az)-(bz-az)*(x-ax))/det;
+            if(u>=-.001&&v>=-.001&&u+v<=1.001)return true;
+        }
+        return false;
+    });
+}
 
 const key = (x,z) => `${x}:${z}`;
 const adjacent = c => [[c.x-1,c.z],[c.x+1,c.z],[c.x,c.z-1],[c.x,c.z+1]];
@@ -24,7 +69,7 @@ export function furnitureFootprint(p) {
         for(let x=Math.floor(p.x-size.x/2);x<=Math.floor(p.x+size.x/2-.0001);x++) cells.push({x,z});
     return cells;
 }
-function parts(source,buildingId,level,groundHeight=()=>0) {
+export function buildingFloorParts(source,buildingId,level,groundHeight=()=>0) {
     return source.filter(o=>o.type==='floor'&&structureBuildingId(o)===buildingId&&structureLevel(o)===level)
         .flatMap(o=>{
             const p=floorVisualPose(o,source);
@@ -66,8 +111,12 @@ export function getFurnitureRooms(source,buildingId) {
         const saved=objects.find(o=>Array.isArray(o.properties?.layout_rooms))?.properties.layout_rooms;
         const layout=objects.find(o=>o.properties?.layout_generation)?.properties.layout_generation;
         const shell=objects.find(o=>o.properties?.building_generation)?.properties.building_generation;
-        const areas=parts(source,buildingId,level),cells=floorCells(areas);
-        const rooms=saved?.length?saved:components(cells).map((list,i)=>({id:`open-${level}-${i}`,
+        const areas=buildingFloorParts(source,buildingId,level),cells=floorCells(areas);
+        // A compact open-plan floor may need no extra partitions. Recover its
+        // functional zones with the same planner, rather than losing the foyer
+        // and treating every floor as another living room or kitchen.
+        const openPlan=!saved?.length&&shell?planBuildingInterior(source,{buildingId,level,seed:shell.seed}):null;
+        const rooms=saved?.length?saved:openPlan&&!openPlan.error&&!openPlan.objects.length?openPlan.rooms:components(cells).map((list,i)=>({id:`open-${level}-${i}`,
             name:level<0?'Техническое помещение':'Общее помещение',cells:list}));
         for(const room of rooms) {
             if(typeof room.id!=='string'||!Array.isArray(room.cells))continue;
@@ -90,10 +139,36 @@ export function isUnchangedFurniture(object) {
     return generation?.version===1&&generation.original
         &&canonical(generation.original)===canonical(furnitureOriginal(object));
 }
+export const FURNITURE_ROLES={living:'Гостиная',bedroom:'Спальня',child:'Детская',kitchen:'Кухня',studio:'Жилая комната с кухней',
+    bathroom:'Санузел',bath:'Ванная',toilet:'Туалет',dining:'Столовая',dressing:'Гардеробная',laundry:'Прачечная',boiler:'Котельная',
+    office:'Кабинет',storage:'Кладовая / склад',technical:'Техническая',shop:'Торговый зал',workshop:'Мастерская',garage:'Гараж',
+    clinic:'Кабинет осмотра',treatment:'Процедурная',medical_storage:'Медицинское хранилище',classroom:'Класс',
+    washroom:'Моечная',dishwashing:'Моечная посуды',sauna:'Парная',changing:'Предбанник',hallway:'Прихожая / коридор'};
 function roleOf(name) {
+    if(/детск/i.test(name))return 'child';
+    if(/котель/i.test(name))return 'boiler';
+    if(/прачеч/i.test(name))return 'laundry';
+    if(/гардероб/i.test(name))return 'dressing';
+    if(/туалет/i.test(name))return 'toilet';
+    if(/обеденн|столовая/i.test(name))return 'dining';
+    if(/медицинск.*хран/i.test(name))return 'medical_storage';
+    if(/осмотр/i.test(name))return 'clinic';
+    if(/процедур/i.test(name))return 'treatment';
+    if(/мастерск|инструменталь/i.test(name))return 'workshop';
+    if(/гараж/i.test(name))return 'garage';
+    if(/класс/i.test(name))return 'classroom';
+    if(/моечн.*посуд/i.test(name))return 'dishwashing';
+    if(/моечн/i.test(name))return 'washroom';
+    if(/парная/i.test(name))return 'sauna';
+    if(/предбан/i.test(name))return 'changing';
+    if(/ванная/i.test(name))return 'bath';
+    if(/архив/i.test(name))return 'storage';
+    if(/учительск/i.test(name))return 'office';
+    if(/жилая.*кухн/i.test(name))return 'studio';
     if(/спаль|гостев/i.test(name))return 'bedroom';
     if(/кухн/i.test(name))return 'kitchen';
     if(/сануз|ванн/i.test(name))return 'bathroom';
+    if(/прихож|коридор/i.test(name)&&!/гостин/i.test(name))return 'hallway';
     if(/кабинет/i.test(name))return 'office';
     if(/технич/i.test(name))return 'technical';
     if(/склад|кладов|подсоб/i.test(name))return 'storage';
@@ -103,14 +178,33 @@ function roleOf(name) {
 function recipe(role,wealth) {
     const rich=wealth==='rich',poor=wealth==='poor';
     return {
-        bedroom:[rich?'household_bed_double':'household_bed_single','household_nightstand','household_wardrobe','household_dresser','household_armchair','household_nightstand'],
-        kitchen:[poor?'household_wood_stove':'household_cooker','household_sink',poor?'household_stool':'table','household_refrigerator','household_kitchen_cabinet','chair','chair'],
+        hallway:[],
+        child:['household_child_bed','household_nightstand','table','household_wardrobe'],
+        dining:['table','table','household_dining_bench','household_kitchen_cabinet'],
+        dressing:['household_wardrobe','household_dresser','household_laundry_basket'],
+        laundry:['household_washing_machine','household_clothes_dryer','household_laundry_basket','household_sink'],
+        boiler:['household_gas_cylinder','household_storage_rack','household_bucket_metal'],
+        toilet:['household_toilet','household_washbasin','household_trash_bin'],
+        bath:['household_bathtub','household_washbasin','household_laundry_basket'],
+        workshop:['household_workbench','household_tool_cabinet','household_storage_rack','household_tire'],
+        garage:['household_tool_cabinet','household_workbench','household_tire','household_jerrycan'],
+        clinic:['household_exam_couch','household_medical_cabinet','table','household_washbasin'],
+        treatment:['household_exam_couch','household_medical_cabinet','household_washbasin','household_trash_bin'],
+        medical_storage:['household_medical_cabinet','household_storage_rack','household_refrigerator'],
+        classroom:['household_school_desk','household_school_desk','household_school_desk','shelf'],
+        washroom:['household_shower','household_basin','household_dining_bench','household_washbasin'],
+        dishwashing:['household_sink','household_kitchen_cabinet','household_trash_bin','household_storage_rack'],
+        sauna:['household_sauna_stove','household_sauna_bench','household_tub'],
+        changing:['household_dining_bench','household_wardrobe','household_coffee_table'],
+        bedroom:[rich?'household_bed_double':'household_bed_single','household_nightstand','household_wardrobe','household_dresser','household_armchair'],
+        kitchen:['household_cooker','household_sink','table','household_refrigerator','household_kitchen_cabinet'],
+        studio:['household_bed_single','household_cooker','household_sink','table','household_armchair'],
         bathroom:['household_toilet','household_washbasin','household_bathtub','household_storage_rack'],
-        office:['table','chair','shelf','household_dresser','household_armchair','household_storage_rack'],
+        office:['table','shelf','household_dresser','household_armchair','household_storage_rack'],
         technical:['household_generator','household_storage_rack','household_jerrycan','household_wood_crate','household_cardboard_box'],
-        storage:['household_storage_rack','household_wood_crate','household_cardboard_box','shelf','household_wood_crate','household_jerrycan'],
-        shop:['shelf','table','household_storage_rack','chair','household_wood_crate','shelf'],
-        living:[poor?'table':'household_armchair','table',poor?'household_stool':'chair','shelf','household_wardrobe','household_armchair','chair','household_dresser'],
+        storage:['household_storage_rack','household_pallet','household_wood_crate','household_cardboard_box','shelf','household_pallet_jack'],
+        shop:['household_shop_counter','household_display_case','household_refrigerated_display','household_storage_rack','shelf'],
+        living:['household_sofa','table','household_tv_stand','household_armchair','shelf'],
     }[role];
 }
 
@@ -118,7 +212,7 @@ export function planBuildingFurniture(source,{buildingId,scope='floor',level=0,r
     wealth='auto',condition='auto',role='auto',empty=false,occupiedCells=[],groundHeight=()=>0}={}) {
     if(!buildingId||!['room','floor','building'].includes(scope)||!Number.isInteger(level))return {error:'Выберите здание и область меблировки'};
     if(!['auto','poor','ordinary','rich'].includes(wealth)||!['auto','intact','worn','damaged','ruins'].includes(condition)
-        ||!['auto','bedroom','kitchen','bathroom','office','technical','storage','shop','living'].includes(role))return {error:'Неизвестные параметры меблировки'};
+        ||!(role==='auto'||Object.hasOwn(FURNITURE_ROLES,role)))return {error:'Неизвестные параметры меблировки'};
     const allRooms=getFurnitureRooms(source,buildingId);
     const rooms=allRooms.filter(r=>scope==='building'||r.level===level&&(scope==='floor'||r.id===roomId));
     if(!rooms.length&&!empty)return {error:'В выбранной области нет помещений с целым полом'};
@@ -133,15 +227,17 @@ export function planBuildingFurniture(source,{buildingId,scope='floor',level=0,r
         return (h>>>0)/4294967296;
     };
     for(const currentLevel of [...new Set(rooms.map(r=>r.level))]) {
-        const areas=parts(source,buildingId,currentLevel,groundHeight),floor=floorCells(areas);
+        const areas=buildingFloorParts(source,buildingId,currentLevel,groundHeight),floor=floorCells(areas);
         if(floor.size>4096)return {error:'Меблировка поддерживает до 4096 клеток пола на этаже'};
         const sameLevel=retained.filter(o=>structureLevel(o)===currentLevel);
         const hazards=retained.filter(o=>['stairs','ladder'].includes(o.type)&&[currentLevel,currentLevel-1].includes(structureLevel(o))
-            ||['hatch','floor_opening'].includes(o.type)&&structureLevel(o)===currentLevel).map(structurePose);
+            ||['hatch','floor_opening','anomaly'].includes(o.type)&&structureLevel(o)===currentLevel)
+            .map(o=>({...structurePose(o),stair:o.type==='stairs'}));
         const doors=sameLevel.filter(o=>o.type==='door');
-        const obstacles=sameLevel.filter(o=>!['floor','ceiling','roof','floor_opening','hatch','stairs','ladder','door'].includes(o.type));
+        const obstacles=sameLevel.filter(o=>o.properties?.passable!==true&&!['floor','ceiling','roof','floor_opening','hatch','stairs','ladder','door'].includes(o.type));
         const poses=obstacles.map(structurePose);
-        const walls=obstacles.filter(o=>o.type==='wall').map(structurePose);
+        const walls=obstacles.flatMap((o,i)=>o.type==='wall'?[poses[i]]:[]);
+        const windows=sameLevel.filter(o=>o.type==='window').map(o=>({...structurePose(o),sill:Number(o.properties?.elevation||0)}));
         const blocked=new Set();
         for(const o of obstacles) {
             const cut=new Set(o.type==='wall'?doors.filter(d=>doorOnWall(d,o)).flatMap(d=>furnitureFootprint(structurePose(d)).map(c=>key(c.x,c.z))):[]);
@@ -149,8 +245,17 @@ export function planBuildingFurniture(source,{buildingId,scope='floor',level=0,r
         }
         const free=new Map([...floor].filter(([k])=>!blocked.has(k)));
         const reserved=new Set(occupiedCells.filter(c=>c.level===currentLevel).map(c=>key(c.x,c.z)));
+        // Keep the entrance hall aligned through the storeys, including floors
+        // without an exterior door of their own.
+        for(const entrance of retained.filter(o=>o.type==='door'&&structureLevel(o)===0&&o.properties?.building_generation)) {
+            const p=structurePose(entrance);
+            for(const side of [-1,1]) {
+                const k=key(Math.floor(p.x+side*p.normal.x),Math.floor(p.z+side*p.normal.z));
+                if(free.has(k))reserved.add(k);
+            }
+        }
         const protect=[...hazards,...doors.map(structurePose)];
-        for(const p of protect)for(const c of furnitureFootprint({...p,width:p.width+1.5,depth:p.depth+1.5}))reserved.add(key(c.x,c.z));
+        for(const p of protect)for(const c of furnitureFootprint({...p,width:p.width+.3,depth:p.depth+(p.stair?2.4:.3)}))reserved.add(key(c.x,c.z));
         // Reserve physical routes between room centres and existing doors/shafts.
         // Each candidate also preserves connectivity of every remaining free cell.
         const levelRooms=allRooms.filter(r=>r.level===currentLevel);
@@ -172,14 +277,21 @@ export function planBuildingFurniture(source,{buildingId,scope='floor',level=0,r
             if(empty)continue;
             const roomWealth=wealth==='auto'?room.wealth:wealth,roomCondition=condition==='auto'?room.condition:condition;
             const roomRole=role==='auto'||scope!=='room'?roleOf(room.name):role;
-            const choices=recipe(roomRole,roomWealth),roomKeys=new Set(room.cells.map(c=>key(c.x,c.z)));
-            const amount=Math.min(choices.length,{poor:3,ordinary:5,rich:8}[roomWealth]);
+            const choices=[...recipe(roomRole,roomWealth)];
+            // Keep essential items first; vary only the optional furnishings.
+            const essential={bedroom:1,kitchen:3,studio:4,bathroom:2,office:1,living:3,classroom:3,workshop:2,shop:3}[roomRole]||1;
+            choices.splice(essential,choices.length-essential,...choices.slice(essential).sort((a,b)=>random(`${room.id}:${a}`)-random(`${room.id}:${b}`)));
+            const roomKeys=new Set(room.cells.map(c=>key(c.x,c.z)));
+            const amount=Math.min(choices.length,{poor:3,ordinary:5,rich:7}[roomWealth],Math.max(1,Math.floor(room.cells.length/5)));
             const keep={intact:1,worn:.75,damaged:.45,ruins:.16}[roomCondition];
-            const centers=room.cells.flatMap(c=>[0,.5].flatMap(dx=>[0,.5].map(dz=>({x:c.x+.25+dx,z:c.z+.25+dz}))));
+            const centers=room.cells.flatMap(c=>[.25,.5,.75].flatMap(dx=>[.25,.5,.75].map(dz=>({x:c.x+dx,z:c.z+dz}))));
             const edgeDistance=p=>Math.min(...walls.map(w=>distanceTo(p,w)),4);
             for(let index=0;index<amount&&objects.length<256;index++) {
                 if(random(`${currentLevel}:${room.id}:keep:${index}`)>keep)continue;
                 const asset=findLocationAsset(choices[index]);if(!asset)continue;
+                if(retained.some(o=>structureLevel(o)===currentLevel
+                    && (o.type===(asset.baseType||asset.id)||asset.id.startsWith('household_bed_')&&o.type.startsWith('household_bed_'))
+                    && (()=>{const p=structurePose(o);return roomKeys.has(key(Math.floor(p.x),Math.floor(p.z)));})()))continue;
                 const [width,depth,height]=asset.dimensions;
                 const neighbors=objects.filter(o=>o.properties.level===currentLevel&&o.properties.furniture_generation.room_id===room.id);
                 const table=neighbors.find(o=>o.type==='table');
@@ -195,7 +307,16 @@ export function planBuildingFurniture(source,{buildingId,scope='floor',level=0,r
                     }
                     return value+.08*random(`${room.id}:${index}:${p.x}:${p.z}`);
                 };
-                const ranked=centers.map(center=>({center,score:score(center)})).sort((a,b)=>a.score-b.score).slice(0,600);
+                const wallCenters=walls.flatMap(w=>[-1,1].flatMap(side=>{
+                    const normal={x:w.normal.x*side,z:w.normal.z*side};
+                    const rotation=Math.atan2(normal.x,normal.z);
+                    return Array.from({length:Math.ceil(w.width/.5)},(_,i)=>{
+                        const along=-w.width/2+.25+i*.5;
+                        return {x:w.x+w.axis.x*along+normal.x*(w.depth/2+depth/2+.035),
+                            z:w.z+w.axis.z*along+normal.z*(w.depth/2+depth/2+.035),rotation};
+                    });
+                }));
+                const ranked=[...wallCenters,...centers].map(center=>({center,score:score(center)})).sort((a,b)=>a.score-b.score).slice(0,600);
                 let placed=false;
                 for(const {center} of ranked) {
                     if(placed)break;
@@ -205,13 +326,21 @@ export function planBuildingFurniture(source,{buildingId,scope='floor',level=0,r
                         if(['chair','household_stool'].includes(asset.id)&&tablePose)return -normal.x*(tablePose.x-center.x)-normal.z*(tablePose.z-center.z);
                         return edgeDistance({x:center.x-normal.x*depth/2,z:center.z-normal.z*depth/2});
                     };
-                    for(const quarter of [0,1,2,3].sort((a,b)=>orientationScore(a)-orientationScore(b))) {
+                    for(const quarter of (center.rotation!==undefined?[center.rotation/(Math.PI/2)]:[0,1,2,3].sort((a,b)=>orientationScore(a)-orientationScore(b)))) {
                         diagnostics.candidates++;
-                        const angle=quarter*Math.PI/2+(roomCondition==='damaged'||roomCondition==='ruins'?(random(`${room.id}:angle:${index}`)-.5)*.18:0);
+                        const angle=quarter*Math.PI/2;
                         const p={...center,width,depth,height,axis:{x:Math.cos(angle),z:-Math.sin(angle)},normal:{x:Math.sin(angle),z:Math.cos(angle)}};
                         const footprint=furnitureFootprint(p),keys=footprint.map(c=>key(c.x,c.z));
                         if(keys.some(k=>reserved.has(k)||!roomKeys.has(k)))continue;
-                        if(poses.some(q=>intersects(p,q))||protect.some(q=>intersects(p,q,.8)))continue;
+                        if(poses.some(q=>intersects(p,q,.02))||protect.some(q=>intersects(p,q,.3)))continue;
+                        if(windows.some(w=>height>w.sill-.05 && intersects(p,{...w,depth:w.depth+.18},.06)))continue;
+                        if(asset.id==='household_toilet') {
+                            const front={...p,x:p.x+p.normal.x*(depth/2+.38),z:p.z+p.normal.z*(depth/2+.38),width:.6,depth:.7};
+                            if(furnitureFootprint(front).some(c=>!roomKeys.has(key(c.x,c.z)))||poses.some(q=>intersects(front,q,.02)))continue;
+                        }
+                        // Leave a working aisle at the cooker, including the
+                        // space occupied by pulled-out dining chairs.
+                        if(['table','household_school_desk'].includes(asset.id)&&neighbors.some(o=>o.type==='household_cooker'&&intersects(p,structurePose(o),.9)))continue;
                         const support=areas.find(a=>inside(a,p.x,p.z));if(!support)continue;
                         let supported=true;
                         const samples=size=>Array.from({length:Math.ceil(size/.2)+1},(_,i)=>-size/2+size*i/Math.ceil(size/.2));
@@ -219,23 +348,157 @@ export function planBuildingFurniture(source,{buildingId,scope='floor',level=0,r
                             if(!areas.some(a=>Math.abs(a.surfaceHeight-support.surfaceHeight)<.01&&inside(a,p.x+x*p.axis.x+z*p.normal.x,p.z+x*p.axis.z+z*p.normal.z))){supported=false;break;}
                         }
                         if(!supported)continue;
-                        const next=new Map([...free].filter(([k])=>!keys.includes(k)));
+                        const companions=[];
+                        if(['table','household_school_desk'].includes(asset.id)) {
+                            const seat=findLocationAsset(roomWealth==='poor'?'household_stool':'chair');
+                            for(const side of [-1,1]) {
+                                const rotation=angle+(side>0?Math.PI:0),[w,d,h]=seat.dimensions;
+                                const chair={x:p.x+p.normal.x*side*(depth/2+d/2+.12),z:p.z+p.normal.z*side*(depth/2+d/2+.12),
+                                    width:w,depth:d,height:h,axis:{x:Math.cos(rotation),z:-Math.sin(rotation)},normal:{x:Math.sin(rotation),z:Math.cos(rotation)},rotation,asset:seat};
+                                const cells=furnitureFootprint(chair);
+                                if(cells.some(c=>reserved.has(key(c.x,c.z))||!roomKeys.has(key(c.x,c.z)))
+                                    ||poses.some(q=>intersects(chair,q,.02))||protect.some(q=>intersects(chair,q,.3)))continue;
+                                if(neighbors.some(o=>o.type==='household_cooker'&&intersects(chair,structurePose(o),.8)))continue;
+                                if(![-1,1].every(x=>[-1,1].every(z=>areas.some(a=>Math.abs(a.surfaceHeight-support.surfaceHeight)<.01
+                                    &&inside(a,chair.x+x*w/2*chair.axis.x+z*d/2*chair.normal.x,chair.z+x*w/2*chair.axis.z+z*d/2*chair.normal.z)))))continue;
+                                companions.push(chair);
+                            }
+                            if(!companions.length)continue;
+                        }
+                        const occupiedKeys=[...keys,...companions.flatMap(p=>furnitureFootprint(p).map(c=>key(c.x,c.z)))];
+                        const next=new Map([...free].filter(([k])=>!occupiedKeys.includes(k)));
                         if(components(next).length!==components(free).length)continue;
                         const tile_x=Math.floor(p.x),tile_y=Math.floor(p.z);
                         const elevation=support.surfaceHeight-Number(groundHeight(tile_x,tile_y));
                         if(!Number.isFinite(elevation)||elevation<0||elevation>10)continue;
                         const object={type:asset.baseType||asset.id,name:asset.label,tile_x,tile_y,properties:{building_id:buildingId,level:currentLevel,
                             dimensions:{width,depth,height},rotation:angle,offset_x:p.x-tile_x-.5,offset_z:p.z-tile_y-.5,elevation,
-                            color:asset.color,...(asset.baseType?{visual_asset:asset.id}:{}),
+                            color:asset.color,...(asset.passable?{passable:true,cover_enabled:false}:{}),...(asset.baseType?{visual_asset:asset.id}:{}),
                             ...(asset.container?{contents:[],interactions:['open_container']}:{}),
                             furniture_condition:roomCondition}};
                         object.properties.furniture_generation={version:1,seed:String(seed),room_id:room.id,role:roomRole,wealth:roomWealth,condition:roomCondition,
                             original:JSON.parse(JSON.stringify(furnitureOriginal(object)))};
                         objects.push(object);poses.push(p);for(const k of keys)free.delete(k);
+                        for(const chair of companions) {
+                            if(objects.length>=256)break;
+                            const tile_x=Math.floor(chair.x),tile_y=Math.floor(chair.z);
+                            const seated={type:chair.asset.id,name:chair.asset.label,tile_x,tile_y,properties:{building_id:buildingId,level:currentLevel,
+                                dimensions:{width:chair.width,depth:chair.depth,height:chair.height},rotation:chair.rotation,
+                                offset_x:chair.x-tile_x-.5,offset_z:chair.z-tile_y-.5,
+                                elevation:support.surfaceHeight-Number(groundHeight(tile_x,tile_y)),color:chair.asset.color,furniture_condition:roomCondition}};
+                            seated.properties.furniture_generation={version:1,seed:String(seed),room_id:room.id,role:roomRole,wealth:roomWealth,condition:roomCondition,
+                                original:JSON.parse(JSON.stringify(furnitureOriginal(seated)))};
+                            objects.push(seated);poses.push(chair);for(const c of furnitureFootprint(chair))free.delete(key(c.x,c.z));
+                        }
                         placed=true;break;
                     }
                 }
-                if(!placed)diagnostics.skipped++;
+                if(!placed && choices[index]==='household_bed_double') { choices[index]='household_bed_single';index--; }
+                else if(!placed)diagnostics.skipped++;
+            }
+            // Accessories use real support heights and their own vertical layer.
+            // They remain ordinary editable objects with the same replacement tag.
+            const addAccessory=(id,p,elevation)=>{
+                if(objects.length>=256||elevation<0||elevation>10)return;
+                const asset=findLocationAsset(id);if(!asset)return;
+                if(retained.some(o=>o.type===id&&structureLevel(o)===currentLevel&&o.properties?.furniture_generation?.room_id===room.id))return;
+                const tile_x=Math.floor(p.x),tile_y=Math.floor(p.z);
+                const angle=p.rotation||0;
+                const footprint=furnitureFootprint({...p,width:asset.dimensions[0],depth:asset.dimensions[1],axis:{x:Math.cos(angle),z:-Math.sin(angle)},normal:{x:Math.sin(angle),z:Math.cos(angle)}});
+                if(footprint.some(c=>!roomKeys.has(key(c.x,c.z))||occupiedCells.some(a=>a.level===currentLevel&&a.x===c.x&&a.z===c.z)))return;
+                if([-1,1].some(x=>[-1,1].some(z=>!areas.some(a=>inside(a,p.x+x*asset.dimensions[0]/2*Math.cos(angle)+z*asset.dimensions[1]/2*Math.sin(angle),p.z-x*asset.dimensions[0]/2*Math.sin(angle)+z*asset.dimensions[1]/2*Math.cos(angle))))))return;
+                const object={type:id,name:asset.label,tile_x,tile_y,properties:{building_id:buildingId,level:currentLevel,
+                    dimensions:{width:asset.dimensions[0],depth:asset.dimensions[1],height:asset.dimensions[2]},
+                    offset_x:p.x-tile_x-.5,offset_z:p.z-tile_y-.5,rotation:p.rotation||0,elevation,
+                    passable:true,cover_enabled:false,color:asset.color,is_on:false,furniture_condition:roomCondition}};
+                if(!hasFurnitureSupport(retained,object,groundHeight))return;
+                object.properties.furniture_generation={version:1,seed:String(seed),room_id:room.id,role:roomRole,wealth:roomWealth,condition:roomCondition,
+                    original:JSON.parse(JSON.stringify(furnitureOriginal(object)))};
+                objects.push(object);
+            };
+            const local=objects.filter(o=>structureLevel(o)===currentLevel&&o.properties.furniture_generation.room_id===room.id);
+            const table=local.find(o=>o.type==='table');
+            if(table&&roomWealth!=='poor'&&random(`${room.id}:accessory`)<keep) {
+                const p=structurePose(table);
+                addAccessory(roomRole==='office'?'household_old_computer':'household_table_setting',
+                    {...p,rotation:p.angle},Number(table.properties.elevation)+p.height+.015);
+            }
+            for(const [supportType,accessory] of [
+                ['household_tv_stand',roomWealth==='rich'?'household_tv_flat':'household_tv_crt'],
+                ['household_shop_counter','household_cash_register'],['household_workbench','household_vise'],
+                ['household_kitchen_cabinet',roomRole==='dishwashing'?'household_dish_rack':'household_kitchen_set'],['household_cooker','household_pot']
+            ]) {
+                const base=local.find(o=>o.type===supportType);
+                if(base&&random(`${room.id}:${accessory}`)<keep){const p=structurePose(base);
+                    addAccessory(accessory,{...p,rotation:p.angle},Number(base.properties.elevation)+p.height+.012);}
+            }
+            const wallItems={boiler:['household_gas_boiler','household_switchboard'],laundry:['household_water_heater'],
+                bathroom:['household_mirror','household_towel_rail'],bath:['household_mirror','household_towel_rail'],
+                toilet:['household_mirror'],classroom:['household_blackboard'],dressing:['household_mirror'],
+                bedroom:['household_radiator'],office:['household_radiator']}[roomRole]||[];
+            for(const id of wallItems) {
+                const asset=findLocationAsset(id),[width,depth,height]=asset.dimensions;
+                const mount=walls.filter(w=>w.height>=Number(asset.elevation)+height+.035).flatMap(w=>[-1,1].flatMap(side=>[-.25,0,.25].map(offset=>({
+                    x:w.x+w.axis.x*w.width*offset+w.normal.x*side*(w.depth/2+depth/2+.012),
+                    z:w.z+w.axis.z*w.width*offset+w.normal.z*side*(w.depth/2+depth/2+.012),
+                    rotation:Math.atan2(w.normal.x*side,w.normal.z*side),wall:w}))))
+                    .find(p=>p.wall.width>=width+.1&&roomKeys.has(key(Math.floor(p.x),Math.floor(p.z)))
+                        &&!windows.some(w=>distanceTo(p,w)<width/2+.2)&&!protect.some(w=>distanceTo(p,w)<width/2+.2)
+                        &&!objects.filter(o=>structureLevel(o)===currentLevel&&o.properties?.furniture_generation
+                            &&Number(o.properties.elevation)+Number(o.properties.dimensions?.height)>Number(asset.elevation)).some(o=>distanceTo(p,structurePose(o))<width/2+.1));
+                if(mount){const support=areas.find(a=>inside(a,mount.x,mount.z));
+                    if(support)addAccessory(id,mount,support.surfaceHeight-Number(groundHeight(Math.floor(mount.x),Math.floor(mount.z)))+Number(asset.elevation));}
+            }
+            if(roomCondition!=='intact'&&random(`${room.id}:litter`)>.5) {
+                const cell=room.cells.find(c=>free.has(key(c.x,c.z))&&!reserved.has(key(c.x,c.z)));
+                if(cell){const p={x:cell.x+.5,z:cell.z+.5},support=areas.find(a=>inside(a,p.x,p.z));
+                    if(support)addAccessory(roomRole==='kitchen'?'household_fork':'household_litter',p,support.surfaceHeight-Number(groundHeight(cell.x,cell.z))+.003);}
+            }
+            if(roomRole!=='hallway'&&random(`${room.id}:fixture`)<keep) {
+                // Ceiling fixtures follow the room, independently of furniture
+                // and circulation reserved on the floor below them.
+                const centre={x:room.cells.reduce((s,c)=>s+c.x+.5,0)/room.cells.length,
+                    z:room.cells.reduce((s,c)=>s+c.z+.5,0)/room.cells.length};
+                const [width,depth]=findLocationAsset('ceiling_bulb').dimensions;
+                const p=[centre,...centers].sort((a,b)=>Math.hypot(a.x-centre.x,a.z-centre.z)-Math.hypot(b.x-centre.x,b.z-centre.z)).find(c=>{
+                    const pose={...c,width,depth,axis:{x:1,z:0},normal:{x:0,z:1}};
+                    return furnitureFootprint(pose).every(c=>roomKeys.has(key(c.x,c.z)))
+                        && !hazards.some(h=>intersects(pose,h,.1))
+                        && [-1,1].every(x=>[-1,1].every(z=>areas.some(a=>inside(a,c.x+x*width/2,c.z+z*depth/2))));
+                });
+                const support=p&&areas.find(a=>inside(a,p.x,p.z));
+                if(support)addAccessory('ceiling_bulb',p,support.surfaceHeight-Number(groundHeight(Math.floor(p.x),Math.floor(p.z)))+2.36);
+            }
+            if(roomWealth==='rich'&&['living','bedroom','office'].includes(roomRole)&&random(`${room.id}:rug`)<keep) {
+                const asset=findLocationAsset('household_floor_rug'),[width,depth]=asset.dimensions;
+                const open=room.cells.filter(c=>free.has(key(c.x,c.z)));
+                const centre=open.length?{x:open.reduce((s,c)=>s+c.x+.5,0)/open.length,z:open.reduce((s,c)=>s+c.z+.5,0)/open.length}:null;
+                const seats=local.filter(o=>['household_armchair','chair','household_stool'].includes(o.type)).map(structurePose);
+                const rugCandidates=[...centers,...seats].flatMap(c=>[0,Math.PI/2].map(rotation=>({...c,rotation})));
+                const rugScore=p=>Math.min(centre?Math.hypot(p.x-centre.x,p.z-centre.z):Infinity,
+                    ...seats.map(s=>Math.hypot(p.x-s.x,p.z-s.z)))-edgeDistance(p)*.1;
+                const point=rugCandidates.sort((a,b)=>rugScore(a)-rugScore(b)).find(c=>{
+                    const p={...c,width,depth,axis:{x:Math.cos(c.rotation),z:-Math.sin(c.rotation)},normal:{x:Math.sin(c.rotation),z:Math.cos(c.rotation)}};
+                    return furnitureFootprint(p).every(c=>roomKeys.has(key(c.x,c.z)))
+                        && !walls.some(w=>intersects(p,w))
+                        && !protect.some(w=>intersects(p,w,.1))
+                        && !local.filter(o=>!o.properties.passable&&!['table','chair','household_stool','household_armchair'].includes(o.type)).some(o=>intersects(p,structurePose(o)))
+                        && [-1,1].every(x=>[-1,1].every(z=>areas.some(a=>inside(a,p.x+x*width/2*p.axis.x+z*depth/2*p.normal.x,p.z+x*width/2*p.axis.z+z*depth/2*p.normal.z))));
+                });
+                if(point){const support=areas.find(a=>inside(a,point.x,point.z));
+                    if(support)addAccessory('household_floor_rug',point,support.surfaceHeight-Number(groundHeight(Math.floor(point.x),Math.floor(point.z)))+.002);}
+            }
+            if(roomWealth!=='poor'&&random(`${room.id}:wall-decor`)<keep) {
+                const id=roomRole==='hallway'?'household_wall_shelf'
+                    :roomWealth==='rich'&&random(`${room.id}:wall-style`)>.5?'household_wall_rug':'poster';
+                const asset=findLocationAsset(id),[width,depth,height]=asset.dimensions;
+                const mount=walls.filter(w=>w.height>=1.085+height).flatMap(w=>[-1,1].map(side=>({x:w.x+w.normal.x*side*(w.depth/2+depth/2+.025),
+                    z:w.z+w.normal.z*side*(w.depth/2+depth/2+.025),rotation:Math.atan2(w.normal.x*side,w.normal.z*side),wall:w})))
+                    .find(p=>p.wall.width>=width+.1&&roomKeys.has(key(Math.floor(p.x),Math.floor(p.z)))
+                        && !windows.some(w=>distanceTo(p,w)<width/2+.3)&&!protect.some(w=>distanceTo(p,w)<width/2+.4)
+                        && !poses.some(q=>q!==p.wall&&distanceTo(p,q)<width/2+.1));
+                if(mount){const support=areas.find(a=>inside(a,mount.x,mount.z));
+                    if(support)addAccessory(id,mount,support.surfaceHeight-Number(groundHeight(Math.floor(mount.x),Math.floor(mount.z)))+1.05);}
             }
         }
     }

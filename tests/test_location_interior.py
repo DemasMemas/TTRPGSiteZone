@@ -34,6 +34,8 @@ console.log(JSON.stringify({shell,plans}));})();
 def test_layout_keeps_reachable_rooms_and_physical_level_connections(app, shape, condition):
     data = interior(shape, condition, wealth='rich')
     objects = [SimpleNamespace(id=i+1, **o) for i, o in enumerate(data['shell'] + [o for p in data['plans'] for o in p['objects']])]
+    for o in objects:
+        if o.type == 'hatch': o.properties['is_open'] = True
     location = SimpleNamespace(id=1, grid_width=18, grid_height=18,
                                tiles_data=[[{'height': 1} for _ in range(18)] for _ in range(18)])
     with patch.object(LocationObject, 'query') as oq, patch.object(LocationCharacter, 'query') as cq:

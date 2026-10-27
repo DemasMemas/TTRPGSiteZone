@@ -8,6 +8,14 @@ const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationGr
 const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
 const water = fs.readFileSync(path.join(__dirname, '../app/static/js/waterSurface.js'), 'utf8');
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+test('grass blending cannot place roots in hard paving',async()=>{
+    const {acceptsDetail,grassPlacements}=await import(moduleUrl);
+    for(const terrain of ['concrete','granite_tiles','metal','wood_floor']){
+        const tiles=Array.from({length:8},()=>Array.from({length:8},(_,x)=>({terrain:x<4?'grass':terrain})));
+        for(let z=.05;z<7.9;z+=.13)for(let x=4;x<5;x+=.07)assert.equal(acceptsDetail(tiles,'grass',x,z,12),false);
+        const plan=grassPlacements(tiles);assert.ok(plan.tufts.every(p=>tiles[Math.floor(p.z)]?.[Math.floor(p.x)]?.terrain==='grass'));
+    }
+});
 
 test('grass placements are patchy, batched, stable, and exclude floors and non-grass', async () => {
     const { grassPlacements } = await import(moduleUrl);

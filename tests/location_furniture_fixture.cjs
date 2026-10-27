@@ -3,11 +3,14 @@ const read=n=>fs.readFileSync(path.join(__dirname,'../app/static/js',n),'utf8');
 const url=s=>'data:text/javascript;base64,'+Buffer.from(s).toString('base64');
 async function modules(){
     const architecture=url(read('locationArchitecture.js')),catalog=url(read('locationAssetCatalog.js'));
+    const interior=url(read('locationInteriorGenerator.js').replace("'./locationArchitecture.js'",JSON.stringify(architecture)));
     const F=await import(url(read('locationFurnitureGenerator.js').replace("'./locationArchitecture.js'",JSON.stringify(architecture))
-        .replace("'./locationAssetCatalog.js'",JSON.stringify(catalog))));
+        .replace("'./locationAssetCatalog.js'",JSON.stringify(catalog)).replace("'./locationInteriorGenerator.js'",JSON.stringify(interior))));
     const H=await import(url(read('locationHouseGenerator.js').replace("'./locationRoofSections.js'",JSON.stringify(url(read('locationRoofSections.js'))))));
     const I=await import(url(read('locationInteriorGenerator.js').replace("'./locationArchitecture.js'",JSON.stringify(architecture))));
-    return {F,H,I,A:await import(architecture),C:await import(catalog)};
+    const furnitureUrl=url(read('locationFurnitureGenerator.js').replace("'./locationArchitecture.js'",JSON.stringify(architecture)).replace("'./locationAssetCatalog.js'",JSON.stringify(catalog)).replace("'./locationInteriorGenerator.js'",JSON.stringify(interior)));
+    const B=await import(url(read('locationBuildingAnomalies.js').replace("'./locationArchitecture.js'",JSON.stringify(architecture)).replace("'./locationFurnitureGenerator.js'",JSON.stringify(furnitureUrl))));
+    return {F,H,I,B,A:await import(architecture),C:await import(catalog)};
 }
 async function fixture({source,shellOptions={},options={},noLayout=false}={}){
     const {F,H,I}=await modules();

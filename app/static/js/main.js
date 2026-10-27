@@ -47,14 +47,14 @@ import {
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
     setLocationBrushObjectScale, setLocationBrushObjectRotation, setLocationBuildMode, setLocationStructurePreset,
-    setLocationHouseDrawMode,
+    setLocationHouseDrawMode, generateLocationBuildingAnomalies, refreshLocationFloorMenu,
     refreshLocationBuildPreview,
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
     setLocationStructureRotation, rotateLocationPlacement, isLocationEditorTransformActive,
     applyLocationLighting, setLocationLightingPreset,
     getLocationLightingPreset, setLocationAssetPreset, clearLocationAssetPreset,
     setLocationAssetElevation,
-    setLocationAssetDimensions, getSelectedLocationEditorAsset, getLocationBuildingIds,
+    setLocationAssetDimensions, getSelectedLocationEditorAsset, getLocationBuildingIds, getLocationBuildingLevels,
     canRestoreGeneratedLocationFloor, restoreGeneratedLocationFloor, generateLocationFloorInterior, generateLocationFurniture,
     getSelectedLocationFloorFit, fitSelectedLocationFloorToBuilding,
     addFloorAboveSelectedLocationAsset, beginMoveSelectedLocationAsset,
@@ -409,12 +409,11 @@ window.enterLocation = async function(locationId) {
                             <label id="loc-structure-depth-field">Глубина <input id="loc-structure-depth" type="number" min="0.1" max="30" step="0.1" value="0.2" style="width:58px;"></label>
                             <label id="loc-structure-height-field">Высота <input id="loc-structure-height" type="number" min="0.1" max="20" step="0.1" value="2.4" style="width:58px;"></label>
                             <label>Здание <select id="loc-structure-building" class="form-control" style="width:auto;"></select></label>
-                            <button type="button" id="loc-structure-new-building">Новое здание</button>
                             <button type="button" id="loc-restore-generated-floor" hidden>Восстановить пол дома</button>
-                            <button type="button" id="loc-generate-interior">Планировка выбранного этажа</button>
-                            <button type="button" id="loc-generate-furniture">Меблировка · комната / этаж / здание</button>
+                            <button type="button" id="loc-generate-interior">Изменить планировку этажа…</button>
+                            <button type="button" id="loc-generate-furniture">Расставить мебель…</button>
                             <input id="loc-structure-building-id" type="hidden" value="${editorBuildingId}">
-                            <label>Этаж размещения <input id="loc-structure-level" class="form-control" type="number" step="1" value="0" style="width:90px;"></label>
+                            <label>Этаж для изменений <select id="loc-structure-level" class="form-control"></select></label>
                             <label id="loc-structure-roof-type-field" style="display:none;">Крыша <select id="loc-structure-roof-type" class="form-control" style="width:auto;"><option value="gable">Двускатная</option><option value="flat">Плоская</option><option value="none">Без автоматической крыши</option></select></label>
                             <label id="loc-structure-rotation-field">Поворот, ° <input id="loc-structure-rotation" class="form-control" type="number" min="0" max="359" step="15" value="0" style="width:72px;" title="Q / E: поворот на 15°"></label>
                             <label>Класс укрытия <select id="loc-structure-cover-class" class="form-control" style="width:auto;">
@@ -522,6 +521,7 @@ window.enterLocation = async function(locationId) {
                     <button type="button" data-location-tool="radiation">Радиация</button>
                     <button type="button" data-location-tool="erase">Ластик</button>
                     <button type="button" data-location-tool="assets">Ассеты</button>
+                    <button type="button" data-location-tool="building">Строительство</button>
                     <button type="button" data-location-tool="light">Свет</button>
                 `;
                 const hint = document.createElement('p');
@@ -544,14 +544,14 @@ window.enterLocation = async function(locationId) {
                 let assetSection = null;
                 let environmentSection = null;
                 const selectLocationTool = tool => {
-                    if (!['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'light'].includes(tool)) return;
+                    if (!['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'building', 'light'].includes(tool)) return;
                     cancelLocationAssetResize(false);
                     const previousTool = window.locationEditorTool;
-                    if (previousTool === 'assets' && tool !== 'assets') {
+                    if (['assets','building'].includes(previousTool) && previousTool !== tool) {
                         activeAsset = null;
                         clearLocationAssetPreset();
                         setLocationHouseDrawMode(false);
-                        assetSection?.querySelector('[data-house-draw]')?.setAttribute('aria-pressed', 'false');
+                        document.querySelector('[data-house-draw]')?.setAttribute('aria-pressed', 'false');
                         renderAssetCards();
                     }
                     window.locationEditorTool = tool;
@@ -565,18 +565,24 @@ window.enterLocation = async function(locationId) {
                     });
                     waterSettings.hidden = document.getElementById('loc-edit-terrain')?.value !== 'water';
                     eraseSettings.hidden = tool !== 'erase';
-                    if (assetSection) assetSection.hidden = tool !== 'assets';
+                    if (assetSection) {
+                        assetSection.hidden = !['assets','building'].includes(tool);
+                        assetSection.querySelectorAll('.location-house-generator').forEach(node=>node.hidden=tool!=='building');
+                        assetSection.querySelector('.map-editor-section-heading').textContent=tool==='building'?'Строительство':'Библиотека ассетов';
+                        renderAssetCards();
+                    }
                     if (environmentSection) environmentSection.hidden = tool !== 'light';
                     setLocationDarknessOverlayVisible(tool === 'light');
-                    if (tool !== 'assets') setLocationBuildMode('terrain');
+                    if (!['assets','building'].includes(tool)) setLocationBuildMode('terrain');
                     else if (activeAsset) setLocationAssetPreset(activeAsset);
                     setLocationEraserMode(tool === 'erase');
-                    if (tool !== 'assets') setLocationBrushObjectMode(false);
+                    if (!['assets','building'].includes(tool)) setLocationBrushObjectMode(false);
                     const radCheck = document.getElementById('loc-rad-mode');
                     if (radCheck) radCheck.checked = tool === 'radiation';
                     hint.textContent = {
                         select: 'Выберите объект или персонажа без рисования.',
                         assets: 'Выберите ассет в библиотеке, наведите на карту и кликните для размещения. ПКМ отменяет выбор ассета.',
+                        building: 'Выберите строительный элемент или нарисуйте контур здания. Здесь же доступны этажи, планировка, мебель и аномалии.',
                         terrain: 'Кликните по клетке или проведите кистью, чтобы сменить покрытие.',
                         height: 'Кликните по клетке или проведите кистью, чтобы изменить высоту.',
                         radiation: 'Кликните по клетке или проведите кистью, чтобы задать радиацию.',
@@ -585,6 +591,7 @@ window.enterLocation = async function(locationId) {
                     }[tool];
                     renderPlacementSettings();
                     if (tool !== 'select' && !getLocationEditMode()) setLocationEditMode(true);
+                    refreshLocationFloorMenu();
                 };
                 toolbar.addEventListener('click', event => {
                     const button = event.target.closest('[data-location-tool]');
@@ -602,9 +609,7 @@ window.enterLocation = async function(locationId) {
                     <input class="form-control location-asset-search" type="search" placeholder="Найти ассет или аномалию" aria-label="Поиск по ассетам">
                     <div class="location-house-generator">
                         <button type="button" data-house-draw aria-pressed="false">Нарисовать здание</button>
-                        <label>Генератор <select class="form-control" data-house-kind><option value="shell">Здание · формы, этажи, помещения и мебель</option><option value="residential">Классический жилой дом · прямоугольник</option></select></label>
-                        <label>Seed <input class="form-control" data-house-seed type="text" value="0" maxlength="32"></label>
-                        <span>Растяните область ЛКМ по ровному участку. В диалоге выберите форму и наполнение: пустое здание, помещения или помещения с мебелью. Размеры 6–16 м, сложные формы от 10×10 м. Классический дом: прежний прямоугольник 4–12 м.</span>
+                        <span>Потяните ЛКМ по свободному участку. В открывшемся окне выберите назначение здания, затем нажмите «Предпросмотр» и «Создать».</span>
                     </div>
                     <div class="location-asset-tabs"></div>
                     <div class="location-asset-grid"></div>
@@ -614,9 +619,9 @@ window.enterLocation = async function(locationId) {
                             <input class="form-control" type="number" data-placement-height min="0" max="10" step="0.1">
                         </label>
                         <div class="location-asset-dimensions" data-placement-size>
-                            <label>Длина X, м <input class="form-control" type="number" data-placement-dimension="width" min="0.05" max="30" step="any"></label>
-                            <label>Ширина Z, м <input class="form-control" type="number" data-placement-dimension="depth" min="0.02" max="30" step="any"></label>
-                            <label>Высота модели, м <input class="form-control" type="number" data-placement-dimension="height" min="0.05" max="20" step="any"></label>
+                            <label>Длина X, м <input class="form-control" type="number" data-placement-dimension="width" min="0.005" max="30" step="any"></label>
+                            <label>Ширина Z, м <input class="form-control" type="number" data-placement-dimension="depth" min="0.005" max="30" step="any"></label>
+                            <label>Высота модели, м <input class="form-control" type="number" data-placement-dimension="height" min="0.005" max="20" step="any"></label>
                         </div>
                         <label data-placement-building-field style="display:none;">Здание <select class="form-control" data-placement-building></select></label>
                         <button type="button" data-placement-new-building style="display:none;">Новое здание</button>
@@ -630,16 +635,25 @@ window.enterLocation = async function(locationId) {
                 `;
                 toolsRoot.appendChild(assetSection);
                 const buildingTools = document.createElement('div');
-                buildingTools.className = 'location-house-generator';
-                buildingTools.innerHTML = '<strong>Здания · планировка и мебель</strong><span>Выберите здание и этаж. Меблировка доступна для комнаты, этажа или всего здания.</span>';
+                buildingTools.className = 'location-house-generator location-building-management';
+                buildingTools.innerHTML = '<strong>Изменить существующее здание</strong><p>Выберите здание на карте инструментом «Выбор» или в списке ниже. Затем выберите этаж и нужное действие. Для нового здания используйте кнопку «Нарисовать здание» выше.</p>';
                 for (const id of ['loc-structure-building', 'loc-structure-level']) {
                     buildingTools.appendChild(document.getElementById(id).closest('label'));
                 }
-                for (const id of ['loc-structure-new-building', 'loc-generate-interior', 'loc-generate-furniture', 'loc-restore-generated-floor']) {
+                for (const id of ['loc-generate-interior', 'loc-generate-furniture', 'loc-restore-generated-floor']) {
                     buildingTools.appendChild(document.getElementById(id));
                 }
                 assetSection.querySelector('.location-house-generator').after(buildingTools);
-                assetSection.hidden = window.locationEditorTool !== 'assets';
+                const anomalyControls=document.createElement('details');
+                anomalyControls.className='location-house-generator location-building-anomaly-controls';
+                anomalyControls.innerHTML='<summary>Аномалии во всём доме</summary><label>Плотность <input class="form-control" data-building-anomaly-density type="number" min="0.25" max="2" step="0.25" value="1"></label><button type="button" id="loc-generate-anomalies">Добавить аномалии</button>';
+                buildingTools.appendChild(anomalyControls);
+                const floorControls=document.createElement('div');
+                floorControls.id='loc-building-floor-controls';
+                floorControls.style.flexBasis='100%';
+                buildingTools.appendChild(floorControls);
+                assetSection.hidden = !['assets','building'].includes(window.locationEditorTool);
+                assetSection.querySelectorAll('.location-house-generator').forEach(node=>node.hidden=window.locationEditorTool!=='building');
                 const assetTabs = assetSection.querySelector('.location-asset-tabs');
                 const assetGrid = assetSection.querySelector('.location-asset-grid');
                 const assetInspector = assetSection.querySelector('.location-asset-inspector');
@@ -656,7 +670,7 @@ window.enterLocation = async function(locationId) {
                         renderAssetCards();
                         renderPlacementSettings();
                     }
-                    selectLocationTool('assets');
+                    selectLocationTool('building');
                     setLocationHouseDrawMode(enabled);
                     houseButton.setAttribute('aria-pressed', String(enabled));
                     if (enabled) hint.textContent = 'Потяните ЛКМ от первого угла до противоположного; затем настройте здание и проверьте предпросмотр.';
@@ -716,6 +730,10 @@ window.enterLocation = async function(locationId) {
                 const renderAssetCards = () => {
                     assetTabs.replaceChildren();
                     assetGrid.replaceChildren();
+                    const libraryVisible = window.locationEditorTool === 'assets';
+                    for (const node of [assetTabs, assetGrid, assetSearch,
+                        assetSection.querySelector('.location-asset-library-heading > span')]) node.hidden = !libraryVisible;
+                    if (!libraryVisible) return;
                     groups.forEach(group => {
                         const tab = document.createElement('button');
                         tab.type = 'button';
@@ -771,10 +789,15 @@ window.enterLocation = async function(locationId) {
                     assetPlacement.querySelector('[data-placement-level]')];
                 const renderBuildingControls = () => {
                     const ids = getLocationBuildingIds();
+                    const levels=getLocationBuildingLevels(activeBuildingId);
+                    const floorSelect=document.getElementById('loc-structure-level');
+                    floorSelect.replaceChildren(...levels.map(level=>new Option(level<0?`Подвал ${-level}`:`${level+1}-й этаж`,String(level))));
+                    floorSelect.disabled=!levels.length;
+                    if(levels.length&&!levels.includes(activeLevel))activeLevel=levels.includes(0)?0:levels[0];
                     for (const select of buildingSelectors) {
                         select.replaceChildren(...ids.map((id, index) => new Option(`Здание ${index + 1}`, id)));
                         if (!activeBuildingId) select.add(new Option('Старая постройка (без ID)', ''));
-                        else if (!ids.includes(activeBuildingId)) select.add(new Option('Новое здание', activeBuildingId));
+                        else if (!ids.includes(activeBuildingId)) select.add(new Option('Выберите построенный дом', activeBuildingId));
                         select.value = activeBuildingId;
                     }
                     for (const input of buildingFields) input.value = activeBuildingId;
@@ -783,6 +806,7 @@ window.enterLocation = async function(locationId) {
                         !canRestoreGeneratedLocationFloor(activeBuildingId, activeLevel);
                     document.getElementById('loc-generate-interior').disabled = !ids.includes(activeBuildingId);
                     document.getElementById('loc-generate-furniture').disabled = !ids.includes(activeBuildingId);
+                    document.getElementById('loc-generate-anomalies').disabled = !ids.includes(activeBuildingId);
                 };
                 const setActiveBuilding = (id, level = activeLevel) => {
                     activeBuildingId = id || '';
@@ -799,8 +823,7 @@ window.enterLocation = async function(locationId) {
                     refreshLocationBuildPreview();
                 };
                 for (const select of buildingSelectors) select.onchange = () => setActiveBuilding(select.value);
-                for (const button of [document.getElementById('loc-structure-new-building'),
-                    assetPlacement.querySelector('[data-placement-new-building]')]) {
+                for (const button of [assetPlacement.querySelector('[data-placement-new-building]')]) {
                     button.onclick = () => setActiveBuilding(
                         `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`, 0);
                 }
@@ -824,6 +847,11 @@ window.enterLocation = async function(locationId) {
                     const button=event.currentTarget;button.disabled=true;
                     try {await generateLocationFurniture(activeBuildingId,activeLevel);}
                     finally {button.disabled=false;renderBuildingControls();}
+                };
+                document.getElementById('loc-generate-anomalies').onclick=async event=>{
+                    const button=event.currentTarget;button.disabled=true;
+                    try{await generateLocationBuildingAnomalies(activeBuildingId,{seed:globalThis.crypto?.randomUUID?.()||String(Math.random()),density:Number(document.querySelector('[data-building-anomaly-density]').value)});}
+                    finally{button.disabled=false;renderBuildingControls();}
                 };
                 renderBuildingControls();
                 const renderAssetSelection = () => {
@@ -858,9 +886,9 @@ window.enterLocation = async function(locationId) {
                             <button type="button" data-asset-action="delete">Удалить</button>
                         </div>
                         <div class="location-asset-dimensions" data-selected-size>
-                            <label>Длина X, м <input class="form-control" type="number" data-selected-dimension="width" min="0.05" max="30" step="any"></label>
-                            <label>Ширина Z, м <input class="form-control" type="number" data-selected-dimension="depth" min="0.02" max="30" step="any"></label>
-                            <label>Высота модели, м <input class="form-control" type="number" data-selected-dimension="height" min="0.05" max="20" step="any"></label>
+                            <label>Длина X, м <input class="form-control" type="number" data-selected-dimension="width" min="0.005" max="30" step="any"></label>
+                            <label>Ширина Z, м <input class="form-control" type="number" data-selected-dimension="depth" min="0.005" max="30" step="any"></label>
+                            <label>Высота модели, м <input class="form-control" type="number" data-selected-dimension="height" min="0.005" max="20" step="any"></label>
                         </div>
                         <div data-selected-building-fields style="display:none;">
                             <span data-selected-building-label></span>

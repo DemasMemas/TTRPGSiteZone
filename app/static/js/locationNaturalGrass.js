@@ -99,6 +99,11 @@ export function naturalGrassPlacements(tiles, isCovered = () => false, chunk = n
                     count('floorRejected', local);
                     continue;
                 }
+                if([-.4,0,.4].some(dx=>[-.4,0,.4].some(dz=>['concrete','granite_tiles','metal','wood_floor']
+                    .includes(tiles[Math.floor(pz+dz)]?.[Math.floor(px+dx)]?.terrain)))){
+                    count('blendRejected',local);
+                    continue;
+                }
                 if (chunk && (Math.floor(px / CHUNK_SIZE) !== chunk.x
                     || Math.floor(pz / CHUNK_SIZE) !== chunk.z)) continue;
                 medium01.push({ x: px, z: pz,

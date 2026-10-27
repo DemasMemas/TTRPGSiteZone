@@ -322,6 +322,11 @@ function handleKeyDown(e) {
         if (Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
         if (e.repeat && ['KeyQ', 'KeyE', 'KeyR'].includes(e.code)) return;
         if ((e.altKey || e.ctrlKey || e.metaKey) && ['KeyQ', 'KeyE', 'KeyR'].includes(e.code)) return;
+        if (e.code === 'KeyE' && !modalOpen && target.closest?.('dialog.location-building-dialog')) {
+            e.preventDefault();
+            if (window.isGM) window.toggleEditMode();
+            return;
+        }
         if (!modalOpen && ['KeyQ', 'KeyE'].includes(e.code)
             && window.rotateWorldObjectPlacement?.(e.code === 'KeyE' ? 1 : -1)) {
             e.preventDefault();

@@ -13,7 +13,19 @@ FURNITURE_TYPES = {
     'household_sink', 'household_washbasin', 'household_toilet',
     'household_bathtub', 'household_wood_stove', 'household_generator',
     'household_wood_crate', 'household_cardboard_box', 'household_jerrycan',
+    'household_floor_rug', 'household_wall_rug', 'household_wall_shelf',
+    'household_old_computer', 'household_desk_lamp', 'ceiling_bulb', 'poster',
 }
+FURNITURE_TYPES.update('household_' + name for name in (
+    'tv_crt', 'tv_flat', 'sofa', 'tv_stand', 'coffee_table', 'dining_bench',
+    'child_bed', 'school_desk', 'blackboard', 'exam_couch', 'medical_cabinet',
+    'washing_machine', 'clothes_dryer', 'laundry_basket', 'water_heater',
+    'gas_boiler', 'gas_cylinder', 'switchboard', 'radiator', 'mirror', 'towel_rail',
+    'shower', 'basin', 'tub', 'sauna_bench', 'sauna_stove', 'trash_bin',
+    'shop_counter', 'display_case', 'refrigerated_display', 'cash_register',
+    'pallet', 'pallet_jack', 'workbench', 'tool_cabinet', 'vise', 'tire',
+    'table_setting', 'kitchen_set', 'dish_rack', 'pot', 'bucket_metal', 'fork', 'litter',
+))
 
 
 def original_furniture(obj):

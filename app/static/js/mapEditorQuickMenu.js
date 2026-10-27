@@ -16,6 +16,7 @@ const LOCATION_TOOLS = [
     ['radiation', 'Радиация'],
     ['erase', 'Ластик'],
     ['assets', 'Ассеты'],
+    ['building', 'Строительство'],
     ['light', 'Свет'],
 ];
 
@@ -193,6 +194,8 @@ export function initMapEditorQuickMenu({ isEnabled, isLocation, selectTool, loca
         }
         if (!isEnabled() || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
         if (['KeyE', 'KeyR'].includes(event.code) && quickMenu) closeMapEditorQuickMenu();
+        if (isLocation() && event.code === 'KeyE'
+            && event.target.closest?.('dialog.location-building-dialog')) return;
 
         if (!isLocation() && ['KeyQ', 'KeyE'].includes(event.code)
             && window.rotateWorldObjectPlacement?.(event.code === 'KeyE' ? 1 : -1)) {

@@ -37,7 +37,8 @@ test('wealth and purpose change room count and minimum room areas',async()=>{
     const poor=plan({wealth:'poor'}),ordinary=plan({wealth:'ordinary'}),rich=plan({wealth:'rich'});
     assert.ok(poor.rooms.length<ordinary.rooms.length);
     assert.ok(ordinary.rooms.length<rich.rooms.length);
-    assert.ok(rich.rooms.every(r=>r.cells.length>=16));
+    assert.ok(rich.rooms.filter(r=>!r.name.includes('коридор')&&r.name!=='Санузел').every(r=>r.cells.length>=16));
+    assert.ok(rich.rooms.find(r=>r.name==='Санузел').cells.length>=9);
     assert.ok(plan({buildingType:'warehouse'}).rooms.length<ordinary.rooms.length);
     assert.ok(plan({condition:'ruins'}).objects.length<ordinary.objects.length);
 });

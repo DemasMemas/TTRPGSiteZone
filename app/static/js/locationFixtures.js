@@ -1,4 +1,4 @@
-export const ELECTRIC_FIXTURE_TYPES = new Set(['ceiling_bulb', 'wall_bulb']);
+export const ELECTRIC_FIXTURE_TYPES = new Set(['ceiling_bulb', 'wall_bulb', 'household_street_lamp', 'household_floor_lamp']);
 
 export function isElectricFixture(object) {
     return ELECTRIC_FIXTURE_TYPES.has(object?.type);
@@ -22,16 +22,19 @@ export function electricFixtureLightSource(object, includeOff = false) {
     const dimensions = properties.dimensions || {};
     const rotation = Number(properties.rotation || 0);
     const forward = object.type === 'wall_bulb' ? Number(dimensions.depth || 0.4) * 0.67 : 0;
+    const standing=object.type==='household_street_lamp'||object.type==='household_floor_lamp';
+    const lateral=object.type==='household_street_lamp'?Number(dimensions.width||1)*.35:0;
     return {
-        x: Number(object.tile_x) + 0.5 + Number(properties.offset_x || 0) + Math.sin(rotation) * forward,
-        z: Number(object.tile_y) + 0.5 + Number(properties.offset_z || 0) + Math.cos(rotation) * forward,
+        x: Number(object.tile_x) + 0.5 + Number(properties.offset_x || 0) + Math.sin(rotation) * forward+Math.cos(rotation)*lateral,
+        z: Number(object.tile_y) + 0.5 + Number(properties.offset_z || 0) + Math.cos(rotation) * forward-Math.sin(rotation)*lateral,
         tileX: Number(object.tile_x),
         tileZ: Number(object.tile_y),
         height: Number(properties.elevation || 0)
-            + (object.type === 'ceiling_bulb' ? ceilingBulbYOffset(dimensions) : wallBulbYOffset(dimensions)),
+            + (standing?Number(dimensions.height||(object.type==='household_street_lamp'?5:1.65))*.94
+                :object.type === 'ceiling_bulb' ? ceilingBulbYOffset(dimensions) : wallBulbYOffset(dimensions)),
         color: properties.light_color || '#ffe2aa',
         intensity: properties.is_on === false ? 0 : 2.1,
-        distance: 7,
+        distance: object.type==='household_street_lamp'?12:7,
     };
 }
 

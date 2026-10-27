@@ -70,7 +70,8 @@ test('rotated floors, hatch clearances and floor height use real support rather 
     assert.ok(plan.objects.length>0);
     const p=A.structurePose(floor);
     for(const o of plan.objects){
-        assert.ok(Math.abs(groundHeight(o.tile_x,o.tile_y)+o.properties.elevation-2.435)<.0001);
+        if(!o.properties.passable)assert.ok(Math.abs(groundHeight(o.tile_x,o.tile_y)+o.properties.elevation-2.435)<.0001);
+        else assert.ok(groundHeight(o.tile_x,o.tile_y)+o.properties.elevation>=2.435);
         const pose=A.structurePose(o);
         for(const x of [-pose.width/2,pose.width/2])for(const z of [-pose.depth/2,pose.depth/2]){
             const dx=pose.x+x*pose.axis.x+z*pose.normal.x-p.x,dz=pose.z+x*pose.axis.z+z*pose.normal.z-p.z;

@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { createVerticalAccessModel } from './locationVerticalAccess.js';
 import { createBasementCutaway, cutawayContains } from './locationBasementCutaway.js';
 import { createHouseholdModel, releaseHouseholdRendererResources } from './locationHouseholdModels.js';
+import { createLocationShadowCache, createLocationShadowPass } from './locationShadowCache.js';
 import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'https://unpkg.com/three@0.128.0/examples/jsm/renderers/CSS2DRenderer.js';
 import {
@@ -223,6 +224,8 @@ let currentLocationId = null;
 let currentLocationData = null;
 let locationAmbientLight = null;
 let locationDirectionalLight = null;
+let locationShadowCache = null;
+let locationShadowPass = null;
 let locationLightingPreset = 'current';
 let resolvedLightingProfile = null;
 let locationLightGroup = null;
@@ -1067,7 +1070,8 @@ function buildRoutePoints(startX, startY, endX, endY, movingCharacterId = null) 
         });
         const anomalyIndex = routePath.findIndex(([x, y], index) => (
             index > 0 && anomalies.some(([object, originX, originY]) => (
-                anomalyCoversTile(object, originX, originY, x, y)
+                structureLevel(object)===(path.surfaces?.[index]?.level??movementTargetLevel)
+                && anomalyCoversTile(object, originX, originY, x, y)
             ))
         ));
         if (anomalyIndex > 0) routePath = routePath.slice(0, anomalyIndex + 1);
@@ -5761,6 +5765,7 @@ function updateFogOverlay(active, sources) {
             mesh.renderOrder = 4;
             scene.add(mesh);
             fogOverlayMeshes.set(kind, mesh);
+            updateRoofVisibility.lastState = null;
         }
         const index = mesh.geometry.index;
         let count = 0;
@@ -5807,9 +5812,11 @@ function applyFogOfWar() {
             || (!hidden && (!active || isCharacterVisibleToPlayer(entry, sources)));
         const onViewedFloor = locationLevelVisible(entry.renderFloorLevel ?? entry.floorLevel ?? 0, null, entry.model.position.x, entry.model.position.z);
         entry.model.visible = visible && onViewedFloor;
+        (entry.model.userData ||= {}).physicalShadowVisible = visible && !hidden;
         entry.label.visible = visible && onViewedFloor;
     });
     objectMeshes.forEach((mesh) => {
+        mesh.userData.physicalShadowVisible = mesh.userData?.objType==='anomaly' ? undefined : !mesh.userData?.sourceObject?.gm_hidden;
         if (!locationLevelVisible(decorDisplayLevel(mesh.userData?.sourceObject), null,
             mesh.position.x, mesh.position.z)) {
             mesh.visible = false;
@@ -5834,28 +5841,16 @@ function applyFogOfWar() {
     });
     locationObjectMeshes.forEach((mesh) => {
         const object = mesh.userData?.locationObject || {};
+        const position = getObjectGridPosition(object);
+        const physicalVisible = object.properties?.gm_hidden ? Boolean(window.isGM)
+            : !isFogHiddenObject(object) || !active || isPointVisibleToPlayer(
+                position.x ?? 0, position.y ?? 0,
+                getTileHeight(position.x ?? 0, position.y ?? 0) + getFogObjectHeight(object), sources);
+        mesh.userData.physicalShadowVisible = physicalVisible && !object.properties?.gm_hidden;
         const displayLevel = ['hatch','floor_opening'].includes(object.type) && structureLevel(object)-1 === locationViewLevel
             ? locationViewLevel : structureLevel(object);
-        if (!locationLevelVisible(displayLevel, structureBuildingId(object),
-            mesh.position.x, mesh.position.z, object)) {
-            mesh.visible = false;
-            return;
-        }
-        if (object.properties?.gm_hidden) {
-            mesh.visible = Boolean(window.isGM);
-            return;
-        }
-        if (!isFogHiddenObject(object)) {
-            mesh.visible = true;
-            return;
-        }
-        const position = getObjectGridPosition(object);
-        mesh.visible = !active || isPointVisibleToPlayer(
-            position.x ?? 0,
-            position.y ?? 0,
-            getTileHeight(position.x ?? 0, position.y ?? 0) + getFogObjectHeight(object),
-            sources,
-        );
+        mesh.visible = physicalVisible && locationLevelVisible(displayLevel, structureBuildingId(object),
+            mesh.position.x, mesh.position.z, object);
     });
     syncFogMemoryGhosts(active, sources);
     visionBlockerHeightCache = null;
@@ -7477,6 +7472,8 @@ export function initLocationScene(containerId) {
     locationDirectionalLight.shadow.radius = 2;
     scene.add(locationDirectionalLight);
     scene.add(locationDirectionalLight.target);
+    locationShadowCache = createLocationShadowCache(locationDirectionalLight);
+    locationShadowPass = createLocationShadowPass(renderer,()=>[...locationObjectMeshes,...roofMeshes,...objectMeshes,...[...characterModels.values()].map(entry=>entry.model)]);
 
     // Highlight
     createHighlight();
@@ -7519,7 +7516,8 @@ export function initLocationScene(containerId) {
         const roofStartedAt = profiling ? performance.now() : 0;
         updateRoofVisibility();
         const roofVisibilityMs = profiling ? performance.now() - roofStartedAt : 0;
-        animateAnomalyEffects(anomalyEffectMeshes, performance.now());
+        animateAnomalyEffects(anomalyEffectMeshes, frameTime);
+        for(const root of locationObjectMeshes)if(root.visible&&root.userData.locationObject?.type==='anomaly')animateAnomalyEffects([root],frameTime);
         animateFireObjectModels(locationObjectMeshes, frameTime);
         animateFireObjectModels(objectMeshes, frameTime);
         waterSurfaceMesh?.material.map?.offset.set((frameTime * 0.000002) % 1, (frameTime * 0.000001) % 1);
@@ -7527,6 +7525,7 @@ export function initLocationScene(containerId) {
             ? performance.now() : 0;
         let renderFinishedAt = 0;
         if (renderer && scene && camera) {
+            locationShadowPass?.run(()=>locationShadowCache?.update(scene, renderer));
             renderer.render(scene, camera);
             renderFinishedAt = profiling || lampTrace || loadFrame || staticFieldFirstFrame
                 ? performance.now() : 0;
@@ -7658,7 +7657,7 @@ function getLocationObjectAtScreen(clientX, clientY) {
     raycaster.setFromCamera(mouse, camera);
     const terrainHit = profiledLocationRaycast(tileCubes, false, 'surface')[0];
     const hit = profiledLocationRaycast(locationObjectMeshes.filter(mesh => mesh.visible), true, 'structure')
-        .find(hit => !locationHitOccludedByTerrain(hit, terrainHit));
+        .find(hit => visibleEditorHit(hit) && !locationHitOccludedByTerrain(hit, terrainHit));
     if (!hit) return null;
     let mesh = hit.object;
     while (mesh && !mesh.userData.locationObjectId) mesh = mesh.parent;
@@ -9940,7 +9939,7 @@ function disposeLocationObject(mesh) {
 }
 
 function getStructureDimensions(preset = structurePreset) {
-    if (window.locationEditorTool === 'assets' && selectedLocationAsset?.kind === 'structure'
+    if (['assets','building'].includes(window.locationEditorTool) && selectedLocationAsset?.kind === 'structure'
         && selectedLocationAsset.id === preset) {
         return { width: structureWidth, depth: structureDepth, height: structureHeight };
     }
@@ -9954,7 +9953,7 @@ function getStructureDimensions(preset = structurePreset) {
 }
 
 function getStructurePlacementProperties() {
-    const library = window.locationEditorTool === 'assets';
+    const library = ['assets','building'].includes(window.locationEditorTool);
     const buildingId = library ? document.querySelector('[data-placement-building-id]')?.value
         : document.getElementById('loc-structure-building-id')?.value;
     const level = library ? document.querySelector('[data-placement-level]')?.value
@@ -9962,7 +9961,7 @@ function getStructurePlacementProperties() {
     return { building_id: String(buildingId || '').trim(), level: Number.isInteger(Number(level)) ? Number(level) : 0 };
 }
 
-function wallBulbMountAt(x, z, level, elevation, dimensions, maxDistance = 0.9, bottomPivot = false) {
+function wallBulbMountAt(x, z, level, elevation, dimensions, maxDistance = 0.9, bottomPivot = false, allowOverhang = false) {
     let nearest = null;
     for (const wall of currentLocationData?.objects || []) {
         if (wall.type !== 'wall' || structureLevel(wall) !== level) continue;
@@ -9991,7 +9990,7 @@ function wallBulbMountAt(x, z, level, elevation, dimensions, maxDistance = 0.9, 
             const relativeY = getTileHeight(tileX, tileZ) + elevation
                 - getTileHeight(wall.tile_x, wall.tile_y) - Number(wall.properties?.elevation || 0);
             if (relativeY - dimensions.height / 2 < span.bottom - 0.01
-                || relativeY + dimensions.height / 2 > span.top + 0.01) continue;
+                || relativeY + dimensions.height / 2 > span.top + (allowOverhang ? 0.2 : 0.01)) continue;
             const distance = Math.hypot(mountX - x, mountZ - z);
             if (distance > maxDistance || (nearest && distance >= nearest.distance)) continue;
             nearest = { x: mountX, z: mountZ, tileX, tileZ, distance,
@@ -10009,7 +10008,43 @@ function wallBulbPlacement(x, z, asset, client = hoveredPointerClient) {
     const dimensions = assetDimensions(asset, 'structure', asset.id);
     return wallBulbMountAt(point?.x ?? x + 0.5, point?.z ?? z + 0.5,
         level, clampAssetElevation(asset.elevation) + (asset.mount === 'wall' ? dimensions.height / 2 : 0),
-        dimensions, 0.9, asset.mount === 'wall');
+        dimensions, 0.9, asset.mount === 'wall', asset.id === 'household_downpipe');
+}
+
+// Preview and persisted placement share the same surface hit. Elevation in the
+// tool remains an extra offset above that surface, relative to the active floor.
+function assetSurfacePlacement(x, z, asset, client = hoveredPointerClient) {
+    if (!['structure', 'decor'].includes(asset?.kind) || asset.mount === 'wall'
+        || ['wall', 'floor', 'roof', 'ceiling', 'door', 'window', 'stairs', 'ladder', 'hatch',
+            'floor_opening', 'wall_bulb', 'ceiling_bulb', 'wall_torch', 'poster'].includes(asset.baseType || asset.id)) return null;
+    const placement = getStructurePlacementProperties();
+    const base = getTileHeight(x, z) + structureLevelOffset({ properties: placement });
+    if (!client) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.set((client.x - rect.left) / rect.width * 2 - 1,
+        1 - (client.y - rect.top) / rect.height * 2);
+    raycaster.setFromCamera(mouse, camera);
+    const supports = locationObjectMeshes.filter(root => {
+        const object = root.userData.locationObject;
+        return object && structureLevel(object) === placement.level
+            && (object.type === 'floor' || findLocationAsset(object.type)?.visual?.family === 'household'
+                || ['table', 'box', 'shelf', 'military_crate', 'chest'].includes(object.type));
+    });
+    for (const hit of profiledLocationRaycast(supports, true, 'editor')) {
+        if (!visibleEditorHit(hit) || !hit.face) continue;
+        const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+        if (normal.y < 0.75 || hit.point.y < base - 0.01) continue;
+        const tileX = Math.floor(hit.point.x), tileZ = Math.floor(hit.point.z);
+        if (tileX < 0 || tileZ < 0 || tileX >= currentLocationData.grid_width
+            || tileZ >= currentLocationData.grid_height) continue;
+        let root = hit.object;
+        while (root && !root.userData.locationObject) root = root.parent;
+        return { x: hit.point.x, z: hit.point.z, tileX, tileZ,
+            elevation: clampAssetElevation(hit.point.y - getTileHeight(tileX, tileZ)
+                - structureLevelOffset({ properties: placement }) + Number(asset.elevation || 0)),
+            buildingId: structureBuildingId(root?.userData.locationObject) };
+    }
+    return null;
 }
 
 function editorHoverLevelOffset() {
@@ -10124,7 +10159,7 @@ function refreshFloorRugHeights() {
 }
 
 function usesStaticLightField(object) {
-    return Boolean(object?.type);
+    return Boolean(object?.type)&&object.type!=='anomaly';
 }
 
 function attachStaticLightFieldToRoot(root, level) {
@@ -10166,18 +10201,20 @@ function locationObjectMaterialColor(object) {
 // independent for darkness, selection, openings and roof cutaway.
 function batchStructureParts(group) {
     const byMaterial = new Map();
-    for (const child of group.children) {
-        if (!child.isMesh || Array.isArray(child.material) || !child.geometry?.index) continue;
+    group.updateMatrixWorld(true);
+    const inverse = group.matrixWorld.clone().invert();
+    group.traverse(child => {
+        if (!child.isMesh || Array.isArray(child.material) || !child.geometry?.index) return;
         const parts = byMaterial.get(child.material) || [];
         parts.push(child); byMaterial.set(child.material, parts);
-    }
+    });
     for (const [material, parts] of byMaterial) {
         if (parts.length < 2) continue;
         const names = Object.keys(parts[0].geometry.attributes);
         if (!parts.every(p => Object.keys(p.geometry.attributes).join() === names.join())) continue;
         const geometries = parts.map(part => {
-            part.updateMatrix();
-            return part.geometry.toNonIndexed().applyMatrix4(part.matrix);
+            const relative = new THREE.Matrix4().multiplyMatrices(inverse, part.matrixWorld);
+            return part.geometry.toNonIndexed().applyMatrix4(relative);
         });
         const merged = new THREE.BufferGeometry();
         for (const name of names) {
@@ -10187,7 +10224,7 @@ function batchStructureParts(group) {
             for (const attribute of attributes) { array.set(attribute.array, offset); offset += attribute.array.length; }
             merged.setAttribute(name, new THREE.BufferAttribute(array, attributes[0].itemSize, attributes[0].normalized));
         }
-        for (const part of parts) { group.remove(part); part.geometry.dispose(); }
+        for (const part of parts) { part.parent.remove(part); part.geometry.dispose(); }
         geometries.forEach(g => g.dispose());
         group.add(new THREE.Mesh(merged, material));
     }
@@ -10207,7 +10244,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         && (asset?.visual?.renderMode !== 'pbr'
             || asset.id === 'art_worn_plaster' || asset.id === 'art_aged_wood');
     const usePbrMaterial = asset?.visual?.renderMode === 'pbr' && !quietHouseFinish;
-    const hasSeparateMaterials = household || ['fence', 'window', 'box', 'military_crate', 'shelf', 'ground_item'].includes(obj.type)
+    const hasSeparateMaterials = ['anomaly','poster'].includes(obj.type) || household || ['fence', 'window', 'box', 'military_crate', 'shelf', 'ground_item'].includes(obj.type)
         || properties.is_ground_item || isFireObject(obj) || isElectricFixture(obj);
     const material = hasSeparateMaterials ? null
         : new THREE.MeshStandardMaterial({
@@ -10227,7 +10264,18 @@ function createLocationObjectMesh(obj, forPreview = false) {
     const group = new THREE.Group();
     let main;
 
-    if (household) {
+    if (obj.type==='anomaly') {
+        const effect=createAnomalyEffect(properties.anomalyType||'void',properties.color||'#79d7dd',1,
+            properties.anomaly_key||properties.anomalyKey||'',obj.name||'');
+        effect.scale.set(width,Math.min(height,1),depth);
+        group.add(effect);
+    } else if (obj.type==='poster') {
+        const poster=createPosterMesh(properties.color);
+        applyDecorSize(poster,{dimensions:{width,depth,height}},'poster');
+        poster.rotation.y=-Math.PI/2;
+        poster.position.y=height/2;
+        group.add(poster);
+    } else if (household) {
         group.add(createHouseholdModel(THREE, asset, {width, depth, height}, properties.color));
     } else if (['ladder','hatch','floor_opening'].includes(obj.type)) {
         group.add(createVerticalAccessModel(THREE,obj,{width,depth,height},material));
@@ -10446,7 +10494,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         });
     }
 
-    if (['wall', 'floor', 'window', 'stairs'].includes(obj.type)) batchStructureParts(group);
+    if (['wall', 'floor', 'window', 'stairs', 'door'].includes(obj.type)) batchStructureParts(group);
     const objectPosition = getObjectGridPosition(obj);
     const tileX = objectPosition.x ?? 0;
     const tileY = objectPosition.y ?? 0;
@@ -10469,8 +10517,15 @@ function createLocationObjectMesh(obj, forPreview = false) {
     }
     group.traverse(child => {
         if (!child.isMesh) return;
-        child.castShadow = obj.type !== 'floor' && obj.type !== 'household_floor_rug' && !child.userData.fireFlame;
-        child.receiveShadow = true;
+        // Animated, translucent anomaly visuals are effects, not sun blockers.
+        // Casting their changing rings would invalidate the static shadow map
+        // every frame across the entire quarter.
+        child.castShadow = !['floor', 'household_floor_rug', 'anomaly'].includes(obj.type) && !child.userData.fireFlame;
+        child.receiveShadow = obj.type !== 'anomaly';
+        if(['roof','ceiling'].includes(obj.type)){
+            child.userData.physicalShadow={visible:child.visible,castShadow:child.castShadow,opacity:child.material.opacity,side:child.material.side};
+            (group.userData.physicalShadowMeshes ||= []).push(child);
+        }
     });
     group.userData = { ...group.userData, locationObjectId: obj.id, locationObject: obj };
     if (properties.gm_hidden && window.isGM) makeGmHiddenGhost(group);
@@ -11014,7 +11069,7 @@ export function isLocationCharacterInDarkness(characterId) {
 }
 
 function tintLocationMesh(mesh, factor) {
-    if (mesh.userData?.gmHiddenGhost) return;
+    if (mesh.userData?.gmHiddenGhost || mesh.userData?.locationObject?.type==='anomaly') return;
     mesh.traverse(child => {
         if (!child.isMesh) return;
         for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
@@ -11026,6 +11081,7 @@ function tintLocationMesh(mesh, factor) {
 }
 
 function refreshDarknessEditorOverlay(darkTiles = activeLightingProfile?.dark_tiles || []) {
+    updateRoofVisibility.lastState = null;
     if (darknessEditorOverlay) {
         scene?.remove(darknessEditorOverlay);
         disposeObject(darknessEditorOverlay);
@@ -11291,19 +11347,25 @@ function locationFloorDeletionReason(buildingId, level) {
 }
 
 function refreshLocationFloorDeleteAction() {
-    const button = document.querySelector('#location-floor-menu [data-floor-delete]');
+    const button = document.querySelector('#location-building-actions [data-floor-delete]');
     if (!button) return;
     const buildingId = structureBuildingId(getSelectedEditorSource()) || getStructurePlacementProperties().building_id;
     const reason = locationFloorDeletionReason(buildingId, locationViewLevel);
     button.disabled = Boolean(reason);
     button.title = reason || `Удалить этаж ${locationViewLevel} выбранного здания`;
-    const explanation = document.querySelector('#location-floor-menu [data-floor-delete-reason]');
+    const explanation = document.querySelector('#location-building-actions [data-floor-delete-reason]');
     if (explanation) { explanation.textContent = reason; explanation.hidden = !reason; }
 }
 
-function refreshLocationFloorMenu() {
+export function refreshLocationFloorMenu() {
     const menu = document.getElementById('location-floor-menu');
     if (!menu) return;
+    const actions = document.getElementById('location-building-actions');
+    const dock = document.getElementById('loc-building-floor-controls');
+    if(actions) {
+        if(dock && actions.parentNode!==dock)dock.appendChild(actions);
+        actions.hidden = !dock || !window.locationEditMode || window.locationEditorTool!=='building';
+    }
     const select = menu.querySelector('select');
     const count = locationFloorCount();
     const minimum = locationMinimumLevel();
@@ -11415,15 +11477,25 @@ function updateStoreyTerrainVisibility() {
 
 function updateRoofVisibility() {
     if (!camera || !controls) return;
-    updateStoreyTerrainVisibility();
-    const distance = camera.position.distanceTo(controls.target);
     const wasDirty = locationBuildingViewsDirty;
     const views = getLocationBuildingViews();
+    const previous = updateRoofVisibility.lastState;
+    const state = { views, tiles: currentLocationData?.tiles_data, level: locationViewLevel, editMode,
+        roofsVisible: locationRoofsVisible,
+        pose: [camera.position.x, camera.position.y, camera.position.z,
+            controls.target.x, controls.target.y, controls.target.z] };
+    const geometryChanged = wasDirty || !previous || previous.views !== views || previous.tiles !== state.tiles;
+    if (!geometryChanged && previous.level === state.level && previous.editMode === editMode
+        && previous.roofsVisible === locationRoofsVisible && state.pose.every((v,i)=>v===previous.pose[i])) return;
+    // Terrain clipping and contours do not depend on the camera position.
+    if (geometryChanged || previous.level !== state.level || previous.editMode !== editMode) updateStoreyTerrainVisibility();
+    updateRoofVisibility.lastState = state;
+    const distance = camera.position.distanceTo(controls.target);
     // Independent panels use the existing roof cutaway rule, while remaining
     // visible and pickable when explicitly shown in the manual editor.
-    for (const mesh of locationObjectMeshes) {
+    state.panels = geometryChanged ? locationObjectMeshes.flatMap(mesh => {
         const object = mesh.userData.locationObject;
-        if (!['roof', 'ceiling'].includes(object?.type)) continue;
+        if (!['roof', 'ceiling'].includes(object?.type)) return [];
         const pose = structurePose(object);
         const coveredBySlab = (currentLocationData?.objects || []).some(floor => {
             if (floor.type !== 'floor' || structureBuildingId(floor) !== structureBuildingId(object)
@@ -11438,10 +11510,18 @@ function updateRoofVisibility() {
         });
         const coveringPlan = object.properties?.building_generation?.version === 1
             ? views.get(structureBuildingId(object))?.plan : null;
+        return [{mesh, object, pose, coveredBySlab, coveringPlan}];
+    }) : previous.panels;
+    const planOpacity = new Map();
+    for (const {mesh, object, pose, coveredBySlab, coveringPlan} of state.panels) {
+        if(coveringPlan&&!planOpacity.has(coveringPlan))planOpacity.set(coveringPlan,roofOpacityForCamera(coveringPlan,controls.target,distance,locationRoofsVisible,false,camera.position));
         const opacity = coveredBySlab || locationViewLevel < 0 && structureLevel(object) > locationViewLevel ? 0
-            : editMode && !coveringPlan ? Number(locationRoofsVisible) : roofOpacityForCamera(coveringPlan || { ...pose, rise: 0,
+            : editMode && !coveringPlan ? Number(locationRoofsVisible) : coveringPlan ? planOpacity.get(coveringPlan) : roofOpacityForCamera({ ...pose, rise: 0,
             eaveY: mesh.position.y + pose.height }, controls.target, distance,
             locationRoofsVisible, false, camera.position);
+        if(mesh.userData.pickRoofOpacity===opacity)continue;
+        locationObjectPickCache.key=null;
+        mesh.userData.pickRoofOpacity=opacity;
         mesh.traverse(child => {
             if (!child.isMesh) return;
             child.material.transparent = opacity < 1;
@@ -11527,6 +11607,8 @@ function rebuildLocationRoofs() {
             roof.userData.cutawayFloorMesh = floorMeshes.get(plan.floorId) || null;
         }
         roof.userData.floorLevel = structureLevel(floor);
+        roof.userData.physicalShadowVisible = true;
+        roof.traverse(child=>{if(child.isMesh){child.userData.physicalShadow={visible:child.visible,castShadow:child.castShadow,opacity:child.material.opacity,side:child.material.side};(roof.userData.physicalShadowMeshes ||= []).push(child);}});
         scene.add(roof);
         roofMeshes.push(roof);
     }
@@ -11649,48 +11731,98 @@ function clearBuildingShellPreview() {
 
 async function planNewBuilding(options) {
     const plan = planBuildingShell(options);
-    if (plan.error || !options.contents || options.contents === 'empty') return plan;
-    const { planBuildingInterior } = await import('./locationInteriorGenerator.js');
-    const levels = [...new Set(plan.objects.filter(o => o.type === 'floor').map(structureLevel))];
-    for (const level of levels) {
-        const layout = planBuildingInterior(plan.objects, { ...options, level });
-        if (!layout.error) plan.objects.push(...layout.objects);
+    if (plan.error) return plan;
+    if (options.contents && options.contents !== 'empty') {
+        const { planBuildingInterior } = await import('./locationInteriorGenerator.js');
+        const levels = [...new Set(plan.objects.filter(o => o.type === 'floor').map(structureLevel))];
+        for (const level of levels) {
+            const layout = planBuildingInterior(plan.objects, { ...options, level });
+            if (!layout.error) plan.objects.push(...layout.objects);
+        }
+        if (options.contents === 'furnished') {
+            const { planBuildingFurniture } = await import('./locationFurnitureGenerator.js');
+            const furniture = planBuildingFurniture(plan.objects, { ...options, scope:'building',
+                occupiedCells:[...characterModels.values()].map(c=>({x:c.posX,z:c.posY,level:c.floorLevel||0})) });
+            if (furniture.error) return furniture;
+            plan.objects.push(...furniture.objects);
+        }
     }
-    if (options.contents === 'furnished') {
-        const { planBuildingFurniture } = await import('./locationFurnitureGenerator.js');
-        const furniture = planBuildingFurniture(plan.objects, { ...options, scope:'building',
-            occupiedCells:[...characterModels.values()].map(c=>({x:c.posX,z:c.posY,level:c.floorLevel||0})) });
-        if (furniture.error) return furniture;
-        plan.objects.push(...furniture.objects);
+    if(options.anomalies) {
+        const {planBuildingAnomalies}=await import('./locationBuildingAnomalies.js');
+        const anomalies=planBuildingAnomalies(plan.objects,{...options,density:options.anomalyDensity,
+            catalog:window.locationAnomalyCatalog||[]});
+        if(anomalies.error)return anomalies;
+        plan.objects.push(...anomalies.objects);
     }
     return plan;
+}
+
+export async function generateLocationBuildingAnomalies(buildingId,{seed='0',density=1}={}) {
+    if(houseCreationPending||!currentLocationData||!window.isGM)return false;
+    const epoch=houseSceneEpoch,locationId=currentLocationId;
+    const {planBuildingAnomalies}=await import('./locationBuildingAnomalies.js');
+    if(epoch!==houseSceneEpoch)return false;
+    const tileAnomalies=[];
+    currentLocationData.tiles_data.forEach((row,z)=>row.forEach((tile,x)=>{
+        for(const o of tile.objects||[])if(o.type==='anomaly')tileAnomalies.push({type:'anomaly',tile_x:x,tile_y:z,
+            properties:{...o,level:decorDisplayLevel(o),offset_x:o.x||0,offset_z:o.z||0,dimensions:o.dimensions||{width:o.scale||1,depth:o.scale||1}}});
+    }));
+    const plan=planBuildingAnomalies(currentLocationData.objects,{buildingId,seed,density,groundHeight:getTileHeight,
+        catalog:window.locationAnomalyCatalog||[],tileAnomalies,
+        occupiedCells:[...characterModels.values()].map(c=>({x:c.posX,z:c.posY,level:c.floorLevel||0}))});
+    if(plan.error){showNotification(plan.error,'system');return false;}
+    if(!plan.objects.length){showNotification('Нет свободных подходящих участков для дополнительных аномалий.','system');return false;}
+    houseCreationPending=true;
+    try {
+        const change=await Server.changeLocationObjects(window.currentLobbyId,locationId,{objects:plan.objects,
+            generate_anomalies:{building_id:buildingId,source_versions:plan.sourceVersions}});
+        if(epoch===houseSceneEpoch)applyLocationObjectsChange(change);
+        showNotification(`Добавлено аномалий: ${plan.objects.length}`,'success');
+        return true;
+    } catch(error){showNotification(error.message||'Не удалось добавить аномалии','system');return false;}
+    finally{houseCreationPending=false;}
+}
+
+function buildingPurposeOptions() {
+    return Object.entries({residential:'Жилой дом',shop:'Магазин',warehouse:'Склад',workshop:'Мастерская / СТО',
+        cafe:'Кафе / столовая',clinic:'Медпункт',office:'Административное здание',school:'Школа',garage:'Гараж',bathhouse:'Баня'})
+        .map(([id,label])=>`<option value="${id}">${label}</option>`).join('');
 }
 
 function chooseBuildingShell(footprint) {
     houseShellDialog?.close();
     const dialog = document.createElement('dialog');
     houseShellDialog = dialog;
-    dialog.className = 'modal-content';
-    dialog.style.cssText = 'position:fixed;left:auto;right:20px;top:70px;margin:0;width:340px;max-height:75vh;overflow:auto;padding:16px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;z-index:1100;';
-    dialog.innerHTML = `<form method="dialog" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+    dialog.className = 'modal-content location-building-dialog';
+    const seed=globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`;
+
+    dialog.innerHTML = `<form method="dialog" class="location-new-building-form"><div class="location-new-building-fields">
         <strong style="grid-column:1/-1;">Новое здание</strong>
-        <label style="grid-column:1/-1;">Форма<select class="form-control" name="shape"><option value="rectangle">Прямоугольник</option><option value="L">Г</option><option value="T">Т</option><option value="U">П</option><option value="C">С</option><option value="cross">Крест</option><option value="compound">Три корпуса</option><option value="custom">Свои корпуса</option></select></label>
-        <label style="grid-column:1/-1;">Наполнение<select class="form-control" name="contents"><option value="empty">Пустое здание</option><option value="rooms">С помещениями</option><option value="furnished">С помещениями и мебелью</option></select></label>
+        <small style="grid-column:1/-1;">Настройте основные параметры и нажмите «Предпросмотр». До нажатия «Создать» локация не меняется.</small>
+        <label style="grid-column:1/-1;">Что построить<select class="form-control" name="buildingType">${buildingPurposeOptions()}</select></label>
+        <small style="grid-column:1/-1;" data-building-purpose-hint>Прихожая, жилые комнаты, кухня и санузел.</small>
+        <strong class="location-building-section-title">Размер и этажи</strong>
+        <label style="grid-column:1/-1;">Форма здания<select class="form-control" name="shape"><option value="rectangle">Прямоугольный</option><option value="L">Г-образный</option><option value="T">Т-образный</option><option value="U">П-образный</option><option value="C">С-образный</option><option value="cross">Крестообразный</option><option value="compound">Три соединённые части</option><option value="custom">Своя форма из частей</option></select></label>
         <label>Ширина, м<input class="form-control" name="width" type="number" min="6" max="16" step="2" required></label>
         <label>Глубина, м<input class="form-control" name="depth" type="number" min="6" max="16" step="2" required></label>
         <label>Наземных этажей<input class="form-control" name="storeys" type="number" min="1" max="4" value="1" required></label>
         <label>Подвалов<input class="form-control" name="basements" type="number" min="0" max="2" value="0" required></label>
+        <strong class="location-building-section-title">Обстановка</strong>
+        <label style="grid-column:1/-1;">Наполнение<select class="form-control" name="contents"><option value="empty">Пустое здание</option><option value="rooms">С помещениями</option><option value="furnished" selected>С помещениями и мебелью</option></select></label>
         <label>Достаток<select class="form-control" name="wealth"><option value="poor">Бедное</option><option value="ordinary" selected>Обычное</option><option value="rich">Богатое</option></select></label>
         <label>Состояние<select class="form-control" name="condition"><option value="intact">Целое</option><option value="worn">Ветхое</option><option value="damaged">Частично разрушенное</option><option value="ruins">Руины</option></select></label>
+        <label class="location-building-checkbox">Генерировать аномалии <input type="checkbox" name="anomalies"></label>
+        <label style="grid-column:1/-1;" data-anomaly-density hidden>Плотность аномалий<input class="form-control" name="anomalyDensity" type="number" min="0.25" max="2" step="0.25" value="1" disabled></label>
+        <strong class="location-building-section-title">Крыша</strong>
         <label>Кровля<select class="form-control" name="roofType"><option value="flat">Плоская</option><option value="shed">Односкатная</option><option value="gable" selected>Двускатная</option></select></label>
         <label>Уклон, °<input class="form-control" name="roofPitch" type="number" min="0" max="60" step="1" value="25" required></label>
-        <label>Высокая сторона / скаты<select class="form-control" name="roofDirection"><option value="auto">По корпусу</option><option value="north">Север / С–Ю</option><option value="south">Юг / С–Ю</option><option value="east">Восток / В–З</option><option value="west">Запад / В–З</option></select></label>
-        <label>Свес, м<input class="form-control" name="roofOverhang" type="number" min="0" max="0.6" step="0.05" value="0.25" required></label>
-        <details style="grid-column:1/-1;" data-shell-bodies><summary>Крыши и этажность корпусов</summary><div data-shell-body-rows></div><button type="button" data-shell-add-body>Добавить корпус</button></details>
-        <small style="grid-column:1/-1;">Фигурные контуры: от 10×10 м. Связи этажей — вертикальные лестницы. Повторная генерация создаёт здание только на свободном участке; существующие здания и ручные изменения сохраняются.</small>
+        <details class="location-building-advanced"><summary>Направление скатов и свес</summary><label>Направление крыши<select class="form-control" name="roofDirection"><option value="auto">Автоматически по форме дома</option><option value="north">Высокая сторона на севере / скаты С–Ю</option><option value="south">Высокая сторона на юге / скаты С–Ю</option><option value="east">Высокая сторона на востоке / скаты В–З</option><option value="west">Высокая сторона на западе / скаты В–З</option></select></label>
+        <label>Свес за стену, м<input class="form-control" name="roofOverhang" type="number" min="0" max="0.6" step="0.05" value="0.25" required></label></details>
+        <details class="location-building-advanced" data-shell-bodies><summary>Отдельные части дома и пристройки</summary><p>Выбранная форма уже собрана автоматически. Здесь можно изменить размеры её частей, сделать пристройку ниже или задать ей другую крышу. Отступы отсчитываются от первого угла нарисованного контура.</p><div data-shell-body-rows></div><button type="button" data-shell-add-body>Добавить пристройку</button></details>
+        <small style="grid-column:1/-1;">Размеры 6–16 м, сложные формы от 10×10 м. Между наземными этажами — лестничные марши, в подвал — люк с лестницей. Создание доступно на свободном участке.</small>
         <output style="grid-column:1/-1;" data-shell-summary></output>
-        <div style="grid-column:1/-1;position:sticky;bottom:0;background:#20251d;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:6px 0;">
-        <button type="button" data-shell-preview>Предпросмотр</button>
+        </div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:6px 0;flex-shrink:0;">
+        <button type="button" data-shell-preview autofocus>Предпросмотр</button>
         <button value="create" data-shell-create disabled>Создать</button>
         <button style="grid-column:1/-1;" value="cancel" formnovalidate>Отмена</button>
         </div>
@@ -11699,7 +11831,7 @@ function chooseBuildingShell(footprint) {
     for (const key of ['width', 'depth']) form.elements[key].value = Math.min(16, Math.max(6, Math.ceil(footprint[key] / 2) * 2));
     const appendBody = b => {
         const row=document.createElement('fieldset');row.dataset.shellBody='';row.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:8px 0;';
-        row.innerHTML=`<legend>Корпус</legend>${[['x','X от угла',0,16,1],['z','Z от угла',0,16,1],['width','Ширина',2,16,1],['depth','Глубина',2,16,1],['storeys','Этажей',1,4,1],['eave','Стены, м',2.4,8,.1],['pitch','Уклон, °',0,60,1],['overhang','Свес, м',0,.6,.05]].map(([key,label,min,max,step])=>`<label>${label}<input class="form-control" data-body-field="${key}" type="number" min="${min}" max="${max}" step="${step}" required></label>`).join('')}
+        row.innerHTML=`<legend>Часть дома ${form.querySelectorAll('[data-shell-body]').length+1}</legend>${[['x','Отступ по X, м',0,16,1],['z','Отступ по Z, м',0,16,1],['width','Ширина, м',2,16,1],['depth','Глубина, м',2,16,1],['storeys','Этажей в этой части',1,4,1],['eave','Высота стен, м',2.4,8,.1],['pitch','Уклон крыши, °',0,60,1],['overhang','Свес, м',0,.6,.05]].map(([key,label,min,max,step])=>`<label>${label}<input class="form-control" data-body-field="${key}" type="number" min="${min}" max="${max}" step="${step}" required></label>`).join('')}
             <label>Кровля<select class="form-control" data-body-field="type"><option value="flat">Плоская</option><option value="shed">Односкатная</option><option value="gable">Двускатная</option></select></label>
             <label>Направление<select class="form-control" data-body-field="direction"><option value="auto">По корпусу</option><option value="north">Север / С–Ю</option><option value="south">Юг / С–Ю</option><option value="east">Восток / В–З</option><option value="west">Запад / В–З</option></select></label><button type="button" data-body-remove>Удалить корпус</button>`;
         const defaults={x:0,z:0,width:4,depth:4,storeys:Number(form.elements.storeys.value),eave:2.4,pitch:Number(form.elements.roofPitch.value),type:form.elements.roofType.value,direction:form.elements.roofDirection.value,overhang:Number(form.elements.roofOverhang.value),...b};
@@ -11722,6 +11854,20 @@ function chooseBuildingShell(footprint) {
     });
     form.addEventListener('change',event=>{
         const name=event.target.name;
+        if(name==='buildingType')form.querySelector('[data-building-purpose-hint]').textContent={
+            residential:'Прихожая, жилые комнаты, кухня и санузел.',
+            shop:'Торговый зал, склад и служебные комнаты. Меблировка — столы, стеллажи и служебная мебель.',
+            warehouse:'Складские и подсобные помещения. Меблировка — стеллажи, поддоны, ящики и коробки.',
+            workshop:'Верстаки, инструментальная и подсобные помещения.',cafe:'Обеденный зал, кухня, моечная и кладовая.',
+            clinic:'Кабинеты осмотра, процедурная, медицинское хранение и приёмная.',
+            office:'Кабинеты, архив и комната персонала.',school:'Классы, учительская, столовая и коридор.',
+            garage:'Место для техники, рабочая зона и хранение.',bathhouse:'Парная, моечная и предбанник.'
+        }[form.elements.buildingType.value];
+        if(name==='anomalies') {
+            form.querySelector('[data-anomaly-density]').hidden=!form.elements.anomalies.checked;
+            form.elements.anomalyDensity.disabled=!form.elements.anomalies.checked;
+        }
+        if(name==='shape'&&form.elements.shape.value==='custom')form.querySelector('[data-shell-bodies]').open=true;
         if(['shape','width','depth'].includes(name)&&form.elements.shape.value!=='custom')resetBodies();
         const field={storeys:'storeys',roofType:'type',roofPitch:'pitch',roofDirection:'direction',roofOverhang:'overhang'}[name];
         if(field)for(const input of form.querySelectorAll(`[data-body-field="${field}"]`))input.value=event.target.value;
@@ -11731,10 +11877,12 @@ function chooseBuildingShell(footprint) {
         const version = ++previewVersion, epoch = houseSceneEpoch;
         approved = null;
         dialog.querySelector('[data-shell-create]').disabled = true;
-        const options = { ...footprint, seed: document.querySelector('[data-house-seed]')?.value || '0', buildingId: 'shell-preview' };
+        const options = { ...footprint, seed, buildingId: 'shell-preview' };
         for (const key of ['width', 'depth', 'storeys', 'basements']) options[key] = Number(form.elements[key].value);
-        for (const key of ['shape', 'wealth', 'condition']) options[key] = form.elements[key].value;
+        for (const key of ['shape', 'wealth', 'condition', 'buildingType']) options[key] = form.elements[key].value;
         options.contents = form.elements.contents.value;
+        options.anomalies = form.elements.anomalies.checked;
+        options.anomalyDensity = Number(form.elements.anomalyDensity.value);
         for(const key of ['roofType','roofDirection'])options[key]=form.elements[key].value;
         for(const key of ['roofPitch','roofOverhang'])options[key]=Number(form.elements[key].value);
         options.bodies=[...form.querySelectorAll('[data-shell-body]')].map(row=>Object.fromEntries([...row.querySelectorAll('[data-body-field]')].map(input=>[input.dataset.bodyField,input.type==='number'?Number(input.value):input.value])));
@@ -11782,18 +11930,18 @@ function chooseBuildingShell(footprint) {
 
 export async function generateLocationFurniture(buildingId, level = locationViewLevel) {
     if(!editMode||houseCreationPending||!currentLocationData||!window.isGM)return false;
-    const {getFurnitureRooms,planBuildingFurniture}=await import('./locationFurnitureGenerator.js');
+    const {getFurnitureRooms,planBuildingFurniture,FURNITURE_ROLES}=await import('./locationFurnitureGenerator.js');
     const rooms=getFurnitureRooms(currentLocationData.objects,buildingId).filter(r=>r.level===level);
     const epoch=houseSceneEpoch,locationId=currentLocationId,lobbyId=window.currentLobbyId;
     houseShellDialog?.close();
     const dialog=document.createElement('dialog');houseShellDialog=dialog;
-    dialog.className='modal-content';
-    dialog.style.cssText='position:fixed;left:auto;right:20px;top:70px;margin:0;width:360px;max-height:75vh;overflow:auto;padding:16px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;z-index:1100;';
+    dialog.className='modal-content location-building-dialog';
+
     dialog.innerHTML=`<form method="dialog" style="display:grid;gap:8px;">
         <strong>Меблировка · этаж <span data-furniture-level></span></strong>
         <label>Область<select class="form-control" name="scope"><option value="room">Выбранная комната</option><option value="floor" selected>Этот этаж</option><option value="building">Всё здание, включая подвалы</option></select></label>
         <label>Комната<select class="form-control" name="roomId"></select></label>
-        <label>Назначение комнаты<select class="form-control" name="role"><option value="auto">Из планировки</option><option value="living">Гостиная</option><option value="bedroom">Спальня</option><option value="kitchen">Кухня</option><option value="bathroom">Санузел</option><option value="office">Кабинет</option><option value="storage">Кладовая / склад</option><option value="technical">Техническая</option><option value="shop">Торговый зал</option></select></label>
+        <label>Назначение комнаты<select class="form-control" name="role"><option value="auto">Из планировки</option>${Object.entries(FURNITURE_ROLES).map(([id,label])=>`<option value="${id}">${label}</option>`).join('')}</select></label>
         <label>Достаток<select class="form-control" name="wealth"><option value="auto">Из планировки каждого этажа</option><option value="poor">Бедное</option><option value="ordinary">Обычное</option><option value="rich">Богатое</option></select></label>
         <label>Состояние<select class="form-control" name="condition"><option value="auto">Из планировки каждого этажа</option><option value="intact">Целое</option><option value="worn">Ветхое</option><option value="damaged">Частично разрушенное</option><option value="ruins">Руины</option></select></label>
         <label>Seed<input class="form-control" name="seed" value="0" maxlength="32"></label>
@@ -11805,6 +11953,7 @@ export async function generateLocationFurniture(buildingId, level = locationView
         <button value="cancel" formnovalidate>Отмена</button></form>`;
     dialog.querySelector('[data-furniture-level]').textContent=String(level);
     const form=dialog.querySelector('form'),summary=dialog.querySelector('[data-furniture-summary]');
+    form.elements.role.add(new Option('Прихожая / коридор','hallway'));
     form.elements.roomId.replaceChildren(...rooms.map(r=>new Option(`${r.name} (${r.id})`,r.id)));
     const selection=getSelectedLocationEditorAsset();
     const selected=rooms.find(r=>r.cells.some(c=>c.x===Math.floor(selection?.x)&&c.z===Math.floor(selection?.z)));
@@ -11870,11 +12019,11 @@ export async function generateLocationFloorInterior(buildingId, level = location
     houseShellDialog?.close();
     const dialog=document.createElement('dialog');
     houseShellDialog=dialog;
-    dialog.className='modal-content';
-    dialog.style.cssText='position:fixed;left:auto;right:20px;top:70px;margin:0;width:340px;max-height:75vh;overflow:auto;padding:16px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;z-index:1100;';
+    dialog.className='modal-content location-building-dialog';
+
     dialog.innerHTML=`<form method="dialog" style="display:grid;gap:8px;">
         <strong>Планировка этажа <span data-layout-level></span></strong>
-        <label>Назначение<select class="form-control" name="buildingType"><option value="residential">Жилое здание</option><option value="shop">Магазин</option><option value="warehouse">Склад</option></select></label>
+        <label>Назначение<select class="form-control" name="buildingType">${buildingPurposeOptions()}</select></label>
         <label>Достаток<select class="form-control" name="wealth"><option value="poor">Бедное</option><option value="ordinary">Обычное</option><option value="rich">Богатое</option></select></label>
         <label>Состояние<select class="form-control" name="condition"><option value="intact">Целое</option><option value="worn">Ветхое</option><option value="damaged">Частично разрушенное</option><option value="ruins">Руины</option></select></label>
         <label>Seed<input class="form-control" name="seed" maxlength="32"></label>
@@ -11890,7 +12039,7 @@ export async function generateLocationFloorInterior(buildingId, level = location
     const shell=currentLocationData.objects.find(o=>structureBuildingId(o)===buildingId && o.properties?.building_generation)?.properties.building_generation;
     form.elements.wealth.value=saved?.wealth||shell?.wealth||'ordinary';
     form.elements.condition.value=saved?.condition||shell?.condition||'intact';
-    form.elements.buildingType.value=saved?.buildingType||'residential';
+    form.elements.buildingType.value=saved?.buildingType||shell?.buildingType||'residential';
     form.elements.seed.value=saved?.seed||shell?.seed||'0';
     let approved=null;
     const hidden=[];
@@ -11948,13 +12097,13 @@ async function createResidentialHouse(start, end) {
     const locationId = currentLocationId;
     const sceneEpoch = houseSceneEpoch;
     let footprint = houseFootprint(start.x, start.z, end.x, end.z);
-    const shell = document.querySelector('[data-house-kind]')?.value === 'shell';
+    const shell = true;
     const options = shell ? await chooseBuildingShell(footprint) : null;
     if (shell && !options) return;
     if (sceneEpoch !== houseSceneEpoch || locationId !== currentLocationId) return;
     if (options) footprint = { minX: options.minX, minZ: options.minZ, width: options.width, depth: options.depth };
     const { minX, minZ, width, depth } = footprint;
-    const seed = options?.seed ?? (document.querySelector('[data-house-seed]')?.value || '0');
+    const seed = options?.seed ?? (globalThis.crypto?.randomUUID?.()||String(Math.random()));
     const buildingId = shell
         ? `shell-${locationId}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
         : houseBuildingId(locationId, footprint, seed);
@@ -12060,13 +12209,8 @@ function createEditorDecorPreview(type, color) {
     const group = new THREE.Group();
     const material = new THREE.MeshStandardMaterial({ color: color || '#7f9674' });
     if (type === 'tree') {
-        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.15, 0.7, 8),
-            new THREE.MeshStandardMaterial({ color: '#5b3a20' }));
-        trunk.position.y = 0.35;
-        group.add(trunk);
-        const crown = new THREE.Mesh(new THREE.ConeGeometry(0.43, 1.2, 8), material);
-        crown.position.y = 1.15;
-        group.add(crown);
+        group.add(createHouseholdModel(THREE, findLocationAsset('nature_oak_green'),
+            baseAssetDimensions('tree', 'decor'), color));
     } else {
         const geometry = type === 'rock' ? new THREE.DodecahedronGeometry(0.35)
             : new THREE.CylinderGeometry(0.23, 0.3, 0.16, 8);
@@ -12233,7 +12377,7 @@ function addEditorVolumeGizmo(preview, center) {
 }
 
 function updateBuildPreview() {
-    if (houseDrawMode && window.locationEditorTool === 'assets') {
+    if (houseDrawMode && ['assets','building'].includes(window.locationEditorTool)) {
         clearBuildPreview();
         return;
     }
@@ -12321,13 +12465,15 @@ function updateBuildPreview() {
     const editingSelection = editorMoveMode || editorRotateMode || editorResizeMode;
     const source = editingSelection ? getSelectedEditorSource() : selectedLocationAsset;
     const placementProperties = getStructurePlacementProperties();
-    const placingAsset = window.locationEditorTool === 'assets' && selectedLocationAsset;
+    const placingAsset = ['assets','building'].includes(window.locationEditorTool) && selectedLocationAsset;
     const openingPlacementPreview = placingAsset && !editingSelection && source?.kind === 'structure'
         && ['door', 'window'].includes(placementForLocationAsset(source).type);
     const movableStructurePreview = placingAsset && !editingSelection && source?.kind === 'structure'
         && !openingPlacementPreview;
     const wallBulbPreview = movableStructurePreview && (source.id === 'wall_bulb' || source.mount === 'wall');
     const wallMount = wallBulbPreview ? wallBulbPlacement(x, z, source) : null;
+    const surface = placingAsset && !editingSelection && !wallBulbPreview ? assetSurfacePlacement(x, z, source) : null;
+    const mount = wallMount || surface;
     if (wallBulbPreview && !wallMount) { clearBuildPreview(); return; }
     const mountOffsetX = !editingSelection ? Math.sin(structureRotation) * Number(source?.offsetZ || 0) : 0;
     const mountOffsetZ = !editingSelection ? Math.cos(structureRotation) * Number(source?.offsetZ || 0) : 0;
@@ -12348,13 +12494,20 @@ function updateBuildPreview() {
         if (movableStructurePreview) {
             const floorOffset = placementForLocationAsset(source).type === 'floor'
                 ? structureHeight - FLOOR_SURFACE_OFFSET : 0;
-            buildPreviewMesh.position.set(wallMount?.x ?? x + 0.5 + mountOffsetX,
-                getTileHeight(wallMount?.tileX ?? x, wallMount?.tileZ ?? z)
+            buildPreviewMesh.position.set(mount?.x ?? x + 0.5 + mountOffsetX,
+                getTileHeight(mount?.tileX ?? x, mount?.tileZ ?? z)
                     + structureLevelOffset({ properties: placementProperties })
-                    + clampAssetElevation(source.elevation) - floorOffset,
-                wallMount?.z ?? z + 0.5 + mountOffsetZ);
+                    + (surface?.elevation ?? clampAssetElevation(source.elevation)) - floorOffset,
+                mount?.z ?? z + 0.5 + mountOffsetZ);
             alignFloorRugToSurface(buildPreviewMesh, buildPreviewMesh.userData.locationObject);
             if (wallMount) buildPreviewMesh.rotation.y = wallMount.rotation;
+        }
+        if (!editingSelection && source?.kind === 'decor') {
+            buildPreviewMesh.position.set(surface?.x ?? x + 0.5 + Number(source.x ?? source.offsetX ?? 0),
+                getTileHeight(surface?.tileX ?? x, surface?.tileZ ?? z)
+                    + structureLevelOffset({ properties: placementProperties })
+                    + (surface?.elevation ?? clampAssetElevation(source.elevation)),
+                surface?.z ?? z + 0.5 + Number(source.z ?? source.offsetZ ?? 0));
         }
         return;
     }
@@ -12380,16 +12533,16 @@ function updateBuildPreview() {
                         offset_z: editorMovePreviewPoint.z - z - 0.5 },
                 } : source) : {
                 type: placementForLocationAsset(source).type,
-                tile_x: wallMount?.tileX ?? x, tile_y: wallMount?.tileZ ?? z,
+                tile_x: mount?.tileX ?? x, tile_y: mount?.tileZ ?? z,
                 properties: {
                     ...placementProperties,
                     dimensions: { width: structureWidth, depth: structureDepth, height: structureHeight },
                     color: structureColor,
-                    ...(wallMount?.buildingId ? { building_id: wallMount.buildingId } : {}),
+                    ...(mount?.buildingId ? { building_id: mount.buildingId } : {}),
                     rotation: wallMount?.rotation ?? structureRotation,
-                    offset_x: wallMount ? wallMount.x - wallMount.tileX - 0.5 : mountOffsetX,
-                    offset_z: wallMount ? wallMount.z - wallMount.tileZ - 0.5 : mountOffsetZ,
-                    elevation: clampAssetElevation(source.elevation),
+                    offset_x: mount ? mount.x - mount.tileX - 0.5 : mountOffsetX,
+                    offset_z: mount ? mount.z - mount.tileZ - 0.5 : mountOffsetZ,
+                    elevation: surface?.elevation ?? clampAssetElevation(source.elevation),
                     ...(source.id === 'opening' ? { is_open: true } : {}),
                     ...(placementForLocationAsset(source).visualAsset ? { visual_asset: source.id } : {}),
                     ...(isFireObject({ type: source.id }) ? { is_lit: true } : {}),
@@ -12422,19 +12575,20 @@ function updateBuildPreview() {
                 editingSelection ? Number(source.rotation || 0) : brushObjectRotation,
             );
             buildPreviewMesh.position.set(
-                editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.x ?? source.offsetX ?? 0),
-                getTileHeight(x, z) + (editingSelection ? structureLevelOffset(source)
-                    : structureLevelOffset({properties:getStructurePlacementProperties()})) + clampAssetElevation(source.elevation),
-                editorMovePreviewPoint?.z ?? z + 0.5 + Number(source.z ?? source.offsetZ ?? 0),
+                surface?.x ?? editorMovePreviewPoint?.x ?? x + 0.5 + Number(source.x ?? source.offsetX ?? 0),
+                getTileHeight(surface?.tileX ?? x, surface?.tileZ ?? z) + (editingSelection ? structureLevelOffset(source)
+                    : structureLevelOffset({properties:getStructurePlacementProperties()}))
+                    + (surface?.elevation ?? clampAssetElevation(source.elevation)),
+                surface?.z ?? editorMovePreviewPoint?.z ?? z + 0.5 + Number(source.z ?? source.offsetZ ?? 0),
             );
         }
         if (kind === 'structure') buildPreviewMesh.position.set(
             (editorMoveMode || editorResizeMode) && source.type === 'floor' ? buildPreviewMesh.position.x
-                : wallMount?.x ?? editorMovePreviewPoint?.x ?? resizeCenter?.x
+                : mount?.x ?? editorMovePreviewPoint?.x ?? resizeCenter?.x
                     ?? x + 0.5 + Number(source.properties?.offset_x || 0) + mountOffsetX,
-            getTileHeight(wallMount?.tileX ?? x, wallMount?.tileZ ?? z),
+            getTileHeight(mount?.tileX ?? x, mount?.tileZ ?? z),
             (editorMoveMode || editorResizeMode) && source.type === 'floor' ? buildPreviewMesh.position.z
-                : wallMount?.z ?? editorMovePreviewPoint?.z ?? resizeCenter?.z
+                : mount?.z ?? editorMovePreviewPoint?.z ?? resizeCenter?.z
                     ?? z + 0.5 + Number(source.properties?.offset_z || 0) + mountOffsetZ,
         );
         if (kind === 'structure') {
@@ -12444,7 +12598,7 @@ function updateBuildPreview() {
             buildPreviewMesh.position.y += (editingSelection
                 ? structureLevelOffset(source) : structureLevelOffset({ properties: placementProperties }))
                 + (editorResizeMode ? editorResizeElevation
-                    : clampAssetElevation(source.properties?.elevation ?? source.elevation)) - floorOffset;
+                    : surface?.elevation ?? clampAssetElevation(source.properties?.elevation ?? source.elevation)) - floorOffset;
             if(source.properties?.roof_section) {
                 const original=buildPreviewMesh.userData.locationObject;
                 const previewObject=editorRotateMode?{...original,properties:{...original.properties,rotation:bearingToObjectRotation(editorRotateAngle)}}:original;
@@ -12493,7 +12647,7 @@ function updateBuildPreview() {
         }
         return;
     }
-    if (buildMode !== 'structure' || window.locationEditorTool === 'assets') return;
+    if (buildMode !== 'structure' || ['assets','building'].includes(window.locationEditorTool)) return;
     const dimensions = getStructureDimensions();
     const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(dimensions.width, dimensions.height, dimensions.depth),
@@ -12511,7 +12665,7 @@ function updateBuildPreview() {
 async function placeStructureAtTile(x, z, client = null) {
     if (!window.currentLobbyId || !currentLocationId) return;
     const dimensions = getStructureDimensions();
-    const placement = window.locationEditorTool === 'assets' && selectedLocationAsset?.id === structurePreset
+    const placement = ['assets','building'].includes(window.locationEditorTool) && selectedLocationAsset?.id === structurePreset
         ? placementForLocationAsset(selectedLocationAsset) : { type: structurePreset, visualAsset: null };
     const placedType = placement.type;
     const needsWallMount = placedType === 'wall_bulb' || selectedLocationAsset?.mount === 'wall';
@@ -12522,12 +12676,14 @@ async function placeStructureAtTile(x, z, client = null) {
         return;
     }
     const building = getStructurePlacementProperties();
-    if (wallMount?.buildingId) building.building_id = wallMount.buildingId;
+    const surface = !needsWallMount ? assetSurfacePlacement(x, z, selectedLocationAsset, client) : null;
+    const mount = wallMount || surface;
+    if (mount?.buildingId) building.building_id = mount.buildingId;
     if (building.level !== 0 && !building.building_id) {
         showNotification('Укажите ID здания для второго этажа', 'system');
         return;
     }
-    const roofType = window.locationEditorTool === 'assets'
+    const roofType = ['assets','building'].includes(window.locationEditorTool)
         ? document.querySelector('[data-placement-roof-type]')?.value
         : document.getElementById('loc-structure-roof-type')?.value;
     const selectedCoverClass = document.getElementById('loc-structure-cover-class')?.value || 'medium';
@@ -12536,8 +12692,8 @@ async function placeStructureAtTile(x, z, client = null) {
         const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, {
             name: placedType,
             type: placedType,
-            tile_x: wallMount?.tileX ?? x,
-            tile_y: wallMount?.tileZ ?? z,
+            tile_x: mount?.tileX ?? x,
+            tile_y: mount?.tileZ ?? z,
             properties: {
                 ...building,
                 dimensions,
@@ -12546,12 +12702,12 @@ async function placeStructureAtTile(x, z, client = null) {
                 color: structureColor,
                 ...(placement.visualAsset ? { visual_asset: placement.visualAsset } : {}),
                 rotation: wallMount?.rotation ?? structureRotation,
-                offset_x: wallMount ? wallMount.x - wallMount.tileX - 0.5
+                offset_x: mount ? mount.x - mount.tileX - 0.5
                     : Math.sin(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
-                offset_z: wallMount ? wallMount.z - wallMount.tileZ - 0.5
+                offset_z: mount ? mount.z - mount.tileZ - 0.5
                     : Math.cos(structureRotation) * Number(selectedLocationAsset?.offsetZ || 0),
-                elevation: window.locationEditorTool === 'assets'
-                    ? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
+                elevation: ['assets','building'].includes(window.locationEditorTool)
+                    ? surface?.elevation ?? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
                 cover_class: selectedCoverClass,
                 cover_max_hp: coverProfile.maxHp,
                 cover_hp: coverProfile.maxHp,
@@ -12652,7 +12808,7 @@ export function rotateLocationPlacement(direction) {
         return true;
     }
     if (editorMoveMode || editorResizeMode) return true;
-    if (window.locationEditorTool === 'assets' && selectedLocationAsset) {
+    if (['assets','building'].includes(window.locationEditorTool) && selectedLocationAsset) {
         if (selectedLocationAsset.kind === 'structure') {
             setLocationStructureRotation(structureRotation + yawStep * Math.PI / 180);
         } else if (selectedLocationAsset.kind === 'decor') {
@@ -13185,6 +13341,11 @@ export function getLocationBuildingIds() {
         .map(structureBuildingId).filter(Boolean))];
 }
 
+export function getLocationBuildingLevels(buildingId) {
+    return [...new Set((currentLocationData?.objects || []).filter(o=>o.type==='floor'
+        &&structureBuildingId(o)===buildingId).map(structureLevel))].sort((a,b)=>a-b);
+}
+
 function notifyEditorBuildingsChanged() {
     window.dispatchEvent(new Event('location-editor-buildings-changed'));
 }
@@ -13245,7 +13406,7 @@ export async function addFloorAboveSelectedLocationAsset(options = null) {
         .map(structureLevel))].sort((a,b)=>a-b);
     if (!options) {
         const dialog = document.createElement('dialog');
-        dialog.className = 'modal-content';
+        dialog.className = 'modal-content location-building-dialog';
         dialog.style.cssText = 'max-width:440px;padding:20px;background:#20251d;color:#e7e4ce;border:1px solid #777f52;';
         dialog.innerHTML = `<form method="dialog" style="display:grid;gap:12px;">
             <strong>Создать этаж</strong>
@@ -13417,7 +13578,7 @@ function cancelLocationEditorContextAction() {
         updateBuildPreview();
         return true;
     }
-    if (window.locationEditorTool === 'assets' && selectedLocationAsset) {
+    if (['assets','building'].includes(window.locationEditorTool) && selectedLocationAsset) {
         if (window.cancelLocationAssetPlacement) window.cancelLocationAssetPlacement();
         else clearLocationAssetPreset();
         return true;
@@ -14166,7 +14327,7 @@ export async function generateSelectedLocationRoof(settings) {
     if(roofEditPending||!buildingId||!window.isGM)return false;
     const epoch=houseSceneEpoch,locationId=currentLocationId,lobbyId=window.currentLobbyId;
     if(!settings) {
-        const dialog=document.createElement('dialog');dialog.className='modal-content';
+        const dialog=document.createElement('dialog');dialog.className='modal-content location-building-dialog';
         dialog.style.cssText='max-width:400px;padding:18px;background:#20251d;color:#e7e4ce;';
         dialog.innerHTML=`<form method="dialog" style="display:grid;gap:8px;"><strong>Крыша выбранного здания</strong>
             <label>Тип<select class="form-control" name="type"><option value="gable">Двускатная</option><option value="shed">Односкатная</option><option value="flat">Плоская</option></select></label>
@@ -14519,8 +14680,11 @@ async function placeSelectedLocationAsset(x, z, client = null) {
         return;
     }
     if (asset.kind === 'decor') {
+        const surface = assetSurfacePlacement(x, z, asset, client);
+        x = surface?.tileX ?? x;
+        z = surface?.tileZ ?? z;
         processedTilesForObjects.clear();
-        applyLocationBrush(x, z, { addObject: true }, 0);
+        applyLocationBrush(x, z, { addObject: true, assetPlacement: surface }, 0);
         processedTilesForObjects.clear();
         const objects = currentLocationData.tiles_data[z][x].objects || [];
         if (objects.length) {
@@ -14942,6 +15106,7 @@ function updateLocationGridColors(changedTiles = null) {
 }
 
 function rebuildLocationGrid() {
+    updateRoofVisibility.lastState = null;
     if (locationGridMesh) {
         scene.remove(locationGridMesh);
         disposeObject(locationGridMesh);
@@ -15086,6 +15251,7 @@ function ensureTerrainGrassDetail() {
 }
 
 function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = false) {
+    updateRoofVisibility.lastState = null;
     const reusableMesh = preserveTexture && reuseMaterial ? terrainSurfaceMesh : null;
     if (terrainSurfaceMesh && !reusableMesh) {
         scene.remove(terrainSurfaceMesh);
@@ -15396,6 +15562,7 @@ export function getLocationGrassDiagnostics() {
 }
 
 function rebuildGrassDetailMesh(changedTiles = null) {
+    updateRoofVisibility.lastState = null;
     const partial = Boolean(changedTiles?.length && naturalGrassAssets
         && grassDetailGroup?.userData.naturalGrassChunks);
     if (grassDetailGroup && !partial) {
@@ -15608,25 +15775,8 @@ function rebuildTileObjects(tileX, tileZ) {
                 yOffset = 0.25;
         }
         if (obj.type === 'tree') {
-            mesh = new THREE.Group();
-            const trunk = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.1, 0.14, 0.75, 8),
-                new THREE.MeshStandardMaterial({ color: 0x5b3a20 })
-            );
-            trunk.position.y = 0.375;
-            mesh.add(trunk);
-            [
-                { radius: 0.46, height: 0.72, y: 0.82, color: 0x255b2f },
-                { radius: 0.36, height: 0.66, y: 1.14, color: 0x2f7439 },
-                { radius: 0.25, height: 0.55, y: 1.44, color: 0x3a8745 }
-            ].forEach(layer => {
-                const foliage = new THREE.Mesh(
-                    new THREE.ConeGeometry(layer.radius, layer.height, 8),
-                    new THREE.MeshStandardMaterial({ color: obj.color || layer.color })
-                );
-                foliage.position.y = layer.y;
-                mesh.add(foliage);
-            });
+            mesh = createHouseholdModel(THREE, findLocationAsset('nature_oak_green'),
+                baseAssetDimensions('tree', 'decor'), obj.color);
             yOffset = 0;
         } else if (!mesh) {
             mesh = new THREE.Mesh(geometry, material);
@@ -15672,6 +15822,7 @@ function moveTileDecorWithTerrain(tileX, tileZ, heightDelta) {
 export function applyLocationTilesUpdate(locationId, updates) {
     if (getCurrentLocationId() !== locationId) return;
     if (!currentLocationData) return;
+    updateRoofVisibility.lastState = null;
     let heightChanged = false;
     let terrainChanged = false;
     let grassSubtypeChanged = false;
@@ -15836,13 +15987,13 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                     const newObj = {
                         type: brushObjectType,
                         level: getStructurePlacementProperties().level,
-                        x: brushObjectOffsetX,
-                        z: brushObjectOffsetZ,
+                        x: updates.assetPlacement ? updates.assetPlacement.x - x - 0.5 : brushObjectOffsetX,
+                        z: updates.assetPlacement ? updates.assetPlacement.z - z - 0.5 : brushObjectOffsetZ,
                         scale: brushObjectScale,
                         rotation: brushObjectRotation,
-                        elevation: window.locationEditorTool === 'assets'
-                            ? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
-                        dimensions: window.locationEditorTool === 'assets'
+                        elevation: ['assets','building'].includes(window.locationEditorTool)
+                            ? updates.assetPlacement?.elevation ?? clampAssetElevation(selectedLocationAsset?.elevation) : 0,
+                        dimensions: ['assets','building'].includes(window.locationEditorTool)
                             ? assetDimensions(selectedLocationAsset, 'decor', selectedLocationAsset?.id)
                             : undefined,
                         color: brushObjectColor
@@ -16409,7 +16560,7 @@ function setupCharacterDragging() {
             updateBuildPreview();
             return;
         }
-        if (window.locationEditMode && window.locationEditorTool === 'assets' && selectedLocationAsset) {
+        if (window.locationEditMode && ['assets','building'].includes(window.locationEditorTool) && selectedLocationAsset) {
             e.preventDefault();
             window.selectLocationEditorTool?.('select');
             clearLocationAssetPreset();
@@ -16487,7 +16638,15 @@ function setupCharacterDragging() {
             updateBuildPreview();
         }
     };
-    document.addEventListener('keyup', onKeyUp);
+    document.addEventListener('keyup', onKeyUp, true);
+    const onFocusIn = e => {
+        if (isKeyboardInputTarget(e.target) || e.target.closest?.('.modal')) onWindowBlur();
+    };
+    const onVisibilityChange = () => { if (document.hidden) onWindowBlur(); };
+    document.addEventListener('focusin', onFocusIn);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    handlers.document.focusin = onFocusIn;
+    handlers.document.visibilitychange = onVisibilityChange;
     window.addEventListener('blur', onWindowBlur);
     handlers.document.keyup = onKeyUp;
     handlers.window.cameraBlur = onWindowBlur;
@@ -16725,7 +16884,7 @@ export function setupLocationEditing() {
             if (point) commitEditorAssetMove(point.x, point.z);
             return;
         }
-        if (houseDrawMode && window.locationEditorTool === 'assets') {
+        if (houseDrawMode && ['assets','building'].includes(window.locationEditorTool)) {
             e.preventDefault();
             e.stopImmediatePropagation();
             if (houseCreationPending) return;
@@ -16743,7 +16902,7 @@ export function setupLocationEditing() {
             }
             return;
         }
-        if (window.locationEditorTool === 'assets' && !e.altKey && (!e.shiftKey || !selectedLocationAsset)) {
+        if (['assets','building'].includes(window.locationEditorTool) && !e.altKey && (!e.shiftKey || !selectedLocationAsset)) {
             if (!selectedLocationAsset) {
                 if (selectEditorAsset(e.clientX, e.clientY, e.shiftKey)) {
                     e.preventDefault();
@@ -16789,7 +16948,7 @@ export function setupLocationEditing() {
         if (!locationActive) return;
         if (e.buttons !== 1) return;
         if (!window.locationEditMode) return;
-        if ((window.locationEditorTool === 'assets' && !e.altKey && !e.shiftKey) || editorMoveMode || editorRotateMode || editorResizeMode) return;
+        if ((['assets','building'].includes(window.locationEditorTool) && !e.altKey && !e.shiftKey) || editorMoveMode || editorRotateMode || editorResizeMode) return;
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
         const { x, z } = hoveredTileCoords;
@@ -17207,6 +17366,7 @@ export function setLocationEditMode(enabled) {
     if (btn) btn.style.background = enabled ? '#4a6fa5' : '';
     const locCheckbox = document.getElementById('loc-edit-toggle-checkbox');
     if (locCheckbox) locCheckbox.checked = enabled;
+    refreshLocationFloorMenu();
     updateBuildPreview();
 }
 
@@ -17460,6 +17620,7 @@ export function addLocationRoofButton() {
 
 export function addLocationFloorMenu() {
     document.getElementById('location-floor-menu')?.remove();
+    document.getElementById('location-building-actions')?.remove();
     const menu = document.createElement('div');
     menu.id = 'location-floor-menu';
     menu.className = 'location-floor-menu';
@@ -17493,24 +17654,28 @@ export function addLocationFloorMenu() {
     };
     menu.append(down, label, up);
     if (window.isGM) {
+        const actions = document.createElement('div');
+        actions.id = 'location-building-actions';
+        actions.className = 'location-house-generator';
+        actions.hidden = true;
         const create = document.createElement('button');
         create.type = 'button'; create.textContent = 'Добавить этаж';
-        create.style.cssText = 'position:absolute;right:0;bottom:calc(100% + 6px);font:inherit;white-space:nowrap;padding:0 8px;';
         create.dataset.floorCreate = '';
         create.title = 'Добавить этаж или подвал выбранного здания';
         create.onclick = () => addFloorAboveSelectedLocationAsset();
-        menu.appendChild(create);
+        actions.appendChild(create);
         for (const [whole, text] of [[false, 'Удалить этаж'], [true, 'Удалить здание']]) {
             const button = document.createElement('button');
             button.type = 'button'; button.textContent = text;
             button.dataset[whole ? 'buildingDelete' : 'floorDelete'] = '';
             button.onclick = () => deleteSelectedLocationBuilding(whole);
-            menu.appendChild(button);
+            actions.appendChild(button);
         }
         const reason = document.createElement('small');
         reason.dataset.floorDeleteReason = '';
-        reason.style.cssText = 'position:absolute;right:0;bottom:calc(100% + 40px);width:300px;white-space:normal;padding:4px 8px;background:#20251d;';
-        menu.appendChild(reason);
+        reason.style.flexBasis = '100%';
+        actions.appendChild(reason);
+        menu.appendChild(actions);
     }
     document.getElementById('location-container').appendChild(menu);
     refreshLocationFloorMenu();
@@ -17521,6 +17686,12 @@ export function addLocationFloorMenu() {
 }
 
 export function destroyLocationScene() {
+    locationShadowPass?.dispose();
+    locationShadowPass = null;
+    updateRoofVisibility.lastState = null;
+    locationShadowCache?.dispose();
+    locationShadowCache = null;
+    document.getElementById('location-building-actions')?.remove();
     lampLightingEchoes.reset();
     lampEditTrace = null;
     basementCutaway?.dispose(); basementCutaway = null;
@@ -17585,12 +17756,16 @@ export function destroyLocationScene() {
         delete handlers.document.keydown;
     }
     if (handlers.document.keyup) {
-        document.removeEventListener('keyup', handlers.document.keyup);
+        document.removeEventListener('keyup', handlers.document.keyup, true);
         delete handlers.document.keyup;
     }
     if (handlers.window.cameraBlur) {
         window.removeEventListener('blur', handlers.window.cameraBlur);
         delete handlers.window.cameraBlur;
+    }
+    for (const type of ['focusin', 'visibilitychange']) {
+        if (handlers.document[type]) document.removeEventListener(type, handlers.document[type]);
+        delete handlers.document[type];
     }
     locationCameraKeys.clear();
     if (handlers.window.combatHudPointerMove) {

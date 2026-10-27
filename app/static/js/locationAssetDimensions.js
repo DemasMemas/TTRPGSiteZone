@@ -32,9 +32,9 @@ export function assetDimensions(source, kind, type) {
 
 export function validAssetDimensions(value) {
     if (!value || typeof value !== 'object') return false;
-    return Number.isFinite(value.width) && value.width >= 0.05 && value.width <= 30
-        && Number.isFinite(value.depth) && value.depth >= 0.02 && value.depth <= 30
-        && Number.isFinite(value.height) && value.height >= 0.05 && value.height <= 20;
+    return Number.isFinite(value.width) && value.width >= 0.005 && value.width <= 30
+        && Number.isFinite(value.depth) && value.depth >= 0.005 && value.depth <= 30
+        && Number.isFinite(value.height) && value.height >= 0.005 && value.height <= 20;
 }
 
 export function resizedAxis(value, minimum = 0.05, maximum = 30) {
@@ -42,7 +42,7 @@ export function resizedAxis(value, minimum = 0.05, maximum = 30) {
 }
 
 export function resizedUniformDimensions(base, factor) {
-    const limits = { width: [0.05, 30], depth: [0.02, 30], height: [0.05, 20] };
+    const limits = { width: [0.005, 30], depth: [0.005, 30], height: [0.005, 20] };
     const axes = Object.keys(limits);
     const minimum = Math.max(...axes.map(axis => limits[axis][0] / base[axis]));
     const maximum = Math.min(...axes.map(axis => limits[axis][1] / base[axis]));

@@ -46,6 +46,7 @@ function detailTerrainWeight(tiles, kind, px, pz) {
 export function acceptsDetail(tiles, kind, px, pz, salt) {
     const surface = tiles[Math.floor(pz)]?.[Math.floor(px)]?.terrain;
     if (!surface || surface === 'water') return false;
+    if(kind==='grass'&&['concrete','granite_tiles','metal','wood_floor'].includes(surface))return false;
     return hash(Math.floor(px * 1024), Math.floor(pz * 1024), salt)
         < detailTerrainWeight(tiles, kind, px, pz);
 }

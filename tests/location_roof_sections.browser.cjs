@@ -6,7 +6,8 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
     const core=url(read('locationRoofSections.js'));
     const {planBuildingShell,planResidentialHouse}=await import(url(read('locationHouseGenerator.js').replace("'./locationRoofSections.js'",`'${core}'`)));
     const api=`/lobbies/${lobby.id}`;
-    const cases=[...['flat','shed','gable'].map(roofType=>({name:`rectangle-${roofType}`,shape:'rectangle',roofType})),
+    const cases=[...['flat','gable'].map(roofType=>({name:`small-${roofType}`,shape:'rectangle',width:6,depth:6,roofType})),
+        ...['flat','shed','gable'].map(roofType=>({name:`rectangle-${roofType}`,shape:'rectangle',roofType})),
         ...['T','compound','L','U','C','cross'].map(shape=>({name:shape,shape,roofType:'gable'})),
         {name:'mixed',shape:'custom',roofType:'gable',bodies:[{x:0,z:0,width:8,depth:10,storeys:2,type:'gable'},{x:8,z:2,width:4,depth:6,storeys:1,type:'shed',direction:'east'}]},
         {name:'damaged',shape:'L',roofType:'gable',condition:'damaged'},
@@ -30,6 +31,21 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
             document.querySelector('#panel-tools:not(.collapsed) .toggle-btn')?.click();document.querySelector('#panel-characters:not(.collapsed) .toggle-btn')?.click();
             locationControls.target.set(8,3,8);locationControls.object.position.set(23,19,25);locationControls.update();true`);
         await pause(500);
+        if(spec.name.startsWith('small-')) {
+            const roofOpacities=()=>page.evaluate(`(()=>{const values=[];for(const root of roofRender.s.children)if(root.userData.locationObject?.type==='roof')root.traverse(m=>{if(m.isMesh)values.push(m.material.opacity)});return values})()`);
+            for(const [angle,position] of [[0,[5,11,10]],[1,[10,10,5]]]) {
+                await page.evaluate(`L.setLocationEditMode(false);locationControls.target.set(5,1,5);locationControls.object.position.set(${position.join(',')});locationControls.update();document.getElementById('panel-tools').style.visibility='hidden';true`);
+                await pause(300);
+                const opacity=await roofOpacities();
+                assert.ok(opacity.length>0&&opacity.every(v=>v===0),'small roof opens at a usable interior camera distance');
+                if(process.env.VTT_ROOF_INSPECT==='1')fs.writeFileSync(path.join(os.tmpdir(),`vtt-roof-${spec.name}-interior-${angle}.png`),Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
+            }
+            await page.evaluate(`locationControls.object.position.set(30,24,30);locationControls.update();true`);
+            await pause(300);
+            assert.ok((await roofOpacities()).every(v=>v===1),'small roof returns in the distant view');
+            await page.evaluate(`document.getElementById('panel-tools').style.visibility='';true`);
+            console.log('SMALL ROOF CUTAWAY PASS',spec.name);
+        }
         if(process.env.VTT_ROOF_INSPECT==='1'){
             const file=path.join(os.tmpdir(),`vtt-roof-${spec.name}-top.png`);fs.writeFileSync(file,Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
             await page.evaluate(`locationControls.object.position.set(25,8,19);locationControls.update();true`);await pause(400);

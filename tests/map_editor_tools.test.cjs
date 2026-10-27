@@ -181,6 +181,10 @@ test('local Q/E give placement or selection priority over the global edit toggle
     rotationActive = true;
     assert.equal(press('KeyE'), true);
     assert.equal(toggles, 1);
+    const rotationsBeforeDialog = rotations.length;
+    press('KeyE', { target: { closest: selector => selector === 'dialog.location-building-dialog' ? {} : null } });
+    assert.equal(toggles, 2,'E exits editing from a focused preview button even with a placement active');
+    assert.equal(rotations.length, rotationsBeforeDialog,'dialog E does not rotate the building element');
 });
 
 test('location brush uses only the active tool, regardless of Alt and Shift', () => {
@@ -794,11 +798,12 @@ test('held Q selects the highlighted full-ring sector on release', async () => {
         locationAction(action) { actions.push(action); return action === 'resize' && selectedObject; },
     });
     listeners.pointermove({ clientX: 400, clientY: 300 });
-    const press = (code, inputType = null) => {
+    const press = (code, inputType = null, buildingDialog = false) => {
         let prevented = false;
         listeners.keydown({
         code, repeat: false, altKey: false, ctrlKey: false, metaKey: false,
-        target: { closest(selector) { return selector === 'input' && inputType ? { type: inputType } : null; } },
+        target: { closest(selector) { return selector === 'dialog.location-building-dialog' && buildingDialog ? {}
+            : selector === 'input' && inputType ? { type: inputType } : null; } },
         preventDefault() { prevented = true; }, stopImmediatePropagation() {},
         });
         return prevented;
@@ -846,7 +851,7 @@ test('held Q selects the highlighted full-ring sector on release', async () => {
     location = true;
     press('KeyQ');
     const locationMenu = appended.at(-1);
-    assert.equal(locationMenu.children[0].children.length, 9);
+    assert.equal(locationMenu.children[0].children.length, 10);
     let outsideClickBlocked = false;
     listeners.pointerdown({
         target: {},
@@ -857,14 +862,14 @@ test('held Q selects the highlighted full-ring sector on release', async () => {
     assert.equal(locationMenu.removed, true);
     press('KeyQ');
     press('Digit7');
-    assert.deepEqual(selected, ['terrain', 'terrain', 'light']);
+    assert.deepEqual(selected, ['terrain', 'terrain', 'building']);
     assert.equal(appended.at(-1).removed, true);
     press('Digit8');
     press('KeyV');
     press('KeyB');
     press('KeyG');
     press('KeyT');
-    assert.deepEqual(selected, ['terrain', 'terrain', 'light', 'select', 'assets']);
+    assert.deepEqual(selected, ['terrain', 'terrain', 'building', 'light', 'select', 'assets']);
     assert.deepEqual(actions, ['move', 'rotate']);
     assert.equal(press('KeyR'), false);
     assert.deepEqual(actions, ['move', 'rotate', 'resize']);
@@ -882,6 +887,8 @@ test('held Q selects the highlighted full-ring sector on release', async () => {
     assert.equal(press('KeyE'), true);
     assert.deepEqual(rotations, [-1, 1]);
     assert.equal(appended.length, menusBefore);
+    assert.equal(press('KeyE',null,true),false,'capture handler leaves dialog E to the edit toggle');
+    assert.deepEqual(rotations,[-1,1]);
     assert.equal(press('KeyQ', 'text'), false);
     assert.deepEqual(rotations, [-1, 1]);
     modalVisible = true;

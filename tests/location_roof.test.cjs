@@ -307,10 +307,10 @@ test('small and large roofs cut away at comparable framing, and enclosed floors 
     assert.match(sceneSource, /height - FLOOR_SURFACE_OFFSET/);
 });
 
-test('roof opacity follows camera distance and roof size without changing the cutaway boundary', async () => {
+test('small roofs become transparent at a useful interior viewing distance', async () => {
     const { roofOpacityForCamera, roofVisibleForCamera } = await load();
     const plan = { x: 5, z: 5, angle: 0, width: 6, depth: 5, eaveY: 5, rise: 1 };
-    const threshold = Math.max(5, plan.width * 0.85);
+    const threshold = 10;
     const opacityAtHeight = height => roofOpacityForCamera(plan, { x: 5, z: 5 }, height,
         true, false, { x: 5, y: plan.eaveY + plan.rise + height, z: 5 });
     assert.equal(opacityAtHeight(threshold - 2), 0);
@@ -369,7 +369,7 @@ test('near roof cuts away while distant roof remains complete on any viewed floo
     assert.equal(lowerFloor.visible, true);
 
     context.camera.position.x = 10;
-    context.camera.position.y = 10;
+    context.camera.position.y = 15;
     context.camera.position.z = 10;
     context.updateRoofVisibility();
     assert.equal(upperFloor.visible, true);

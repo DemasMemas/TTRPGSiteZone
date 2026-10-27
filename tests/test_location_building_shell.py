@@ -13,23 +13,52 @@ from app.services.location_navigation import find_path, surface
 from app.extensions import db, socketio
 
 
-def shell(shape='rectangle', condition='intact', storeys=2, basements=1, roof_type=None):
+def shell(shape='rectangle', condition='intact', storeys=2, basements=1, roof_type=None, width=10, depth=10):
     script = """const fs=require('fs');
 const roof='data:text/javascript;base64,'+fs.readFileSync('app/static/js/locationRoofSections.js').toString('base64');
 const source=fs.readFileSync('app/static/js/locationHouseGenerator.js','utf8').replace("'./locationRoofSections.js'",JSON.stringify(roof));
 import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'))
 .then(m=>console.log(JSON.stringify(m.planBuildingShell(JSON.parse(process.argv[1])).objects)));
 """
-    result = subprocess.run(['node', '-e', script, json.dumps(dict(minX=2, minZ=2, width=10,
-        depth=10, storeys=storeys, basements=basements, shape=shape, condition=condition, seed='shell', buildingId='shell',roofType=roof_type))],
+    result = subprocess.run(['node', '-e', script, json.dumps(dict(minX=2, minZ=2, width=width,
+        depth=depth, storeys=storeys, basements=basements, shape=shape, condition=condition, seed='shell', buildingId='shell',roofType=roof_type))],
         cwd=Path(__file__).resolve().parents[1], check=True, capture_output=True, text=True, encoding='utf-8')
     return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize('size', [6, 8, 12, 16])
+def test_flights_connect_small_and_large_houses_and_cellar_hatch_seals_route(app, size):
+    objects = [SimpleNamespace(id=i+1, **o) for i,o in enumerate(shell(width=size, depth=size, storeys=3))]
+    location = SimpleNamespace(id=1, grid_width=20, grid_height=20,
+        tiles_data=[[{'height':1} for _ in range(20)] for _ in range(20)])
+    entry = next(o for o in objects if o.type=='door')
+    hatch = next(o for o in objects if o.type=='hatch')
+    ladder = next(o for o in objects if o.type=='ladder')
+    start=(entry.tile_x,entry.tile_y+1,0)
+    assert abs(hatch.tile_x-entry.tile_x)+abs(hatch.tile_y-entry.tile_y)>=3
+    assert len([o for o in objects if o.type=='stairs'])==2
+    with patch.object(LocationObject,'query') as oq,patch.object(LocationCharacter,'query') as cq:
+        oq.filter_by.return_value.all.return_value=objects
+        cq.filter_by.return_value.all.return_value=[]
+        maps={l:CombatService._build_movement_map(location,floor_level=l) for l in [-1,0,1,2]}
+        target=(ladder.tile_x,ladder.tile_y,-1)
+        assert find_path(location,objects,start,(*start[:2],2),lambda l:maps[l])
+        assert not find_path(location,objects,start,target,lambda l:maps[l])
+        hatch.properties['is_open']=True
+        maps={l:CombatService._build_movement_map(location,floor_level=l) for l in [-1,0,1,2]}
+        assert find_path(location,objects,start,target,lambda l:maps[l])
+        assert find_path(location,objects,target,start,lambda l:maps[l])
 
 
 @pytest.mark.parametrize('shape', ['rectangle', 'L', 'U', 'C', 'compound'])
 @pytest.mark.parametrize('condition', ['intact', 'ruins'])
 def test_generated_entrance_basement_and_upper_connections(app, shape, condition):
     objects = [SimpleNamespace(id=i+1, **o) for i, o in enumerate(shell(shape, condition))]
+    hatches = [o for o in objects if o.type == 'hatch']
+    assert hatches and all(o.properties['is_open'] is False for o in hatches)
+    assert all(o.properties['level'] < 0 for o in objects if o.type == 'ladder')
+    for hatch in hatches:
+        hatch.properties['is_open'] = True
     location = SimpleNamespace(id=1, grid_width=16, grid_height=16,
         tiles_data=[[{'height':1} for _ in range(16)] for _ in range(16)])
     with patch.object(LocationObject, 'query') as oq, patch.object(LocationCharacter, 'query') as cq:
@@ -50,6 +79,8 @@ def test_generated_entrance_basement_and_upper_connections(app, shape, condition
 
 def test_generated_four_storeys_and_two_basements_keep_separate_landings(app):
     objects = [SimpleNamespace(id=i+1, **o) for i,o in enumerate(shell('U', storeys=4, basements=2))]
+    for o in objects:
+        if o.type == 'hatch': o.properties['is_open'] = True
     location = SimpleNamespace(id=1, grid_width=16, grid_height=16,
         tiles_data=[[{'height':1} for _ in range(16)] for _ in range(16)])
     with patch.object(LocationObject, 'query') as oq, patch.object(LocationCharacter, 'query') as cq:
@@ -65,6 +96,8 @@ def test_generated_four_storeys_and_two_basements_keep_separate_landings(app):
 @pytest.mark.parametrize('kind',['flat','shed','gable'])
 def test_volume_roofs_do_not_introduce_phantom_floor_obstacles(app,kind):
     objects = [SimpleNamespace(id=i+1, **o) for i,o in enumerate(shell('T', roof_type=kind))]
+    for o in objects:
+        if o.type == 'hatch': o.properties['is_open'] = True
     location=SimpleNamespace(id=1,grid_width=16,grid_height=16,tiles_data=[[{'height':1} for _ in range(16)] for _ in range(16)])
     with patch.object(LocationObject,'query') as oq,patch.object(LocationCharacter,'query') as cq:
         oq.filter_by.return_value.all.return_value=objects
@@ -197,7 +230,7 @@ def test_atomic_building_edits_isolate_levels_and_clients(client, app, create_us
         assert {o['id'] for o in after} == {o['id'] for o in before} - set(removed)
         assert {o['id'] for o in before if o['properties']['level'] == -2} <= set(removed)
         # Only the portal belonging to the removed shaft may change on the upper floor.
-        assert all(o['type'] == 'floor_opening' and o['properties']['level'] == -1
+        assert all(o['type'] in {'floor_opening', 'hatch'} and o['properties']['level'] == -1
                    for o in before if o['id'] in removed and o['properties']['level'] != -2)
         # Keep the neighboring building and terrain, even for an entire-building delete.
         neighbor = client.post(url+'/objects', headers=headers, json=dict(type='floor', name='neighbor',

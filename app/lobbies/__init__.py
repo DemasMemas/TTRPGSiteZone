@@ -2610,6 +2610,19 @@ def change_location_objects_batch(lobby_id, location_id, lobby):
                        and o.type in {'wall', 'door'}]
             if {o.id for o in deleted} != set(ids):
                 return jsonify({'error': 'Планировка изменилась. Обновите локацию и повторите предпросмотр.'}), 409
+        anomaly_generation = data.get('generate_anomalies')
+        if anomaly_generation is not None:
+            if (replacement is not None or furniture_replacement is not None
+                    or not isinstance(anomaly_generation, dict)
+                    or not isinstance(anomaly_generation.get('building_id'), str)):
+                raise ValidationError('Generate anomalies separately for a building')
+            versions = anomaly_generation.get('source_versions')
+            if (not isinstance(versions, list) or any(not isinstance(v, list) or len(v) != 2
+                    or any(type(n) is not int for n in v) for v in versions)):
+                raise ValidationError('Anomaly generation requires source revisions')
+            current = LocationObject.query.filter_by(location_id=location_id).all()
+            if sorted(versions) != sorted([[o.id, o.revision] for o in current]):
+                return jsonify({'error': 'Обстановка изменилась. Повторите генерацию аномалий.'}), 409
         specs = data.get('objects')
         if not isinstance(specs, list) or not (0 if replacement is not None or furniture_replacement is not None else 1) <= len(specs) <= 5000:
             raise ValidationError('Expected 1 to 5000 objects')
@@ -2625,6 +2638,11 @@ def change_location_objects_batch(lobby_id, location_id, lobby):
                         or type(props.get('level')) is not int or props['level'] != replacement['level']
                         or not isinstance(generation, dict) or generation.get('version') != 1):
                     raise ValidationError('Replacement must contain only layout walls and doors on the selected floor')
+        if anomaly_generation is not None:
+            from app.services.anomaly_profiles import anomaly_profile
+            if any(o['type'] != 'anomaly' or o.get('properties', {}).get('building_id') != anomaly_generation['building_id']
+                   or not anomaly_profile(o.get('properties', {}).get('anomaly_key')) for o in specs):
+                raise ValidationError('Expected existing anomaly types in the selected building')
         if furniture_replacement is not None:
             from app.services.location_furniture import validate_furniture_replacement
             deleted = validate_furniture_replacement(location, furniture_replacement, specs)
@@ -2799,7 +2817,7 @@ def update_location_object(lobby_id, object_id, lobby, participant):
             if min(max(abs(actor.pos_x - x), abs(actor.pos_y - y)) for x, y in footprint) > 1:
                 raise ValidationError('Too far from fire object')
     if 'is_on' in properties:
-        if obj.type not in {'ceiling_bulb', 'wall_bulb'}:
+        if obj.type not in {'ceiling_bulb', 'wall_bulb', 'household_street_lamp', 'household_floor_lamp'}:
             raise ValidationError('Only electric fixtures can be switched')
         if type(properties['is_on']) is not bool:
             raise ValidationError('is_on must be a boolean')

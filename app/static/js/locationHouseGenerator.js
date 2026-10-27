@@ -18,13 +18,14 @@ export function shellBodyRects(shape,width,depth) {
 // Empty shells use the same editable primitives and signed levels as manual building.
 // Two metre modules keep openings clear of corners and cap the number of objects.
 export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle',
-    storeys = 1, basements = 0, wealth = 'ordinary', condition = 'intact',
+    storeys = 1, basements = 0, wealth = 'ordinary', condition = 'intact', buildingType = 'residential',
     seed = '0', buildingId, roofType, roofPitch = 25, roofDirection = 'auto', roofOverhang = .25,
     bodies: requestedBodies = null, groundHeight = () => 0 }) {
     if (![minX, minZ, width, depth, storeys, basements].every(Number.isInteger)
         || width < 6 || depth < 6 || width > 16 || depth > 16 || width % 2 || depth % 2
         || storeys < 1 || storeys > 4 || basements < 0 || basements > 2 || !buildingId
         || !['rectangle', 'L', 'U', 'C', 'compound', 'T', 'cross', 'custom'].includes(shape)
+        || !['residential','shop','warehouse','workshop','cafe','clinic','office','school','garage','bathhouse'].includes(buildingType)
         || !['poor', 'ordinary', 'rich'].includes(wealth)
         || !['intact', 'worn', 'damaged', 'ruins'].includes(condition)) {
         return { error: 'Размеры: чётные числа от 6 до 16 м; этажи 1–4, подвалы 0–2' };
@@ -67,7 +68,7 @@ export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle
         if (occupied(x, z)) cells.push({ x, z });
     }
     const generation = { version: 1, minX, minZ, width, depth, shape, storeys, basements,
-        wealth, condition, seed: String(seed), ...(roofType?{roofType,roofPitch,roofDirection,bodies:bodyRects}: {}) };
+        wealth, condition, buildingType, seed: String(seed), ...(roofType?{roofType,roofPitch,roofDirection,bodies:bodyRects}: {}) };
     const objects = [];
     const style = {
         poor: { wall: 'wall', floor: 'art_aged_wood', color: '#877964', thickness: .16, window: .8 },
@@ -87,17 +88,45 @@ export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle
     // Keep the entrance and vertical circulation strip intact. Damage elsewhere is
     // missing geometry, never a colour-only effect or a phantom stair connection.
     const highestStorey=Math.max(...bodyRects.map(b=>b.storeys??storeys));
-    // The ordinary entry and alternating ladders need a four metre service area.
-    const service=cells.find(c=>Array.from({length:4/unit},(_,i)=>i).every(i=>
-        Array.from({length:4/unit},(_,j)=>j).every(j=>occupied(c.x+i,c.z+j,highestStorey-1))));
-    if(!service)return {error:'В контуре нет места для входа и межэтажных связей'};
-    const serviceX=minX+service.x*unit,serviceZ=minZ+service.z*unit;
     const entry=cells.find(c=>!occupied(c.x,c.z-1));
+    const entryX=minX+entry.x*unit+unit/2,entryZ=minZ+entry.z*unit+unit/2;
+    // Two parallel flights alternate direction, sharing clear landings at both
+    // ends. Narrow six metre houses use a shorter, steeper flight, never a ladder.
+    const serviceSizes=highestStorey>1?[[4,8],[8,4],[4,6],[6,4]]:[[4,4]];
+    let service=null;
+    for(const [w,d] of serviceSizes) {
+        const candidates=cells.filter(c=>Array.from({length:w/unit},(_,i)=>i).every(i=>
+            Array.from({length:d/unit},(_,j)=>j).every(j=>occupied(c.x+i,c.z+j,highestStorey-1))));
+        candidates.sort((a,b)=>Math.hypot(a.x-entry.x,a.z-entry.z)-Math.hypot(b.x-entry.x,b.z-entry.z));
+        if(candidates.length){service={...candidates[0],width:w,depth:d,alongX:w>d};break;}
+    }
+    if(!service)return {error:'Для лестничных маршей нужно место не меньше 4×6 м на всех наземных этажах основного корпуса'};
+    const serviceX=minX+service.x*unit,serviceZ=minZ+service.z*unit;
+    const span=Math.max(service.width,service.depth),flightDepth=span>=8?3.6:2;
+    const flightPoint=(lane,along)=>service.alongX?{x:serviceX+along,z:serviceZ+lane}:{x:serviceX+lane,z:serviceZ+along};
+    const cellarCandidates=[];
+    for(let z=minZ+1.5;z<minZ+depth-1;z++)for(let x=minX+1.5;x<minX+width-1;x++) {
+        if(![-1,1].every(dx=>[-1,1].every(dz=>occupied(Math.floor((x+dx-minX)/unit),Math.floor((z+dz-minZ)/unit)))))continue;
+        const u=service.alongX?z-serviceZ:x-serviceX,v=service.alongX?x-serviceX:z-serviceZ;
+        if(highestStorey>1&&u>0&&u<4&&v>0&&v<span)continue;
+        cellarCandidates.push({x,z});
+    }
+    const cellarScore=p=>Math.hypot(p.x-(serviceX+service.width/2),p.z-(serviceZ+service.depth/2))
+        +(Math.hypot(p.x-entryX,p.z-entryZ)<3?20:0);
+    cellarCandidates.sort((a,b)=>cellarScore(a)-cellarScore(b));
+    const cellar=cellarCandidates[0];
+    const cellarOther=cellarCandidates.find(p=>Math.hypot(p.x-cellar.x,p.z-cellar.z)>=2);
+    if(basements&&(!cellar||basements>1&&!cellarOther))return {error:'Не удалось разместить подвальные люки вне межэтажной лестницы'};
+    const circulation=[{x:serviceX+service.width/2,z:serviceZ+service.depth/2},...basements?[cellar,...(cellarOther?[cellarOther]:[])]:[]];
     for (let level = -basements; level < highestStorey; level++) {
         for (const { x, z } of cells) {
             if(!occupied(x,z,level))continue;
-            const protectedCell = x*unit < (service.x*unit+4) && z*unit < (service.z*unit+4)
-                && x>=service.x && z>=service.z || x===entry.x&&z===entry.z;
+            const cx=minX+x*unit+unit/2,cz=minZ+z*unit+unit/2;
+            const protectedCell = x*unit < service.x*unit+service.width && z*unit < service.z*unit+service.depth
+                && x>=service.x && z>=service.z || x===entry.x&&z===entry.z
+                || circulation.some(p=>Math.abs(cx-p.x)<=unit&&Math.abs(cz-p.z)<=unit
+                    || Math.abs(cz-entryZ)<unit&&cx>=Math.min(entryX,p.x)-unit/2&&cx<=Math.max(entryX,p.x)+unit/2
+                    || Math.abs(cx-p.x)<unit&&cz>=Math.min(entryZ,p.z)-unit/2&&cz<=Math.max(entryZ,p.z)+unit/2);
             const collapse = level > -basements && !protectedCell
                 && random(`slab:${level}:${x}:${z}`) < (condition === 'ruins' ? .48 : condition === 'damaged' ? .2 : 0);
             if (!collapse) add('floor', level, minX + x * unit + unit/2, minZ + z * unit + unit/2, unit, unit, .12,
@@ -120,10 +149,14 @@ export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle
                 const height = broken ? .45 + roll : 2.4;
                 add('wall', level, wx, wz, unit, style.thickness, height,
                     { rotation, color: style.color, visual_asset: style.wall, exterior_wall: true });
+                const windowMargin=Math.min(unit*.8,style.window)/2+.25;
+                const nearStairs=highestStorey>1&&wx>=serviceX-windowMargin&&wx<=serviceX+service.width+windowMargin
+                    &&wz>=serviceZ-windowMargin&&wz<=serviceZ+service.depth+windowMargin
+                    ||basements>0&&level===0&&Math.hypot(wx-cellar.x,wz-cellar.z)<1.5+windowMargin;
                 if (entrance && level === 0) {
                     add('door', level, wx, wz, Math.min(unit*.9,wealth === 'rich' ? 1.3 : 1), .18, 2,
                         { rotation, is_open: true, ...(condition === 'ruins' ? { visual_asset: 'opening', interactions: [] } : {}) });
-                } else if (level >= 0 && !broken && !entrance
+                } else if (level >= 0 && !broken && !entrance && !nearStairs
                     && (x + z) % (wealth === 'poor' ? 3 : 2) === 1
                     && occupied(x + (dz ? -1 : 0), z + (dx ? -1 : 0), level)
                     && occupied(x + (dz ? 1 : 0), z + (dx ? 1 : 0), level)) {
@@ -132,19 +165,24 @@ export function planBuildingShell({ minX, minZ, width, depth, shape = 'rectangle
                     add('window', level, wx, wz, Math.min(unit*.8,style.window), .14, 1,
                         { rotation, elevation: 1, ...(lost ? { is_open: true } : {}) });
                 }
-                if (wealth === 'rich' && !broken && !(entrance && level === 0)) {
-                    add('wall', level, wx, wz, unit, .34, .12,
-                        { rotation, elevation: 2.28, color: '#d4c9ae' });
-                }
             }
         }
         if (level < highestStorey - 1) {
-            // Alternate shafts to preserve a landing at every level.
-            const x = serviceX + (Math.abs(level) % 2 ? 2.5 : 1.5), z = serviceZ + 2.5;
-            if(!occupied(Math.floor((x-minX)/unit),Math.floor((z-minZ)/unit),level+1))return {error:'Над входной зоной нет площадки следующего этажа: выровняйте этажность основного корпуса'};
-            const broken = condition === 'ruins' && level === highestStorey - 2;
-            if (!broken) add('ladder', level, x, z, .9, .9, 2.4);
-            add('floor_opening', level + 1, x, z, 1, 1, .05);
+            if(level<0) {
+                const p=Math.abs(level)%2?cellar:cellarOther||cellar;
+                add('ladder',level,p.x,p.z,.9,.9,2.4,{elevation:.035});
+                add('hatch',level+1,p.x,p.z,1,1,.08,{elevation:.035,is_open:false});
+            } else {
+                const p=flightPoint(level%2?2.5:1.5,span/2);
+                const rotation=(service.alongX?Math.PI/2:0)+(level%2?Math.PI:0);
+                const broken=condition==='ruins'&&level===highestStorey-2;
+                if(!broken)add('stairs',level,p.x,p.z,.9,flightDepth,2.4,{rotation,elevation:.035});
+                else add('floor_opening',level+1,p.x,p.z,.9,flightDepth,.05,{rotation});
+            }
+        }
+        if(level>=0&&highestStorey>1)for(const lane of [.9,3.1]) {
+            const p=flightPoint(lane,span/2);
+            add('wall',level,p.x,p.z,flightDepth,.14,2.4,{rotation:service.alongX?0:Math.PI/2,visual_asset:'inner_wall',stairwell:true});
         }
     }
     // Compact only compatible rectangles. Openings remain separate editable objects;

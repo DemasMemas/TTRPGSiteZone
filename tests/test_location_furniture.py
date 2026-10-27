@@ -23,6 +23,8 @@ def furniture(**options):
 def test_furniture_keeps_room_routes_and_basement_ladders(app, shape, condition):
     data = furniture(shellOptions={'shape': shape, 'condition': condition, 'wealth': 'rich'})
     original = [SimpleNamespace(**o) for o in data['source']]
+    for o in original:
+        if o.type == 'hatch': o.properties['is_open'] = True
     additions = [SimpleNamespace(id=10000+i, **o) for i, o in enumerate(data['plan']['objects'])]
     location = SimpleNamespace(id=1, grid_width=18, grid_height=18,
                                tiles_data=[[{'height': 1} for _ in range(18)] for _ in range(18)])
@@ -141,6 +143,8 @@ def test_large_six_level_buildings_keep_real_routes_after_furnishing(app, shape,
     data = furniture(shellOptions={'shape': shape, 'wealth': wealth, 'condition': condition,
                                    'width': 16, 'depth': 16, 'storeys': 4, 'basements': 2})
     original = [SimpleNamespace(**o) for o in data['source']]
+    for o in original:
+        if o.type == 'hatch': o.properties['is_open'] = True
     complete = original+[SimpleNamespace(id=10000+i, **o) for i, o in enumerate(data['plan']['objects'])]
     location = SimpleNamespace(id=1, grid_width=24, grid_height=24,
                                tiles_data=[[{'height': 1} for _ in range(24)] for _ in range(24)])

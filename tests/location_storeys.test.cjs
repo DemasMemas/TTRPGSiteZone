@@ -98,13 +98,20 @@ test('floor menu uses the actual signed levels with zero as ground',()=>{
     const select={options:[],replaceChildren(...options){this.options=options;}};
     const down={},up={};
     const menu={querySelector:s=>s==='select'?select:s==='[data-floor-down]'?down:up};
+    const container={},dock={appendChild(m){m.parentNode=this;}},actions={};
+    menu.parentNode=container;
     const context=vm.createContext({locationViewLevel:-1,locationFloorCount:()=>3,locationMinimumLevel:()=>-3,
+        window:{locationEditMode:true,locationEditorTool:'building'},
         refreshLocationFloorDeleteAction(){},
-        document:{getElementById:()=>menu},Option:class{constructor(text,value){this.text=text;this.value=value;}}});
+        document:{getElementById:id=>id==='location-floor-menu'?menu:id==='location-building-actions'?actions:dock},Option:class{constructor(text,value){this.text=text;this.value=value;}}});
     vm.runInContext(part('refreshLocationFloorMenu','updateLocationLampFixtureFloors'),context);
     context.refreshLocationFloorMenu();
     assert.deepEqual(Array.from(select.options,o=>o.value),['-3','-2','-1','0','1','2']);
     assert.equal(select.value,'-1');assert.equal(down.disabled,false);
+    assert.equal(menu.parentNode,container,'floor navigation stays in its game position while editing');
+    assert.equal(actions.parentNode,dock);assert.equal(actions.hidden,false);
+    context.window.locationEditMode=false;context.refreshLocationFloorMenu();
+    assert.equal(menu.parentNode,container);assert.equal(actions.hidden,true);
 });
 
 test('stair movement tolerates a RAF timestamp before the event and ends at server height',()=>{

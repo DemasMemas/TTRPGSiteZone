@@ -31,8 +31,20 @@ test('intact rectangular shells compact slabs and walls without duplicating cove
     const plan=house.planBuildingShell({minX:2,minZ:2,width:12,depth:12,storeys:2,basements:2,buildingId:'compact'});
     assert.equal(plan.objects.filter(o=>o.type==='floor').length,4);
     assert.equal(plan.objects.filter(o=>o.type==='roof').length,1);
-    assert.equal(plan.objects.filter(o=>o.type==='wall').length,16);
+    assert.equal(plan.objects.filter(o=>o.type==='wall'&&!o.properties.stairwell).length,16);
+    assert.equal(plan.objects.filter(o=>o.type==='wall'&&o.properties.stairwell).length,4);
     assert.ok(plan.objects.filter(o=>o.type==='window').length<24);
+    assert.ok(plan.objects.some(o=>o.type==='window'),'other rooms retain their windows');
+    const {architecture}=await modules();
+    for(const window of plan.objects.filter(o=>o.type==='window')) {
+        const p=architecture.structurePose(window),level=window.properties.level;
+        for(const stair of plan.objects.filter(o=>o.type==='stairs'&&[level,level-1].includes(o.properties.level))) {
+            const q=architecture.structurePose(stair),dx=p.x-q.x,dz=p.z-q.z;
+            const distance=Math.hypot(Math.max(0,Math.abs(dx*q.axis.x+dz*q.axis.z)-q.width/2),
+                Math.max(0,Math.abs(dx*q.normal.x+dz*q.normal.z)-q.depth/2));
+            assert.ok(distance>p.width/2+.5,'stairs and upper landings have no nearby windows');
+        }
+    }
     for (const roofType of ['flat','shed','gable']) {
         const edge=house.planBuildingShell({minX:0,minZ:0,width:12,depth:12,storeys:2,basements:2,
             buildingId:'edge',roofType});
@@ -56,10 +68,13 @@ test('empty shells preserve orthogonal boundaries, independent wealth/damage, an
             assert.deepEqual(plan, house.planBuildingShell(options));
             assert.deepEqual(JSON.parse(JSON.stringify(plan)), plan);
             assert.deepEqual([...new Set(plan.objects.map(o => o.properties.level))].sort(), [-1,-2,0,1,2]);
-            assert.equal(plan.objects.filter(o => o.type === 'ladder').length, condition === 'ruins' ? 3 : 4);
+            assert.equal(plan.objects.filter(o => o.type === 'ladder').length, 2);
+            assert.equal(plan.objects.filter(o => o.type === 'stairs').length, condition === 'ruins' ? 1 : 2);
+            assert.ok(plan.objects.filter(o=>o.type==='ladder').every(o=>o.properties.level<0));
+            assert.ok(plan.objects.filter(o=>o.type==='hatch').every(o=>o.properties.is_open===false));
             assert.equal(plan.objects.filter(o => o.type === 'door').length, 1);
             for (const object of plan.objects) {
-                assert.ok(['floor','wall','roof','door','window','ladder','floor_opening'].includes(object.type));
+                assert.ok(['floor','wall','roof','door','window','ladder','stairs','hatch','floor_opening'].includes(object.type));
                 assert.equal(object.properties.building_id, 'shell');
                 assert.equal(object.properties.building_generation.wealth, wealth);
                 if (object.properties.visual_asset) assert.ok(catalog.findLocationAsset(object.properties.visual_asset));
@@ -72,7 +87,7 @@ test('empty shells preserve orthogonal boundaries, independent wealth/damage, an
             if (condition === 'damaged' || condition === 'ruins') {
                 assert.ok(area(plan, 'roof') < area(original, 'roof'));
                 assert.ok(plan.objects.some(o=>o.type==='wall'&&o.properties.dimensions.height<1));
-                assert.ok(area(plan, 'floor') < area(original, 'floor'));
+                assert.ok(area(plan, 'floor') <= area(original, 'floor'),'damage preserves essential landings even in a narrow wing');
             }
             for (const floor of plan.objects.filter(o=>o.type==='floor')) {
                 assert.equal(floor.properties.roof_enabled, false);
@@ -106,7 +121,7 @@ test('failed atomic shell creation preserves unrelated manual objects', async ()
         applyLocationObjectsChange(){throw Error('Failed transaction must not update scene');},
         showNotification(){},
     });
-    vm.runInContext(source,context);
+    vm.runInContext(scene.slice(scene.indexOf('async function planNewBuilding('),scene.indexOf('export async function generateLocationBuildingAnomalies('))+source,context);
     await context.createResidentialHouse({x:2,z:2},{x:11,z:11});
     assert.equal(requests,1);
     assert.deepEqual(deleted,[]);
@@ -130,7 +145,7 @@ test('shell roof sections use the saved editable building extent for camera cuta
     context.camera={position:{x:11,y:8,z:13,distanceTo:()=>10}};
     context.controls={target:{x:7,y:5,z:8}};
     context.locationObjectMeshes=[{position:{y:8.2},userData:{locationObject:object},traverse:fn=>fn(child)}];
-    Object.assign(context,{locationViewLevel:2,locationRoofsVisible:true,editMode:false,
+    Object.assign(context,{locationViewLevel:2,locationRoofsVisible:true,editMode:false,locationObjectPickCache:{key:null},
         updateStoreyTerrainVisibility(){},applyFogOfWar(){},updateLocationLampFixtureFloors(){},lampRenderSources:[]});
     const start=scene.indexOf('function updateRoofVisibility(');
     vm.runInContext(scene.slice(start,scene.indexOf('\n}',start)+2),context);

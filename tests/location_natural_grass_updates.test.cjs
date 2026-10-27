@@ -109,7 +109,7 @@ async function harness(tiles, objects = []) {
         refreshTerrainFoundation: () => false, updateTileCubes: () => false,
         ...Object.fromEntries(['updateLocationObjectHeight', 'moveTileDecorWithTerrain',
             'invalidateMovementMapCache', 'rebuildLocationTerrainSurface', 'rebuildWaterSurfaceMesh',
-            'rebuildLocationGrid', 'clearFogOverlay', 'applyFogOfWar', 'queueStaticLightFieldRefresh']
+            'rebuildLocationGrid', 'clearFogOverlay', 'applyFogOfWar', 'queueStaticLightFieldRefresh', 'updateRoofVisibility']
             .map(name => [name, () => {}])),
         releaseLocationModel() {}, isSharedLocationModelGeometry: () => false, releaseLocationPbrMaterial() {},
         attachStaticLightFieldToRoot(root) { root.traverse(mesh => {

@@ -157,6 +157,7 @@ test('near multi-storey houses retain lower floors while single-storey houses st
         objectMeshes: decor, window: { isGM: true }, fogIsActive: () => false,
         loadFogMemory() {}, updateFogOverlay() {}, syncFogMemoryGhosts() {},
         isFogHiddenObject: () => false,
+        getObjectGridPosition: object=>({x:object.tile_x||0,y:object.tile_y||0}),
         structureBuildingId: object => object?.properties?.building_id || null,
         structureLevel: object => Number(object?.properties?.level || 0),
     });
