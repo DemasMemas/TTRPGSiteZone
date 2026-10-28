@@ -245,7 +245,8 @@ export function applyStaticLightFieldMaterial(material, texture, field, level = 
     const previousCompile = material.onBeforeCompile;
     const previousKey = material.customProgramCacheKey;
     const controls = { enabled: { value: 1 } };
-    material.userData.staticLightFieldPrototype = { ...controls, previousCompile, previousKey };
+    material.userData.staticLightFieldPrototype = { ...controls, previousCompile, previousKey,
+        batchKey: `${texture.id}:${field.levels.findIndex(item => Number(item.id) === Number(level))}` };
     material.customProgramCacheKey = () => `${previousKey ? previousKey.call(material) : ''}:static-light-field-prototype-v2`;
     material.onBeforeCompile = shader => {
         previousCompile?.(shader);
@@ -307,6 +308,7 @@ export function applyStaticLightFieldMaterial(material, texture, field, level = 
                         * BRDF_Diffuse_Lambert(material.diffuseColor);
                 }`);
     };
+    material.userData.staticLightFieldPrototype.compile = material.onBeforeCompile;
     material.needsUpdate = true;
     return controls;
 }

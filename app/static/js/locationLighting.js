@@ -12,28 +12,6 @@ export const DEFAULT_LOCATION_LIGHTING = Object.freeze({
 });
 
 // Render slots are independent of the number of editable/saved lamps.
-export const LOCATION_LAMP_RENDER_BUDGET = Object.freeze({
-    pointShadow: 2, pointSimple: 4, spotShadow: 1, spotSimple: 1,
-});
-
-export function selectLocationLampRenderSources(sources, target, affectsView, previous = new Set(),
-    previousShadow = new Set(), budget = LOCATION_LAMP_RENDER_BUDGET) {
-    const ranked = sources.map((source, index) => {
-        if (!(Number(source.intensity) > 0) || !affectsView(source)) return null;
-        const distance = Math.hypot(Number(source.x) - target.x, Number(source.z) - target.z);
-        return { index, score: distance - (previous.has(index) ? 2 : 0)
-            - (previousShadow.has(index) ? 1 : 0) };
-    }).filter(Boolean).sort((left, right) => left.score - right.score || left.index - right.index);
-    const points = ranked.filter(item => sources[item.index].kind !== 'spot').map(item => item.index);
-    const spots = ranked.filter(item => sources[item.index].kind === 'spot').map(item => item.index);
-    return {
-        pointShadow: points.slice(0, budget.pointShadow),
-        pointSimple: points.slice(budget.pointShadow, budget.pointShadow + budget.pointSimple),
-        spotShadow: spots.slice(0, budget.spotShadow),
-        spotSimple: spots.slice(budget.spotShadow, budget.spotShadow + budget.spotSimple),
-    };
-}
-
 export function sameLocationLightingSettings(left, right) {
     if (!left || !right) return false;
     const a = { ...DEFAULT_LOCATION_LIGHTING, ...left };

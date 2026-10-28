@@ -1,6 +1,6 @@
 // Display cutaways affect the main camera only. Original roots still own
 // interaction, fog and edits; temporarily restore their physical shadow form.
-export function createLocationShadowPass(renderer,roots) {
+export function createLocationShadowPass(renderer,roots,withOriginals=draw=>draw()) {
     const original=renderer.shadowMap.render;
     function run(draw){
         const changes=[];
@@ -19,7 +19,7 @@ export function createLocationShadowPass(renderer,roots) {
         }
         try{return draw();}finally{for(let i=changes.length-1;i>=0;i--){const [o,key,value]=changes[i];o[key]=value;}}
     }
-    renderer.shadowMap.render=function(...args){return run(()=>original.apply(this,args));};
+    renderer.shadowMap.render=function(...args){return withOriginals(()=>run(()=>original.apply(this,args)));};
     return{run,dispose(){renderer.shadowMap.render=original;}};
 }
 

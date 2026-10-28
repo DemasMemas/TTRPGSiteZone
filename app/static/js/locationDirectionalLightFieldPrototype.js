@@ -1,4 +1,21 @@
-import { wallCrossesRay } from './locationStaticLightFieldPrototype.js';
+export function wallCrossesRay(x1, z1, y1, x2, z2, y2, wall) {
+    const rx = x2 - x1;
+    const rz = z2 - z1;
+    const sx = wall.x2 - wall.x1;
+    const sz = wall.z2 - wall.z1;
+    const divisor = rx * sz - rz * sx;
+    if (Math.abs(divisor) < 1e-8) return false;
+    const dx = wall.x1 - x1;
+    const dz = wall.z1 - z1;
+    const rayFraction = (dx * sz - dz * sx) / divisor;
+    const wallFraction = (dx * rz - dz * rx) / divisor;
+    const crossingY = y1 + (y2 - y1) * rayFraction;
+    return rayFraction > 1e-4 && rayFraction < 1 - 1e-4
+        && wallFraction >= -1e-4 && wallFraction <= 1 + 1e-4
+        && (wall.bottomY == null || crossingY >= wall.bottomY - 1e-4)
+        && (wall.topY == null || crossingY <= wall.topY + 1e-4);
+}
+
 
 export const DIRECTIONAL_FIELD_HEIGHTS = Object.freeze([0, 1.4, 2.8]);
 export const DIRECTIONAL_FIELD_RANGE = 64;
@@ -202,9 +219,9 @@ export function applyDirectionalLightFieldMaterial(material, texture, field, lev
     }
     const previousCompile = material.onBeforeCompile;
     const previousKey = material.customProgramCacheKey;
-    const controls = { enabled: { value: 1 } };
-    material.userData.directionalLightFieldPrototype = { ...controls, previousCompile, previousKey };
-    material.customProgramCacheKey = () => `${previousKey ? previousKey.call(material) : ''}:directional-field-v1`;
+    material.userData.directionalLightFieldPrototype = { previousCompile, previousKey,
+        batchKey: `${texture.id}:${field.levels.findIndex(item => Number(item.id) === Number(level))}` };
+    material.customProgramCacheKey = () => `${previousKey ? previousKey.call(material) : ''}:directional-field-v2`;
     material.onBeforeCompile = shader => {
         previousCompile?.(shader);
         const vertexMarker = '#include <project_vertex>';
@@ -220,7 +237,6 @@ export function applyDirectionalLightFieldMaterial(material, texture, field, lev
         shader.uniforms.directionalFieldBaseY = { value: Number(field.levels.find(item => Number(item.id) === Number(level)).y) };
         shader.uniforms.directionalFieldAtlasColumns = { value: field.atlasColumns };
         shader.uniforms.directionalFieldAtlasRows = { value: field.atlasRows };
-        shader.uniforms.directionalFieldEnabled = controls.enabled;
         shader.vertexShader = shader.vertexShader
             .replace('#include <common>', `#include <common>
                 varying vec3 vDirectionalFieldWorldPosition;`)
@@ -241,7 +257,6 @@ export function applyDirectionalLightFieldMaterial(material, texture, field, lev
                 uniform float directionalFieldBaseY;
                 uniform float directionalFieldAtlasColumns;
                 uniform float directionalFieldAtlasRows;
-                uniform float directionalFieldEnabled;
                 varying vec3 vDirectionalFieldWorldPosition;
                 vec3 directionalFieldRead(vec2 cell, float heightSlice, float direction) {
                     float plane = (directionalFieldLevel * ${DIRECTIONAL_FIELD_HEIGHTS.length.toFixed(1)}
@@ -255,7 +270,7 @@ export function applyDirectionalLightFieldMaterial(material, texture, field, lev
                     return encoded.rgb * encoded.a * ${DIRECTIONAL_FIELD_RANGE.toFixed(1)};
                 }`)
             .replace(fragmentMarker, `${fragmentMarker}
-                if (directionalFieldEnabled > 0.5) {
+                {
                     vec3 fieldNormal = inverseTransformDirection(normal, viewMatrix);
                     vec2 position = clamp(vDirectionalFieldWorldPosition.xz,
                         vec2(0.0), directionalFieldSize - vec2(0.0001));
@@ -279,8 +294,8 @@ export function applyDirectionalLightFieldMaterial(material, texture, field, lev
                         * BRDF_Diffuse_Lambert(material.diffuseColor);
                 }`);
     };
+    material.userData.directionalLightFieldPrototype.compile = material.onBeforeCompile;
     material.needsUpdate = true;
-    return controls;
 }
 
 export function removeDirectionalLightFieldMaterial(material) {

@@ -128,6 +128,8 @@ export function releaseSurfaceTextures(kinds) {
 export function applySurfacePattern(material, texture, scale = 0.25, projection = 'sides') {
     const previousCompile = material.onBeforeCompile;
     const previousKey = material.customProgramCacheKey?.bind(material);
+    material.userData.surfacePattern = { previousCompile, normal: projection !== 'top',
+        batchKey: `${texture.id}:${scale}:${projection}` };
     material.customProgramCacheKey = () => `${previousKey ? previousKey() : ''}:surface-pattern:${projection}`;
     material.onBeforeCompile = shader => {
         previousCompile?.(shader);
@@ -174,4 +176,5 @@ export function applySurfacePattern(material, texture, scale = 0.25, projection 
                 diffuseColor.rgb *= 0.55 + 0.55 * surfaceShade;
             `);
     };
+    material.userData.surfacePattern.compile = material.onBeforeCompile;
 }

@@ -1,7 +1,10 @@
 // Read-only benchmark of saved Trava3 location 24, using real GPU Chrome.
 // Runs without vsync/FPS limit. VTT_PERF_COMPARE=1 selects comparable camera views.
 // VTT_PERF_SOURCE can supply an earlier locationScene.js for before/after runs.
+// VTT_PERF_BASELINE_DIR supplies its matching JS modules for older revisions.
 // VTT_PERF_SNAPSHOT freezes one server response for comparisons during editing.
+// VTT_PERF_PHASES=overview-original,overview,near-original,near,motion-original,motion,editing-original,editing
+// compares the original renderer and cached batches in one browser; VERIFY=1 adds GPU checks.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -26,6 +29,7 @@ async function connect(url) {
         const message = JSON.parse(event.data);
         if(message.method==='Fetch.requestPaused'){
             const p=message.params,name=new URL(p.request.url).pathname.split('/').pop(),dir=process.env.VTT_WATER_BASELINE_DIR;
+            if(!['GET','HEAD'].includes(p.request.method)){networkEvents.push({blockedMutation:p.request.method});call('Fetch.failRequest',{requestId:p.requestId,errorReason:'BlockedByClient'}).catch(console.error);return;}
             const file=dir&&path.join(dir,name);
             (file&&fs.existsSync(file)?call('Fetch.fulfillRequest',{requestId:p.requestId,responseCode:200,responseHeaders:[{name:'Content-Type',value:'application/javascript'}],body:fs.readFileSync(file).toString('base64')}):call('Fetch.continueRequest',{requestId:p.requestId})).catch(console.error);
         }
@@ -87,12 +91,25 @@ socketio.run(app,host='127.0.0.1',port=5049,debug=False,use_reloader=False,allow
  const profile=fs.mkdtempSync(path.join(os.tmpdir(),'vtt-pripyat-perf-'));
  const override=fs.mkdtempSync(path.join(os.tmpdir(),'vtt-perf-source-'));
  let source=fs.readFileSync(path.join(root,'app/static/js/locationScene.js'),'utf8');
+ if(process.env.VTT_PERF_BASELINE_DIR)source=fs.readFileSync(path.join(process.env.VTT_PERF_BASELINE_DIR,'locationScene.js'),'utf8');
  if(process.env.VTT_PERF_SOURCE)source=fs.readFileSync(process.env.VTT_PERF_SOURCE,'utf8');
  fs.writeFileSync(path.join(override,'locationScene.js'),source+`
-window.__quarterPerf={get scene(){return scene},get renderer(){return renderer},get sun(){return locationDirectionalLight},get grass(){return grassDetailGroup},get roots(){return locationObjectMeshes},get roofs(){return roofMeshes},stats:locationBuildingProfileStats};
+window.__quarterPerf={get scene(){return scene},get renderer(){return renderer},get sun(){return locationDirectionalLight},get grass(){return grassDetailGroup},get roots(){return locationObjectMeshes},get roofs(){return roofMeshes},get batches(){return typeof locationRenderBatches==='undefined'?null:locationRenderBatches},stats:locationBuildingProfileStats};
+window.__quarterPerf.startPreview=()=>{const root=locationObjectMeshes.find(m=>m.userData.locationObject?.type==='household_street_bench');editorSelection={kind:'structure',id:root.userData.locationObject.id};editorSelections=[editorSelection];updateEditorSelectionVisual();return beginMoveSelectedLocationAsset();};
+window.__quarterPerf.endPreview=()=>clearEditorSelection();
+window.__quarterPerf.installCounters=()=>{const shadowUpdate=locationShadowCache.update.bind(locationShadowCache);
+if(typeof locationRenderBatches!=='undefined'&&locationRenderBatches){const prepare=locationRenderBatches.prepare;locationRenderBatches.prepare=function(...args){if(window.__perfNoBatches)return;const start=performance.now();try{return prepare(...args)}finally{if(window.__perfActive){const c=window.__perfCounts.batches ||= {count:0,ms:0};c.count++;c.ms+=performance.now()-start}}};}
+const add=scene.add;scene.add=function(...args){if(window.__perfActive)for(const m of args)if(m.userData.locationRenderBatch){const c=window.__perfCounts.batchBuild ||= {count:0,ms:0};c.count++;}return add.apply(this,args)};
+locationShadowCache.update=function(...args){const start=performance.now();const value=shadowUpdate(...args);if(window.__perfActive){window.__perfShadow.push(Boolean(locationDirectionalLight.shadow.needsUpdate));const c=window.__perfCounts.sunCache ||= {count:0,ms:0};c.count++;c.ms+=performance.now()-start;}return value};};
 const originalRoofUpdate=updateRoofVisibility;
 updateRoofVisibility=function(...args){const start=performance.now();const value=originalRoofUpdate(...args);if(window.__perfActive)window.__perfRoofs.push(performance.now()-start);return value};
 `);
+ if(process.env.VTT_PERF_BASELINE_DIR)for(const name of fs.readdirSync(process.env.VTT_PERF_BASELINE_DIR)){if(name!=='locationScene.js'&&name.endsWith('.js'))fs.copyFileSync(path.join(process.env.VTT_PERF_BASELINE_DIR,name),path.join(override,name));}
+ for(const name of ['rebuildLocationRoofs','rebuildSmoothTerrainMesh','applyLocationLighting','setupLocationEditing','updateBuildPreview','flushPendingTerrainRefresh','applyFogOfWar','getLocationBuildingViews']){
+  if(source.includes('function '+name+'('))fs.appendFileSync(path.join(override,'locationScene.js'),`
+const perf_${name}=${name};${name}=function(...args){const start=performance.now();try{return perf_${name}(...args)}finally{if(window.__perfActive){const c=window.__perfCounts['${name}'] ||= {count:0,ms:0};c.count++;c.ms+=performance.now()-start}}};
+`);
+ }
  process.env.VTT_WATER_BASELINE_DIR=override;
  let browser,page;
  try{
@@ -108,7 +125,7 @@ updateRoofVisibility=function(...args){const start=performance.now();const value
   const pages=await(await fetch(`http://127.0.0.1:${port}/json`)).json();
   page=await connect(pages.find(p=>p.type==='page').webSocketDebuggerUrl);
   await page.call('Page.enable');await page.call('Runtime.enable');await page.call('Log.enable');
-  await page.call('Fetch.enable',{patterns:[{urlPattern:'*/static/js/locationScene.js',requestStage:'Request'}]});
+  await page.call('Fetch.enable',{patterns:[{urlPattern:'*/static/js/*.js',requestStage:'Request'},{urlPattern:'*/lobbies/19/locations/24*',requestStage:'Request'}]});
   await page.call('Page.navigate',{url:base});await page.until(`location.origin===${JSON.stringify(base)}`,'origin');
   await page.evaluate(`localStorage.setItem('access_token',${JSON.stringify(data.token)});localStorage.setItem('user_id','${data.user}');true`);
   await page.call('Page.navigate',{url:base+'/lobbies/19/page'});
@@ -116,36 +133,57 @@ updateRoofVisibility=function(...args){const start=performance.now();const value
   await page.evaluate(`window.__quarterSnapshot=${JSON.stringify(snapshot)};true`);
   await page.evaluate(`(async()=>{window.L=await import('/static/js/locationScene.js');const {Server}=await import('/static/js/api.js');
       const original=Server.getLocationDetail;Server.getLocationDetail=async(lobby,id)=>id===24?structuredClone(__quarterSnapshot):original.call(Server,lobby,id);
-      await enterLocation(24);socket.disconnect();L.loadLocation(structuredClone(__quarterSnapshot));return true})()`);
+      await enterLocation(24);socket.disconnect();return true})()`);
   await page.until(`window.locationControls&&__quarterPerf.roots.length===${data.count}`,'quarter render');
+  await page.evaluate('__quarterPerf.installCounters();true');
   console.log('GPU',await page.evaluate(`(()=>{const gl=__quarterPerf.renderer.getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');return gl.getParameter(ext?.UNMASKED_RENDERER_WEBGL||gl.RENDERER)})()`));
+  if(process.env.VTT_PERF_PROFILE==='1')console.log('MESHES',await page.evaluate(`(()=>{const types={};for(const root of __quarterPerf.roots){const type=root.userData.locationObject.type;const c=types[type] ||= {roots:0,meshes:0,shared:0};c.roots++;root.traverse(m=>{if(m.isMesh){c.meshes++;if(m.geometry.userData.householdShared)c.shared++}});}return types})()`));
   await page.evaluate(`(()=>{const p=__quarterPerf,r=p.renderer,render=r.render.bind(r);window.__perfRender=[];window.__perfRoofs=[];window.__perfCalls=[];window.__perfTriangles=[];
       r.render=function(...args){const start=performance.now();const value=render(...args);if(window.__perfActive){__perfRender.push(performance.now()-start);__perfCalls.push(r.info.render.calls);__perfTriangles.push(r.info.render.triangles);}return value};
       document.querySelector('#panel-tools:not(.collapsed) .toggle-btn')?.click();document.querySelector('#panel-characters:not(.collapsed) .toggle-btn')?.click();return true})()`);
+  if(process.env.VTT_PERF_EDITOR==='1')await page.evaluate(`L.setLocationEditMode(true);selectLocationEditorTool('select');true`);
+  await page.evaluate(`(()=>{
+    const p=__quarterPerf,r=p.renderer,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    window.__perfGPU=[];window.__perfPending=[];window.__perfCounts={};window.__perfShadow=[];
+    const render=r.render.bind(r);r.render=function(...args){
+      for(let i=__perfPending.length-1;i>=0;i--){const q=__perfPending[i];if(gl.getQueryParameter(q,gl.QUERY_RESULT_AVAILABLE)){
+        if(!gl.getParameter(ext.GPU_DISJOINT_EXT))__perfGPU.push(gl.getQueryParameter(q,gl.QUERY_RESULT)/1e6);
+        gl.deleteQuery(q);__perfPending.splice(i,1)}}
+      const q=window.__perfActive&&ext?gl.createQuery():null;if(q)gl.beginQuery(ext.TIME_ELAPSED_EXT,q);
+      try{return render(...args)}finally{if(q){gl.endQuery(ext.TIME_ELAPSED_EXT);__perfPending.push(q)}}
+    };
+    return true})()`);
+  if(process.env.VTT_PERF_PROFILE==='1'){await page.call('Profiler.enable');await page.call('Profiler.setSamplingInterval',{interval:1000});}
   const results=[];
-  const phases=process.env.VTT_PERF_COMPARE==='1'?['overview','near','motion']:['overview','no-grass','no-shadows','no-buildings','near','motion'];
+  const phases=process.env.VTT_PERF_PHASES?process.env.VTT_PERF_PHASES.split(','):process.env.VTT_PERF_COMPARE==='1'?['overview','near','motion']:['overview','no-grass','no-shadows','no-buildings','near','motion'];
   for(const phase of phases){
    await page.evaluate(`(()=>{const p=__quarterPerf;window.__perfSaved=p.roots.map(m=>[m,m.visible]);window.__perfGrass=p.grass?.visible;
-    const near=${phase==='near'},x=near?29:35,z=near?43:32,h=near?18:75;
+    window.__perfNoBatches=${phase.endsWith('-original')};
+    const near=${phase.startsWith('near')},x=near?29:35,z=near?43:32,h=near?18:75;
     locationControls.target.set(x,1,z);locationControls.object.position.set(x+h*.45,h,z+h*.7);locationControls.update();
     if(${phase==='no-grass'}&&p.grass)p.grass.visible=false;
     if(${phase==='no-shadows'})p.renderer.shadowMap.enabled=false;
     if(${phase==='no-buildings'})p.roots.forEach(m=>m.visible=false);
     return true})()`);
-   await pause(1500);
-   if(phase==='overview'){
-    const screenshot=path.join(os.tmpdir(),'vtt-pripyat-perf-'+(process.env.VTT_PERF_LABEL||'baseline')+'-overview.png');
+   await pause(Number(process.env.VTT_PERF_WARMUP_MS||1500));
+   if(phase.startsWith('editing')){assert.equal(await page.evaluate('__quarterPerf.startPreview()'),true);await pause(1000);}
+   if(process.env.VTT_PERF_PROFILE==='1')await page.call('Profiler.start');
+   if(phase.startsWith('overview')||phase.startsWith('near')){
+    const screenshot=path.join(os.tmpdir(),'vtt-pripyat-perf-'+(process.env.VTT_PERF_LABEL||'baseline')+'-'+phase+'.png');
     fs.writeFileSync(screenshot,Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
    }
-   const result=await page.evaluate(`new Promise(resolve=>{window.__perfRender=[];window.__perfRoofs=[];window.__perfCalls=[];window.__perfTriangles=[];window.__perfActive=true;
+   const result=await page.evaluate(`new Promise(resolve=>{window.__perfRender=[];window.__perfRoofs=[];window.__perfCalls=[];window.__perfTriangles=[];window.__perfActive=true;window.__perfGPU=[];window.__perfCounts={};window.__perfShadow=[];
     const values=[],start=performance.now();let previous=start;
     const step=now=>{values.push(now-previous);previous=now;
-      if(${phase==='motion'}){const x=35+Math.sin((now-start)*.001)*3;locationControls.target.x=x;locationControls.object.position.x=x+75*.45;}
-      if(now-start<3500){requestAnimationFrame(step);return;}
+      if(${phase.startsWith('motion')}){const x=35+Math.sin((now-start)*.001)*3;locationControls.target.x=x;locationControls.object.position.x=x+75*.45;}
+      if(${phase.startsWith('editing')}){const canvas=__quarterPerf.renderer.domElement,r=canvas.getBoundingClientRect();canvas.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerId:1,pointerType:'mouse',clientX:r.left+r.width*.5+Math.sin((now-start)*.001)*100,clientY:r.top+r.height*.6+Math.cos((now-start)*.001)*40}));}
+      if(now-start<${Number(process.env.VTT_PERF_SAMPLE_MS||3500)}){requestAnimationFrame(step);return;}
       window.__perfActive=false;const mean=a=>a.reduce((s,n)=>s+n,0)/Math.max(1,a.length),p95=a=>[...a].sort((a,b)=>a-b)[Math.floor(a.length*.95)];
-      resolve({phase:${JSON.stringify(phase)},fps:1000/mean(values.slice(1)),frameMs:mean(values.slice(1)),p95Ms:p95(values.slice(1)),renderMs:mean(__perfRender),roofsMs:mean(__perfRoofs),calls:Math.round(mean(__perfCalls)),triangles:Math.round(mean(__perfTriangles)),stats:__quarterPerf.stats()});};requestAnimationFrame(step)})`);
+      resolve({phase:${JSON.stringify(phase)},fps:1000/mean(values.slice(1)),frameMs:mean(values.slice(1)),p95Ms:p95(values.slice(1)),renderMs:mean(__perfRender),roofsMs:mean(__perfRoofs),calls:Math.round(mean(__perfCalls)),triangles:Math.round(mean(__perfTriangles)),gpuMs:__perfGPU.length?mean(__perfGPU):null,gpuP95Ms:p95(__perfGPU),counters:__perfCounts,shadowFrames:__perfShadow.filter(Boolean).length,frames:__perfRender.length,stats:__quarterPerf.stats()});};requestAnimationFrame(step)})`);
+   if(process.env.VTT_PERF_PROFILE==='1'){const {profile:cpu}=await page.call('Profiler.stop');const counts=new Map();for(const id of cpu.samples||[])counts.set(id,(counts.get(id)||0)+1);result.cpuTop=cpu.nodes.filter(n=>counts.has(n.id)).sort((a,b)=>counts.get(b.id)-counts.get(a.id)).slice(0,16).map(n=>({name:n.callFrame.functionName,url:n.callFrame.url.split('/').pop(),line:n.callFrame.lineNumber+1,samples:counts.get(n.id)}));}
    results.push(result);console.log('PERF',JSON.stringify(result));
-   await page.evaluate(`(()=>{const p=__quarterPerf;if(p.grass)p.grass.visible=window.__perfGrass;p.renderer.shadowMap.enabled=true;p.renderer.shadowMap.needsUpdate=true;window.__perfSaved.forEach(([m,v])=>m.visible=v);return true})()`);
+   if(phase.startsWith('editing')){assert.ok(result.counters.updateBuildPreview?.count>10,'actual editor preview must update');await page.call('Input.dispatchKeyEvent',{type:'keyDown',code:'Escape',key:'Escape'});await page.call('Input.dispatchKeyEvent',{type:'keyUp',code:'Escape',key:'Escape'});await page.evaluate('__quarterPerf.endPreview();true');}
+   await page.evaluate(`(()=>{const p=__quarterPerf;if(p.grass)p.grass.visible=window.__perfGrass;p.renderer.shadowMap.enabled=true;p.renderer.shadowMap.needsUpdate=true;window.__perfSaved.forEach(([m,v])=>m.visible=v);window.__perfNoBatches=false;return true})()`);
   }
   const filename=path.join(os.tmpdir(),'vtt-pripyat-perf-'+(process.env.VTT_PERF_LABEL||'baseline')+'.json');fs.writeFileSync(filename,JSON.stringify(results,null,2));console.log('RESULT',filename);
   const shadowCheck=await page.evaluate(`(async()=>{const p=__quarterPerf,r=p.renderer;
@@ -163,7 +201,9 @@ updateRoofVisibility=function(...args){const start=performance.now();const value
   assert.equal(shadowCheck.before,shadowCheck.cutaway,'hiding roofs must retain physical shadows');
   assert.equal(shadowCheck.before,shadowCheck.upper,'switching the viewed floor must retain physical shadows');
   assert.equal(shadowCheck.before,shadowCheck.floorRestored);
+  if(process.env.VTT_PERF_VERIFY==='1')await require('./location_render_batches.browser.cjs')(page);
   const screenshot=path.join(os.tmpdir(),'vtt-pripyat-perf-'+(process.env.VTT_PERF_LABEL||'baseline')+'.png');fs.writeFileSync(screenshot,Buffer.from((await page.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
+  assert.ok(!page.networkEvents.some(e=>e.blockedMutation),'benchmark must never attempt to save the real map');
  }finally{if(page){await page.call('Browser.close').catch(()=>{});page.close();}browser?.kill();server.kill();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
 
