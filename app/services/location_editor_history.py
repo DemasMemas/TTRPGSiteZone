@@ -45,6 +45,33 @@ def apply_object_edit(location_id, lobby_id, data):
     def conflict():
         raise ConflictError('Затронутые данные уже изменены. Отмена или повтор не применены; обновите сцену.')
 
+    # Paste and replay must not attach copies to a wall/floor that changed
+    # after the preview. Lock dependencies even though this edit doesn't write them.
+    checks = data.get('checks', {})
+    if not isinstance(checks, dict):
+        raise ValidationError('Invalid edit dependencies')
+    versions, ground = checks.get('objects', []), checks.get('ground', [])
+    if (not isinstance(versions, list) or len(versions) > 5000
+            or any(not isinstance(v, list) or len(v) != 2 or any(type(n) is not int for n in v) for v in versions)
+            or len({v[0] for v in versions}) != len(versions)):
+        raise ValidationError('Invalid dependency revisions')
+    if versions:
+        locked = LocationObject.query.filter(LocationObject.location_id == location_id,
+            LocationObject.id.in_([v[0] for v in versions])).populate_existing().with_for_update().all()
+        if sorted([[o.id, o.revision] for o in locked]) != sorted(versions):
+            conflict()
+    if not isinstance(ground, list) or len(ground) > location.grid_width * location.grid_height:
+        raise ValidationError('Invalid ground dependencies')
+    ground_seen = set()
+    for cell in ground:
+        if (not isinstance(cell, dict) or type(cell.get('x')) is not int or type(cell.get('z')) is not int
+                or not 0 <= cell['x'] < location.grid_width or not 0 <= cell['z'] < location.grid_height
+                or (cell['x'], cell['z']) in ground_seen):
+            raise ValidationError('Invalid ground dependency')
+        ground_seen.add((cell['x'], cell['z']))
+        if original_tiles[cell['z']][cell['x']].get('height') != cell.get('height'):
+            conflict()
+
     for item in objects:
         if not isinstance(item, dict) or type(item.get('id')) is not int or item['id'] in ids:
             raise ValidationError('Expected unique object IDs')

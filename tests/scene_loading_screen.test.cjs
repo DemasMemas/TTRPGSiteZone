@@ -19,24 +19,34 @@ function harness() {
     const title = { textContent: '' };
     const detail = { textContent: '' };
     const retry = { hidden: true };
+    const cancel = { hidden: false, textContent: '' };
+    const percent = { textContent: '' };
+    const fill = { style: {} };
+    const progress = { setAttribute(name, value) { this[name] = value; } };
     const elements = new Map([
         ['scene-loading-screen', screen],
         ['scene-loading-title', title],
         ['scene-loading-detail', detail],
         ['scene-loading-retry', retry],
+        ['scene-loading-cancel', cancel],
+        ['scene-loading-percent', percent],
+        ['scene-loading-fill', fill],
+        ['scene-loading-progress', progress],
+        ['lobby-name', { textContent: 'Тестовое лобби' }],
     ]);
     const frames = [];
     const context = vm.createContext({
+        AbortController,
         document: { getElementById: id => elements.get(id) },
         requestAnimationFrame: callback => frames.push(callback),
-        window: { isLocationActive: false, worldLoadMetrics: { complete: false } },
+        window: { isLocationActive: false, worldLoadMetrics: { complete: false }, location: {} },
         console: { error() {} },
     });
     vm.runInContext(`${helpers}\n${worldLoad}`, context);
     const flushFrames = () => {
         while (frames.length) frames.shift()();
     };
-    return { context, classes, title, detail, retry, flushFrames };
+    return { context, classes, title, detail, retry, cancel, percent, fill, progress, flushFrames };
 }
 
 test('an old loading completion cannot hide the next scene or its error', () => {
@@ -63,6 +73,48 @@ test('an old loading completion cannot hide the next scene or its error', () => 
     assert.equal(retry.hidden, false);
 });
 
+test('progress is monotonic, accessible and belongs to the current scene', () => {
+    const { context, title, percent, fill, progress } = harness();
+    const world = context.showSceneLoading('world');
+    assert.equal(title.textContent, 'Тестовое лобби');
+    context.setSceneLoadingProgress(world, 42.3);
+    context.setSceneLoadingProgress(world, 12);
+    assert.equal(percent.textContent, '42%');
+    assert.equal(fill.style.width, '42%');
+    assert.equal(progress['aria-valuenow'], '42');
+    context.showSceneLoading('location');
+    context.setSceneLoadingProgress(world, 100);
+    assert.equal(percent.textContent, '0%');
+});
+
+test('cancelling aborts the request and rejects late completion or errors', () => {
+    const { context, classes, retry, flushFrames } = harness();
+    const world = context.showSceneLoading('world');
+    const signal = vm.runInContext('sceneLoadingController.signal', context);
+    context.window.cancelSceneLoading();
+    assert.equal(signal.aborted, true);
+    assert.equal(context.window.location.href, '/');
+    context.finishSceneLoading(world);
+    context.failSceneLoading(world, 'late failure');
+    flushFrames();
+    assert.equal(classes.has('is-hidden'), false);
+    assert.equal(retry.hidden, true);
+});
+
+test('location cancellation returns to the map and remains available on failure', () => {
+    const { context, cancel } = harness();
+    context.window.MAP_CHUNKS_WIDTH = 2;
+    let exits = 0;
+    context.window.exitLocation = () => { exits++; };
+    const location = context.showSceneLoading('location');
+    context.failSceneLoading(location, 'failed');
+    assert.equal(cancel.hidden, false);
+    context.window.cancelSceneLoading();
+    assert.equal(exits, 1);
+    assert.equal(context.isCurrentSceneLoading(location), false);
+    assert.equal(context.window.locationDirectOpenPending, false);
+});
+
 test('world screen waits for all chunks and retries after a paused location load', async () => {
     const { context, classes, retry, flushFrames } = harness();
     let loads = 0;
@@ -87,4 +139,56 @@ test('world screen waits for all chunks and retries after a paused location load
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(classes.has('is-error'), true);
     assert.equal(retry.hidden, false);
+});
+
+function chunksHarness() {
+    const source = fs.readFileSync(path.join(__dirname, '../app/static/js/lobbyData.js'), 'utf8');
+    let finishTerrain;
+    const terrain = new Promise(resolve => { finishTerrain = resolve; });
+    let respond;
+    const response = new Promise(resolve => { respond = resolve; });
+    const chunksMap = new Map();
+    const context = vm.createContext({
+        window: { MAP_CHUNKS_WIDTH: 1, MAP_CHUNKS_HEIGHT: 1 },
+        currentLobbyId: 1, chunksMap,
+        performance: { now: () => 1, mark() {}, measure() {} },
+        Server: { getChunks: () => response },
+        loadGrassGroundPixels: async () => {},
+        setWorldGrassGroundPixelsEnabled() {},
+        waitForWorldTerrainRefresh: () => terrain,
+        addChunk(x, y) { chunksMap.set(`${x},${y}`, {}); },
+        console: { info() {}, error() {}, warn() {} },
+    });
+    vm.runInContext(source.slice(source.indexOf('let loadingAllChunks = null;')).replace('export ', ''), context);
+    return { context, chunksMap, finishTerrain, respond: () => respond([{ chunk_x: 0, chunk_y: 0, data: [] }]) };
+}
+
+test('world progress reaches 100 only after terrain assembly, including shared callers', async () => {
+    const { context, respond, finishTerrain } = chunksHarness();
+    const samples = [];
+    const loading = context.loadAllChunks();
+    assert.equal(context.loadAllChunks({ onProgress: value => samples.push(value) }), loading);
+    respond();
+    await new Promise(setImmediate);
+    assert.equal(samples.at(-1), 90);
+    assert.equal(context.window.worldLoadMetrics.complete, undefined);
+    finishTerrain();
+    await loading;
+    assert.equal(samples.at(-1), 100);
+    assert.equal(context.window.worldLoadMetrics.complete, true);
+});
+
+test('aborted world load discards late chunks and can be restarted', async () => {
+    const { context, chunksMap, respond, finishTerrain } = chunksHarness();
+    const controller = new AbortController();
+    const loading = context.loadAllChunks({ signal: controller.signal });
+    controller.abort();
+    const retry = context.loadAllChunks();
+    respond();
+    await loading;
+    assert.equal(chunksMap.size, 0);
+    finishTerrain();
+    await retry;
+    assert.equal(chunksMap.size, 1);
+    assert.equal(context.window.worldLoadMetrics.complete, true);
 });

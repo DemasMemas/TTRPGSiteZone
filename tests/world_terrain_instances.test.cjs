@@ -702,7 +702,7 @@ test('world chunks wait for one shared grass image load and keep a consistent fa
     const lobbySource = fs.readFileSync(path.join(__dirname, '../app/static/js/lobbyData.js'), 'utf8');
     const start = lobbySource.indexOf('let loadingAllChunks = null;');
     assert.ok(start >= 0);
-    const code = lobbySource.slice(start).replace('export function loadAllChunks()', 'function loadAllChunks()');
+    const code = lobbySource.slice(start).replace('export function loadAllChunks(', 'function loadAllChunks(');
     const setup = () => {
         let resolveImages;
         let rejectImages;

@@ -129,8 +129,8 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}/world-groups`);
     },
 
-    async getWorldRules(lobbyId) {
-        return apiFetch(`/lobbies/${lobbyId}/world-rules`);
+    async getWorldRules(lobbyId, options = {}) {
+        return apiFetch(`/lobbies/${lobbyId}/world-rules`, options);
     },
 
     async createMutant(lobbyId, payload) {
@@ -326,8 +326,8 @@ export const Server = {
     },
 
     // ----- Карта -----
-    async getChunks(lobbyId, minX, maxX, minY, maxY) {
-        return apiFetch(`/lobbies/${lobbyId}/chunks?min_chunk_x=${minX}&max_chunk_x=${maxX}&min_chunk_y=${minY}&max_chunk_y=${maxY}`);
+    async getChunks(lobbyId, minX, maxX, minY, maxY, options = {}) {
+        return apiFetch(`/lobbies/${lobbyId}/chunks?min_chunk_x=${minX}&max_chunk_x=${maxX}&min_chunk_y=${minY}&max_chunk_y=${maxY}`, options);
     },
 
     async updateTile(lobbyId, chunkX, chunkY, tileX, tileY, updates) {
@@ -462,8 +462,8 @@ export const Server = {
         return apiFetch(`/lobbies/${lobbyId}/locations`);
     },
 
-    async getLocationDetail(lobbyId, locationId) {
-        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`);
+    async getLocationDetail(lobbyId, locationId, options = {}) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}`, options);
     },
 
     async updateLocation(lobbyId, locationId, updates) {

@@ -23,6 +23,8 @@ from test_location_editor_history import (
     test_darkness_cells_preserve_disjoint_foreign_paint_and_conflict_atomically,
     test_environment_history_preserves_lamps_and_rejects_stale_preview,
     test_invalid_cell_patch_is_not_committed,
+    test_paste_dependencies_survive_undo_redo_and_reject_changed_support,
+    test_paste_ground_conflict_has_no_partial_objects_or_lamps,
 )
 
 

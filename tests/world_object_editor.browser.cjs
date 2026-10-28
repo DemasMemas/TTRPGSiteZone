@@ -128,7 +128,7 @@ else:
         await request(`/lobbies/${lobby.id}/chunks/1/0/tile/0/10`, { objects: [{ type: 'house', x: -0.4, z: -0.4 }] }, token, 'PATCH');
         browser = spawn(process.env.BROWSER_EXECUTABLE || 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
             '--headless=new', '--no-sandbox', '--no-first-run', '--ignore-certificate-errors',
-            ...((process.env.VTT_LOC_NUMERIC === '1' || process.env.VTT_LOC_HISTORY === '1' || process.env.VTT_LOC_BRUSH === '1') ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] : []),
+            ...((process.env.VTT_LOC_NUMERIC === '1' || process.env.VTT_LOC_HISTORY === '1' || process.env.VTT_LOC_BRUSH === '1' || process.env.VTT_LOC_CLIPBOARD === '1') ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] : []),
             ...(process.env.VTT_PERF_UNCAPPED==='1'?['--disable-frame-rate-limit','--disable-gpu-vsync']:[]),
             ...(process.env.VTT_BROWSER_GPU==='1'?[]:['--use-angle=swiftshader','--enable-unsafe-swiftshader']), '--window-size=1440,900',
             '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
@@ -154,6 +154,14 @@ else:
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===${waterGeometry?4:2} && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if (process.env.VTT_SCENE_LOADING === '1') {
+            await require('./scene_loading.browser.cjs')({ page, request, token, lobby, base });
+            return;
+        }
+        if (process.env.VTT_LOC_CLIPBOARD === '1') {
+            await require('./location_clipboard.browser.cjs')({ page, request, token, lobby, base, connect, debugPort });
+            return;
+        }
         if (process.env.VTT_LOC_BRUSH === '1') {
             await require('./location_brush_history.browser.cjs')({ page, request, token, lobby, base, connect, debugPort });
             return;

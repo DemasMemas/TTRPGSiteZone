@@ -163,3 +163,44 @@ def test_invalid_cell_patch_is_not_committed(editor, cell):
                     json={'cells': [{'x': 1, 'z': 1, 'before': before, 'after': cell}]})
     assert r.status_code == 400
     assert client.get(url, headers=headers).get_json()['tiles_data'][1][1] == before
+
+
+def test_paste_dependencies_survive_undo_redo_and_reject_changed_support(editor):
+    client, headers, url, lobby_id = editor
+    floor = client.post(url + '/objects', headers=headers, json={
+        'name': 'floor', 'type': 'floor', 'tile_x': 1, 'tile_y': 1,
+        'properties': {'building_id': 'target', 'level': 1, 'dimensions': {'width': 4, 'depth': 4, 'height': .12}},
+    }).get_json()
+    checks = {'objects': [[floor['id'], floor['revision']]], 'ground': [{'x': 1, 'z': 1, 'height': 1}]}
+    spec = {'name': 'copy', 'type': 'box', 'tile_x': 1, 'tile_y': 1,
+            'properties': {'building_id': 'target', 'level': 1, 'rotation': 12.345}}
+    change = {'objects': [{'id': -1, 'before': None, 'after': spec}], 'checks': checks}
+    r = client.post(url + '/object-edits', headers=headers, json=change)
+    assert r.status_code == 200, r.get_json()
+    obj = r.get_json()['objects'][0]
+    assert obj['id'] != floor['id']
+    inverse = {'objects': [{'id': obj['id'], 'before': obj, 'after': None}], 'checks': checks}
+    assert client.post(url + '/object-edits', headers=headers, json=inverse).status_code == 200
+    redo = {'objects': [{'id': obj['id'], 'before': None, 'after': obj}], 'checks': checks}
+    assert client.post(url + '/object-edits', headers=headers, json=redo).status_code == 200
+    assert client.patch(f"/lobbies/{lobby_id}/locations/objects/{floor['id']}", headers=headers,
+                        json={'properties': {'elevation': .375}}).status_code == 200
+    assert client.post(url + '/object-edits', headers=headers, json=change).status_code == 409
+    assert len(client.get(url, headers=headers).get_json()['objects']) == 2
+
+
+def test_paste_ground_conflict_has_no_partial_objects_or_lamps(editor):
+    client, headers, url, _ = editor
+    before = client.get(url, headers=headers).get_json()['tiles_data'][1][1]
+    assert client.post(url + '/object-edits', headers=headers, json={
+        'cells': [{'x': 1, 'z': 1, 'before': before, 'after': {**before, 'height': 2}}],
+    }).status_code == 200
+    change = {'checks': {'ground': [{'x': 1, 'z': 1, 'height': 1}]},
+              'objects': [{'id': -1, 'before': None, 'after': {'name': 'copy', 'type': 'box',
+                           'tile_x': 1, 'tile_y': 1, 'properties': {}}}],
+              'lights': {'before': [], 'after': [{'x': 2, 'z': 2, 'height': 2, 'intensity': 1,
+                                                'distance': 6, 'color': '#ffffff'}]}}
+    assert client.post(url + '/object-edits', headers=headers, json=change).status_code == 409
+    stored = client.get(url, headers=headers).get_json()
+    assert stored['objects'] == []
+    assert stored['lighting']['local_lights'] == []

@@ -131,6 +131,7 @@ export async function loadLobbyInfo() {
 }
 
 let loadingAllChunks = null;
+let chunkLoadControl = null;
 let worldGrassGroundReady = null;
 
 function prepareWorldGrassGround() {
@@ -143,13 +144,29 @@ function prepareWorldGrassGround() {
     return worldGrassGroundReady;
 }
 
-export function loadAllChunks() {
-    if (loadingAllChunks) return loadingAllChunks;
+export function loadAllChunks({ signal, onProgress } = {}) {
+    if (loadingAllChunks) {
+        if (chunkLoadControl.signal?.aborted) {
+            return loadingAllChunks.then(() => signal?.aborted ? undefined : loadAllChunks({ signal, onProgress }));
+        }
+        if (signal) chunkLoadControl.signal = signal;
+        if (onProgress) {
+            chunkLoadControl.listeners.add(onProgress);
+            onProgress(chunkLoadControl.progress);
+        }
+        return loadingAllChunks;
+    }
     if (window.locationDirectOpenPending || window.isLocationActive) return Promise.resolve();
     if (!Number.isInteger(window.MAP_CHUNKS_WIDTH) || !Number.isInteger(window.MAP_CHUNKS_HEIGHT)) {
         return Promise.resolve();
     }
     const startedAt = performance.now();
+    const control = { signal, listeners: new Set(onProgress ? [onProgress] : []), progress: 0 };
+    chunkLoadControl = control;
+    const reportProgress = value => {
+        control.progress = Math.max(control.progress, value);
+        if (!control.signal?.aborted) control.listeners.forEach(listener => listener(control.progress));
+    };
     const metrics = {
         startedAt, firstFrameMs: null, pageToFirstFrameMs: null,
         fullLoadMs: null, pageToFullLoadMs: null,
@@ -195,6 +212,7 @@ export function loadAllChunks() {
         });
         const grassGroundStartedAt = performance.now();
         const grassGroundReady = ranges.length ? prepareWorldGrassGround().then(enabled => {
+            if (control.signal?.aborted) return;
             setWorldGrassGroundPixelsEnabled(enabled);
             metrics.grassGroundSource = enabled ? 'photos' : 'procedural-fallback';
             metrics.grassGroundReadyMs = performance.now() - grassGroundStartedAt;
@@ -202,16 +220,20 @@ export function loadAllChunks() {
         let nextIndex = 0;
         const worker = async () => {
             while (nextIndex < ranges.length) {
-                if (window.isLocationActive) return;
-                await fetchChunkBatch(ranges[nextIndex++], metrics, grassGroundReady);
+                if (window.isLocationActive || control.signal?.aborted) return;
+                await fetchChunkBatch(ranges[nextIndex++], metrics, grassGroundReady, control);
+                reportProgress(90 * chunksMap.size / metrics.expectedChunks);
             }
         };
+        reportProgress(90 * chunksMap.size / metrics.expectedChunks);
         await Promise.all(Array.from({ length: Math.min(4, ranges.length) }, worker));
+        if (control.signal?.aborted) return;
         if (window.isLocationActive) {
             metrics.pausedForLocation = true;
             return;
         }
         await waitForWorldTerrainRefresh();
+        if (control.signal?.aborted) return;
         metrics.loadedChunks = 0;
         for (let x = 0; x < window.MAP_CHUNKS_WIDTH; x++) {
             for (let y = 0; y < window.MAP_CHUNKS_HEIGHT; y++) {
@@ -228,21 +250,22 @@ export function loadAllChunks() {
         performance.mark('world-map-load-complete');
         performance.measure('world-map-load', 'world-map-load-start', 'world-map-load-complete');
         console.info('[World load]', window.getWorldLoadDiagnostics());
-    })().finally(() => { loadingAllChunks = null; });
+        reportProgress(100);
+    })().finally(() => { loadingAllChunks = null; chunkLoadControl = null; });
     return loadingAllChunks;
 }
 
-async function fetchChunkBatch([minX, maxX, minY, maxY], metrics, grassGroundReady) {
+async function fetchChunkBatch([minX, maxX, minY, maxY], metrics, grassGroundReady, control = {}) {
     try {
         const requestedAt = performance.now();
-        const chunks = await Server.getChunks(currentLobbyId, minX, maxX, minY, maxY);
+        const chunks = await Server.getChunks(currentLobbyId, minX, maxX, minY, maxY, { signal: control.signal });
         metrics.requests++;
         metrics.requestAndParseMs += performance.now() - requestedAt;
-        if (window.isLocationActive) return;
+        if (window.isLocationActive || control.signal?.aborted) return;
         await grassGroundReady;
-        if (window.isLocationActive) return;
+        if (window.isLocationActive || control.signal?.aborted) return;
         for (const chunk of chunks) {
-            if (window.isLocationActive) return;
+            if (window.isLocationActive || control.signal?.aborted) return;
             if (chunksMap.has(`${chunk.chunk_x},${chunk.chunk_y}`)) continue;
             const buildStartedAt = performance.now();
             addChunk(chunk.chunk_x, chunk.chunk_y, chunk.data);
@@ -250,6 +273,7 @@ async function fetchChunkBatch([minX, maxX, minY, maxY], metrics, grassGroundRea
             metrics.chunks++;
         }
     } catch (error) {
+        if (control.signal?.aborted) return;
         metrics.failedRequests++;
         console.error('Error fetching chunks', minX, maxX, minY, maxY, error);
     }

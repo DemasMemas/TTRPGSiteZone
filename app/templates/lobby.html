@@ -27,8 +27,9 @@
             <span class="scene-loading-rule" aria-hidden="true"></span>
             <h1 id="scene-loading-title">Карта мира</h1>
             <p id="scene-loading-detail">Загружаем сектора и собираем поверхность.</p>
-            <div class="scene-loading-track" aria-hidden="true"><span></span></div>
-            <span class="scene-loading-footnote">Подготовка сцены</span>
+            <div id="scene-loading-progress" class="scene-loading-track" role="progressbar" aria-label="Загрузка сцены" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="scene-loading-fill"></span></div>
+            <span class="scene-loading-footnote">Подготовка сцены · <span id="scene-loading-percent">0%</span></span>
+            <button id="scene-loading-cancel" type="button" onclick="window.cancelSceneLoading ? window.cancelSceneLoading() : window.location.assign('/')">Отменить и в меню</button>
             <button id="scene-loading-retry" type="button" hidden onclick="window.location.reload()">Повторить загрузку</button>
         </div>
     </div>

@@ -185,13 +185,13 @@ body {
 }
 .scene-loading-track span {
   display: block;
-  width: 34%;
+  width: 0%;
   height: 100%;
   background: #c8bb81;
-  animation: scene-loading-sweep 1.8s ease-in-out infinite alternate;
+  transition: width .15s ease;
 }
-.scene-loading-screen.is-error .scene-loading-track span { animation: none; width: 100%; background: #a36958; }
-.scene-loading-screen #scene-loading-retry {
+.scene-loading-screen.is-error .scene-loading-track span { background: #a36958; }
+.scene-loading-screen button {
   margin-top: 22px;
   padding: 9px 15px;
   border: 1px solid #9d956e;
@@ -201,10 +201,9 @@ body {
   cursor: pointer;
 }
 .scene-loading-screen #scene-loading-retry[hidden] { display: none; }
-@keyframes scene-loading-sweep { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
 @media (prefers-reduced-motion: reduce) {
   .scene-loading-screen { transition: none; }
-  .scene-loading-track span { animation: none; width: 100%; }
+  .scene-loading-track span { transition: none; }
 }
 
 #canvas-container {

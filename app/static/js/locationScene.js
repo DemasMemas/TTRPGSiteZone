@@ -1,5 +1,6 @@
 import { syncWorldNumber } from './worldNumericInputs.js';
 import { copy, equal, objectChanges, createLocationEditorHistory } from './locationEditorHistory.js';
+import { captureLocationClipboard, planLocationPaste, freshClipboardBuildingId } from './locationClipboard.js';
 import { createWaterProfileLayer, connectedWaterCells, normalizeWaterProfile } from './waterProfiles.js';
 // static/js/locationScene.js
 import * as THREE from 'three';
@@ -256,6 +257,10 @@ let locationDarknessTexture = null;
 let activeLightingProfile = null;
 let selectedLocationAsset = null;
 let editorSelection = null;
+let locationClipboard = null;
+let editorPaste = null;
+let pasteSerial = 0;
+let clipboardPasteHintShown = false;
 let editorMoveMode = false;
 let editorMovePreviewPoint = null;
 let editorRotateMode = false;
@@ -7488,6 +7493,7 @@ export function initLocationScene(containerId) {
     let previousProfileCamera = null;
     function animate(frameTime = performance.now()) {
         animationFrameId = requestAnimationFrame(animate);
+        if (locationSceneLoading) return;
         const deltaSeconds = Math.min(0.1, Math.max(0, (frameTime - previousFrameTime) / 1000));
         previousFrameTime = frameTime;
         if (document.hidden) {
@@ -10232,11 +10238,11 @@ function batchStructureParts(group) {
     }
 }
 
-function createLocationObjectMesh(obj, forPreview = false) {
+function createLocationObjectMesh(obj, forPreview = false, relatedObjects = currentLocationData?.objects) {
     const properties = obj.properties || {};
     const asset = visualAssetForLocationObject(obj.type, properties);
     const household = asset?.visual?.family === 'household';
-    const floorPose = obj.type === 'floor' ? floorVisualPose(obj, currentLocationData?.objects) : null;
+    const floorPose = obj.type === 'floor' ? floorVisualPose(obj, relatedObjects) : null;
     const dimensions = properties.dimensions || floorPose
         || (household || isFireObject(obj) ? baseAssetDimensions(obj.type, 'structure') : getStructureDimensions(obj.type));
     const width = floorPose?.width || dimensions.width || 1;
@@ -10259,7 +10265,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
             obj.type === 'floor' ? 0.5 : 0.25, obj.type === 'floor' ? 'top' : 'sides');
     }
     if (obj.type === 'floor') applyInteriorFloorShade(material, width, depth,
-        floorEntrancePoint(floorPose, currentLocationData?.objects, obj));
+        floorEntrancePoint(floorPose, relatedObjects, obj));
     if (usePbrMaterial && material) {
         applyLocationPbrMaterial(material, asset.visual.maps);
     }
@@ -10289,7 +10295,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         applySurfacePattern(material,getSurfaceTexture(THREE,'roof'),.22,'top');
         group.add(mesh);
     } else if (obj.type === 'floor') {
-        for (const part of floorSlabParts(obj, currentLocationData?.objects)) {
+        for (const part of floorSlabParts(obj, relatedObjects)) {
             const mesh = new THREE.Mesh(new THREE.BoxGeometry(part.width, height, part.depth), material);
             mesh.position.set(part.x, height / 2, part.z);
             group.add(mesh);
@@ -10304,11 +10310,11 @@ function createLocationObjectMesh(obj, forPreview = false) {
         const fenceColor = properties.color === '#67745d' ? '#8b7458' : (properties.color || '#8b7458');
         group.add(createFenceModel(THREE, width, height, depth, fenceColor));
     } else if (obj.type === 'wall') {
-        const plan = wallVisualPlan(obj, currentLocationData?.objects || []);
+        const plan = wallVisualPlan(obj, relatedObjects || []);
         const roofAnchor=properties.roof_ground_anchor?transformedRoofAnchor(obj):null;
         let roofCeiling=Infinity;
         if(properties.roof_wall) {
-            const p=structurePose(obj),floors=(currentLocationData?.objects||[]).filter(f=>f.type==='floor'
+            const p=structurePose(obj),floors=(relatedObjects||[]).filter(f=>f.type==='floor'
                 &&structureBuildingId(f)===structureBuildingId(obj)&&structureLevel(f)>structureLevel(obj));
             const heights=[-.4,0,.4].map(t=>{
                 const x=p.x+p.axis.x*p.width*t,z=p.z+p.axis.z*p.width*t;
@@ -10380,7 +10386,7 @@ function createLocationObjectMesh(obj, forPreview = false) {
         }
     } else if (obj.type === 'door') {
         const jamb = 0.09;
-        const frame = doorFrameStyle(obj, currentLocationData?.objects || []);
+        const frame = doorFrameStyle(obj, relatedObjects || []);
         const trim = doorTrimLayout(width, height, frame, jamb);
         const frameMaterial = new THREE.MeshStandardMaterial({ color: frame.color });
         for (const sign of [-1, 1]) {
@@ -11419,6 +11425,7 @@ export function setLocationViewLevel(level) {
     applyFogOfWar();
     updateLocationLampFixtureFloors(lampRenderSources);
     refreshLocationFloorMenu();
+    if (editorPaste) updateBuildPreview();
 }
 
 let basementCutaway = null;
@@ -11674,6 +11681,8 @@ function updateLocationObjectHeight(tileX, tileZ) {
 function clearBuildPreview() {
     buildPreviewKey = null;
     if (!buildPreviewMesh) return;
+    const outline = buildPreviewMesh.userData.pasteOutline;
+    if (outline) { scene?.remove(outline); outline.geometry.dispose(); outline.material.dispose(); }
     scene?.remove(buildPreviewMesh);
     disposeLocationObject(buildPreviewMesh);
     buildPreviewMesh = null;
@@ -12299,14 +12308,14 @@ function revealOpeningPlacementPreview(preview, dimensions, showOpening) {
     preview.add(outline);
 }
 
-function createEditorGroupMovePreview() {
+function createEditorGroupMovePreview(entries = null, relatedObjects = currentLocationData?.objects) {
     const group = new THREE.Group();
-    for (const selection of editorSelections) {
-        const source = getEditorSource(selection);
+    const items = entries || editorSelections.map(selection => ({ selection, source: getEditorSource(selection) }));
+    for (const { selection, source } of items) {
         if (!source) continue;
         let mesh;
         if (selection.kind === 'structure') {
-            mesh = createLocationObjectMesh(source, true);
+            mesh = createLocationObjectMesh(source, true, relatedObjects);
         } else if (selection.kind === 'lamp') {
             mesh = createEditorLampPreview(source, false);
             mesh.position.set(Number(source.x),
@@ -12385,6 +12394,7 @@ function addEditorVolumeGizmo(preview, center) {
 }
 
 function updateBuildPreview() {
+    if (editorPaste) { updateLocationPastePreview(); return; }
     if (houseDrawMode && ['assets','building'].includes(window.locationEditorTool)) {
         clearBuildPreview();
         return;
@@ -12857,7 +12867,7 @@ export function rotateLocationPlacement(direction) {
 }
 
 export function isLocationEditorTransformActive() {
-    return Boolean(window.locationEditMode && (editorMoveMode || editorRotateMode || editorResizeMode));
+    return Boolean(window.locationEditMode && (editorMoveMode || editorRotateMode || editorResizeMode || editorPaste));
 }
 
 // Grass cover depends on slab footprints and walls that trim them, not on
@@ -13311,6 +13321,147 @@ function getSelectedEditorSource() {
     return getEditorSource(editorSelection);
 }
 
+export function getLocationClipboardState() {
+    return { count: locationClipboard?.entries.length || 0, preview: Boolean(editorPaste),
+        valid: editorPaste?.plan?.valid || false, error: editorPaste?.plan?.error || null };
+}
+export function copySelectedLocationAssets() {
+    if (!currentLocationData || !window.isGM || !window.locationEditMode || editorHistory.state().busy) return false;
+    if (isLocationEditorTransformActive()) {
+        showNotification('Сначала подтвердите преобразование или отмените его через Esc', 'system');
+        return false;
+    }
+    locationClipboard = null;
+    try {
+        const entries = editorSelections.map(selection => {
+            const source = getEditorSource(selection), position = getEditorSelectionPosition(selection, source);
+            if (!source || !position) throw Error('Выбранный объект уже удалён. Выберите объекты заново.');
+            const level = selection.kind === 'structure' ? structureLevel(source)
+                : selection.kind === 'lamp' ? lampDisplayLevel(source) : decorDisplayLevel(source);
+            const ground = getTileHeight(Math.floor(position.x), Math.floor(position.z));
+            const offset = selection.kind === 'lamp' ? Number(source.height)
+                : structureLevelOffset(source) + Number(selection.kind === 'structure' ? source.properties?.elevation || 0 : source.elevation || 0);
+            const snapshot = copy(source);
+            if (selection.kind === 'structure' && !snapshot.properties?.dimensions) {
+                snapshot.properties = { ...snapshot.properties, dimensions: assetDimensions(source, 'structure', source.type) };
+            }
+            return { kind: selection.kind, source: snapshot, ...position, level, baseHeight: ground + offset,
+                mount: selection.kind==='structure' ? visualAssetForLocationObject(source.type,source.properties)?.mount : undefined };
+        });
+        locationClipboard = captureLocationClipboard(entries, { objects: currentLocationData.objects || [],
+            groundAt: (x,z)=>getTileHeight(Math.floor(x),Math.floor(z)), sourceLevel: locationViewLevel, floorOffset: FLOOR_SURFACE_OFFSET });
+        clipboardPasteHintShown = false;
+        showNotification(`Скопировано: ${entries.length}. Ctrl+V — предпросмотр.`, 'system');
+        return true;
+    } catch (error) { showNotification(error.message, 'system'); return false; }
+}
+export function cancelLocationPaste() {
+    if (!editorPaste) return false;
+    const hint = document.querySelector('#panel-tools .map-editor-hint');
+    if (hint && editorPaste.hint !== undefined) hint.textContent = editorPaste.hint;
+    editorPaste = null;
+    clearBuildPreview();
+    return true;
+}
+export function beginLocationPaste() {
+    if (!currentLocationData || !window.isGM || !window.locationEditMode || editorHistory.state().busy) return false;
+    if (!locationClipboard) { showNotification('Сначала скопируйте выбранные объекты через Ctrl+C', 'system'); return false; }
+    if (editorMoveMode || editorRotateMode || editorResizeMode) {
+        showNotification('Сначала подтвердите преобразование или отмените его через Esc', 'system'); return false;
+    }
+    cancelLocationPaste();
+    window.selectLocationEditorTool?.('select');
+    setLocationHouseDrawMode(false);
+    const groups = new Set(locationClipboard.entries.filter(e=>e.kind==='structure').map(e=>structureBuildingId(e.source)||''));
+    editorPaste = { clipboard: locationClipboard, serial: ++pasteSerial,
+        buildingNames: Object.fromEntries([...groups].map(id=>[id,freshClipboardBuildingId()])),
+        hint: document.querySelector('#panel-tools .map-editor-hint')?.textContent, plan: null };
+    clearBuildPreview();
+    updateLocationPastePreview();
+    if (!clipboardPasteHintShown) {
+        showNotification('ЛКМ — вставить, Esc / ПКМ — отменить.', 'system');
+        clipboardPasteHintShown = true;
+    }
+    return true;
+}
+function locationPastePlan(state = editorPaste) {
+    if (!state || !hoveredPointerClient || !hoveredTileCoords) return null;
+    let coords = hoveredTileCoords, point;
+    for (let i=0;i<4;i++) {
+        point = getPointerWorldPoint(hoveredPointerClient.x, hoveredPointerClient.y, locationPointerSurfaceHeight(coords.x,coords.z));
+        if (!point) return null;
+        const next = { x: Math.floor(point.x), z: Math.floor(point.z) };
+        if (next.x===coords.x && next.z===coords.z) break;
+        coords = next;
+    }
+    return planLocationPaste(state.clipboard, { x:point.x,z:point.z,level:locationViewLevel,
+        width:currentLocationData.grid_width,height:currentLocationData.grid_height,objects:currentLocationData.objects || [],
+        groundAt:(x,z)=>getTileHeight(Math.floor(x),Math.floor(z)),buildingNames:state.buildingNames,floorOffset:FLOOR_SURFACE_OFFSET });
+}
+function updateLocationPastePreview() {
+    const plan = locationPastePlan();
+    if (editorPaste) editorPaste.plan = plan;
+    if (!plan || !scene || !window.locationEditMode) { clearBuildPreview(); return; }
+    editorPaste.plan = plan;
+    const key = `paste:${editorPaste.serial}:${locationViewLevel}`;
+    if (!buildPreviewMesh || buildPreviewKey!==key) {
+        clearBuildPreview();
+        const entries = plan.entries.map((e,i)=>({ source:e.kind==='structure'?{...e.source,id:-i-1}:e.source,
+            selection:{kind:e.kind,x:Math.floor(e.x),z:Math.floor(e.z)} }));
+        buildPreviewMesh = createEditorGroupMovePreview(entries,
+            [...currentLocationData.objects,...entries.filter(e=>e.selection.kind==='structure').map(e=>e.source)]);
+        buildPreviewMesh.userData.editorPastePreview = true;
+        buildPreviewKey = key;
+        scene.add(buildPreviewMesh);
+    }
+    plan.entries.forEach((entry,i)=>{
+        const mesh = buildPreviewMesh.children[i], origin=mesh.userData.editorMoveOrigin;
+        mesh.position.set(entry.x,getTileHeight(Math.floor(entry.x),Math.floor(entry.z))+origin.groundOffset,entry.z);
+        // Follow terrain compensation as well as the common storey shift.
+        const base=entry.kind==='lamp'?entry.source.height:entry.level*STOREY_HEIGHT+Number(entry.source.properties?.elevation??entry.source.elevation??0);
+        mesh.userData.pasteBaseOffset ??= base;
+        mesh.position.y += base-mesh.userData.pasteBaseOffset;
+    });
+    buildPreviewMesh.updateMatrixWorld(true);
+    let outline=buildPreviewMesh.userData.pasteOutline;
+    if (!outline) { outline=new THREE.BoxHelper(buildPreviewMesh,0x8be2cb); outline.raycast=()=>{};
+        buildPreviewMesh.userData.pasteOutline=outline; scene.add(outline); }
+    outline.update(); outline.material.color.setHex(plan.valid?0x8be2cb:0xff7777);
+    const hint=document.querySelector('#panel-tools .map-editor-hint');
+    if(hint)hint.textContent=plan.error || `Вставка ${plan.entries.length} объектов · этаж ${locationViewLevel}. ЛКМ — подтвердить, Esc — отменить.`;
+}
+async function commitLocationPaste() {
+    const state=editorPaste, plan=locationPastePlan();
+    if (!state || !plan) return false;
+    if (!plan.valid) { showNotification(plan.error,'system'); return false; }
+    cancelLocationPaste();
+    const saved = await runLocationObjectCommand(async()=>{
+        const current = locationPastePlan(state);
+        if (!current?.valid) { showNotification(current?.error || 'Выберите место вставки','system'); return false; }
+        const cells=new Map();
+        for(const e of current.entries)cells.set(`${Math.floor(e.x)},${Math.floor(e.z)}`,{x:Math.floor(e.x),z:Math.floor(e.z)});
+        const anchor={x:Math.floor(current.anchor.x),z:Math.floor(current.anchor.z)};
+        cells.set(`${anchor.x},${anchor.z}`,anchor);
+        objectEdit.checks={objects:current.supports,ground:[...cells.values()].map(({x,z})=>({x,z,height:currentLocationData.tiles_data[z][x].height}))};
+        const selections=[],lights=copy(currentLocationData.lighting.local_lights || []);
+        for(const e of current.entries) {
+            if(e.kind==='structure') {
+                const object=await editorCreateObject(window.currentLobbyId,currentLocationId,e.source);
+                addLocationObject(object);selections.push({kind:'structure',id:object.id});
+            } else if(e.kind==='decor') {
+                const x=Math.floor(e.x),z=Math.floor(e.z),tile=currentLocationData.tiles_data[z][x];
+                tile.objects ||= [];tile.objects.push(copy(e.source));
+                selections.push({kind:'decor',x,z,index:tile.objects.length-1});
+            } else { lights.push(copy(e.source));selections.push({kind:'lamp',index:lights.length-1}); }
+        }
+        if(current.entries.some(e=>e.kind==='lamp'))await persistLocationLights(lights,'paste');
+        editorSelections=selections;editorSelection=selections.at(-1);
+        return true;
+    });
+    if(!saved && currentLocationData && locationClipboard===state.clipboard) { editorPaste=state;updateBuildPreview(); }
+    return saved;
+}
+
 function getPrimaryLocationEditorAsset() {
     const source = getSelectedEditorSource();
     if (!source) return null;
@@ -13623,6 +13774,7 @@ function clearEditorSelection() {
 
 function cancelLocationEditorContextAction() {
     if (!window.isGM || !window.locationEditMode) return false;
+    if (editorPaste) { cancelLocationPaste(); return true; }
     if (editorSelections.length) {
         clearEditorSelection();
         updateBuildPreview();
@@ -13980,6 +14132,7 @@ async function runLocationObjectCommand(action) {
         result = await action();
         if (currentLocationData !== sceneData) return false;
         change = objectChanges(before, editorObjectSnapshot());
+        if (context.checks) change.checks = context.checks;
         selectionAfter = copy(editorSelections);
         // Restore the preview before awaiting IO. Incoming events are held until
         // the response is applied, so neither an echo nor a foreign edit is recorded.
@@ -14020,6 +14173,7 @@ async function runLocationObjectCommand(action) {
 }
 export async function replayLocationObjectHistory(forward = false) {
     if (!window.isGM || !window.locationEditMode || !currentLocationData) return false;
+    if (editorPaste) { cancelLocationPaste(); return false; }
     // Volume Scale remains selected after a confirmed drag. Its idle tool state
     // must not prevent undoing that confirmed resize.
     if (editorResizeMode && !editorResizeAnchor) cancelLocationAssetResize();
@@ -14218,6 +14372,7 @@ export function clearLocationAssetPreset() {
 }
 
 export function beginMoveSelectedLocationAsset() {
+    cancelLocationPaste();
     if (!getSelectedEditorSource()) {
         showNotification('Сначала выберите объект инструментом «Выбор»', 'system');
         return false;
@@ -14236,6 +14391,7 @@ export function beginMoveSelectedLocationAsset() {
 }
 
 export function beginRotateSelectedLocationAsset() {
+    cancelLocationPaste();
     const selection = getSelectedLocationEditorAsset();
     if (!selection) {
         showNotification('Сначала выберите объект инструментом «Выбор»', 'system');
@@ -14263,6 +14419,7 @@ export function beginRotateSelectedLocationAsset() {
 }
 
 export function beginResizeSelectedLocationAsset() {
+    cancelLocationPaste();
     if (editorSelections.length > 1) {
         showNotification('Для изменения размера группы используйте + или −', 'system');
         return false;
@@ -15084,7 +15241,32 @@ async function placeSelectedLocationAssetImpl(x, z, client = null) {
 }
 
 // ========== Загрузка данных локации ==========
+let locationSceneLoading = false;
+
 export function loadLocation(data) {
+    for (const stage of buildLocationStages(data)) { /* synchronous callers */ }
+}
+
+export async function loadLocationInStages(data, { signal, onProgress } = {}) {
+    const loadingScene = scene;
+    locationSceneLoading = true;
+    try {
+        const stages = buildLocationStages(data);
+        while (!signal?.aborted && scene === loadingScene) {
+            const step = stages.next();
+            if (step.done) return true;
+            onProgress?.(step.value);
+            // Allow the progress indicator to paint and the cancel button to receive input.
+            await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        }
+        stages.return();
+        return false;
+    } finally {
+        if (scene === loadingScene) locationSceneLoading = false;
+    }
+}
+
+function* buildLocationStages(data) {
     basementCutaway?.dispose(); basementCutaway = null;
     basementContour = null; basementContourSignature = '';
     setLocationStaticLightFieldEnabled(false);
@@ -15105,6 +15287,8 @@ export function loadLocation(data) {
     anomalyEffectMeshes = [];
     locationObjectMeshes = [];
     darknessEditorOverlay = null;
+    cancelLocationPaste();
+    locationClipboard = null;
     editorHistory.reset();
     objectEdit = null;
     currentLocationData = data;
@@ -15170,6 +15354,8 @@ export function loadLocation(data) {
     grassDetailGroup = null;
     clearAllCharacters();
     markLoadStage('resetMs');
+    yield { percent: 25, detail: 'Подготавливаем поверхность.' };
+    loadStageAt = performance.now();
 
     const gridWidth = data.grid_width;
     const gridHeight = data.grid_height;
@@ -15285,12 +15471,19 @@ export function loadLocation(data) {
     tileCubes = [locationTileMesh, waterTileMesh];
     scene.add(locationTileMesh, waterTileMesh);
     markLoadStage('tileMeshesMs');
+    yield { percent: 40, detail: 'Собираем рельеф и текстуры.' };
+    loadStageAt = performance.now();
     rebuildSmoothTerrainMesh();
     rebuildLocationTerrainSurface();
+    const terrainWorkMs = performance.now() - loadStageAt;
+    yield { percent: 50, detail: 'Подготавливаем воду и растительность.' };
+    loadStageAt = performance.now() - terrainWorkMs;
     rebuildWaterSurfaceMesh();
     rebuildLocationGrid();
     rebuildGrassDetailMesh();
     markLoadStage('terrainAndTexturesMs');
+    yield { percent: 60, detail: 'Размещаем объекты на тайлах.' };
+    loadStageAt = performance.now();
 
     // Объекты на тайлах
     for (let y = 0; y < data.tiles_data.length; y++) {
@@ -15299,6 +15492,8 @@ export function loadLocation(data) {
         }
     }
     markLoadStage('decorMs');
+    yield { percent: 70, detail: 'Размещаем объекты и крыши.' };
+    loadStageAt = performance.now();
 
     // Отдельные объекты
     if (data.objects && data.objects.length) {
@@ -15306,8 +15501,12 @@ export function loadLocation(data) {
     }
     rebuildLocationRoofs();
     markLoadStage('objectsAndRoofsMs');
+    yield { percent: 80, detail: 'Настраиваем освещение.' };
+    loadStageAt = performance.now();
     applyLocationLighting();
     markLoadStage('lightingMs');
+    yield { percent: 85, detail: 'Подготавливаем видимость.' };
+    loadStageAt = performance.now();
     applyFogOfWar();
     markLoadStage('fogMs');
 
@@ -15325,6 +15524,7 @@ export function loadLocation(data) {
         locationLoadTrace.loadMs = +Object.values(locationLoadTrace.stages).reduce((sum, ms) => sum + ms, 0).toFixed(1);
         locationLoadTrace.loadedAt = performance.now();
     }
+    yield { percent: 90, detail: 'Подготавливаем интерфейс.' };
 }
 
 // ========== Обновление тайлов ==========
@@ -16874,6 +17074,15 @@ function setupCharacterDragging() {
         if (e.target?.isContentEditable || isKeyboardInputTarget(e.target)
             || Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
         if (window.isGM && window.locationEditMode && e.ctrlKey && !e.altKey && !e.metaKey
+            && ['KeyC','KeyV'].includes(e.code)) {
+            e.preventDefault(); e.stopImmediatePropagation();
+            if (!e.repeat) { if(e.code==='KeyC')copySelectedLocationAssets();else beginLocationPaste(); }
+            return;
+        }
+        if (editorPaste && !e.ctrlKey && ['Delete','KeyH','Equal','Minus','NumpadAdd','NumpadSubtract'].includes(e.code)) {
+            e.preventDefault(); e.stopImmediatePropagation(); return;
+        }
+        if (window.isGM && window.locationEditMode && e.ctrlKey && !e.altKey && !e.metaKey
             && (e.code === 'KeyZ' || e.code === 'KeyY')) {
             e.preventDefault(); e.stopImmediatePropagation();
             if (!e.repeat) void replayLocationObjectHistory(e.code === 'KeyY' || e.shiftKey);
@@ -16918,6 +17127,7 @@ function setupCharacterDragging() {
             return;
         }
         if (e.key !== 'Escape') return;
+        if (editorPaste) { e.preventDefault();cancelLocationPaste();return; }
         if (objectEdit?.phase === 'stroke') {
             e.preventDefault();
             void finishLocationBrushStroke(true);
@@ -17187,6 +17397,12 @@ export function setupLocationEditing() {
         if (document.activeElement?.closest?.('#location-floor-menu')) document.activeElement.blur();
         if (e.button !== 0) return;
         if (e.target !== canvas) return;
+        if (editorPaste) {
+            e.preventDefault(); e.stopImmediatePropagation();
+            onPointerMove(e);
+            void commitLocationPaste();
+            return;
+        }
         if (window.locationEditMode && editorResizeMode && editorSelection?.kind === 'structure') {
             const rect = canvas.getBoundingClientRect();
             mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -17739,6 +17955,7 @@ export function beginCharacterPlacement(characterOrCharacters) {
 
 // ========== Управляющие функции для UI ==========
 export function setLocationEditMode(enabled) {
+    if (!enabled) cancelLocationPaste();
     if (!enabled && objectEdit?.phase === 'stroke') void finishLocationBrushStroke(true);
     editMode = enabled;
     window.locationEditMode = enabled;
@@ -18098,6 +18315,7 @@ export function addLocationFloorMenu() {
 }
 
 export function destroyLocationScene() {
+    locationSceneLoading = false;
     locationShadowPass?.dispose();
     locationShadowPass = null;
     updateRoofVisibility.lastState = null;
@@ -18340,6 +18558,8 @@ export function destroyLocationScene() {
     window.locationControls = null;
 
     // Данные
+    cancelLocationPaste();
+    locationClipboard = null;
     editorHistory.reset();
     objectEdit = null;
     currentLocationData = null;

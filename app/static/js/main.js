@@ -35,7 +35,7 @@ fillEditCenterCoordinates, pickTileForMarker } from './markers.js';
 import { openCharacterSheet, closeCharacterSheet, exportCharacter, importCharacter } from './characterSheet.js';
 import { setCurrentLobbyId as setCharLobbyId } from './characterSheet.js';
 import {
-    initLocationScene, loadLocation, startLocationLoadDiagnostics,
+    initLocationScene, loadLocationInStages, startLocationLoadDiagnostics,
     updateCharacterPosition, setCurrentLocationId, getCurrentLocationId,
     loadCombatStartRequests, handleCombatStartRequest, handleCombatStartRequestResolved,
     addDeleteLocationButton, setDeleteButtonVisible, addEditLocationButton, setEditButtonVisible,
@@ -52,6 +52,7 @@ import {
     setLocationStructureRotation, rotateLocationPlacement, isLocationEditorTransformActive,
     applyLocationLighting, setLocationLightingPreset,
     getLocationEditorHistoryState, replayLocationObjectHistory,
+    cancelLocationPaste,
     paintLocationDarknessAtTile, saveLocationEnvironment,
     getLocationLightingPreset, setLocationAssetPreset, clearLocationAssetPreset,
     setLocationAssetElevation,
@@ -236,12 +237,16 @@ let currentLocationData = null;
 
 function resumeWorldMapLoad() {
     const loadingToken = showSceneLoading('world');
+    const signal = sceneLoadingController.signal;
+    const onProgress = percent => setSceneLoadingProgress(loadingToken, 10 + percent * 0.9);
+    setSceneLoadingProgress(loadingToken, 10);
     (async () => {
-        await loadAllChunks();
+        await loadAllChunks({ signal, onProgress });
+        if (!isCurrentSceneLoading(loadingToken)) return;
         if (window.worldLoadMetrics?.pausedForLocation && !window.isLocationActive) {
-            await loadAllChunks();
+            await loadAllChunks({ signal, onProgress });
         }
-        if (window.isLocationActive) return;
+        if (!isCurrentSceneLoading(loadingToken) || window.isLocationActive) return;
         if (!window.worldLoadMetrics?.complete) throw new Error('World map load incomplete');
         finishSceneLoading(loadingToken);
         Promise.resolve().then(refreshWorldTravel).catch(error =>
@@ -275,6 +280,7 @@ window.enterLocation = async function(locationId) {
     window.cancelCommonMapTool?.();
     window.clearDirectWorldObjectSelection?.();
     const loadingToken = showSceneLoading('location');
+    const signal = sceneLoadingController.signal;
     closeMapEditorQuickMenu();
     if (window._locationEventCleanup) {
         window._locationEventCleanup();
@@ -294,9 +300,10 @@ window.enterLocation = async function(locationId) {
         if (globalTileInfo) globalTileInfo.style.display = 'none';
 
         const requestStartedAt = performance.now();
-        const data = await Server.getLocationDetail(currentLobbyId, locationId);
+        const data = await Server.getLocationDetail(currentLobbyId, locationId, { signal });
         if (!isCurrentSceneLoading(loadingToken)) return;
         setSceneLoadingLocationName(loadingToken, data.name);
+        setSceneLoadingProgress(loadingToken, 15, 'Создаём сцену подлокации.');
         const networkMs = performance.now() - requestStartedAt;
         currentLocationData = data;
         setCurrentLocationId(locationId);
@@ -309,7 +316,11 @@ window.enterLocation = async function(locationId) {
         const initStartedAt = performance.now();
         initLocationScene('location-canvas');
         startLocationLoadDiagnostics(networkMs, performance.now() - initStartedAt);
-        loadLocation(data);
+        const loaded = await loadLocationInStages(data, {
+            signal,
+            onProgress: ({ percent, detail }) => setSceneLoadingProgress(loadingToken, percent, detail),
+        });
+        if (!loaded || !isCurrentSceneLoading(loadingToken)) return;
         addLocationRoofButton();
         addLocationGridButton();
         addLocationFloorMenu();
@@ -329,7 +340,7 @@ window.enterLocation = async function(locationId) {
         if (window.isGM) loadCombatStartRequests();
 
         if (window.isGM) {
-            const locationWorldRules = await Server.getWorldRules(currentLobbyId).catch(() => ({ anomalies: [] }));
+            const locationWorldRules = await Server.getWorldRules(currentLobbyId, { signal }).catch(() => ({ anomalies: [] }));
             if (!isCurrentSceneLoading(loadingToken)) return;
             window.locationAnomalyCatalog = locationWorldRules.anomalies || [];
             // Кнопки удаления и редактирования параметров
@@ -526,6 +537,7 @@ window.enterLocation = async function(locationId) {
                     <summary>Клавиши</summary>
                     <dl>
                         <div><dt>История редактора</dt><dd>Ctrl+Z — отмена · Ctrl+Y / Ctrl+Shift+Z — повтор. Один мазок — одно действие. В полях ввода действуют обычные сочетания текста. История хранится до выхода или перезагрузки сцены.</dd></div>
+                        <div><dt>Копирование</dt><dd>Ctrl+C — выбранный объект или группа · Ctrl+V — предпросмотр копии · ЛКМ — вставить · Esc / ПКМ — отменить. Этаж выбирается обычными кнопками. Буфер действует в текущей подлокации.</dd></div>
                         <div><dt>Инструменты</dt><dd>1 / V — выбор · 2 — ландшафт · 3 — высота · 4 — радиация · 5 — ластик · 6 / B — ассеты · 7 — строительство · 8 — свет. Удерживайте Q для кругового меню.</dd></div>
                         <div><dt>Режим и размещение</dt><dd>E — редактирование. При размещении ассета Q / E поворачивают его на 15°. R без доступного изменения размера переключает ластик.</dd></div>
                         <div><dt>Выбор объектов</dt><dd>Shift + клик — несколько объектов · короткий ПКМ — снять выделение или отменить размещение · H — скрыть / показать · Delete — удалить.</dd></div>
@@ -595,6 +607,7 @@ window.enterLocation = async function(locationId) {
                 let environmentSection = null;
                 const selectLocationTool = tool => {
                     if (!['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'building', 'light'].includes(tool)) return;
+                    cancelLocationPaste();
                     cancelLocationAssetResize(false);
                     const previousTool = window.locationEditorTool;
                     if (['assets','building'].includes(previousTool) && previousTool !== tool) {
@@ -1527,6 +1540,7 @@ async function deleteCurrentLocation(locationId) {
 }
 
 window.exitLocation = function() {
+    invalidateSceneLoading();
     clearLocationEditorSubscriptions();
     window.cancelCommonMapTool?.();
     closeMapEditorQuickMenu();
@@ -1537,7 +1551,7 @@ window.exitLocation = function() {
     }
     const locationId = getCurrentLocationId();
     const characterId = window.currentLocationCharacterId;
-    if (socket && characterId) {
+    if (socket && locationId) {
         socket.emit('leave_location', {
             token: localStorage.getItem('access_token'),
             location_id: locationId,
@@ -2213,23 +2227,66 @@ window.setCurrentTileTypeFromUI = function(value) {
 };
 
 let sceneLoadingGeneration = 0;
+let sceneLoadingController = null;
+let sceneLoadingType = 'world';
+let sceneLoadingProgress = 0;
+let sceneLoadingActive = false;
+
+function invalidateSceneLoading() {
+    sceneLoadingController?.abort();
+    sceneLoadingActive = false;
+    sceneLoadingGeneration++;
+}
+
+window.cancelSceneLoading = function() {
+    if (!sceneLoadingActive) return;
+    const returnToMap = sceneLoadingType === 'location' && Number.isInteger(window.MAP_CHUNKS_WIDTH);
+    invalidateSceneLoading();
+    window.locationDirectOpenPending = false;
+    if (returnToMap) window.exitLocation();
+    else window.location.href = '/';
+};
 
 function isCurrentSceneLoading(token) {
     return token === sceneLoadingGeneration;
 }
 
 function showSceneLoading(sceneType) {
+    sceneLoadingController?.abort();
+    sceneLoadingController = new AbortController();
+    sceneLoadingType = sceneType;
+    sceneLoadingActive = true;
+    sceneLoadingProgress = 0;
     const token = ++sceneLoadingGeneration;
     const screen = document.getElementById('scene-loading-screen');
     if (!screen) return token;
     screen.classList.remove('is-hidden', 'is-error');
     document.getElementById('scene-loading-title').textContent =
-        sceneType === 'location' ? 'Загрузка…' : 'Карта мира';
+        sceneType === 'location' ? 'Загрузка…' : (document.getElementById('lobby-name')?.textContent || 'Карта мира');
     document.getElementById('scene-loading-detail').textContent = sceneType === 'location'
         ? 'Разворачиваем рельеф, объекты и освещение.'
         : 'Загружаем сектора и собираем поверхность.';
     document.getElementById('scene-loading-retry').hidden = true;
+    const cancel = document.getElementById('scene-loading-cancel');
+    if (cancel) {
+        cancel.hidden = false;
+        cancel.textContent = sceneType === 'location' && Number.isInteger(window.MAP_CHUNKS_WIDTH)
+            ? 'Отменить и на карту' : 'Отменить и в меню';
+    }
+    setSceneLoadingProgress(token, 0);
     return token;
+}
+
+function setSceneLoadingProgress(token, percent, detail) {
+    if (!isCurrentSceneLoading(token)) return;
+    sceneLoadingProgress = Math.max(sceneLoadingProgress, Math.min(100, Math.max(0, Math.round(percent))));
+    const label = document.getElementById('scene-loading-percent');
+    const fill = document.getElementById('scene-loading-fill');
+    const progress = document.getElementById('scene-loading-progress');
+    if (label) label.textContent = `${sceneLoadingProgress}%`;
+    if (fill) fill.style.width = `${sceneLoadingProgress}%`;
+    progress?.setAttribute('aria-valuenow', String(sceneLoadingProgress));
+    if (detail) document.getElementById('scene-loading-detail').textContent = detail;
 }
 
 function setSceneLoadingLocationName(token, name) {
@@ -2238,8 +2295,12 @@ function setSceneLoadingLocationName(token, name) {
 }
 
 function finishSceneLoading(token) {
+    setSceneLoadingProgress(token, 100);
     requestAnimationFrame(() => requestAnimationFrame(() => {
         if (isCurrentSceneLoading(token)) {
+            sceneLoadingActive = false;
+            const cancel = document.getElementById('scene-loading-cancel');
+            if (cancel) cancel.hidden = true;
             document.getElementById('scene-loading-screen')?.classList.add('is-hidden');
         }
     }));
@@ -2271,6 +2332,10 @@ function escapeHtml(unsafe) {
     const startupToken = showSceneLoading(directLocationId ? 'location' : 'world');
     try {
         await loadLobbyInfo();
+        if (!isCurrentSceneLoading(startupToken)) return;
+        if (!directLocationId) setSceneLoadingLocationName(startupToken, document.getElementById('lobby-name').textContent);
+        else document.getElementById('scene-loading-cancel').textContent = 'Отменить и на карту';
+        setSceneLoadingProgress(startupToken, 5, 'Загружаем персонажей комнаты.');
         await loadLobbyCharacters();
         initHotkeys();
     } catch (error) {
@@ -2278,13 +2343,10 @@ function escapeHtml(unsafe) {
         failSceneLoading(startupToken, 'Не удалось подготовить комнату.');
         return;
     }
+    if (!isCurrentSceneLoading(startupToken)) return;
     if (directLocationId) {
         await window.enterLocation(directLocationId);
         window.locationDirectOpenPending = false;
-        if (!getCurrentLocationId()) {
-            window.isLocationActive = false;
-            resumeWorldMapLoad();
-        }
     } else {
         resumeWorldMapLoad();
     }
