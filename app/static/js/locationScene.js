@@ -7253,8 +7253,8 @@ function createLocationProfileControl(container) {
     const panel = document.createElement('pre');
     panel.className = 'scene-profile-results';
     panel.hidden = true;
-    copyButton.style.bottom = '58px';
-    panel.style.bottom = '98px';
+    copyButton.style.bottom = '64px';
+    panel.style.bottom = '108px';
     container.append(button, copyButton, panel);
     let reportText = '';
 
@@ -10735,7 +10735,7 @@ function createLampPreviewLights() {
     return { group, lights: { point, spot } };
 }
 
-function setLampRenderLight(light, source, x = source.x, y = source.y, z = source.z) {
+function setLampPreviewLight(light, source, x = source.x, y = source.y, z = source.z) {
     light.color.set(source.color);
     light.distance = Number(source.distance);
     light.position.set(Number(x), Number(y), Number(z));
@@ -10753,7 +10753,7 @@ function updateLampPreviewLights() {
     for (const light of [lampPreviewLights.point, lampPreviewLights.spot]) {
         const active = preview && (light.isSpotLight === (preview.kind === 'spot' || preview.lightKind === 'spot'));
         light.intensity = active ? Math.min(Number(preview.intensity || 2), 2) : 0;
-        if (active) setLampRenderLight(light, preview,
+        if (active) setLampPreviewLight(light, preview,
             buildPreviewMesh.position.x, buildPreviewMesh.position.y, buildPreviewMesh.position.z);
     }
 }

@@ -677,6 +677,7 @@ window.enterLocation = async function(locationId) {
                     </div>
                     <div class="location-asset-tabs"></div>
                     <div class="location-asset-grid"></div>
+                    <p class="location-asset-empty" role="status" hidden>Ничего не найдено. Измените запрос или выберите категорию.</p>
                     <div class="location-asset-placement" hidden>
                         <span data-placement-name></span>
                         <label><span data-placement-height-label>Высота от земли, м</span>
@@ -793,7 +794,7 @@ window.enterLocation = async function(locationId) {
                     assetTabs.replaceChildren();
                     assetGrid.replaceChildren();
                     const libraryVisible = window.locationEditorTool === 'assets';
-                    for (const node of [assetTabs, assetGrid, assetSearch,
+                    for (const node of [assetTabs, assetGrid, assetSearch, assetSection.querySelector('.location-asset-empty'),
                         assetSection.querySelector('.location-asset-library-heading > span')]) node.hidden = !libraryVisible;
                     if (!libraryVisible) return;
                     groups.forEach(group => {
@@ -801,7 +802,12 @@ window.enterLocation = async function(locationId) {
                         tab.type = 'button';
                         tab.textContent = group;
                         tab.setAttribute('aria-pressed', String(group === activeGroup));
-                        tab.onclick = () => { activeGroup = group; renderAssetCards(); };
+                        tab.onclick = () => {
+                            activeGroup = group;
+                            assetSearch.value = '';
+                            renderAssetCards();
+                            assetGrid.scrollTop = 0;
+                        };
                         assetTabs.appendChild(tab);
                     });
                     const search = assetSearch.value.trim().toLocaleLowerCase('ru');
@@ -834,6 +840,7 @@ window.enterLocation = async function(locationId) {
                         };
                         assetGrid.appendChild(card);
                     });
+                    assetSection.querySelector('.location-asset-empty').hidden = assetGrid.childElementCount > 0;
                 };
                 window.cancelLocationAssetPlacement = () => {
                     activeAsset = null;

@@ -9,9 +9,7 @@ function moduleUrl(name) {
 }
 
 const source = fs.readFileSync(path.join(__dirname,
-    '../app/static/js/locationDirectionalLightFieldPrototype.js'), 'utf8')
-    .replace("from './locationStaticLightFieldPrototype.js'",
-        `from '${moduleUrl('locationStaticLightFieldPrototype.js')}'`);
+    '../app/static/js/locationDirectionalLightFieldPrototype.js'), 'utf8');
 const prototype = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 function lamp(overrides = {}) {
@@ -71,17 +69,17 @@ test('opaque wall and closed door block light; open doorway transmits it', async
     assert.deepEqual(field.sample(6.25, 1.4, 3.25, { x: -1, y: 0, z: 0 }), [0, 0, 0]);
 });
 
-test('levels isolate sources and dynamic-source IDs are excluded from the static atlas', async () => {
+test('levels isolate sources and switched-off lamps do not contribute', async () => {
     const { createDirectionalLightField } = await prototype;
     const field = createDirectionalLightField({ width: 8, height: 8,
         levels: [{ id: 0, y: 0 }, { id: 1, y: 3 }] });
-    const sources = [lamp(), lamp({ id: 'upper', level: 1, y: 4.4 })];
-    const stats = field.rebuild({ lamps: sources, dynamicLightIds: new Set(['lamp']) });
+    const sources = [lamp({ intensity: 0 }), lamp({ id: 'upper', level: 1, y: 4.4 })];
+    const stats = field.rebuild({ lamps: sources });
     assert.equal(stats.activeLights, 1);
     assert.deepEqual(field.sample(3.25, 1.4, 3.25, { x: -1, y: 0, z: 0 }, 0), [0, 0, 0]);
     assert.ok(field.sample(3.25, 4.4, 3.25, { x: -1, y: 0, z: 0 }, 1)[0] > 0);
     assert.deepEqual(field.sample(3.25, 4.4, 3.25, { x: -1, y: 0, z: 0 }, 0), [0, 0, 0]);
-    assert.deepEqual(stats.lampStats.map(item => item.route), ['dynamic', 'field']);
+    assert.deepEqual(stats.lampStats.map(item => item.route), ['off', 'field']);
 });
 
 test('stationary spotlight illuminates its cone, not the rear or the space behind a wall', async () => {
@@ -98,7 +96,7 @@ test('stationary spotlight illuminates its cone, not the rear or the space behin
     field.rebuild({ lamps: [spot], walls: [{ level: 0, x1: 3.5, x2: 3.5,
         z1: 0, z2: 8, bottomY: 0, topY: 3 }] });
     assert.deepEqual(field.sample(4.25, 0, 3.25, up), [0, 0, 0]);
-    field.rebuild({ lamps: [spot], dynamicLightIds: new Set(['spot']) });
+    field.rebuild({ lamps: [{ ...spot, intensity: 0 }] });
     assert.deepEqual(field.sample(4.25, 0, 3.25, up), [0, 0, 0]);
 });
 
@@ -130,7 +128,7 @@ test('one packed texture, linear RGBM superposition and material lifecycle', asy
         userData: {}, ...maps, onBeforeCompile: oldCompile,
         dispose() { this.disposals = (this.disposals || 0) + 1; },
         customProgramCacheKey: () => 'physical' };
-    const controls = applyDirectionalLightFieldMaterial(physical, texture, field, 1);
+    applyDirectionalLightFieldMaterial(physical, texture, field, 1);
     const shader = { uniforms: {}, vertexShader: '#include <common>\n#include <project_vertex>',
         fragmentShader: '#include <common>\n#include <lights_fragment_end>' };
     physical.onBeforeCompile(shader);
@@ -142,9 +140,8 @@ test('one packed texture, linear RGBM superposition and material lifecycle', asy
     assert.equal(shader.uniforms.directionalFieldLevel.value, 1);
     assert.equal(shader.uniforms.directionalFieldMap.value, texture);
     assert.equal(shader.uniforms.directionalFieldSamplesPerMeter.value, 2);
-    assert.equal(controls.enabled.value, 1);
-    controls.enabled.value = 0;
-    assert.equal(shader.uniforms.directionalFieldEnabled.value, 0);
+    assert.equal(shader.uniforms.directionalFieldEnabled, undefined);
+    assert.doesNotMatch(shader.fragmentShader, /directionalFieldEnabled/);
     assert.deepEqual(Object.fromEntries(Object.keys(maps).map(key => [key, physical[key]])), maps);
     assert.equal(removeDirectionalLightFieldMaterial(physical), true);
     assert.equal(physical.disposals, 1);
@@ -189,12 +186,12 @@ test('rotated face uses its world normal and non-integer dimensions use fixed ce
     material.onBeforeCompile(shader);
     assert.equal(shader.uniforms.directionalFieldSamplesPerMeter.value, 3);
     assert.match(shader.fragmentShader, /vec2 cell = clamp\(position \* directionalFieldSamplesPerMeter - vec2\(0\.5\),/);
-    assert.equal(material.customProgramCacheKey(), 'base:directional-field-v1');
+    assert.equal(material.customProgramCacheKey(), 'base:directional-field-v2');
     removeDirectionalLightFieldMaterial(material);
     assert.equal(material.customProgramCacheKey(), 'base');
 });
 
-test('many sources reuse atlas memory and selected dynamic IDs never enter it', async () => {
+test('many sources reuse atlas memory; all active lamps contribute without a dynamic routing mask', async () => {
     const { createDirectionalLightField } = await prototype;
     const field = createDirectionalLightField({ width: 12, height: 6,
         levels: [{ id: 0, y: 0 }] });
@@ -202,11 +199,12 @@ test('many sources reuse atlas memory and selected dynamic IDs never enter it', 
     const lamps = Array.from({ length: 60 }, (_, index) => lamp({
         id: `lamp-${index}`, x: 2.25 + index % 4, z: 1.25 + index % 3,
     }));
-    const stats = field.rebuild({ lamps, dynamicLightIds: new Set(['lamp-0']) });
+    const stats = field.rebuild({ lamps: lamps.map((l, i) => i === 0 ? { ...l, intensity: 0 } : l) });
     assert.equal(stats.activeLights, 59);
-    assert.equal(stats.lampStats[0].route, 'dynamic');
+    assert.equal(stats.lampStats[0].route, 'off');
     assert.equal(field.pixels, pixels);
-    field.rebuild({ lamps: [lamps[0]], dynamicLightIds: new Set(['lamp-0']) });
+    field.rebuild({ lamps: [{ ...lamps[0], intensity: 0 }] });
     assert.ok(field.pixels.every(value => value === 0));
     assert.equal(field.pixels, pixels);
+    assert.equal(field.rebuild({ lamps }).activeLights, 60);
 });

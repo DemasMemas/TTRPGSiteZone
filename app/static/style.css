@@ -250,7 +250,7 @@ body {
   color: #e5e2c6;
 }
 .scene-profile-button {
-  bottom: 18px;
+  bottom: 64px;
   padding: 8px 12px;
   font: 12px Georgia, serif;
   cursor: pointer;
@@ -273,7 +273,7 @@ body {
 
 .location-floor-menu {
   position: absolute;
-  right: 320px;
+  right: 18px;
   bottom: 18px;
   z-index: 24;
   display: flex;
@@ -309,9 +309,6 @@ body {
   cursor: pointer;
 }
 .location-floor-menu button:disabled { opacity: .45; cursor: default; }
-@media (max-width: 680px) {
-  .location-floor-menu { right: 18px; bottom: 104px; }
-}
 
 /* Слой интерфейса поверх 3D */
 .ui-overlay {

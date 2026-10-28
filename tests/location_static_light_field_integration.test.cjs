@@ -3,563 +3,111 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
+const url = text => 'data:text/javascript;base64,' + Buffer.from(text).toString('base64');
+const integration = import(url(read('locationStaticLightField.js')
+    .replace("from './locationArchitecture.js'", `from '${url(read('locationArchitecture.js'))}'`)
+    .replace("from './locationDirectionalLightFieldPrototype.js'", `from '${url(read('locationDirectionalLightFieldPrototype.js'))}'`)));
+const three = { DataTexture: class {
+    constructor(data, width, height) { this.image = { data, width, height }; }
+    dispose() { this.disposed = true; }
+}, RGBAFormat: 1, ClampToEdgeWrapping: 2, LinearFilter: 3 };
+const lamp = (overrides = {}) => ({ kind: 'point', x: 3, z: 3, y: 1.5,
+    height: 1.5, color: '#ffffff', intensity: 2, distance: 7, ...overrides });
+const data = objects => ({ grid_width: 12, grid_height: 6, objects });
+function wall() { return { id: 1, type: 'wall', tile_x: 5, tile_y: 3,
+    properties: { building_id: 'house', level: 0, rotation: -Math.PI / 2,
+        offset_z: -0.5, dimensions: { width: 6, depth: .2, height: 2.4 } } }; }
+function door(open) { return { id: 2, type: 'door', tile_x: 5, tile_y: 3,
+    properties: { building_id: 'house', level: 0, rotation: -Math.PI / 2,
+        offset_z: -.5, is_open: open, dimensions: { width: 1, depth: .18, height: 2 } } }; }
 
-function sourceUrl(name) {
-    return `data:text/javascript;base64,${fs.readFileSync(path.join(__dirname,
-        '../app/static/js', name)).toString('base64')}`;
-}
-
-const architectureUrl = sourceUrl('locationArchitecture.js');
-const prototypeUrl = sourceUrl('locationStaticLightFieldPrototype.js');
-const directionalPrototypeSource = fs.readFileSync(path.join(__dirname,
-    '../app/static/js/locationDirectionalLightFieldPrototype.js'), 'utf8')
-    .replace("from './locationStaticLightFieldPrototype.js'", `from '${prototypeUrl}'`);
-const directionalPrototypeUrl = `data:text/javascript;base64,${Buffer.from(directionalPrototypeSource).toString('base64')}`;
-const integrationSource = fs.readFileSync(path.join(__dirname,
-    '../app/static/js/locationStaticLightField.js'), 'utf8')
-    .replace("from './locationArchitecture.js'", `from '${architectureUrl}'`)
-    .replace("from './locationStaticLightFieldPrototype.js'", `from '${prototypeUrl}'`)
-    .replace("from './locationDirectionalLightFieldPrototype.js'", `from '${directionalPrototypeUrl}'`);
-const integration = import(`data:text/javascript;base64,${Buffer.from(integrationSource).toString('base64')}`);
-const prototype = import(prototypeUrl);
-
-test('game field covers scene materials at their level and restores them on disable', () => {
-    const scene = fs.readFileSync(path.join(__dirname,
-        '../app/static/js/locationScene.js'), 'utf8');
-    const helpers = scene.slice(scene.indexOf('const FLOOR_SURFACE_OFFSET'),
-        scene.indexOf('function quietHouseColor'));
-    const visit = scene.slice(scene.indexOf('function forEachStaticLightFieldMaterial'),
-        scene.indexOf('function setStaticLightFieldButtonState'));
-    const material = () => ({ userData: {} });
-    const sharedChairMaterial = material();
-    const chair = { isMesh: true, userData: {}, material: sharedChairMaterial };
-    const chairRoot = { userData: { locationObject: { type: 'chair', properties: { level: 1 } } },
-        traverse(callback) { callback(chair); callback({ isMesh: true, userData: {}, material: sharedChairMaterial }); } };
-    const crateMaterial = material();
-    const crateRoot = { userData: { locationObject: { type: 'box', properties: { level: 0 } } },
-        traverse(callback) { callback({ isMesh: true, userData: {}, material: [crateMaterial] }); } };
-    const excludedMaterial = material();
-    const lampRoot = { userData: { locationObject: { type: 'ceiling_bulb' } },
-        traverse(callback) { callback({ isMesh: true, userData: {}, material: excludedMaterial }); } };
-    const rootWith = value => ({ userData: {},
-        traverse(callback) { callback({ isMesh: true, userData: {}, material: value }); } });
-    const groundMaterial = material();
-    const waterMaterial = material();
-    const grassMaterial = material();
-    const bankMaterial = material();
-    const decorMaterial = material();
-    const anomalyMaterial = material();
-    const roofMaterial = material();
-    const characterMaterial = material();
-    const terrainSurfaceMesh = rootWith(groundMaterial);
-    const waterSurfaceMesh = rootWith(waterMaterial);
-    const waterBankMesh = rootWith(bankMaterial);
-    const grassDetailGroup = rootWith(grassMaterial);
-    const decorRoot = rootWith(decorMaterial);
-    const anomalyRoot = rootWith(anomalyMaterial);
-    const roofRoot = rootWith(roofMaterial);
-    roofRoot.userData.roofPlan = { floorId: 1 };
-    const attached = [];
-    const controller = { field: { levels: [{ id: 0 }, { id: 1 }] },
-        attach(value, level) { value.userData.fieldLevel = level; attached.push(value); },
-        detach(value) { delete value.userData.fieldLevel; } };
-    const context = { locationStaticLightField: controller,
-        locationTileMesh: null, waterTileMesh: null, smoothTerrainMesh: null,
-        terrainSurfaceMesh, waterSurfaceMesh, waterBankMesh, sandBankMesh: null,
-        waterDetailGroup: null, grassDetailGroup,
-        locationObjectMeshes: [chairRoot, crateRoot, lampRoot],
-        objectMeshes: [decorRoot, anomalyRoot], anomalyEffectMeshes: [anomalyRoot],
-        roofMeshes: [roofRoot], characterModels: new Map([[1, { model: rootWith(characterMaterial) }]]),
-        structureLevel: object => object.properties?.level || 0 };
-    const api = vm.runInNewContext(`${helpers}\n${visit}\n({ usesStaticLightField,
-        attachStaticLightFieldToRoot, forEachStaticLightFieldMaterial })`, context);
-    assert.equal(api.usesStaticLightField({ type: 'shelf' }), true);
-    assert.equal(api.usesStaticLightField({ type: 'ceiling_bulb' }), true);
-    api.attachStaticLightFieldToRoot(chairRoot, 1);
-    api.attachStaticLightFieldToRoot(crateRoot, 0);
-    api.attachStaticLightFieldToRoot(roofRoot, 1);
-    assert.equal(attached.length, 2, 'shared furniture material is attached once');
-    assert.equal(sharedChairMaterial.userData.fieldLevel, 1);
-    assert.equal(crateMaterial.userData.fieldLevel, 0);
-    const visited = new Map();
-    api.forEachStaticLightFieldMaterial((value, level) => visited.set(value, level));
-    for (const value of [groundMaterial, waterMaterial, bankMaterial, grassMaterial,
-        decorMaterial, characterMaterial, crateMaterial, excludedMaterial]) {
-        assert.equal(visited.get(value), 0);
-    }
-    assert.equal(visited.has(roofMaterial), false, 'interior field does not light roofs');
-    assert.equal(visited.get(sharedChairMaterial), 1);
-    assert.equal(visited.has(anomalyMaterial), false);
-    api.forEachStaticLightFieldMaterial(value => controller.detach(value));
-    assert.equal(sharedChairMaterial.userData.fieldLevel, undefined);
-    assert.equal(crateMaterial.userData.fieldLevel, undefined);
-    assert.equal(excludedMaterial.userData.fieldLevel, undefined);
-    context.locationStaticLightField = null;
-    api.attachStaticLightFieldToRoot(chairRoot, 1);
-    assert.equal(attached.length, 2, 'disabled field does not attach to late furniture');
-    const lateMaterial = material();
-    const lateModel = rootWith(lateMaterial);
-    context.locationStaticLightField = controller;
-    api.attachStaticLightFieldToRoot(lateModel, 0);
-    assert.equal(attached.at(-1), lateMaterial);
-});
-
-function wall(angle = -Math.PI / 2) {
-    return { id: 1, type: 'wall', tile_x: 5, tile_y: 3,
-        properties: { building_id: 'house', level: 0, rotation: angle,
-            offset_x: 0, offset_z: -0.5,
-            dimensions: { width: 6, depth: 0.2, height: 2.4 } } };
-}
-
-function door(open) {
-    return { id: 2, type: 'door', tile_x: 5, tile_y: 3,
-        properties: { building_id: 'house', level: 0, rotation: -Math.PI / 2,
-            offset_z: -0.5, is_open: open,
-            dimensions: { width: 1, depth: 0.18, height: 2 } } };
-}
-
-function inputs(objects, sources) {
-    return integration.then(({ locationStaticLightFieldInputs }) =>
-        locationStaticLightFieldInputs({ grid_width: 12, grid_height: 6, objects },
-            sources, () => 0));
-}
-
-test('a closed door blocks light; an open aperture transmits it below the lintel', async () => {
-    const { createStaticLightField } = await prototype;
-    const lamp = { kind: 'point', x: 3, z: 3, y: 1.5,
-        color: '#ffffff', intensity: 2, distance: 7 };
-    const closed = await inputs([wall(), door(false)], [lamp]);
-    const field = createStaticLightField(closed);
-    field.rebuild({ lamps: closed.lamps, walls: closed.walls });
-    assert.deepEqual(field.sample(7, 3, 0), [0, 0, 0]);
-    const open = await inputs([wall(), door(true)], [lamp]);
-    field.rebuild({ lamps: open.lamps, walls: open.walls });
-    assert.ok(field.sample(7, 3, 0)[0] > 0);
-    assert.deepEqual(field.sample(7, 1, 0), [0, 0, 0]);
-    const standalone = await inputs([door(false)], [lamp]);
-    field.rebuild({ lamps: standalone.lamps, walls: standalone.walls });
-    assert.deepEqual(field.sample(7, 3, 0), [0, 0, 0]);
-});
-
-test('rotated solid walls block at their actual world-space pose', async () => {
-    const { createStaticLightField } = await prototype;
-    for (const turn of [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2]) {
-        const object = wall(turn);
-        const axis = { x: Math.cos(turn), z: -Math.sin(turn) };
-        const normal = { x: Math.sin(turn), z: Math.cos(turn) };
-        const source = { kind: 'point', x: 5.5 - normal.x * 1.5,
-            z: 3 - normal.z * 1.5, y: 1.5,
-            color: '#ffffff', intensity: 2, distance: 6 };
-        const data = await inputs([object], [source]);
-        const field = createStaticLightField(data);
-        field.rebuild({ lamps: data.lamps, walls: data.walls });
-        const blocked = field.sample(5.5 + normal.x * 1.5,
-            3 + normal.z * 1.5, 0);
-        assert.deepEqual(blocked, [0, 0, 0], `${turn}: ${axis.x},${axis.z}`);
-    }
-});
-
-test('upper-floor lamps use their own layer and outdoor lamps stay on ground level', async () => {
-    const { createStaticLightField } = await prototype;
-    const floor = { id: 3, type: 'floor', tile_x: 2, tile_y: 2,
-        properties: { building_id: 'house', level: 1, rotation: Math.PI / 4,
-            dimensions: { width: 4, depth: 4, height: 0.12 } } };
-    const data = await inputs([floor], [
-        { kind: 'point', x: 4.9, z: 2.5, y: 3.5,
-            color: '#ffffff', intensity: 2, distance: 4 },
-        { kind: 'point', x: 9, z: 2.5, y: 3.5,
-            color: '#ffffff', intensity: 2, distance: 4 },
-        { kind: 'spot', x: 9, z: 3, y: 1.5,
-            color: '#ffffff', intensity: 2, distance: 4 },
-    ]);
-    assert.deepEqual(data.lamps.map(lamp => lamp.level), [1, 0]);
-    const field = createStaticLightField(data);
-    field.rebuild({ lamps: data.lamps, walls: data.walls });
-    assert.ok(field.sample(4.9, 2.5, 1)[0] > 0);
-    assert.deepEqual(field.sample(4.9, 2.5, 0), [0, 0, 0]);
-    assert.ok(field.sample(9, 2.5, 0)[0] > 0);
-});
-
-test('one texture and material hook survive updates and restore exactly on disable', async () => {
-    const { createLocationStaticLightField } = await integration;
-    const three = { DataTexture: class {
-        constructor(data, width, height) { Object.assign(this, { data, width, height }); }
-        dispose() { this.disposed = true; }
-    }, RGBAFormat: 1, ClampToEdgeWrapping: 2, NearestFilter: 3 };
-    const data = { grid_width: 12, grid_height: 6, objects: [wall()] };
-    const sources = [{ kind: 'point', x: 3, z: 3, y: 1.5,
-        color: '#ffffff', intensity: 2, distance: 7 }];
-    const controller = createLocationStaticLightField(three, data, sources, () => 0,
-        new Set([0]));
-    assert.equal(controller.stats.activeLights, 0);
-    const originalCompile = () => {};
-    const originalKey = () => 'pbr';
-    const material = { isMeshStandardMaterial: true, userData: {},
-        onBeforeCompile: originalCompile, customProgramCacheKey: originalKey };
-    controller.attach(material, 0);
-    assert.notEqual(material.onBeforeCompile, originalCompile);
-    const texture = controller.texture;
-    assert.equal(controller.update(data, sources), true);
-    assert.equal(controller.stats.activeLights, 1);
-    assert.equal(controller.texture, texture);
-    controller.detach(material);
-    assert.equal(material.onBeforeCompile, originalCompile);
-    assert.equal(material.customProgramCacheKey, originalKey);
-    assert.equal(material.userData.staticLightFieldPrototype, undefined);
-    controller.dispose();
-    assert.equal(texture.disposed, true);
-});
-
-test('game directional field excludes active point slots and reuses its texture across door edits', async () => {
+test('all saved point and spot lamps enter the field, including outside the old dynamic pool', async () => {
     const { createLocationDirectionalLightField } = await integration;
-    const three = { DataTexture: class {
-        constructor(data, width, height) { Object.assign(this, { data, width, height }); }
-        dispose() { this.disposed = true; }
-    }, RGBAFormat: 1, ClampToEdgeWrapping: 2, LinearFilter: 3 };
-    const light = { kind: 'point', x: 3, z: 3, y: 1.5,
-        color: '#ffffff', intensity: 2, distance: 7 };
-    const data = { grid_width: 12, grid_height: 6, objects: [wall(), door(false)] };
-    assert.throws(() => createLocationDirectionalLightField(three, data, [light],
-        () => 0, new Set(), 10), /texture or memory limit/);
-    const controller = createLocationDirectionalLightField(three, data, [light],
-        () => 0, new Set([0]), 1024);
-    assert.equal(controller.texture.minFilter, three.LinearFilter);
-    const up = { x: 0, y: 1, z: 0 };
-    assert.equal(controller.stats.activeLights, 0);
-    assert.deepEqual(controller.field.sample(3, 0, 3, up), [0, 0, 0]);
-    const originalCompile = () => {};
-    const material = { isMeshStandardMaterial: true, userData: {},
-        onBeforeCompile: originalCompile, customProgramCacheKey: () => 'pbr' };
-    controller.attach(material, 0);
-    assert.notEqual(material.onBeforeCompile, originalCompile);
-    const texture = controller.texture;
-    assert.equal(controller.update(data, [light]), true);
-    assert.equal(controller.stats.activeLights, 1);
-    assert.ok(controller.field.sample(3, 0, 3, up)[0] > 0);
-    assert.deepEqual(controller.field.sample(7, 0, 3, up), [0, 0, 0]);
-    assert.equal(controller.update({ ...data, objects: [wall(), door(true)] }, [light]), true);
-    assert.equal(controller.texture, texture);
-    assert.ok(controller.field.sample(7, 0, 3, up)[0] > 0);
-    assert.equal(texture.needsUpdate, true);
-    controller.detach(material);
-    assert.equal(material.onBeforeCompile, originalCompile);
-    assert.equal(material.userData.directionalLightFieldPrototype, undefined);
-    controller.dispose();
-    assert.equal(texture.disposed, true);
+    const sources = Array.from({ length: 20 }, (_, i) => lamp({ x: 1 + i % 10,
+        kind: i % 3 ? 'point' : 'spot', azimuth: 0 }));
+    const c = createLocationDirectionalLightField(three, data([]), sources, () => 0);
+    assert.equal(c.inputs.lamps.length, 20);
+    assert.ok(c.stats.lampStats.every(item => item.route === 'field' && item.contributions > 0));
+    assert.ok(c.field.sample(4, 0, 3, { x: 0, y: 1, z: 0 })[0] > 0);
+    c.dispose(); assert.equal(c.texture.disposed, true);
 });
 
-test('game directional field routes every placed spotlight without double-counting slots', async () => {
-    const { activeStaticLightFieldSpotSlots, createLocationDirectionalLightField } = await integration;
-    const three = { DataTexture: class {
-        constructor(data, width, height) { Object.assign(this, { data, width, height }); }
-        dispose() { this.disposed = true; }
-    }, RGBAFormat: 1, ClampToEdgeWrapping: 2, LinearFilter: 3 };
-    const sources = [
-        { kind: 'spot', x: 2.25, z: 3.25, y: 1.4, height: 2,
-            azimuth: 0, color: '#ffffff', intensity: 2, distance: 6 },
-        { kind: 'spot', x: 2.25, z: 3.25, y: 1.4, height: 2,
-            azimuth: 0, color: '#ffffff', intensity: 2, distance: 6 },
-    ];
-    const slots = { spotShadow: [{ intensity: 2,
-        userData: { lampRenderSourceIndex: 0 } }], spotSimple: [{ intensity: 2,
-        userData: { lampRenderSourceIndex: 1 } }] };
-    const frozen = activeStaticLightFieldSpotSlots(slots, sources);
-    assert.deepEqual(frozen, { spotShadow: [null], spotSimple: [null] });
-    const controller = createLocationDirectionalLightField(three,
-        { grid_width: 8, grid_height: 8, objects: [] }, sources, () => 0,
-        new Set(frozen.spotShadow.filter(index => index != null)));
-    assert.deepEqual(controller.stats.lampStats.map(item => item.route), ['field', 'field']);
-    assert.ok(controller.field.sample(4.25, 0, 3.25, { x: 0, y: 1, z: 0 })[0] > 0);
-    const texture = controller.texture;
-    const rotated = [sources[0], { ...sources[1], azimuth: 90 }];
-    assert.equal(controller.update({ grid_width: 8, grid_height: 8, objects: [] }, rotated,
-        new Set()), true);
-    assert.ok(controller.field.sample(4.25, 0, 3.25,
-        { x: 0, y: 1, z: 0 })[0] > 0, 'the first spotlight remains in the field');
-    assert.ok(controller.field.sample(2.25, 0, 5.25,
-        { x: 0, y: 1, z: 0 })[0] > 0);
-    assert.equal(controller.update({ grid_width: 8, grid_height: 8, objects: [] }, sources,
-        new Set([0, 1])), true);
-    assert.equal(controller.stats.activeLights, 0);
-    assert.equal(controller.texture, texture);
-    controller.dispose();
-    assert.equal(texture.disposed, true);
+test('door and wall edits update the existing atlas and preserve fractional source values', async () => {
+    const { createLocationDirectionalLightField } = await integration;
+    const c = createLocationDirectionalLightField(three, data([wall(), door(false)]), [lamp()], () => 0);
+    const texture = c.texture, pixels = c.field.pixels;
+    assert.deepEqual(c.field.sample(7, 0, 3, { x: 0, y: 1, z: 0 }), [0, 0, 0]);
+    assert.equal(c.update(data([wall(), door(true)]), [lamp({ x: 3.125, intensity: 2.345 })]), true);
+    assert.equal(c.texture, texture); assert.equal(c.field.pixels, pixels);
+    assert.equal(c.inputs.lamps[0].x, 3.125); assert.equal(c.inputs.lamps[0].intensity, 2.345);
+    assert.ok(c.field.sample(7, 0, 3, { x: 0, y: 1, z: 0 })[0] > 0);
+    c.update(data([wall(), door(false)]), [lamp()]);
+    assert.deepEqual(c.field.sample(7, 0, 3, { x: 0, y: 1, z: 0 }), [0, 0, 0]);
+    c.dispose();
 });
 
-test('shadowless spotlight routes through wall-aware field instead of shining through a wall', async () => {
-    const { activeStaticLightFieldSpotSlots, createLocationDirectionalLightField } = await integration;
-    const three = { DataTexture: class {
-        constructor(data, width, height) { Object.assign(this, { data, width, height }); }
-        dispose() {}
-    }, RGBAFormat: 1, ClampToEdgeWrapping: 2, LinearFilter: 3 };
-    const source = { kind: 'spot', x: 3, z: 3, y: 1.5, height: 2,
-        azimuth: 0, color: '#ffffff', intensity: 2, distance: 7 };
-    const slots = { spotShadow: [], spotSimple: [{ intensity: 2,
-        userData: { lampRenderSourceIndex: 0 } }] };
-    assert.deepEqual(activeStaticLightFieldSpotSlots(slots, [source]),
-        { spotShadow: [], spotSimple: [null] });
-    const closed = { grid_width: 12, grid_height: 6, objects: [wall(), door(false)] };
-    const controller = createLocationDirectionalLightField(three, closed, [source], () => 0);
-    const up = { x: 0, y: 1, z: 0 };
-    assert.equal(controller.stats.lampStats[0].route, 'field');
-    assert.deepEqual(controller.field.sample(7, 0, 3, up), [0, 0, 0]);
-    assert.equal(controller.update({ ...closed, objects: [wall(), door(true)] }, [source]), true);
-    assert.ok(controller.field.sample(7, 0, 3, up)[0] > 0);
-    controller.dispose();
+test('basements, decor and explicit lamp levels are present; adding a floor requests a new atlas', async () => {
+    const { createLocationDirectionalLightField, locationStaticLightFieldInputs } = await integration;
+    const input = { ...data([{ type: 'wall', tile_x: 1, tile_y: 1,
+        properties: { level: -1, dimensions: { width: 1, height: 2, depth: .2 } } }]),
+        tiles_data: [[{ objects: [{ type: 'box', level: 1 }] }]] };
+    const prepared = locationStaticLightFieldInputs(input, [lamp({ level: 2 })], () => 0);
+    assert.deepEqual(prepared.levels.map(l => l.id), [-1, 0, 1, 2]);
+    const c = createLocationDirectionalLightField(three, input, [lamp({ level: 2 })], () => 0);
+    assert.equal(c.stats.lampStats[0].route, 'field');
+    const pixels = c.field.pixels;
+    assert.equal(c.update(input, [lamp({ level: 3 })]), false);
+    assert.equal(c.field.pixels, pixels);
+    c.dispose();
 });
 
-test('opening a real door rebuilds the same field texture without adding a light or wall mesh', async () => {
-    const { createLocationStaticLightField } = await integration;
-    const three = { DataTexture: class {
-        constructor(data, width, height) { Object.assign(this, { data, width, height }); }
-        dispose() {}
-    }, RGBAFormat: 1, ClampToEdgeWrapping: 2, NearestFilter: 3 };
-    const light = { kind: 'point', x: 3, z: 3, y: 1.5,
-        color: '#ffffff', intensity: 2, distance: 7 };
-    const closed = { grid_width: 12, grid_height: 6, objects: [wall(), door(false)] };
-    const controller = createLocationStaticLightField(three, closed, [light], () => 0);
-    const texture = controller.texture;
-    assert.deepEqual(controller.field.sample(7, 3, 0), [0, 0, 0]);
-    assert.equal(controller.update({ ...closed, objects: [wall(), door(true)] }, [light]), true);
-    assert.equal(controller.texture, texture);
-    assert.equal(texture.needsUpdate, true);
-    assert.ok(controller.field.sample(7, 3, 0)[0] > 0);
-    controller.dispose();
+test('texture/memory checks precede allocation and do not choose a legacy lighting mode', async () => {
+    const { createLocationDirectionalLightField } = await integration;
+    let allocations = 0;
+    const limited = { ...three, DataTexture: class { constructor() { allocations++; } } };
+    assert.throws(() => createLocationDirectionalLightField(limited, data([]), [], () => 0, 16), /limit/);
+    assert.throws(() => createLocationDirectionalLightField(limited,
+        { grid_width: 200, grid_height: 200, objects: [{ type: 'box', properties: { level: 10 } }] },
+        [], () => 0), /limit/);
+    assert.equal(allocations, 0);
 });
 
-test('frozen point slots follow the same lamp across deletion and do not reassign on addition', async () => {
-    const { remapStaticLightFieldSlots } = await integration;
-    const before = [
-        { kind: 'point', x: 1, z: 2, intensity: 2 },
-        { kind: 'point', x: 4, z: 2, intensity: 2 },
-        { kind: 'point', x: 8, z: 2, intensity: 2 },
-    ];
-    const slots = { pointShadow: [0, 2], pointSimple: [null] };
-    assert.deepEqual(remapStaticLightFieldSlots(slots, before, [...before,
-        { kind: 'point', x: 10, z: 2, intensity: 2 }]), slots);
-    assert.deepEqual(remapStaticLightFieldSlots(slots, before, before.slice(1)),
-        { pointShadow: [null, 1], pointSimple: [null] });
-    assert.deepEqual(remapStaticLightFieldSlots(slots, before,
-        [before[0], { ...before[1], intensity: 3 }, before[2]]), slots);
+test('scene traversal attaches floors, water, decor and characters at their level, excluding effects', () => {
+    const scene = read('locationScene.js');
+    const body = scene.slice(scene.indexOf('function forEachStaticLightFieldMaterial('), scene.indexOf('function refreshStaticLightField('));
+    const material = id => ({ id });
+    const root = (id, object) => ({ userData: { locationObject: object, sourceObject: object },
+        traverse(fn) { fn({ isMesh: true, userData: {}, material: material(id) }); } });
+    const effect = root('effect', { type: 'anomaly' });
+    const context = { locationTileMesh: root('terrain'), waterTileMesh: null, smoothTerrainMesh: null,
+        terrainSurfaceMesh: null, waterSurfaceMesh: root('water'), waterBankMesh: null, sandBankMesh: null,
+        waterDetailGroup: null, grassDetailGroup: root('grass'),
+        locationObjectMeshes: [root('wall', { type: 'wall', properties: { level: 1 } }), effect],
+        objectMeshes: [root('decor', { type: 'box', level: -1 }), effect], anomalyEffectMeshes: [effect],
+        characterModels: new Map([[1, { model: root('character'), floorLevel: 2 }]]),
+        usesStaticLightField: o => o?.type && o.type !== 'anomaly',
+        structureLevel: o => o?.properties?.level ?? o?.level ?? 0 };
+    vm.runInNewContext(body, context);
+    const visited = [];
+    context.forEachStaticLightFieldMaterial((m, level) => visited.push([m.id, level]));
+    assert.deepEqual(visited, [['terrain', 0], ['water', 0], ['grass', 0], ['wall', 1], ['decor', -1], ['character', 2]]);
 });
 
-test('frozen point and spotlight routes remap together after deleting a lamp', async () => {
-    const { remapStaticLightFieldSlots } = await integration;
-    const before = [
-        { kind: 'point', x: 1, z: 2, intensity: 2 },
-        { kind: 'spot', x: 4, z: 2, intensity: 2, azimuth: 0 },
-        { kind: 'spot', x: 8, z: 2, intensity: 2, azimuth: 90 },
-    ];
-    const slots = { pointShadow: [0], pointSimple: [], spotShadow: [1], spotSimple: [null] };
-    assert.deepEqual(remapStaticLightFieldSlots(slots, before, before.slice(1)),
-        { pointShadow: [null], pointSimple: [], spotShadow: [0], spotSimple: [null] });
-});
-
-test('all placed point lamps use the field regardless of previous dynamic assignments', async () => {
-    const { activeStaticLightFieldPointSlots } = await integration;
-    const sources = Array.from({ length: 3 }, () => ({ kind: 'point', intensity: 2 }));
-    const slot = (actual, desired, intensity) => ({ intensity,
-        userData: { lampRenderSourceIndex: actual, lampDesiredSourceIndex: desired } });
-    const slots = { pointShadow: [slot(0, 2, 2), slot(null, 1, 0)],
-        pointSimple: [slot(2, 0, 0.01)] };
-    assert.deepEqual(activeStaticLightFieldPointSlots(slots, sources),
-        { pointShadow: [null, null], pointSimple: [null] });
-});
-
-test('saved fixtures and lit fire join placed lamps at the correct storey', async () => {
-    const scene = fs.readFileSync(path.join(__dirname,
-        '../app/static/js/locationScene.js'), 'utf8');
-    const start = scene.indexOf('function getLocationStaticFieldSources()');
-    const end = scene.indexOf('function isObjectLightSource(', start);
-    const [{ fireLightSource }, { electricFixtureLightSource }, { structureLevelOffset },
-        { locationStaticLightFieldInputs }] = await Promise.all([
-        import(sourceUrl('locationFire.js')), import(sourceUrl('locationFixtures.js')),
-        import(architectureUrl), integration,
-    ]);
-    const savedFixture = { type: 'wall_bulb', tile_x: 2, tile_y: 2,
-        properties: { level: 1, is_on: true, elevation: 2.2 } };
-    const offFixture = { type: 'ceiling_bulb', tile_x: 3, tile_y: 2,
-        properties: { level: 1, is_on: false, elevation: 2.4 } };
-    const fire = { type: 'torch', tile_x: 7, tile_y: 3,
-        properties: { is_lit: true } };
-    const decor = { x: 9, z: 3, tileX: 9, tileZ: 3, height: 0.4,
-        color: '#ffb064', intensity: 2, distance: 6 };
-    const floor = { type: 'floor', tile_x: 2, tile_y: 2,
-        properties: { level: 1, dimensions: { width: 4, depth: 4, height: 0.12 } } };
-    const context = { lampRenderSources: [{ kind: 'point', x: 1, z: 1, y: 2,
-        intensity: 2, distance: 6, color: '#ffffff' }],
-    currentLocationData: { objects: [floor, savedFixture, offFixture, fire] },
-    fireLightSource, electricFixtureLightSource, structureLevelOffset,
-    getTileHeight: () => 1, getLocationDecorFireSources: () => [decor] };
-    vm.runInNewContext(scene.slice(start, end), context);
-    const sources = context.getLocationStaticFieldSources();
-    assert.equal(sources.length, 4, 'off fixtures do not add a source');
-    assert.equal(sources[1].y, 1 + structureLevelOffset(savedFixture)
-        + electricFixtureLightSource(savedFixture).height);
-    assert.equal(sources[2].y, 1 + fireLightSource(fire).height);
-    assert.equal(sources[3].y, 1.4);
-    const data = locationStaticLightFieldInputs({ grid_width: 12, grid_height: 8,
-        objects: [floor] }, sources, () => 1, true);
-    assert.deepEqual(Array.from(data.lamps, lamp => lamp.level), [0, 1, 0, 0]);
-});
-
-test('field toggle hides only stationary object lights, not dynamic effects', () => {
-    const scene = fs.readFileSync(path.join(__dirname,
-        '../app/static/js/locationScene.js'), 'utf8');
-    const start = scene.indexOf('function setStaticObjectRenderLightsEnabled(');
-    const end = scene.indexOf('function refreshStaticLightField(', start);
-    const stationary = [{ visible: true, userData: { firePoolLight: true } },
-        { visible: true, userData: { decorFireLight: true } }];
-    const dynamic = { visible: true, userData: {} };
-    const context = { locationLightGroup: { children: [...stationary, dynamic] } };
-    vm.runInNewContext(scene.slice(start, end), context);
-    context.setStaticObjectRenderLightsEnabled(false);
-    assert.ok(stationary.every(light => !light.visible));
-    assert.equal(dynamic.visible, true);
-    context.setStaticObjectRenderLightsEnabled(true);
-    assert.ok(stationary.every(light => light.visible));
-    assert.equal(dynamic.visible, true);
-});
-
-test('shadowless point slots route through the wall-aware field', async () => {
-    const { activeStaticLightFieldPointSlots, createLocationDirectionalLightField } = await integration;
-    const three = { DataTexture: class {
-        constructor(data, width, height) { Object.assign(this, { data, width, height }); }
-        dispose() {}
-    }, RGBAFormat: 1, ClampToEdgeWrapping: 2, LinearFilter: 3 };
-    const source = { kind: 'point', x: 3, z: 3, y: 1.5,
-        color: '#ffffff', intensity: 2, distance: 7 };
-    const slots = { pointShadow: [], pointSimple: [{ intensity: 2,
-        userData: { lampRenderSourceIndex: 0 } }] };
-    const frozen = activeStaticLightFieldPointSlots(slots, [source]);
-    assert.deepEqual(frozen, { pointShadow: [], pointSimple: [null] });
-    const controller = createLocationDirectionalLightField(three,
-        { grid_width: 12, grid_height: 6, objects: [wall(), door(false)] },
-        [source], () => 0, new Set(frozen.pointShadow.filter(index => index != null)));
-    assert.equal(controller.stats.lampStats[0].route, 'field');
-    assert.ok(controller.field.sample(3, 0, 3, { x: 0, y: 1, z: 0 })[0] > 0);
-    assert.deepEqual(controller.field.sample(7, 0, 3, { x: 0, y: 1, z: 0 }), [0, 0, 0]);
-    controller.dispose();
-});
-
-test('saved point lamps in two separate houses contribute across the whole scene', async () => {
-    const { locationStaticLightFieldInputs } = await integration;
-    const { createStaticLightField } = await prototype;
-    const make = (type, x, z, width, depth, height, rotation = 0) => ({
-        type, tile_x: Math.floor(x), tile_y: Math.floor(z), properties: {
-            offset_x: x - Math.floor(x) - 0.5,
-            offset_z: z - Math.floor(z) - 0.5,
-            rotation, dimensions: { width, depth, height },
-        },
-    });
-    const objects = [6, 20].flatMap(x => [
-        make('floor', x, 6, 8, 8, 0.12),
-        make('wall', x, 2, 8, 0.2, 2.4),
-        make('wall', x, 10, 8, 0.2, 2.4),
-        make('wall', x - 4, 6, 8, 0.2, 2.4, -Math.PI / 2),
-        make('wall', x + 4, 6, 8, 0.2, 2.4, -Math.PI / 2),
-    ]);
-    const sources = [4, 5, 6, 7, 8, 18, 19, 20, 21, 22].map(x => ({
-        x, z: 6, height: 2.2, y: 3.2, color: '#ffd090',
-        intensity: 2.5, distance: 8,
-    }));
-    const inputs = locationStaticLightFieldInputs({ grid_width: 28, grid_height: 12, objects },
-        sources, () => 1);
-    assert.equal(inputs.lamps.length, 10);
-    assert.deepEqual(inputs.lamps.map(lamp => lamp.id), [...sources.keys()]);
-    const field = createStaticLightField(inputs);
-    const stats = field.rebuild({ lamps: inputs.lamps, walls: inputs.walls,
-        dynamicLightIds: new Set([0, 1, 2, 3, 4, 5]) });
-    assert.equal(stats.activeLights, 4);
-    assert.deepEqual(stats.lampStats.slice(0, 6).map(item => item.reason),
-        Array(6).fill('dynamic'));
-    assert.ok(stats.lampStats.slice(6).every(item => item.contributions > 0),
-        `right-house lamps lost: ${JSON.stringify(stats.lampStats)}`);
-    assert.ok(field.sample(20, 6, 0)[0] > 0.4,
-        `right house was not lit: ${field.sample(20, 6, 0)}`);
-    assert.ok(field.sampleWall(16.125, 6, 0)[0] > 0,
-        'right-house interior wall lost its field contribution');
-    assert.deepEqual(field.sampleWall(15.875, 6, 0), [0, 0, 0],
-        'right-house light crossed an opaque exterior wall');
-    assert.deepEqual(field.sample(6, 6, 0), [0, 0, 0]);
-    const pixels = Buffer.from(field.pixels);
-    field.rebuild({ lamps: inputs.lamps, walls: inputs.walls,
-        dynamicLightIds: new Set([0, 1, 2, 3, 4, 5]) });
-    assert.deepEqual(Buffer.from(field.pixels), pixels);
-});
-
-test('real-scene directional switch restores standard light and releases its resources', () => {
-    const scene = fs.readFileSync(path.join(__dirname,
-        '../app/static/js/locationScene.js'), 'utf8');
-    const start = scene.indexOf('export function setLocationStaticLightFieldEnabled(');
-    const end = scene.indexOf('export function getLocationStaticLightFieldDiagnostics(', start);
-    assert.ok(start > 0 && end > start);
-    const events = [];
-    const material = { userData: {} };
-    const controller = { stats: {}, attach() { events.push('attach'); },
-        detach() { events.push('detach'); }, dispose() { events.push('dispose'); } };
-    const context = vm.createContext({
-        locationStaticLightField: null, staticFieldPointSlots: null,
-        staticFieldSpotSlots: null,
-        locationStaticLightFieldRefreshTimer: null, staticFieldFirstFrame: null,
-        staticFieldLastToggleFrame: null,
-        staticFieldLastToggleWork: null,
-        locationProfiler: { stop() { events.push('stop-profile'); } },
-        scene: {}, currentLocationData: { grid_width: 10, grid_height: 10, objects: [] },
-        renderer: { capabilities: { maxTextureSize: 8192 }, info: { programs: [] } },
-        lampRenderSources: [{ kind: 'point' }, { kind: 'point' }, { kind: 'point' }],
-        lampRenderSlots: { pointShadow: [{ intensity: 2, shadow: { autoUpdate: true },
-            userData: { lampRenderSourceIndex: 2, lampDesiredSourceIndex: 2 } }],
-        pointSimple: [{ intensity: 2, shadow: { autoUpdate: false },
-            userData: { lampRenderSourceIndex: 1, lampDesiredSourceIndex: 1 } }],
-        spotShadow: [], spotSimple: [] },
-        LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER: 2,
-        activeStaticLightFieldPointSlots() {
-            return { pointShadow: [null], pointSimple: [null] };
-        },
-        activeStaticLightFieldSpotSlots() {
-            return { spotShadow: [], spotSimple: [] };
-        },
-        structureLevel: () => 0, getTileHeight: () => 0, THREE: {},
-        getLocationStaticFieldSources() { return context.lampRenderSources; },
-        setStaticObjectRenderLightsEnabled(enabled) { events.push(enabled ? 'objects-on' : 'objects-off'); },
-        forEachStaticLightFieldMaterial(callback) { callback(material, 0); },
-        staticFieldDynamicIds() { return new Set(Object.values(context.staticFieldPointSlots || {})
-            .flat().filter(index => index != null)); },
-        createLocationDirectionalLightField(_three, _data, _sources, _height, excluded) {
-            assert.deepEqual([...excluded], []);
-            events.push('create');
-            return controller;
-        },
-        updateLampRenderLights() { events.push('slots'); },
-        setStaticLightFieldButtonState() {},
-        getLocationStaticLightFieldDiagnostics() { return {}; },
-        performance: { now: () => 100 }, clearTimeout() {},
-        showNotification() {}, console: { info() {}, error() {} },
-    });
-    vm.runInContext(scene.slice(start, end).replace('export function', 'function'), context);
-    assert.equal(context.setLocationStaticLightFieldEnabled(false), false);
-    assert.deepEqual(events, []);
-    assert.equal(context.setLocationStaticLightFieldEnabled(true), true);
-    assert.deepEqual(events, ['stop-profile', 'create', 'objects-off', 'attach', 'slots']);
-    assert.equal(context.lampRenderSlots.pointShadow[0].intensity, 0);
-    assert.equal(context.lampRenderSlots.pointSimple[0].intensity, 0);
-    assert.equal(context.lampRenderSlots.pointSimple[0].userData.lampRenderSourceIndex, null);
-    assert.equal(context.setLocationStaticLightFieldEnabled(false), false);
-    assert.deepEqual(events.slice(-5), ['stop-profile', 'detach', 'dispose', 'objects-on', 'slots']);
-    assert.equal(context.locationStaticLightField, null);
-    assert.equal(context.staticFieldPointSlots, null);
-    assert.equal(context.setLocationStaticLightFieldEnabled(true), true);
-    assert.deepEqual(events.slice(-5), ['stop-profile', 'create', 'objects-off', 'attach', 'slots']);
-    assert.equal(context.setLocationStaticLightFieldEnabled(false), false);
-    assert.deepEqual(events.slice(-5), ['stop-profile', 'detach', 'dispose', 'objects-on', 'slots']);
-    context.renderer.capabilities.maxTextureSize = 50;
-    const beforeRejectedEnable = events.length;
-    assert.equal(context.setLocationStaticLightFieldEnabled(true), false);
-    assert.equal(events.length, beforeRejectedEnable + 1);
-    assert.equal(events.at(-1), 'stop-profile');
-    const loadStart = scene.indexOf('export function loadLocation(data)');
-    const loadEnd = scene.indexOf('function rebuildSmoothTerrainMesh', loadStart);
-    const loadBody = scene.slice(loadStart, loadEnd);
-    assert.match(loadBody, /controls\.update\(\);\s*updateLampRenderLights\(performance\.now\(\), 1, true\);\s*setLocationStaticLightFieldEnabled\(true\);/);
+test('refresh failure retains the last valid field; only scene disposal detaches it', () => {
+    const source = read('locationScene.js');
+    const start = source.indexOf('function refreshStaticLightField(');
+    const end = source.indexOf('export function getLocationStaticLightFieldDiagnostics(', start);
+    let disposed = 0, detached = 0, notices = 0;
+    const field = { update() { throw Error('refresh failed'); }, detach() { detached++; }, dispose() { disposed++; } };
+    const context = { locationStaticLightField: field, currentLocationData: data([]),
+        locationStaticLightFieldRefreshTimer: 9, getLocationStaticFieldSources: () => [],
+        console: { error() {} }, showNotification() { notices++; }, clearTimeout() {},
+        forEachStaticLightFieldMaterial: fn => fn({}), performance };
+    vm.runInNewContext(source.slice(start, end), context);
+    context.refreshStaticLightField();
+    assert.equal(context.locationStaticLightField, field); assert.equal(disposed, 0); assert.equal(notices, 1);
+    context.disposeLocationLightField();
+    assert.equal(context.locationStaticLightField, null); assert.equal(disposed, 1); assert.equal(detached, 1);
+    assert.equal(context.locationStaticLightFieldRefreshTimer, null);
 });

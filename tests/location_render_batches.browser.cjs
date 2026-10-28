@@ -5,7 +5,7 @@ module.exports = async page => {
         const T=await import('three');
         const {createLocationRenderBatches}=await import('/static/js/locationRenderBatches.js');
         const {applySurfacePattern}=await import('/static/js/locationTerrainDetail.js');
-        const {applyStaticLightFieldMaterial,removeStaticLightFieldMaterial}=await import('/static/js/locationStaticLightFieldPrototype.js');
+        const {createDirectionalLightField,createDirectionalLightFieldTexture,applyDirectionalLightFieldMaterial,removeDirectionalLightFieldMaterial}=await import('/static/js/locationDirectionalLightFieldPrototype.js');
         const actualScene=__quarterPerf.scene,actualRenderer=__quarterPerf.renderer;
         const actualTarget=new T.WebGLRenderTarget(720,450),savedTarget=actualRenderer.getRenderTarget();
         const visual=[];
@@ -57,15 +57,15 @@ module.exports = async page => {
             const texture=new T.DataTexture(new Uint8Array([100,100,100,255]),1,1,T.RGBAFormat);texture.needsUpdate=true;
             for(const m of [a,b]){applySurfacePattern(m.material,texture,.22,'top');m.material.needsUpdate=true;}
             compare('roof surface shader');
-            const field={width:8,height:8,columns:8,rows:8,levels:[{id:0}]};
-            const bytes=new Uint8Array(8*16*4);for(let i=0;i<bytes.length;i++)bytes[i]=i%4===3?255:25+(i%80);
-            const fieldTexture=new T.DataTexture(bytes,8,16,T.RGBAFormat);fieldTexture.needsUpdate=true;
-            for(const m of [a,b]){m.scale.setScalar(1);applyStaticLightFieldMaterial(m.material,fieldTexture,field,0);}
+            const field=createDirectionalLightField({width:8,height:8,levels:[{id:0,y:0}],samplesPerMeter:2});
+            field.rebuild({lamps:[{id:0,level:0,x:2,y:2,z:2,color:'#ffffff',intensity:2,distance:7}]});
+            const fieldTexture=createDirectionalLightFieldTexture(T,field);
+            for(const m of [a,b]){m.scale.setScalar(1);applyDirectionalLightFieldMaterial(m.material,fieldTexture,field,0);}
             compare('static field world positions and normals');
             batcher.prepare();check(batches().length===1,'known shader chain batches');batcher.restore();
             for(const m of [a,b])m.scale.set(1,2,1);
-            batcher.prepare();check(batches().length===0,'nonuniform field normals keep original shader');batcher.restore();
-            for(const m of [a,b]){removeStaticLightFieldMaterial(m.material);m.scale.setScalar(1);}
+            compare('nonuniform directional field normals');batcher.prepare();check(batches().length===1,'nonuniform directional field batches');batcher.restore();
+            for(const m of [a,b]){removeDirectionalLightFieldMaterial(m.material);m.scale.setScalar(1);}
             fieldTexture.dispose();compare('field detach restores surface shader');
             b.material.onBeforeCompile=()=>{};b.material.needsUpdate=true;
             batcher.prepare();check(batches().length===0,'unknown shader excluded');batcher.restore();

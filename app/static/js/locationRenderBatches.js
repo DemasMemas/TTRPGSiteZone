@@ -18,22 +18,20 @@ export function createLocationRenderBatches(THREE, scene, roots) {
     function materialKey(material) {
         if (!material?.isMeshStandardMaterial || !material.visible || material.transparent || material.opacity !== 1
             || material.clippingPlanes?.length || material.wireframe || material.displacementMap) return null;
-        const cached = materials.get(material), staticField = material.userData.staticLightFieldPrototype,
-            directional = material.userData.directionalLightFieldPrototype;
+        const cached = materials.get(material);
         if (cached && cached.r === material.emissive.r && cached.g === material.emissive.g
             && cached.b === material.emissive.b && cached.nx === material.normalScale.x
-            && cached.ny === material.normalScale.y && cached.staticEnabled === staticField?.enabled.value
-            && cached.directionalEnabled === directional?.enabled.value
+            && cached.ny === material.normalScale.y
             && watched.every((name, i) => material[name] === cached.watched[i])) return cached.key;
         // Only known shader extensions can share uniforms. Arbitrary callbacks
         // keep their original draw, even if their program cache keys coincide.
         let compile = material.onBeforeCompile;
         const fields = [];
-        for (const name of ['directionalLightFieldPrototype', 'staticLightFieldPrototype', 'surfacePattern']) {
+        for (const name of ['directionalLightFieldPrototype', 'surfacePattern']) {
             const state = material.userData[name];
             if (!state) continue;
             if (!state.batchKey || state.compile !== compile) return null;
-            fields.push(name, state.batchKey, state.enabled?.value);
+            fields.push(name, state.batchKey);
             compile = state.previousCompile;
         }
         if (compile !== THREE.Material.prototype.onBeforeCompile) return null;
@@ -51,8 +49,7 @@ export function createLocationRenderBatches(THREE, scene, roots) {
         const key = values.join(':');
         materials.set(material, { key, watched: watched.map(name => material[name]),
             r: material.emissive.r, g: material.emissive.g, b: material.emissive.b,
-            nx: material.normalScale.x, ny: material.normalScale.y,
-            staticEnabled: staticField?.enabled.value, directionalEnabled: directional?.enabled.value });
+            nx: material.normalScale.x, ny: material.normalScale.y });
         return key;
     }
     function release(key, batch) {
@@ -90,8 +87,6 @@ export function createLocationRenderBatches(THREE, scene, roots) {
                 && old.side === m?.side && old.roughness === m?.roughness && old.metalness === m?.metalness
                 && old.er === e?.r && old.eg === e?.g && old.eb === e?.b
                 && old.emissiveIntensity === m?.emissiveIntensity
-                && old.staticEnabled === m?.userData?.staticLightFieldPrototype?.enabled.value
-                && old.directionalEnabled === m?.userData?.directionalLightFieldPrototype?.enabled.value
                 && old.geometry === mesh.geometry && old.version === version
                 && old.r === c?.r && old.g === c?.g && old.b === c?.b
                 && old.receiveShadow === mesh.receiveShadow && old.layers === mesh.layers.mask
@@ -111,8 +106,6 @@ export function createLocationRenderBatches(THREE, scene, roots) {
             side: mesh.material?.side, roughness: mesh.material?.roughness, metalness: mesh.material?.metalness,
             er: mesh.material?.emissive?.r, eg: mesh.material?.emissive?.g, eb: mesh.material?.emissive?.b,
             emissiveIntensity: mesh.material?.emissiveIntensity,
-            staticEnabled: mesh.material?.userData?.staticLightFieldPrototype?.enabled.value,
-            directionalEnabled: mesh.material?.userData?.directionalLightFieldPrototype?.enabled.value,
             material: mesh.material, geometry: mesh.geometry, r: mesh.material?.color?.r,
             g: mesh.material?.color?.g, b: mesh.material?.color?.b,
             receiveShadow: mesh.receiveShadow, layers: mesh.layers.mask, renderOrder: mesh.renderOrder,
@@ -123,10 +116,9 @@ export function createLocationRenderBatches(THREE, scene, roots) {
             root.traverseVisible(mesh => {
                 if (!mesh.isMesh || mesh.isSkinnedMesh || mesh.isInstancedMesh
                     || mesh.customDepthMaterial || mesh.matrixWorld.determinant() <= 0) return;
-                // These existing shaders use mat3(modelMatrix) for their world
-                // normal. Keep non-uniformly scaled variants on the original path.
-                if (mesh.material?.userData?.staticLightFieldPrototype
-                    || mesh.material?.userData?.surfacePattern?.normal) {
+                // The side-projected surface pattern uses mat3(modelMatrix)
+                // for its normal. Keep non-uniform scales on the original path.
+                if (mesh.material?.userData?.surfacePattern?.normal) {
                     const e = mesh.matrixWorld.elements;
                     const x = e[0] ** 2 + e[1] ** 2 + e[2] ** 2;
                     const y = e[4] ** 2 + e[5] ** 2 + e[6] ** 2;

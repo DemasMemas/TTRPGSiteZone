@@ -55,15 +55,14 @@ export function createDirectionalLightField({ width, height, levels, samplesPerM
             + (plane % atlasColumns) * columns + column;
     }
 
-    function rebuild({ lamps = [], walls = [], dynamicLightIds = new Set() } = {}) {
+    function rebuild({ lamps = [], walls = [] } = {}) {
         const startedAt = performance.now();
         radiance.fill(0);
         let sampleVisits = 0;
         let blockedSamples = 0;
         let contributions = 0;
         const lampStats = lamps.map(lamp => ({ id: lamp.id,
-            route: dynamicLightIds.has(lamp.id) ? 'dynamic'
-                : !(Number(lamp.intensity) > 0) || !(Number(lamp.distance) > 0) ? 'off'
+            route: !(Number(lamp.intensity) > 0) || !(Number(lamp.distance) > 0) ? 'off'
                     : !levelIndex.has(Number(lamp.level)) ? 'missing-level' : 'field',
             contributions: 0 }));
         lamps.forEach((lamp, lampIndex) => {
