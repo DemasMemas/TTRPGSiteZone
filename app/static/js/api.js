@@ -589,6 +589,11 @@ export const Server = {
         });
     },
 
+    async editLocationObjects(lobbyId, locationId, change) {
+        return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/object-edits`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
+        });
+    },
     async createLocationObject(lobbyId, locationId, objectData) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/objects`, {
             method: 'POST',

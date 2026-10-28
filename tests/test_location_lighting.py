@@ -52,6 +52,26 @@ def test_location_lighting_keeps_fixture_dimensions():
         normalize_location_lighting({'local_lights': [light]}, 20, 20)
 
 
+def test_location_numeric_precision_and_lamp_minimum_dimensions():
+    lighting = normalize_location_lighting({
+        'ambient_intensity': 0.37549, 'directional_azimuth': 12.345,
+    }, 20, 20)
+    assert lighting['ambient_intensity'] == 0.375
+    assert lighting['directional_azimuth'] == 12.345
+    for value in ('', ' ', None, float('nan'), float('inf')):
+        with pytest.raises(ValidationError):
+            normalize_location_lighting({'ambient_intensity': value}, 20, 20)
+    light = {
+        'x': 2, 'z': 2, 'height': 2, 'color': '#ffffff', 'intensity': 0.375,
+        'distance': 5, 'kind': 'spot', 'azimuth': 12.345,
+        'dimensions': {'width': 0.05, 'depth': 0.02, 'height': 0.05},
+    }
+    assert normalize_location_lighting({'local_lights': [light]}, 20, 20)['local_lights'][0]['azimuth'] == 12.345
+    light['dimensions']['width'] = 0.005
+    with pytest.raises(ValidationError):
+        normalize_location_lighting({'local_lights': [light]}, 20, 20)
+
+
 def test_location_lighting_preserves_gm_hidden_flag():
     light = {'x': 2, 'z': 2, 'height': 2, 'color': '#ffffff', 'intensity': 1, 'distance': 5}
     assert normalize_location_lighting({'local_lights': [light]}, 20, 20)['local_lights'][0]['gm_hidden'] is False
@@ -118,6 +138,7 @@ def test_gm_can_save_location_lighting_without_regenerating_tiles(client, create
     assert client.put(url, headers=auth_headers(player), json={'lighting': lighting}).status_code == 403
     updated = client.put(url, headers=auth_headers(gm), json={'lighting': lighting})
     assert updated.status_code == 200
+    assert updated.get_json()['lighting']['ambient_intensity'] == 0.1
     stored = db.session.get(Location, location_id)
     assert stored.tiles_data == tiles
     assert stored.lighting['mode'] == 'manual'

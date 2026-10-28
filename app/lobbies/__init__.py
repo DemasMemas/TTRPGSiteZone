@@ -2517,6 +2517,7 @@ def update_location(lobby_id, location_id, lobby):
     return jsonify({
         'message': 'Location updated',
         'location': location_marker,
+        **({'lighting': location.lighting} if 'lighting' in data else {}),
         'deleted_structure_count': len(deleted_structure_ids),
     }), 200
 
@@ -2569,6 +2570,16 @@ def add_location_object(lobby_id, location_id, lobby):
         'object': payload
     }, room=f"location_{location_id}")
     return jsonify(payload), 201
+
+
+@lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/object-edits', methods=['POST'])
+@jwt_required()
+@requires_gm
+def edit_location_objects(lobby_id, location_id, lobby):
+    from app.services.location_editor_history import apply_object_edit
+    payload = apply_object_edit(location_id, lobby_id, request.get_json())
+    socketio.emit('location_editor_objects_changed', payload, room=f'location_{location_id}')
+    return jsonify(payload)
 
 
 @lobbies_bp.route('/<int:lobby_id>/locations/<int:location_id>/objects/batch', methods=['POST', 'DELETE'])

@@ -19,6 +19,12 @@ export function objectRotationToBearing(rotation) {
     return -Number(rotation) * 180 / Math.PI;
 }
 
+export function normalizedBearing(degrees) {
+    const angle = degrees % 360;
+    // Remove conversion noise from radians without imposing the mouse's 1° step.
+    return Number((angle < 0 ? angle + 360 : angle).toPrecision(15));
+}
+
 export function cameraYawStepDegrees(camera, direction) {
     camera?.updateMatrixWorld();
     const matrix = camera?.matrixWorld?.elements;

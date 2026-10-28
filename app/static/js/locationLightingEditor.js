@@ -1,4 +1,5 @@
 import { DEFAULT_LOCATION_LIGHTING } from './locationLighting.js';
+import { bindNumericInput, readNumericInput } from './worldNumericInputs.js';
 
 const safeColor = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
 
@@ -6,10 +7,10 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
     getLights = () => initial?.local_lights || [], getDarkTiles = () => initial?.dark_tiles || [],
     getVisualPreset = () => 'current', onVisualPresetChange = () => {}) {
     const settings = { ...DEFAULT_LOCATION_LIGHTING, ...(initial || {}) };
-    const input = (label, key, min, max, step = 0.1) => `
+    const input = (label, key, min, max) => `
         <label class="location-lighting-field">
             ${label}
-            <input class="form-control" type="number" data-lighting="${key}" min="${min}" max="${max}" step="${step}" value="${Number(settings[key])}">
+            <input class="form-control" type="number" data-lighting="${key}" min="${min}" max="${max}" step="any" value="${Number(settings[key])}" title="Точность до 0,001">
         </label>`;
     container.innerHTML = `
         <label class="location-lighting-field location-lighting-mode">Режим
@@ -29,8 +30,8 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
             ${input('Яркость общего света', 'ambient_intensity', 0, 3)}
             <label class="location-lighting-field">Цвет направленного света<input class="form-control" type="color" data-lighting="directional_color" value="${safeColor(settings.directional_color, DEFAULT_LOCATION_LIGHTING.directional_color)}"></label>
             ${input('Яркость направленного света', 'directional_intensity', 0, 3)}
-            ${input('Направление, °', 'directional_azimuth', -180, 180, 1)}
-            ${input('Высота света, °', 'directional_elevation', 0, 90, 1)}
+            ${input('Направление, °', 'directional_azimuth', -180, 180)}
+            ${input('Высота света, °', 'directional_elevation', 0, 90)}
             <label class="location-lighting-field">Цвет фона<input class="form-control" type="color" data-lighting="background_color" value="${safeColor(settings.background_color, DEFAULT_LOCATION_LIGHTING.background_color)}"></label>
         </div>
         <small class="location-lighting-hint">Изменения видны сразу. Лампы размещаются на карте через Библиотеку ассетов.</small>
@@ -49,12 +50,18 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
     syncMode();
 
     const editor = {
-        get() {
+        get(report = true) {
             const value = { mode: mode.value };
             for (const key of Object.keys(DEFAULT_LOCATION_LIGHTING)) {
                 if (key === 'mode' || key === 'local_lights' || key === 'dark_tiles') continue;
                 const element = container.querySelector(`[data-lighting="${key}"]`);
-                value[key] = element.type === 'number' ? Number(element.value) : element.value;
+                value[key] = element.type === 'number'
+                    ? readNumericInput(element, { report: report && mode.value === 'manual', precision: 3 })
+                    : element.value;
+                if (element.type === 'number' && !Number.isFinite(value[key]) && mode.value === 'world') {
+                    value[key] = settings[key];
+                }
+                if (element.type === 'number' && !Number.isFinite(value[key])) return null;
             }
             value.local_lights = getLights().map(light => ({ ...light }));
             value.dark_tiles = getDarkTiles().map(tile => ({ ...tile }));
@@ -63,8 +70,12 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
     };
     const preview = event => {
         if (event.target === visualPreset) return;
-        onPreview(editor.get());
+        const value = editor.get(false);
+        if (value) onPreview(value);
     };
+    container.querySelectorAll('input[type="number"]').forEach(element => {
+        bindNumericInput(element, { precision: 3, onCommit: () => preview({ target: element }) });
+    });
     container.oninput = preview;
     container.onchange = preview;
     return editor;

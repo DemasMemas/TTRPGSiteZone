@@ -6,7 +6,7 @@ import { addMessage, updateParticipantsList, onlineUserIds, lobbyParticipants } 
 import { updateTileInChunk, chunksMap, removeChunk } from './lobby3d.js';
 import { applyWeather } from './weather.js';
 import { setUserColor } from './colors.js';
-import { applyLocationLighting, refreshUserColor, getLocationViewLevel, setLocationViewLevel } from './locationScene.js';
+import { receiveLocationObjectEvent, applyLocationLighting, refreshUserColor, getLocationViewLevel, setLocationViewLevel } from './locationScene.js';
 import AppState from './ui_interactions.js';
 
 let socket;
@@ -218,7 +218,7 @@ export function initSocket(lobbyId, token) {
 
     socket.on('location_updated', data => {
         if (Number(data?.location_id) === Number(window.currentLocationId) && data?.updates?.lighting) {
-            applyLocationLighting(data.updates.lighting, true, 'socket');
+            receiveLocationObjectEvent('applyLocationLighting', data.updates.lighting, true, 'socket');
         }
     });
 

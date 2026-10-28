@@ -1,3 +1,5 @@
+import { syncWorldNumber } from './worldNumericInputs.js';
+import { copy, equal, objectChanges, createLocationEditorHistory } from './locationEditorHistory.js';
 import { createWaterProfileLayer, connectedWaterCells, normalizeWaterProfile } from './waterProfiles.js';
 // static/js/locationScene.js
 import * as THREE from 'three';
@@ -39,7 +41,7 @@ import {
 } from './locationPbrMaterials.js';
 import {
     anchoredResizeCenter, bearingFromDelta, bearingToObjectRotation, cameraYawStepDegrees,
-    clampAssetElevation, objectRotationToBearing,
+    clampAssetElevation, objectRotationToBearing, normalizedBearing,
     projectedAxisDrag, rotatePointAround, volumeResize,
 } from './locationAssetTransforms.js';
 import { installSecondaryClick } from './locationEditorPointer.js';
@@ -56,7 +58,7 @@ import { createSavedRoofGeometry, planEditableRoofs, rebuildRoofSection, roofBod
     roofWallBasisObject, transformedRoofAnchor } from './locationRoofSections.js';
 import { createLocationTerrainPixels, getGrassGroundImages, loadGrassGroundPixels,
     updateLocationTerrainPixels } from './locationTerrainTexture.js';
-import { computeDarknessFactors, lightPathOpen } from './locationDarkness.js';
+import { computeDarknessFactors, lightPathOpen, paintDarkTiles } from './locationDarkness.js';
 import { activeStaticLightFieldPointSlots, activeStaticLightFieldSpotSlots,
     createLocationDirectionalLightField,
     remapStaticLightFieldSlots, LOCATION_DIRECTIONAL_FIELD_SAMPLES_PER_METER } from './locationStaticLightField.js';
@@ -12091,7 +12093,10 @@ export async function generateLocationFloorInterior(buildingId, level = location
     finally {houseCreationPending=false;}
 }
 
-async function createResidentialHouse(start, end) {
+async function createResidentialHouse(...args) {
+    return runLocationObjectCommand(() => createResidentialHouseImpl(...args));
+}
+async function createResidentialHouseImpl(start, end) {
     if (houseCreationPending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return;
     const lobbyId = window.currentLobbyId;
     const locationId = currentLocationId;
@@ -12143,7 +12148,7 @@ async function createResidentialHouse(start, end) {
     houseCreationPending = true;
     showNotification('Создаётся дом; дождитесь завершения сохранения', 'system');
     try {
-        const change = await Server.changeLocationObjects(lobbyId, locationId, { objects: plan.objects });
+        const change = await editorChangeObjects(lobbyId, locationId, { objects: plan.objects });
         if (sceneEpoch !== houseSceneEpoch) return;
         applyLocationObjectsChange(change);
         window.dispatchEvent(new CustomEvent('location-editor-active-building',
@@ -12161,14 +12166,17 @@ export function canRestoreGeneratedLocationFloor(buildingId, level = 0) {
     return Boolean(restorableGeneratedFloor(currentLocationData?.objects, buildingId, level));
 }
 
-export async function restoreGeneratedLocationFloor(buildingId, level = 0) {
+export async function restoreGeneratedLocationFloor(...args) {
+    return runLocationObjectCommand(() => restoreGeneratedLocationFloorImpl(...args));
+}
+async function restoreGeneratedLocationFloorImpl(buildingId, level = 0) {
     if (houseFloorRestorePending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return false;
     const spec = restorableGeneratedFloor(currentLocationData.objects, buildingId, level);
     if (!spec) return false;
     houseFloorRestorePending = true;
     const sceneEpoch = houseSceneEpoch;
     try {
-        const restored = await Server.createLocationObject(window.currentLobbyId, currentLocationId, spec);
+        const restored = await editorCreateObject(window.currentLobbyId, currentLocationId, spec);
         if (sceneEpoch === houseSceneEpoch) addLocationObject(restored);
         showNotification('Пол дома восстановлен', 'success');
         return true;
@@ -12662,7 +12670,10 @@ function updateBuildPreview() {
     scene.add(mesh);
 }
 
-async function placeStructureAtTile(x, z, client = null) {
+async function placeStructureAtTile(...args) {
+    return runLocationObjectCommand(() => placeStructureAtTileImpl(...args));
+}
+async function placeStructureAtTileImpl(x, z, client = null) {
     if (!window.currentLobbyId || !currentLocationId) return;
     const dimensions = getStructureDimensions();
     const placement = ['assets','building'].includes(window.locationEditorTool) && selectedLocationAsset?.id === structurePreset
@@ -12689,7 +12700,7 @@ async function placeStructureAtTile(x, z, client = null) {
     const selectedCoverClass = document.getElementById('loc-structure-cover-class')?.value || 'medium';
     const coverProfile = COVER_CLASS_DEFAULTS[selectedCoverClass] || COVER_CLASS_DEFAULTS.medium;
     try {
-        const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, {
+        const object = await editorCreateObject(window.currentLobbyId, currentLocationId, {
             name: placedType,
             type: placedType,
             tile_x: mount?.tileX ?? x,
@@ -12750,6 +12761,12 @@ async function removeStructuresAtTile(x, z, radius = 0) {
             && !structureDeletionInFlight.has(object.id);
     });
     if (!objects.length) return;
+
+    if (objectEdit?.phase === 'stroke') {
+        objects.forEach(object => objectEdit.objects.set(object.id, copy(object)));
+        applyLocationObjectsChange({ location_id: currentLocationId, deleted_ids: objects.map(o => o.id) });
+        return;
+    }
 
     objects.forEach(object => structureDeletionInFlight.add(object.id));
     try {
@@ -12872,6 +12889,13 @@ function buildingGrassChangedTiles(previous, next, changed) {
 
 export function applyLocationObjectsChange({ location_id, objects = [], deleted_ids = [] }) {
     if (!currentLocationData || Number(location_id) !== Number(currentLocationId)) return;
+    if (objectEdit?.phase === 'preview') {
+        const removed = new Set(deleted_ids);
+        const ids = new Set(currentLocationData.objects.map(o => o.id));
+        currentLocationData.objects = currentLocationData.objects.filter(o => !removed.has(o.id));
+        currentLocationData.objects.push(...objects.filter(o => !ids.has(o.id)));
+        return;
+    }
     const existing = new Set((currentLocationData.objects || []).map(o => Number(o.id)));
     const added = objects.filter(o => !existing.has(Number(o.id)));
     const removed = new Set(deleted_ids.filter(id => existing.has(Number(id))).map(Number));
@@ -12901,7 +12925,10 @@ export function applyLocationObjectsChange({ location_id, objects = [], deleted_
     performance.measure('location-building:scene', { start: started, end: performance.now() });
 }
 
-export async function deleteSelectedLocationBuilding(wholeBuilding = false) {
+export async function deleteSelectedLocationBuilding(...args) {
+    return runLocationObjectCommand(() => deleteSelectedLocationBuildingImpl(...args));
+}
+async function deleteSelectedLocationBuildingImpl(wholeBuilding = false) {
     const source = getSelectedEditorSource();
     const buildingId = structureBuildingId(source) || getStructurePlacementProperties().building_id;
     if (!buildingId) return showNotification('Выберите элемент нужного здания', 'system');
@@ -12915,7 +12942,7 @@ export async function deleteSelectedLocationBuilding(wholeBuilding = false) {
         : `Удалить этаж ${locationViewLevel} здания «${buildingId}»? Остальные этажи будут сохранены.`)) return false;
     const locationId = currentLocationId, epoch = houseSceneEpoch;
     try {
-        const change = await Server.changeLocationObjects(window.currentLobbyId, locationId,
+        const change = await editorChangeObjects(window.currentLobbyId, locationId,
             { building_id: buildingId, ...(wholeBuilding ? {} : { level: locationViewLevel }) }, 'DELETE');
         if (epoch === houseSceneEpoch) applyLocationObjectsChange(change);
         return true;
@@ -12930,6 +12957,7 @@ export function addLocationObject(object) {
     currentLocationData.objects = currentLocationData.objects || [];
     if (currentLocationData.objects.some(item => String(item.id) === String(object.id))) return;
     currentLocationData.objects.push(object);
+    if (objectEdit?.phase === 'preview') return;
     const fire = isObjectLightSource(object);
     addLocationObjectMesh(object, !fire);
     if (object.type === 'floor') { refreshFloorRugHeights(); rebuildLocationGrid(); rebuildGrassDetailMesh(); rebuildLocationRoofs(); }
@@ -12947,6 +12975,10 @@ window.addLocationObject = addLocationObject;
 
 export function removeLocationObject(objectId) {
     if (!currentLocationData) return;
+    if (objectEdit?.phase === 'preview') {
+        currentLocationData.objects = currentLocationData.objects.filter(o => Number(o.id) !== Number(objectId));
+        return;
+    }
     const removed = (currentLocationData.objects || []).find(object => Number(object.id) === Number(objectId));
     if (Number(containerInteractionState?.objectId) === Number(objectId)) closeContainerInteractionMenu();
     removeLocationObjectMesh(objectId, false);
@@ -12970,8 +13002,12 @@ export function updateLocationObject(object) {
     currentLocationData.objects = currentLocationData.objects || [];
     const index = currentLocationData.objects.findIndex(item => String(item.id) === String(object.id));
     const previous = index === -1 ? null : currentLocationData.objects[index];
+    // REST and socket echoes can arrive in either order during consecutive numeric edits.
+    if (Number.isFinite(previous?.revision) && Number.isFinite(object.revision)
+        && object.revision < previous.revision) return;
     if (index === -1) currentLocationData.objects.push(object);
     else currentLocationData.objects[index] = object;
+    if (objectEdit?.phase === 'preview') return;
     const fire = isObjectLightSource(object) || isObjectLightSource(previous);
     replaceLocationObjectMesh(object, !fire);
     if (object.type === 'floor' || previous?.type === 'floor') {
@@ -13038,6 +13074,10 @@ function takeReusableLampFixtures(group, sources) {
 }
 
 export function applyLocationLighting(settings, persist = true, origin = 'direct') {
+    if (objectEdit?.phase === 'preview') {
+        if (settings && persist) currentLocationData.lighting = settings;
+        return;
+    }
     if (!scene || !currentLocationData || !locationAmbientLight || !locationDirectionalLight) {
         if (settings && persist && currentLocationData) currentLocationData.lighting = settings;
         return;
@@ -13280,7 +13320,7 @@ function getPrimaryLocationEditorAsset() {
             : visualAssetForLocationObject(source.type, source.properties)?.label || source.name || source.type,
         x: Number(source.tile_x) + 0.5 + Number(source.properties?.offset_x || 0),
         z: Number(source.tile_y) + 0.5 + Number(source.properties?.offset_z || 0),
-        rotation: Math.round((objectRotationToBearing(source.properties?.rotation || 0) + 360) % 360),
+        rotation: normalizedBearing(objectRotationToBearing(source.properties?.rotation || 0)),
         elevation: source.properties?.roof_section ? Number(source.properties.elevation)||0 : clampAssetElevation(source.properties?.elevation),
         color: `#${locationObjectMaterialColor(source).getHexString()}`,
         buildingId: structureBuildingId(source) || '',
@@ -13300,7 +13340,7 @@ function getPrimaryLocationEditorAsset() {
         isLit: isElectricFixture(source) ? source.properties?.is_on !== false : source.properties?.is_lit === true,
     };
     if (kind === 'lamp') return {
-        kind, label: source.kind === 'spot' ? 'Прожектор' : 'Лампа',
+        kind, index: editorSelection.index, label: source.kind === 'spot' ? 'Прожектор' : 'Лампа',
         x: source.x, z: source.z, rotation: Number(source.azimuth || 0),
         height: source.height, elevation: source.height, level:lampDisplayLevel(source), color: source.color,
         intensity: source.intensity, distance: source.distance,
@@ -13312,7 +13352,7 @@ function getPrimaryLocationEditorAsset() {
         kind, label: source.anomalyName || findLocationAsset(source.type)?.label || source.type,
         x: editorSelection.x + 0.5 + Number(source.x || 0),
         z: editorSelection.z + 0.5 + Number(source.z || 0),
-        rotation: Math.round((-(Number(source.rotation) || 0) + 360) % 360),
+        rotation: normalizedBearing(-(Number(source.rotation) || 0)),
         elevation: clampAssetElevation(source.elevation),
         color: source.color || '#aa8866',
         dimensions: assetDimensions(source, 'decor', source.type),
@@ -13324,11 +13364,15 @@ export function getSelectedLocationEditorAsset() {
     const asset = getPrimaryLocationEditorAsset();
     const source = getSelectedEditorSource();
     return asset ? { ...asset, selectedCount: editorSelections.length,
+        selectionKey: editorSelection.kind === 'structure' ? `structure:${editorSelection.id}`
+            : editorSelection.kind === 'lamp' ? `lamp:${editorSelection.index}`
+                : `decor:${editorSelection.x}:${editorSelection.z}:${editorSelection.index}`,
         roofEditing:roofEditPending,
         hidden: Boolean(editorSelection.kind === 'structure' ? source?.properties?.gm_hidden : source?.gm_hidden) } : null;
 }
 
 function notifyEditorSelection() {
+    if (objectEdit?.phase === 'preview') return;
     window.dispatchEvent(new CustomEvent('location-editor-selection', {
         detail: getSelectedLocationEditorAsset(),
     }));
@@ -13362,7 +13406,10 @@ export function getSelectedLocationFloorFit() {
             structureBuildingId(floor), structureLevel(floor)));
 }
 
-export async function fitSelectedLocationFloorToBuilding() {
+export async function fitSelectedLocationFloorToBuilding(...args) {
+    return runLocationObjectCommand(() => fitSelectedLocationFloorToBuildingImpl(...args));
+}
+async function fitSelectedLocationFloorToBuildingImpl() {
     const plan = getSelectedLocationFloorFit();
     if (plan.error) {
         showNotification(plan.error, 'system');
@@ -13376,7 +13423,7 @@ export async function fitSelectedLocationFloorToBuilding() {
     if (tileX < 0 || tileZ < 0 || tileX >= currentLocationData.grid_width
         || tileZ >= currentLocationData.grid_height) return false;
     try {
-        const updated = await Server.updateLocationObject(window.currentLobbyId, floor.id, {
+        const updated = await editorUpdateObject(window.currentLobbyId, floor.id, {
             tile_x: tileX, tile_y: tileZ,
             properties: {
                 offset_x: x - tileX - 0.5, offset_z: z - tileZ - 0.5,
@@ -13394,7 +13441,10 @@ export async function fitSelectedLocationFloorToBuilding() {
     }
 }
 
-export async function addFloorAboveSelectedLocationAsset(options = null) {
+export async function addFloorAboveSelectedLocationAsset(...args) {
+    return runLocationObjectCommand(() => addFloorAboveSelectedLocationAssetImpl(...args));
+}
+async function addFloorAboveSelectedLocationAssetImpl(options = null) {
     const selected = getSelectedEditorSource();
     const buildingId = selected ? structureBuildingId(selected) : getStructurePlacementProperties().building_id;
     const source = (currentLocationData?.objects || []).find(o => o.type === 'floor'
@@ -13469,7 +13519,7 @@ export async function addFloorAboveSelectedLocationAsset(options = null) {
     let lightsCopied = false;
     try {
         for (const floor of plan.objects) {
-            const object = await Server.createLocationObject(window.currentLobbyId, currentLocationId, floor);
+            const object = await editorCreateObject(window.currentLobbyId, currentLocationId, floor);
             addLocationObject(object);
             created.push(object);
         }
@@ -13485,7 +13535,7 @@ export async function addFloorAboveSelectedLocationAsset(options = null) {
     } catch (error) {
         if (lightsCopied) await persistLocationLights(previousLights, 'rollback-storey');
         for (const object of created.reverse()) {
-            try { await Server.deleteLocationObject(window.currentLobbyId, object.id); removeLocationObject(object.id); }
+            try { await editorDeleteObject(window.currentLobbyId, object.id); removeLocationObject(object.id); }
             catch { showNotification('Не удалось откатить часть этажа; проверьте созданные детали', 'system'); }
         }
         showNotification(error.message || 'Не удалось добавить этаж', 'system');
@@ -13587,6 +13637,7 @@ function cancelLocationEditorContextAction() {
 }
 
 function updateEditorSelectionVisual(lightingOverride = null) {
+    if (objectEdit?.phase === 'preview') return;
     if (editorSelectionRing) {
         scene?.remove(editorSelectionRing);
         disposeObject(editorSelectionRing);
@@ -13749,7 +13800,290 @@ function selectEditorAsset(clientX, clientY, additive = false) {
     return Boolean(picked);
 }
 
+// Existing editor mutations preview locally; one conditional request commits the
+// confirmed command. No intermediate G/T/R preview enters the history.
+let objectEdit = null;
+const editorHistory = createLocationEditorHistory(state => {
+    window.dispatchEvent(new CustomEvent('location-editor-history', { detail: state }));
+});
+export function getLocationEditorHistoryState() { return editorHistory.state(); }
+function editorObjectSnapshot() {
+    return copy({ objects: currentLocationData.objects || [],
+        tiles: currentLocationData.tiles_data.map(row => row.map(tile => tile.objects || [])),
+        lights: currentLocationData.lighting?.local_lights || [] });
+}
+function deferObjectEvent(callback) {
+    if (!objectEdit) return false;
+    objectEdit.events.push(callback);
+    return true;
+}
+export function receiveLocationObjectEvent(method, ...args) {
+    if (deferObjectEvent(() => receiveLocationObjectEvent(method, ...args))) return;
+    const methods = { applyLocationTilesUpdate, applyLocationObjectsChange,
+        addLocationObject, removeLocationObject, updateLocationObject, applyLocationLighting };
+    methods[method]?.(...args);
+}
+function restoreEditorObjectData(snapshot) {
+    currentLocationData.objects = snapshot.objects;
+    snapshot.tiles.forEach((row, z) => row.forEach((objects, x) => {
+        currentLocationData.tiles_data[z][x].objects = objects;
+    }));
+    currentLocationData.lighting = snapshot.lighting;
+}
+export function applyLocationEditorObjectsChange(payload) {
+    if (Number(payload.location_id) !== Number(currentLocationId) || !currentLocationData) return;
+    if (deferObjectEvent(() => applyLocationEditorObjectsChange(payload))) return;
+    applyLocationObjectsChange(payload);
+    for (const object of payload.objects || []) {
+        const old = currentLocationData.objects?.find(o => o.id === object.id);
+        if (old && !equal(old, object)) updateLocationObject(object);
+    }
+    if (payload.updates?.length) applyLocationTilesUpdate(currentLocationId, payload.updates);
+    if (payload.cells?.length) applyLocationTilesUpdate(currentLocationId,
+        payload.cells.filter(i => !equal(currentLocationData.tiles_data[i.z]?.[i.x], i.state)));
+    if (payload.lighting) {
+        applyLocationLighting(payload.lighting);
+        window.dispatchEvent(new CustomEvent('location-editor-lighting-applied', { detail: { environment: payload.environment_changed } }));
+    }
+    updateEditorSelectionVisual();
+    notifyEditorSelection();
+}
+function canonicalEditorChange(change, payload) {
+    const saved = copy(change);
+    for (const item of saved.objects) {
+        item.id = payload.id_map?.[item.id] ?? item.id;
+        if (item.after) item.after = copy(payload.objects.find(o => o.id === item.id));
+    }
+    if (saved.lights) saved.lights.after = copy(payload.lighting.local_lights);
+    if (saved.environment) saved.environment.after = environmentValues(payload.lighting);
+    return saved;
+}
+function environmentValues(lighting) {
+    return copy(Object.fromEntries(Object.entries(lighting || {}).filter(([key]) => !['local_lights', 'dark_tiles'].includes(key))));
+}
+
+// Sparse, first-touch snapshots. Future brushes can use the same transaction
+// without knowing how the shared undo/redo stack or server protocol works.
+export function beginLocationBrushStroke(pointerId = null) {
+    if (!currentLocationData || !window.isGM || objectEdit || editorHistory.state().busy) return false;
+    let settle;
+    const settled = new Promise(resolve => { settle = resolve; });
+    objectEdit = { phase: 'stroke', pointerId, locationId: currentLocationId, sceneData: currentLocationData,
+        cells: new Map(), objects: new Map(), darkBefore: copy(currentLocationData.lighting?.dark_tiles || []), events: [], settled, settle };
+    processedTilesForObjects.clear();
+    editorHistory.setBusy(true);
+    return true;
+}
+function touchStrokeCell(x, z) {
+    if (objectEdit?.phase !== 'stroke' || !currentLocationData.tiles_data[z]?.[x]) return;
+    const key = `${x},${z}`;
+    if (!objectEdit.cells.has(key)) objectEdit.cells.set(key, { x, z, before: copy(currentLocationData.tiles_data[z][x]) });
+}
+export function paintLocationDarknessAtTile(x, z, radius, erase) {
+    if (objectEdit?.phase !== 'stroke') return false;
+    const old = currentLocationData.lighting.dark_tiles || [];
+    const next = paintDarkTiles(old, currentLocationData.grid_width, currentLocationData.grid_height, x, z, radius, erase);
+    if (next === old) return false;
+    currentLocationData.lighting = { ...currentLocationData.lighting, dark_tiles: next };
+    previewLocationDarkTiles(next);
+    return true;
+}
+export async function finishLocationBrushStroke(cancel = false) {
+    const context = objectEdit;
+    if (context?.phase !== 'stroke') return false;
+    context.phase = 'save';
+    const change = { objects: [...context.objects.values()].map(before => ({ id: before.id, before, after: null })), tiles: [],
+        cells: [...context.cells.values()].map(i => ({ ...i, after: copy(currentLocationData.tiles_data[i.z][i.x]) }))
+            .filter(i => !equal(i.before, i.after)), darkness: [] };
+    const darkBefore = new Set(context.darkBefore.map(i => `${i.x},${i.z}`));
+    const darkAfter = new Set((currentLocationData.lighting.dark_tiles || []).map(i => `${i.x},${i.z}`));
+    for (const key of new Set([...darkBefore, ...darkAfter])) if (darkBefore.has(key) !== darkAfter.has(key)) {
+        const [x, z] = key.split(',').map(Number);
+        change.darkness.push({ x, z, before: darkBefore.has(key), after: darkAfter.has(key) });
+    }
+    const rollback = () => {
+        objectEdit = null;
+        applyLocationEditorObjectsChange({ location_id: context.locationId, objects: [...context.objects.values()],
+            cells: change.cells.map(i => ({ x: i.x, z: i.z, state: i.before })),
+            ...(change.darkness.length ? { lighting: { ...currentLocationData.lighting, dark_tiles: context.darkBefore } } : {}) });
+    };
+    try {
+        if (cancel) { rollback(); return false; }
+        if (!change.objects.length && !change.cells.length && !change.darkness.length) return true;
+        const payload = await Server.editLocationObjects(window.currentLobbyId, context.locationId, change);
+        if (currentLocationData !== context.sceneData) return false;
+        objectEdit = null;
+        applyLocationEditorObjectsChange(payload);
+        editorHistory.push(canonicalEditorChange(change, payload));
+        return true;
+    } catch (error) {
+        if (currentLocationData === context.sceneData) rollback();
+        showNotification(error.message || 'Не удалось сохранить мазок', 'system');
+        return false;
+    } finally {
+        if (objectEdit === context) objectEdit = null;
+        if (currentLocationData === context.sceneData) {
+            for (const event of context.events) event();
+            editorHistory.setBusy(false);
+        }
+        context.settle();
+    }
+}
+export async function saveLocationEnvironment(settings, expected) {
+    if (!currentLocationData) return false;
+    const requestedScene = currentLocationData;
+    if (objectEdit?.phase === 'save' && objectEdit.settled) await objectEdit.settled;
+    if (currentLocationData !== requestedScene) return false;
+    if (editorHistory.state().busy || objectEdit) {
+        showNotification('Дождитесь сохранения текущего действия', 'system');
+        return false;
+    }
+    const change = { objects: [], tiles: [], environment: { before: environmentValues(expected), after: environmentValues(settings) } };
+    if (equal(change.environment.before, change.environment.after)) { applyLocationLighting(); return true; }
+    const sceneData = currentLocationData, context = { phase: 'save', events: [] };
+    objectEdit = context; editorHistory.setBusy(true);
+    try {
+        const payload = await Server.editLocationObjects(window.currentLobbyId, currentLocationId, change);
+        if (currentLocationData !== sceneData) return false;
+        objectEdit = null; applyLocationEditorObjectsChange(payload);
+        editorHistory.push(canonicalEditorChange(change, payload));
+        return true;
+    } catch (error) {
+        showNotification(error.message || 'Не удалось сохранить освещение', 'system');
+        return false;
+    } finally {
+        if (objectEdit === context) objectEdit = null;
+        if (currentLocationData === sceneData) { for (const event of context.events) event(); editorHistory.setBusy(false); }
+    }
+}
+async function runLocationObjectCommand(action) {
+    if (objectEdit?.phase === 'preview') return action(); // Nested group/roof edits.
+    if (editorHistory.state().busy) {
+        showNotification('Дождитесь сохранения текущего действия', 'system');
+        return false;
+    }
+    if (!currentLocationData || !window.isGM) return false;
+    const sceneData = currentLocationData, locationId = currentLocationId;
+    const before = editorObjectSnapshot();
+    // Mesh picking keeps references to tile decorations. Stage on detached
+    // values and restore the original references, including on failed/no-op edits.
+    const original = { objects: currentLocationData.objects,
+        tiles: currentLocationData.tiles_data.map(row => row.map(tile => tile.objects)),
+        lighting: currentLocationData.lighting };
+    const selectionBefore = copy(editorSelections);
+    const context = { phase: 'preview', events: [], nextId: -1 };
+    objectEdit = context;
+    editorHistory.setBusy(true);
+    let change, result, payload, selectionAfter;
+    try {
+        restoreEditorObjectData({ objects: copy(before.objects), tiles: copy(before.tiles), lighting: copy(original.lighting) });
+        result = await action();
+        if (currentLocationData !== sceneData) return false;
+        change = objectChanges(before, editorObjectSnapshot());
+        selectionAfter = copy(editorSelections);
+        // Restore the preview before awaiting IO. Incoming events are held until
+        // the response is applied, so neither an echo nor a foreign edit is recorded.
+        context.phase = 'restore';
+        objectEdit = null;
+        restoreEditorObjectData(original);
+        objectEdit = context;
+        context.phase = 'save';
+        if (result === false) return false;
+        if (!change.objects.length && !change.tiles.length && !change.lights) return result;
+        payload = await Server.editLocationObjects(window.currentLobbyId, locationId, change);
+        if (currentLocationData !== sceneData) return false;
+        objectEdit = null;
+        applyLocationEditorObjectsChange(payload);
+        editorSelections = selectionAfter.map(s => s.kind === 'structure'
+            ? { ...s, id: payload.id_map?.[s.id] ?? s.id } : s).filter(s => getEditorSource(s));
+        editorSelection = editorSelections.at(-1) || null;
+        editorHistory.push(canonicalEditorChange(change, payload));
+        updateEditorSelectionVisual(); notifyEditorSelection();
+        return result;
+    } catch (error) {
+        if (currentLocationData === sceneData) {
+            objectEdit = null;
+            if (context.phase === 'preview') restoreEditorObjectData(original);
+            editorSelections = selectionBefore.filter(s => getEditorSource(s));
+            editorSelection = editorSelections.at(-1) || null;
+            updateEditorSelectionVisual(); notifyEditorSelection();
+        }
+        showNotification(error.message || 'Не удалось сохранить действие', 'system');
+        return false;
+    } finally {
+        if (objectEdit === context) objectEdit = null;
+        if (currentLocationData === sceneData) {
+            for (const event of context.events) event();
+            editorHistory.setBusy(false);
+        }
+    }
+}
+export async function replayLocationObjectHistory(forward = false) {
+    if (!window.isGM || !window.locationEditMode || !currentLocationData) return false;
+    // Volume Scale remains selected after a confirmed drag. Its idle tool state
+    // must not prevent undoing that confirmed resize.
+    if (editorResizeMode && !editorResizeAnchor) cancelLocationAssetResize();
+    if (editorMoveMode || editorRotateMode || editorResizeMode) {
+        showNotification('Сначала подтвердите преобразование или отмените его через Esc', 'system');
+        return false;
+    }
+    const sceneData = currentLocationData, locationId = currentLocationId;
+    try {
+        return await editorHistory.replay(forward, async change => {
+            const context = { phase: 'save', events: [] };
+            objectEdit = context;
+            try {
+                const payload = await Server.editLocationObjects(window.currentLobbyId, locationId, change);
+                if (currentLocationData !== sceneData) return change;
+                objectEdit = null;
+                applyLocationEditorObjectsChange(payload);
+                clearEditorSelection();
+                return canonicalEditorChange(change, payload);
+            } finally {
+                if (objectEdit === context) objectEdit = null;
+                if (currentLocationData === sceneData) for (const event of context.events) event();
+            }
+        });
+    } catch (error) {
+        showNotification(error.message || 'Не удалось применить историю', 'system');
+        return false;
+    }
+}
+async function editorCreateObject(lobbyId, locationId, spec) {
+    if (!objectEdit || objectEdit.phase !== 'preview') return Server.createLocationObject(lobbyId, locationId, spec);
+    return copy({ ...spec, id: objectEdit.nextId--, revision: 1 });
+}
+async function editorUpdateObject(lobbyId, id, updates) {
+    if (!objectEdit || objectEdit.phase !== 'preview') return Server.updateLocationObject(lobbyId, id, updates);
+    const source = currentLocationData.objects.find(o => o.id === id);
+    return copy({ ...source, ...updates, properties: { ...source.properties, ...updates.properties } });
+}
+async function editorDeleteObject(lobbyId, id) {
+    if (!objectEdit || objectEdit.phase !== 'preview') return Server.deleteLocationObject(lobbyId, id);
+}
+async function editorChangeObjects(lobbyId, locationId, data, method = 'POST') {
+    if (!objectEdit || objectEdit.phase !== 'preview') return Server.changeLocationObjects(lobbyId, locationId, data, method);
+    if (method === 'POST') return { location_id: locationId, deleted_ids: [],
+        objects: await Promise.all(data.objects.map(spec => editorCreateObject(lobbyId, locationId, spec))) };
+    const peers = currentLocationData.objects.filter(o => structureBuildingId(o) === data.building_id);
+    const removed = peers.filter(o => data.level === undefined || structureLevel(o) === data.level
+        || (['stairs', 'ladder'].includes(o.type) && structureLevel(o) + 1 === data.level));
+    for (const shaft of removed.filter(o => ['stairs', 'ladder'].includes(o.type) && structureLevel(o) === data.level)) {
+        const p = structurePose(shaft);
+        for (const hatch of peers.filter(o => ['hatch', 'floor_opening'].includes(o.type) && structureLevel(o) === data.level + 1)) {
+            const h = structurePose(hatch), dx = p.x - h.x, dz = p.z - h.z;
+            if (Math.abs(dx*h.axis.x + dz*h.axis.z) < h.width/2 && Math.abs(dx*h.normal.x + dz*h.normal.z) < h.depth/2
+                && !removed.includes(hatch)) removed.push(hatch);
+        }
+    }
+    return { location_id: locationId, objects: [], deleted_ids: removed.map(o => o.id) };
+}
+
 async function persistLocationLights(lights, action = 'edit') {
+    if (objectEdit?.phase === 'preview') {
+        applyLocationLighting({ ...currentLocationData.lighting, local_lights: copy(lights) });
+        return true;
+    }
     if (lampEditPending || !currentLocationData || !window.currentLobbyId || !currentLocationId) return false;
     lampEditPending = true;
     const savedLocationId = currentLocationId;
@@ -13762,7 +14096,7 @@ async function persistLocationLights(lights, action = 'edit') {
     const echo = lampLightingEchoes.begin(currentLocationId, lighting);
     try {
         const requestStartedAt = performance.now();
-        await Server.updateLocation(window.currentLobbyId, currentLocationId, { lighting });
+        const saved = await Server.updateLocation(window.currentLobbyId, currentLocationId, { lighting });
         if (String(currentLocationId) !== String(savedLocationId) || !currentLocationData) {
             lampLightingEchoes.fail(echo);
             if (lampEditTrace === trace) lampEditTrace = null;
@@ -13778,7 +14112,7 @@ async function persistLocationLights(lights, action = 'edit') {
         }
         trace.stage = 'lighting';
         const applyStartedAt = performance.now();
-        if (lampLightingEchoes.rest(echo)) applyLocationLighting(lighting);
+        if (lampLightingEchoes.rest(echo)) applyLocationLighting(saved?.lighting ?? lighting);
         else trace.timings.duplicateSkipped = (trace.timings.duplicateSkipped || 0) + 1;
         notifyEditorSelection();
         trace.timings.clientApplyMs = +(performance.now() - applyStartedAt).toFixed(1);
@@ -13797,6 +14131,7 @@ async function persistLocationLights(lights, action = 'edit') {
 }
 
 function sendDecorTileUpdates(positions) {
+    if (objectEdit?.phase === 'preview') return;
     const lightChanged = positions.some(({ x, z }) =>
         currentLocationData.tiles_data[z][x].objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
         || objectMeshes.some(mesh => mesh.userData?.tileX === x && mesh.userData?.tileZ === z
@@ -13804,7 +14139,7 @@ function sendDecorTileUpdates(positions) {
     const updates = positions.map(({ x, z }) => ({
         x, z, objects: currentLocationData.tiles_data[z][x].objects,
     }));
-    window.socket?.emit('update_location_tiles', {
+    if (!objectEdit) window.socket?.emit('update_location_tiles', {
         token: localStorage.getItem('access_token'),
         location_id: currentLocationId,
         updates,
@@ -13864,7 +14199,7 @@ export function setLocationAssetElevation(value) {
 }
 
 export function setLocationAssetDimensions(dimensions) {
-    if (!selectedLocationAsset || !validAssetDimensions(dimensions)) return false;
+    if (!selectedLocationAsset || !validAssetDimensions(dimensions, selectedLocationAsset.kind)) return false;
     selectedLocationAsset.dimensions = [dimensions.width, dimensions.depth, dimensions.height];
     if (selectedLocationAsset.kind === 'structure') {
         structureWidth = dimensions.width;
@@ -13982,11 +14317,14 @@ function confirmFloorDeletion(selections) {
         return source?.type === 'floor';
     });
     return !floors.length || window.confirm(floors.length === 1
-        ? 'Удалить выбранный пол? Вместе с ним может исчезнуть крыша; отменить удаление после сохранения нельзя.'
+        ? 'Удалить выбранный пол? Вместе с ним может исчезнуть крыша; удаление можно отменить через Ctrl+Z.'
         : `Удалить выбранные полы (${floors.length})? Вместе с ними могут исчезнуть крыши.`);
 }
 
-export async function deleteSelectedLocationAsset() {
+export async function deleteSelectedLocationAsset(...args) {
+    return runLocationObjectCommand(() => deleteSelectedLocationAssetImpl(...args));
+}
+async function deleteSelectedLocationAssetImpl() {
     const selectionsToDelete = editorSelections.length ? editorSelections : editorSelection ? [editorSelection] : [];
     if (!confirmFloorDeletion(selectionsToDelete)) return;
     if (editorSelections.length > 1) {
@@ -14004,7 +14342,7 @@ export async function deleteSelectedLocationAsset() {
             const source = getEditorSource(selection);
             if (!source) continue;
             try {
-                await Server.deleteLocationObject(window.currentLobbyId, source.id);
+                await editorDeleteObject(window.currentLobbyId, source.id);
                 removeLocationObject(source.id);
             } catch (error) {
                 showNotification(error.message || 'Не удалось удалить объект', 'system');
@@ -14035,7 +14373,7 @@ export async function deleteSelectedLocationAsset() {
         if (!await persistLocationLights(lights, 'delete')) return;
     } else if (editorSelection.kind === 'structure') {
         try {
-            await Server.deleteLocationObject(window.currentLobbyId, source.id);
+            await editorDeleteObject(window.currentLobbyId, source.id);
             removeLocationObject(source.id);
         } catch (error) {
             showNotification(error.message || 'Не удалось удалить объект', 'system');
@@ -14048,14 +14386,17 @@ export async function deleteSelectedLocationAsset() {
     clearEditorSelection();
 }
 
-export async function toggleSelectedLocationFire() {
+export async function toggleSelectedLocationFire(...args) {
+    return runLocationObjectCommand(() => toggleSelectedLocationFireImpl(...args));
+}
+async function toggleSelectedLocationFireImpl() {
     if (!window.isGM || editorSelections.length !== 1 || editorSelection?.kind !== 'structure') return false;
     const source = getSelectedEditorSource();
     if (!isObjectLightSource(source)) return false;
     try {
         const electric = isElectricFixture(source);
         const property = electric ? 'is_on' : 'is_lit';
-        const updated = await Server.updateLocationObject(window.currentLobbyId, source.id, {
+        const updated = await editorUpdateObject(window.currentLobbyId, source.id, {
             properties: { [property]: electric ? source.properties?.is_on === false : source.properties?.is_lit !== true },
         });
         updateLocationObject(updated);
@@ -14066,7 +14407,10 @@ export async function toggleSelectedLocationFire() {
     }
 }
 
-export async function toggleSelectedLocationAssetsHidden() {
+export async function toggleSelectedLocationAssetsHidden(...args) {
+    return runLocationObjectCommand(() => toggleSelectedLocationAssetsHiddenImpl(...args));
+}
+async function toggleSelectedLocationAssetsHiddenImpl() {
     if (!editorSelections.length) return false;
     const selections = [...editorSelections];
     const isHidden = selection => {
@@ -14082,7 +14426,7 @@ export async function toggleSelectedLocationAssetsHidden() {
         if (!source) continue;
         if (selection.kind === 'structure') {
             try {
-                const updated = await Server.updateLocationObject(window.currentLobbyId, source.id, {
+                const updated = await editorUpdateObject(window.currentLobbyId, source.id, {
                     properties: { gm_hidden: hidden },
                 });
                 updateLocationObject(updated);
@@ -14102,7 +14446,10 @@ export async function toggleSelectedLocationAssetsHidden() {
     return true;
 }
 
-async function updateSelectedLocationAssetGroup(transform) {
+async function updateSelectedLocationAssetGroup(...args) {
+    return runLocationObjectCommand(() => updateSelectedLocationAssetGroupImpl(...args));
+}
+async function updateSelectedLocationAssetGroupImpl(transform) {
     if (!editorSelections.length) return false;
     const selections = [...editorSelections];
     const sources = selections.map(getEditorSource);
@@ -14150,16 +14497,21 @@ async function updateSelectedLocationAssetGroup(transform) {
 export async function scaleSelectedLocationAssets(grow) {
     return updateSelectedLocationAssetGroup(asset => {
         if (!asset?.resizable) return null;
-        const dimensions = resizedUniformDimensions(asset.dimensions, grow ? 1.1 : 1 / 1.1);
-        return validAssetDimensions(dimensions) ? { dimensions } : null;
+        const dimensions = resizedUniformDimensions(asset.dimensions, grow ? 1.1 : 1 / 1.1, asset.kind);
+        return validAssetDimensions(dimensions, asset.kind) ? { dimensions } : null;
     });
 }
 
-export async function updateSelectedLocationAssetDetails({ x, z, height, elevation, intensity, distance, color, rotation, dimensions, roofType, buildingId, level, detachRoof }) {
+export async function updateSelectedLocationAssetDetails(...args) {
+    return runLocationObjectCommand(() => updateSelectedLocationAssetDetailsImpl(...args));
+}
+async function updateSelectedLocationAssetDetailsImpl({ x, z, height, elevation, intensity, distance, color, rotation, dimensions, roofType, buildingId, level, detachRoof } = {}) {
     const source = getSelectedEditorSource();
     if (!source || !currentLocationData) return false;
     if (!Number.isFinite(x) || !Number.isFinite(z)
-        || x < 0 || z < 0 || x >= currentLocationData.grid_width || z >= currentLocationData.grid_height) {
+        || x < 0 || z < 0 || (editorSelection.kind === 'lamp'
+            ? x > currentLocationData.grid_width || z > currentLocationData.grid_height
+            : x >= currentLocationData.grid_width || z >= currentLocationData.grid_height)) {
         showNotification('Координаты вне подлокации', 'system');
         return false;
     }
@@ -14167,7 +14519,7 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
         showNotification('Высота должна быть от 0 до 10 м', 'system');
         return false;
     }
-    if (dimensions !== undefined && !validAssetDimensions(dimensions)) {
+    if (dimensions !== undefined && !validAssetDimensions(dimensions, editorSelection.kind)) {
         showNotification('Некорректные размеры объекта', 'system');
         return false;
     }
@@ -14181,7 +14533,12 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
             return false;
         }
     }
+    if (!Number.isFinite(rotation)) return false;
     if (editorSelection.kind === 'lamp') {
+        const minimumHeight = lampDisplayLevel(source) * STOREY_HEIGHT;
+        if (!Number.isFinite(height) || height < minimumHeight || height > minimumHeight + 10
+            || !Number.isFinite(intensity) || intensity < 0 || intensity > 10
+            || !Number.isFinite(distance) || distance < 1 || distance > 30) return false;
         const lights = [...currentLocationData.lighting.local_lights];
         const azimuth = ((Number(rotation) + 180) % 360 + 360) % 360 - 180;
         lights[editorSelection.index] = {
@@ -14192,7 +14549,7 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
     }
     if (editorSelection.kind === 'structure') {
         try {
-            const object = await Server.updateLocationObject(window.currentLobbyId, source.id, {
+            const object = await editorUpdateObject(window.currentLobbyId, source.id, {
                 tile_x: Math.floor(x), tile_y: Math.floor(z),
                 properties: {
                     offset_x: x - Math.floor(x) - 0.5,
@@ -14243,7 +14600,10 @@ export async function updateSelectedLocationAssetDetails({ x, z, height, elevati
 }
 
 let roofEditPending=false;
-export async function updateSelectedLocationRoof(settings) {
+export async function updateSelectedLocationRoof(...args) {
+    return runLocationObjectCommand(() => updateSelectedLocationRoofImpl(...args));
+}
+async function updateSelectedLocationRoofImpl(settings) {
     let source=settings.sourceId!=null?(currentLocationData?.objects||[]).find(o=>o.id===settings.sourceId):getSelectedEditorSource();
     if(roofEditPending||!source||!window.isGM)return false;
     if(source.type==='roof'&&!source.properties?.roof_section) {
@@ -14254,7 +14614,7 @@ export async function updateSelectedLocationRoof(settings) {
         properties.elevation=Number(source.properties.elevation)||0;
         properties.roof_group=`roof-section-${source.id}`;
         roofEditPending=true;notifyEditorSelection();
-        try{source=await Server.updateLocationObject(window.currentLobbyId,source.id,{properties});if(conversionEpoch!==houseSceneEpoch)return false;updateLocationObject(source);}
+        try{source=await editorUpdateObject(window.currentLobbyId,source.id,{properties});if(conversionEpoch!==houseSceneEpoch)return false;updateLocationObject(source);}
         catch(error){showNotification(error.message||'Не удалось преобразовать секцию','system');return false;}
         finally{roofEditPending=false;}
     }
@@ -14304,7 +14664,7 @@ export async function updateSelectedLocationRoof(settings) {
         });
         for(const {object,properties} of updates) {
             if(epoch!==houseSceneEpoch)throw Error('Редактирование крыши прервано при выходе из локации');
-            const updated=await Server.updateLocationObject(lobbyId,object.id,{properties});
+            const updated=await editorUpdateObject(lobbyId,object.id,{properties});
             if(epoch!==houseSceneEpoch)throw Error('Редактирование крыши прервано при выходе из локации');
             updateLocationObject(updated);
         }
@@ -14313,7 +14673,7 @@ export async function updateSelectedLocationRoof(settings) {
                 anchor:source.properties.roof_ground_anchor,groundHeight:getTileHeight});
             for(const spec of joints)if(!peers.some(o=>o.properties?.roof_joint===spec.properties.roof_joint)) {
                 if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');
-                const created=await Server.createLocationObject(lobbyId,currentLocationId,spec);
+                const created=await editorCreateObject(lobbyId,currentLocationId,spec);
                 if(epoch===houseSceneEpoch)addLocationObject(created);
             }
         }
@@ -14322,7 +14682,10 @@ export async function updateSelectedLocationRoof(settings) {
     finally {roofEditPending=false;if(epoch===houseSceneEpoch)notifyEditorSelection();}
 }
 
-export async function generateSelectedLocationRoof(settings) {
+export async function generateSelectedLocationRoof(...args) {
+    return runLocationObjectCommand(() => generateSelectedLocationRoofImpl(...args));
+}
+async function generateSelectedLocationRoofImpl(settings) {
     const source=getSelectedEditorSource(),buildingId=structureBuildingId(source);
     if(roofEditPending||!buildingId||!window.isGM)return false;
     const epoch=houseSceneEpoch,locationId=currentLocationId,lobbyId=window.currentLobbyId;
@@ -14376,16 +14739,16 @@ export async function generateSelectedLocationRoof(settings) {
     roofEditPending=true;
     try {
         // Explicit replacement is limited to this building's roof objects.
-        for(const object of peers.filter(o=>o.type==='roof'||o.properties?.roof_joint)) {if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');await Server.deleteLocationObject(lobbyId,object.id);if(epoch===houseSceneEpoch)removeLocationObject(object.id);}
+        for(const object of peers.filter(o=>o.type==='roof'||o.properties?.roof_joint)) {if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');await editorDeleteObject(lobbyId,object.id);if(epoch===houseSceneEpoch)removeLocationObject(object.id);}
         for(const floor of peers.filter(o=>o.type==='floor'&&o.properties?.roof_enabled!==false)){
             if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');
-            const updated=await Server.updateLocationObject(lobbyId,floor.id,{properties:{roof_enabled:false}});if(epoch===houseSceneEpoch)updateLocationObject(updated);
+            const updated=await editorUpdateObject(lobbyId,floor.id,{properties:{roof_enabled:false}});if(epoch===houseSceneEpoch)updateLocationObject(updated);
         }
         for(const {object,properties} of plan.walls){
             if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');
-            const updated=await Server.updateLocationObject(lobbyId,object.id,{properties});if(epoch===houseSceneEpoch)updateLocationObject(updated);
+            const updated=await editorUpdateObject(lobbyId,object.id,{properties});if(epoch===houseSceneEpoch)updateLocationObject(updated);
         }
-        for(const spec of plan.objects){if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');const object=await Server.createLocationObject(lobbyId,locationId,spec);if(epoch===houseSceneEpoch)addLocationObject(object);}
+        for(const spec of plan.objects){if(epoch!==houseSceneEpoch)throw Error('Локация закрыта');const object=await editorCreateObject(lobbyId,locationId,spec);if(epoch===houseSceneEpoch)addLocationObject(object);}
         showNotification('Крыша создана: секции доступны в обычном редакторе','success');return true;
     }catch(error){showNotification(error.message||'Создание крыши прервано; проверьте сохранённые секции','system');return false;}
     finally{roofEditPending=false;}
@@ -14395,7 +14758,7 @@ export function previewSelectedLocationLamp(details) {
     if (editorSelection?.kind !== 'lamp' || !currentLocationData?.lighting) return;
     if (!Number.isFinite(details.x) || !Number.isFinite(details.z)
         || details.x < 0 || details.z < 0
-        || details.x >= currentLocationData.grid_width || details.z >= currentLocationData.grid_height
+        || details.x > currentLocationData.grid_width || details.z > currentLocationData.grid_height
         || !Number.isFinite(details.height) || details.height < lampDisplayLevel(getSelectedEditorSource())*STOREY_HEIGHT || details.height > lampDisplayLevel(getSelectedEditorSource())*STOREY_HEIGHT+10
         || !Number.isFinite(details.intensity) || details.intensity < 0 || details.intensity > 10
         || !Number.isFinite(details.distance) || details.distance < 1 || details.distance > 30) return;
@@ -14514,7 +14877,7 @@ function updateEditorResizePreview(clientX, clientY, symmetric = false, snap = f
     }
     if (editorResizeAxis === 'all') {
         const next = resizedUniformDimensions(
-            editorResizeBaseDimensions, 1 + (coordinate - editorResizeAnchor.coordinate) * 0.01,
+            editorResizeBaseDimensions, 1 + (coordinate - editorResizeAnchor.coordinate) * 0.01, selection.kind,
         );
         if (Object.keys(next).every(axis => next[axis] === editorResizeDimensions[axis])) {
             if (modeChanged) updateBuildPreview();
@@ -14666,7 +15029,10 @@ async function commitEditorAssetMove(x, z) {
     updateBuildPreview();
 }
 
-async function placeSelectedLocationAsset(x, z, client = null) {
+async function placeSelectedLocationAsset(...args) {
+    return runLocationObjectCommand(() => placeSelectedLocationAssetImpl(...args));
+}
+async function placeSelectedLocationAssetImpl(x, z, client = null) {
     const asset = selectedLocationAsset;
     if (!asset) return;
     if (asset.kind === 'structure') {
@@ -14739,6 +15105,8 @@ export function loadLocation(data) {
     anomalyEffectMeshes = [];
     locationObjectMeshes = [];
     darknessEditorOverlay = null;
+    editorHistory.reset();
+    objectEdit = null;
     currentLocationData = data;
     locationViewLevel = 0;
     locationBuildingViews = new Map();
@@ -15831,16 +16199,17 @@ export function applyLocationTilesUpdate(locationId, updates) {
     let lightChanged = false;
     const changed = [];
     for (const upd of updates) {
-        const tile = currentLocationData.tiles_data[upd.z][upd.x];
+        let tile = currentLocationData.tiles_data[upd.z][upd.x];
+        const previousObjects = tile.objects;
         const previousTerrain = tile.terrain;
         if(upd.water_profile!==undefined)tile.water_profile=normalizeWaterProfile(upd.water_profile);
         const previousGrassSubtype = tile.grass_subtype;
         const previousHeight = getTileHeight(upd.x, upd.z);
-        const objectsChanged = upd.objects !== undefined
-            && JSON.stringify(tile.objects || []) !== JSON.stringify(upd.objects || []);
+        const objectsChanged = (upd.state !== undefined || upd.objects !== undefined)
+            && !equal(tile.objects || [], (upd.state ? upd.state.objects : upd.objects) || []);
         if (objectsChanged && (
             tile.objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
-            || upd.objects?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
+            || (upd.state?.objects || upd.objects)?.some(obj => ['campfire', 'anomaly'].includes(obj.type))
         )) lightChanged = true;
         if (upd.terrain !== undefined) tile.terrain = upd.terrain;
         if (upd.grass_subtype !== undefined) {
@@ -15852,8 +16221,12 @@ export function applyLocationTilesUpdate(locationId, updates) {
         if (upd.height !== undefined) tile.height = upd.height;
         if (upd.water_level_offset === null) delete tile.water_level_offset;
         else if (Number.isFinite(upd.water_level_offset)) tile.water_level_offset=upd.water_level_offset;
-        if (upd.objects !== undefined) tile.objects = upd.objects;
+        if (upd.objects !== undefined && (objectsChanged || !previousObjects)) tile.objects = upd.objects;
         if (upd.radiation !== undefined) tile.radiation = upd.radiation;
+        if (upd.state) {
+            tile = currentLocationData.tiles_data[upd.z][upd.x] = copy(upd.state);
+            if (!objectsChanged && Object.hasOwn(tile, 'objects') && previousObjects) tile.objects = previousObjects;
+        }
         waterShoreChanged ||= tile.terrain!==previousTerrain&&[previousTerrain,tile.terrain].some(t=>t==='sand'||t==='swamp');
         terrainChanged ||= tile.terrain !== previousTerrain;
         waterTopologyChanged ||= (tile.terrain === 'water') !== (previousTerrain === 'water');
@@ -15886,7 +16259,7 @@ export function applyLocationTilesUpdate(locationId, updates) {
         fogGeometry: heightChanged || waterTopologyChanged,
         lighting: lightChanged || (heightChanged && terrainEditTouchesLight(changed)),
         fog: true,
-        selection: heightChanged || updates.some(update => update.objects !== undefined),
+        selection: heightChanged || updates.some(update => update.objects !== undefined || update.state !== undefined),
         height: heightChanged,
     });
     invalidateMovementMapCache();
@@ -15903,10 +16276,11 @@ export function applyLocationWaterProfile(centers,profile,radius=0,basin=false) 
     }
     profile=normalizeWaterProfile(profile);const updates=[];
     for(const [x,z]of targets.values())if(normalizeWaterProfile(getTile(x,z).water_profile)!==profile){
+        touchStrokeCell(x,z);
         getTile(x,z).water_profile=profile;locationWaterProfiles?.updateRegion(x,z);
         updates.push({x,z,water_profile:profile});
     }
-    if(updates.length)window.socket?.emit('update_location_tiles',{
+    if(updates.length && !objectEdit)window.socket?.emit('update_location_tiles',{
         token:localStorage.getItem('access_token'),location_id:window.currentLocationId,updates});
     return updates.length;
 }
@@ -15938,6 +16312,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     for (const { x, z } of targets.values()) {
             if (x < 0 || x >= currentLocationData.grid_width || z < 0 || z >= currentLocationData.grid_height) continue;
             const tile = tiles[z][x];
+            touchStrokeCell(x, z);
             const previousHeight = getTileHeight(x, z);
             let needUpdate = false;
             if (updates.terrain !== undefined && tile.terrain !== updates.terrain) {
@@ -16014,8 +16389,8 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                 }
             }
             if (updates.objects !== undefined && updates.objects.length === 0 && !brushObjectMode) {
-                tile.objects = (tile.objects || []).filter(object => decorDisplayLevel(object) !== locationViewLevel);
-                needUpdate = true;
+                const remaining = (tile.objects || []).filter(object => decorDisplayLevel(object) !== locationViewLevel);
+                if (remaining.length !== (tile.objects || []).length) { tile.objects = remaining; needUpdate = true; }
             }
             if (needUpdate) {
                 if (updates.objects !== undefined || updates.addObject) {
@@ -16031,7 +16406,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
                         moveTileDecorWithTerrain(x, z, tile.height - previousHeight);
                     }
                 }
-                if (updates.objects !== undefined || updates.addObject) {
+                if (objectEdit?.phase !== 'preview' && (updates.objects !== undefined || updates.addObject)) {
                     rebuildTileObjects(x, z);
                 }
                 changed.push({ x, z, terrain: tile.terrain, grass_subtype: tile.grass_subtype || null,
@@ -16041,6 +16416,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
     if (waterTopologyChanged && changed.length) {
         const changedByTile = new Map(changed.map(item => [`${item.x},${item.z}`, item]));
         for (const { x, z, height } of waterSurfaceAdjustments(tiles, new Set(changedByTile.keys()))) {
+            touchStrokeCell(x, z);
             const previousHeight = getTileHeight(x, z);
             tiles[z][x].height = Math.max(0.5, height);
             if (tiles[z][x].height !== previousHeight) heightChanged = true;
@@ -16057,7 +16433,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
             }
         }
     }
-    if (changed.length === 0) return;
+    if (changed.length === 0 || objectEdit?.phase === 'preview') return;
     if(terrainChanged||updates.water_profile!==undefined)for(const {x,z} of changed)locationWaterProfiles?.updateRegion(x,z);
     const foundationChanged = refreshTerrainFoundation();
     const tilesNeedSmooth = updateTileCubes(changed);
@@ -16079,7 +16455,7 @@ export function applyLocationBrush(centerX, centerZ, updates, radius) {
         height: heightChanged,
     });
     invalidateMovementMapCache();
-    if (window.socket && window.currentLocationId) {
+    if (!objectEdit && window.socket && window.currentLocationId) {
         window.socket.emit('update_location_tiles', {
             token: localStorage.getItem('access_token'),
             location_id: window.currentLocationId,
@@ -16495,8 +16871,14 @@ function setupCharacterDragging() {
     handlers.canvas.secondaryclick = onContextMenu;
 
     const onKeyDown = (e) => {
-        if (isKeyboardInputTarget(e.target)
+        if (e.target?.isContentEditable || isKeyboardInputTarget(e.target)
             || Array.from(document.querySelectorAll('.modal')).some(modal => modal.getClientRects().length)) return;
+        if (window.isGM && window.locationEditMode && e.ctrlKey && !e.altKey && !e.metaKey
+            && (e.code === 'KeyZ' || e.code === 'KeyY')) {
+            e.preventDefault(); e.stopImmediatePropagation();
+            if (!e.repeat) void replayLocationObjectHistory(e.code === 'KeyY' || e.shiftKey);
+            return;
+        }
         if (editorRotateMode && editorGroupRotatePivot
             && ['ControlLeft', 'ControlRight'].includes(e.code) && !editorGroupRotateWithPivot) {
             editorGroupRotateWithPivot = true;
@@ -16536,6 +16918,11 @@ function setupCharacterDragging() {
             return;
         }
         if (e.key !== 'Escape') return;
+        if (objectEdit?.phase === 'stroke') {
+            e.preventDefault();
+            void finishLocationBrushStroke(true);
+            return;
+        }
         if (editorResizeMode) {
             e.preventDefault();
             if (!cancelCurrentAssetResizeDrag()) cancelLocationAssetResize();
@@ -16704,9 +17091,10 @@ export function setupLocationEditing() {
         raycaster.setFromCamera(mouse, camera);
         const intersects = profiledLocationRaycast(tileCubes, false, 'surface');
         // An upper-storey ray can leave the map before reaching the ground.
-        // Its intersection with the active editing plane is still valid.
+        // Its intersection with the active editing plane is still valid. A
+        // stroke also needs this fallback while edited ground meshes refresh.
         const hoverSeed = intersects.length ? hitTileCoords(intersects[0])
-            : editorHoverLevelOffset() !== 0 ? {
+            : (editorHoverLevelOffset() !== 0 || objectEdit?.phase === 'stroke') ? {
                 x: Math.min(currentLocationData.grid_width-1, Math.max(0, Math.floor(controls.target.x))),
                 z: Math.min(currentLocationData.grid_height-1, Math.max(0, Math.floor(controls.target.z))),
             } : null;
@@ -16864,6 +17252,10 @@ export function setupLocationEditing() {
             return;
         }
         if (!window.locationEditMode) return;
+        if (editorHistory.state().busy) {
+            showNotification('Дождитесь сохранения текущего действия', 'system');
+            return;
+        }
         if (editorResizeMode) {
             e.preventDefault();
             e.stopImmediatePropagation();
@@ -16920,14 +17312,17 @@ export function setupLocationEditing() {
         if (window.locationEditorTool === 'light' && !e.altKey && !e.shiftKey) {
             e.preventDefault();
             e.stopImmediatePropagation();
+            if (!beginLocationBrushStroke(e.pointerId)) return;
             canvas.setPointerCapture(e.pointerId);
             window.locationDarknessPaintAtTile?.(hoveredTileCoords.x, hoveredTileCoords.z);
+            lastBrushTile = { ...hoveredTileCoords };
             return;
         }
         e.preventDefault();
         e.stopPropagation();
         canvas.setPointerCapture(e.pointerId);
         const { x, z } = hoveredTileCoords;
+        if (!(buildMode === 'structure' && !eraserMode) && !beginLocationBrushStroke(e.pointerId)) return;
         if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
             if (eraserMode) removeStructuresAtTile(x, z, brushRadius);
             else placeStructureAtTile(x, z);
@@ -16939,13 +17334,13 @@ export function setupLocationEditing() {
             lastBrushTile = { x, z };
         }
         if (shouldEraseLocationStructures()) removeStructuresAtTile(x, z, brushRadius);
-        processedTilesForObjects.clear();
     };
     canvas.addEventListener('pointerdown', onPointerDown);
     handlers.canvas.editPointerDown = onPointerDown;
 
     const onPointerMoveWithDrag = (e) => {
         if (!locationActive) return;
+        if (objectEdit?.phase !== 'stroke') return;
         if (e.buttons !== 1) return;
         if (!window.locationEditMode) return;
         if ((['assets','building'].includes(window.locationEditorTool) && !e.altKey && !e.shiftKey) || editorMoveMode || editorRotateMode || editorResizeMode) return;
@@ -16953,7 +17348,10 @@ export function setupLocationEditing() {
         if (e.target !== canvas) return;
         const { x, z } = hoveredTileCoords;
         if (window.locationEditorTool === 'light' && !e.altKey && !e.shiftKey) {
-            window.locationDarknessPaintAtTile?.(x, z);
+            for (const [cx, cz] of lastBrushTile ? brushStrokeTiles(lastBrushTile.x, lastBrushTile.z, x, z) : [[x, z]]) {
+                window.locationDarknessPaintAtTile?.(cx, cz);
+            }
+            lastBrushTile = { x, z };
             return;
         }
         if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
@@ -16975,6 +17373,7 @@ export function setupLocationEditing() {
 
     const onPointerUp = (e) => {
         if (!locationActive) return;
+        if ((e.button === 0 || e.type === 'pointercancel') && objectEdit?.phase === 'stroke' && objectEdit.pointerId === e.pointerId) void finishLocationBrushStroke(e.type === 'pointercancel');
         lastBrushTile = null;
         if (houseDrawPointerId === e.pointerId) {
             const start = houseDrawStart;
@@ -16997,6 +17396,9 @@ export function setupLocationEditing() {
     };
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerUp);
+    const onStrokeLost = () => { if (objectEdit?.phase === 'stroke') void finishLocationBrushStroke(true); };
+    canvas.addEventListener('lostpointercapture', onStrokeLost);
+    window.addEventListener('blur', onStrokeLost);
     handlers.canvas.editPointerUp = onPointerUp;
 
     // Drag & Drop спавна персонажей
@@ -17114,6 +17516,8 @@ export function setupLocationEditing() {
     handlers.canvas.wheel = onWheel;
 
     eventCleanup = () => {
+        canvas.removeEventListener('lostpointercapture', onStrokeLost);
+        window.removeEventListener('blur', onStrokeLost);
         canvas.removeEventListener('pointercancel', onPointerUp);
         removeSecondaryClick();
         if (handlers.window.charDragPointerUp) {
@@ -17335,6 +17739,7 @@ export function beginCharacterPlacement(characterOrCharacters) {
 
 // ========== Управляющие функции для UI ==========
 export function setLocationEditMode(enabled) {
+    if (!enabled && objectEdit?.phase === 'stroke') void finishLocationBrushStroke(true);
     editMode = enabled;
     window.locationEditMode = enabled;
     updateRoofVisibility();
@@ -17372,7 +17777,10 @@ export function setLocationEditMode(enabled) {
 
 export function getLocationEditMode() { return editMode; }
 export function setLocationBrushRadius(r) {
+    if (!Number.isInteger(r) || r < 0 || r > 5) return;
     brushRadius = r;
+    syncWorldNumber('loc-edit-radius', r);
+    syncWorldNumber('loc-darkness-radius', r);
     const darknessRadius = document.querySelector('[data-darkness-radius]');
     const darknessRadiusValue = document.querySelector('[data-darkness-radius-value]');
     if (darknessRadius) darknessRadius.value = r;
@@ -17408,11 +17816,13 @@ export function setLocationGrassSubtype(value) {
     if (select) select.value = currentBrushGrassSubtype;
 }
 export function setLocationBrushHeight(h) {
+    if (!Number.isFinite(h) || h < -3 || h > 3) return;
     currentBrushHeight = h;
+    syncWorldNumber('loc-edit-height', h);
     const locHeightSlider = document.getElementById('loc-edit-height');
     const locHeightSpan = document.getElementById('loc-height-value');
     if (locHeightSlider) locHeightSlider.value = h;
-    if (locHeightSpan) locHeightSpan.textContent = h.toFixed(1);
+    if (locHeightSpan) locHeightSpan.textContent = String(h);
 }
 export function setLocationEraserMode(e) {
     eraserMode = e;
@@ -17422,11 +17832,13 @@ export function setLocationEraserMode(e) {
     if (locEraserCheck) locEraserCheck.checked = e;
 }
 export function setLocationBrushRadiation(rad) {
+    if (!Number.isFinite(rad)) return;
     brushRadiation = Math.min(10, Math.max(0, rad));
+    syncWorldNumber('loc-edit-radiation', brushRadiation);
     const radiationSlider = document.getElementById('loc-edit-radiation');
     const radiationSpan = document.getElementById('loc-radiation-value');
     if (radiationSlider) radiationSlider.value = brushRadiation;
-    if (radiationSpan) radiationSpan.textContent = brushRadiation.toFixed(1);
+    if (radiationSpan) radiationSpan.textContent = String(brushRadiation);
 }
 export function setLocationBrushObjectMode(enabled) {
     brushObjectMode = enabled;
@@ -17928,6 +18340,8 @@ export function destroyLocationScene() {
     window.locationControls = null;
 
     // Данные
+    editorHistory.reset();
+    objectEdit = null;
     currentLocationData = null;
     combatState = null;
     window.locationCombatState = null;

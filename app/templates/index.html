@@ -259,7 +259,7 @@
                         </div>
                     </div>
 
-                    <div class="section-block">
+                    <form class="section-block" onsubmit="event.preventDefault(); login();">
                         <h2 class="section-title">Вход</h2>
                         <div class="form-group">
                             <label for="login-username">Имя пользователя</label>
@@ -270,9 +270,9 @@
                             <input type="password" id="login-password">
                         </div>
                         <div class="button-row">
-                            <button onclick="login()">Войти</button>
+                            <button type="submit">Войти</button>
                         </div>
-                    </div>
+                    </form>
 
                     <div id="auth-message" class="error"></div>
                 </div>

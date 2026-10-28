@@ -1,6 +1,6 @@
 import { waterProfileControls } from './waterProfiles.js';
 // static/js/main.js
-import { initWorldNumericInputs } from './worldNumericInputs.js';
+import { initWorldNumericInputs, getWorldNumericValue, bindNumericInput, readNumericInput, syncNumericInput } from './worldNumericInputs.js';
 import { addTerrainMaterialOptions } from './terrainMaterialCatalog.js';
 import { initSocket } from './socketHandlers.js';
 import { initCharacters, initMutantForm, loadLobbyCharacters, showCreateCharacterForm, showCreateMutantForm } from './characters.js';
@@ -27,8 +27,7 @@ import { initMapEditorQuickMenu, closeMapEditorQuickMenu } from './mapEditorQuic
 import { initWeather, applyWeather } from './weather.js';
 import { createLocationLightingEditor } from './locationLightingEditor.js';
 import { LOCATION_ASSETS } from './locationAssetCatalog.js';
-import { assetDimensions, validAssetDimensions } from './locationAssetDimensions.js';
-import { clampAssetElevation } from './locationAssetTransforms.js';
+import { assetDimensions, validAssetDimensions, assetDimensionLimits } from './locationAssetDimensions.js';
 import { STOREY_HEIGHT } from './locationArchitecture.js';
 import { initMarkers, setupMarkerInteraction, closeMarkerEditModal, saveMarkerEdit, submitCreateMarker,
 openCreateMarkerModal, openCreateMarkerModalAtCenter, fillCenterCoordinates, deleteMarker,
@@ -52,6 +51,8 @@ import {
     setLocationStructureWidth, setLocationStructureDepth, setLocationStructureHeight, setLocationStructureColor,
     setLocationStructureRotation, rotateLocationPlacement, isLocationEditorTransformActive,
     applyLocationLighting, setLocationLightingPreset,
+    getLocationEditorHistoryState, replayLocationObjectHistory,
+    paintLocationDarknessAtTile, saveLocationEnvironment,
     getLocationLightingPreset, setLocationAssetPreset, clearLocationAssetPreset,
     setLocationAssetElevation,
     setLocationAssetDimensions, getSelectedLocationEditorAsset, getLocationBuildingIds, getLocationBuildingLevels,
@@ -62,9 +63,8 @@ import {
     setLocationAssetResizeAxis, getLocationAssetResizeState,
     deleteSelectedLocationAsset, toggleSelectedLocationAssetsHidden, toggleSelectedLocationFire,
     updateSelectedLocationAssetDetails, previewSelectedLocationLamp, updateSelectedLocationRoof, generateSelectedLocationRoof,
-    previewLocationDarkTiles, setLocationDarknessOverlayVisible,
+    setLocationDarknessOverlayVisible,
 } from './locationScene.js';
-import { paintDarkTiles } from './locationDarkness.js';
 import { getUserColorHex, updateMyColor } from './colors.js';
 import { openLobbyRestModal, closeLobbyRestModal, saveLobbyTimeActivity, startLobbyRest } from './rest.js';
 import {
@@ -380,11 +380,13 @@ window.enterLocation = async function(locationId) {
                         <div style="display: flex; align-items: center; gap: 5px;">
                             <span>Радиус:</span>
                             <input type="range" id="loc-edit-radius" min="0" max="5" value="0">
+                            <input class="form-control" type="number" id="loc-edit-radius-number" data-world-number="loc-edit-radius" min="0" max="5" step="1" aria-label="Радиус кисти" style="width:84px;">
                             <span id="loc-radius-value">0</span>
                         </div>
                         <div style="display: flex; align-items: center; gap: 5px;">
                             <span>Высота:</span>
                             <input type="range" id="loc-edit-height" min="-3.0" max="3.0" step="0.1" value="1.0">
+                            <input class="form-control" type="number" id="loc-edit-height-number" data-world-number="loc-edit-height" min="-3" max="3" step="any" aria-label="Высота кисти" style="width:84px;">
                             <span id="loc-height-value">1.0</span>
                         </div>
                         <label style="display: flex; align-items: center; gap: 5px;">
@@ -436,7 +438,8 @@ window.enterLocation = async function(locationId) {
                         </label>
                         <div style="display: flex; align-items: center; gap: 5px;">
                             <span>Радиация:</span>
-                            <input type="range" id="loc-edit-radiation" min="0" max="10" step="0.1" value="0">
+                            <input type="range" id="loc-edit-radiation" min="0" max="10" step="0.5" value="0">
+                            <input class="form-control" type="number" id="loc-edit-radiation-number" data-world-number="loc-edit-radiation" min="0" max="10" step="any" aria-label="Радиация" style="width:84px;">
                             <span id="loc-radiation-value">0.0</span>
                         </div>
                         <div style="display: flex; align-items: center; gap: 5px;">
@@ -488,7 +491,6 @@ window.enterLocation = async function(locationId) {
                     return section;
                 };
                 const sections = {
-                    mode: createToolSection('Режим', ['loc-edit-toggle-checkbox']),
                     select: createToolSection('Выбор', []),
                     brush: createToolSection('Кисть', ['loc-edit-radius']),
                     terrain: createToolSection('Ландшафт', ['loc-edit-terrain', 'loc-grass-subtype']),
@@ -497,12 +499,48 @@ window.enterLocation = async function(locationId) {
                 };
                 const autoExpandLabel = document.createElement('label');
                 autoExpandLabel.innerHTML = '<input type="checkbox" data-map-editor-auto-expand> Раскрывать панель при смене инструмента';
-                sections.select.appendChild(autoExpandLabel);
-                const selectionShortcuts = document.createElement('p');
-                selectionShortcuts.className = 'map-editor-shortcuts';
-                selectionShortcuts.textContent = 'Shift + клик: выбрать несколько · ПКМ: снять выделение · G: переместить · T: повернуть (Ctrl: вокруг центра группы, Shift: шаг 15°) · + / = / −: масштаб всех осей · H: скрыть / показать · Delete: удалить · R: размер одного объекта · Esc: отменить действие';
-                sections.select.appendChild(selectionShortcuts);
-                syncMapEditorAutoExpandCheckbox();
+                const editModeLabel = document.getElementById('loc-edit-toggle-checkbox').closest('label');
+                editModeLabel.style.cssText = '';
+                editModeLabel.className = 'location-edit-toggle';
+                // Move the existing controls before collecting unused legacy controls.
+                const common = document.createElement('div');
+                common.className = 'location-editor-common';
+                common.append(editModeLabel, autoExpandLabel);
+                const historyControls = document.createElement('span');
+                historyControls.className = 'location-history-controls';
+                historyControls.innerHTML = `<button type="button" data-location-undo title="Отмена (Ctrl+Z)" aria-label="Отмена (Ctrl+Z)">↶</button><button type="button" data-location-redo title="Повтор (Ctrl+Y / Ctrl+Shift+Z)" aria-label="Повтор (Ctrl+Y / Ctrl+Shift+Z)">↷</button>`;
+                const syncHistory = () => {
+                    const state = getLocationEditorHistoryState();
+                    historyControls.querySelector('[data-location-undo]').disabled = state.busy || !state.undo;
+                    historyControls.querySelector('[data-location-redo]').disabled = state.busy || !state.redo;
+                };
+                historyControls.querySelector('[data-location-undo]').onclick = () => replayLocationObjectHistory(false);
+                historyControls.querySelector('[data-location-redo]').onclick = () => replayLocationObjectHistory(true);
+                if (window.locationHistoryUiListener) window.removeEventListener('location-editor-history', window.locationHistoryUiListener);
+                window.locationHistoryUiListener = syncHistory;
+                window.addEventListener('location-editor-history', syncHistory);
+                syncHistory();
+                const help = document.createElement('details');
+                help.className = 'map-editor-help location-editor-help';
+                help.innerHTML = `
+                    <summary>Клавиши</summary>
+                    <dl>
+                        <div><dt>История редактора</dt><dd>Ctrl+Z — отмена · Ctrl+Y / Ctrl+Shift+Z — повтор. Один мазок — одно действие. В полях ввода действуют обычные сочетания текста. История хранится до выхода или перезагрузки сцены.</dd></div>
+                        <div><dt>Инструменты</dt><dd>1 / V — выбор · 2 — ландшафт · 3 — высота · 4 — радиация · 5 — ластик · 6 / B — ассеты · 7 — строительство · 8 — свет. Удерживайте Q для кругового меню.</dd></div>
+                        <div><dt>Режим и размещение</dt><dd>E — редактирование. При размещении ассета Q / E поворачивают его на 15°. R без доступного изменения размера переключает ластик.</dd></div>
+                        <div><dt>Выбор объектов</dt><dd>Shift + клик — несколько объектов · короткий ПКМ — снять выделение или отменить размещение · H — скрыть / показать · Delete — удалить.</dd></div>
+                        <div><dt>Перемещение и поворот</dt><dd>G — переместить · T — повернуть мышью. Shift при повороте — шаг 15°, Ctrl — вокруг центра группы. ЛКМ — подтвердить · Esc — отменить.</dd></div>
+                        <div><dt>Размер</dt><dd>R — размер одного объекта · X / Y / Z — ось. Для постройки тяните грань: Shift — симметрично, Ctrl — шаг 0,1 м (пол — 1 м), отпускание ЛКМ — сохранить. Для декора двигайте мышь и подтвердите ЛКМ. Esc — отменить / выйти. + / = / − — масштаб выделенных объектов по всем осям.</dd></div>
+                        <div><dt>Кисть и точный ввод</dt><dd>Alt + = / − — радиус · [ / ] — тип покрытия · = / − без выделенного объекта — высота. Ползунки: высота — 0,1; радиация — 0,5. Числовые поля сохраняют точность; Enter или потеря фокуса подтверждают ввод.</dd></div>
+                        <div><dt>Камера</dt><dd>W / A / S / D — движение · удержание и движение ПКМ — вращение · колесо — приближение.</dd></div>
+                    </dl>`;
+                help.querySelector('summary').addEventListener('keydown', event => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (!event.repeat) help.open = !help.open;
+                });
+                common.appendChild(help);
                 const legacyControls = document.createElement('div');
                 legacyControls.hidden = true;
                 Array.from(toolsRoot.children)
@@ -525,19 +563,31 @@ window.enterLocation = async function(locationId) {
                     <button type="button" data-location-tool="light">Свет</button>
                 `;
                 const hint = document.createElement('p');
+                toolbar.appendChild(historyControls);
                 hint.className = 'map-editor-hint';
-                const shortcuts = document.createElement('p');
-                shortcuts.className = 'map-editor-shortcuts';
-                shortcuts.textContent = 'Q / 1–7: инструменты · V: выбор · B: ассеты · G: двигать · T: повернуть · E: редактор · R: размер / ластик';
-                toolsRoot.prepend(toolbar);
+                toolsRoot.prepend(common, toolbar);
+                syncMapEditorAutoExpandCheckbox();
                 toolbar.after(hint);
-                hint.after(shortcuts);
+
+                const toolSettings = document.createElement('div');
+                toolSettings.className = 'location-tool-settings';
+                hint.after(toolSettings);
+                for (const section of [sections.brush, sections.terrain, sections.height, sections.radiation]) {
+                    section.setAttribute('aria-label', section.querySelector('strong').textContent);
+                    toolSettings.appendChild(section);
+                }
+                sections.select.classList.add('location-selection-section');
+                for (const id of ['loc-edit-radius', 'loc-edit-height', 'loc-edit-radiation']) {
+                    const row = document.getElementById(id).parentElement;
+                    row.classList.add('location-brush-control');
+                    row.style.cssText = '';
+                }
 
                 const eraseSettings = document.createElement('section');
                 eraseSettings.className = 'map-editor-section';
                 eraseSettings.innerHTML = '<strong class="map-editor-section-heading">Ластик</strong><label><input type="checkbox" id="loc-erase-structures"> Также удалять постройки</label>';
                 eraseSettings.hidden = true;
-                toolsRoot.appendChild(eraseSettings);
+                toolSettings.appendChild(eraseSettings);
 
                 const waterSettings=waterProfileControls('loc');waterSettings.hidden=true;sections.terrain.appendChild(waterSettings);
                 let activeAsset = null;
@@ -560,9 +610,10 @@ window.enterLocation = async function(locationId) {
                         button.setAttribute('aria-pressed', String(button.dataset.locationTool === tool));
                     });
                     Object.entries(sections).forEach(([name, section]) => {
-                        section.hidden = name !== 'mode' && name !== tool
+                        section.hidden = name !== tool
                             && !(name === 'brush' && ['terrain', 'height', 'radiation', 'erase'].includes(tool));
                     });
+                    toolSettings.hidden = !['terrain', 'height', 'radiation', 'erase'].includes(tool);
                     waterSettings.hidden = document.getElementById('loc-edit-terrain')?.value !== 'water';
                     eraseSettings.hidden = tool !== 'erase';
                     if (assetSection) {
@@ -616,7 +667,7 @@ window.enterLocation = async function(locationId) {
                     <div class="location-asset-placement" hidden>
                         <span data-placement-name></span>
                         <label><span data-placement-height-label>Высота от земли, м</span>
-                            <input class="form-control" type="number" data-placement-height min="0" max="10" step="0.1">
+                            <input class="form-control" type="number" data-placement-height min="0" max="10" step="any">
                         </label>
                         <div class="location-asset-dimensions" data-placement-size>
                             <label>Длина X, м <input class="form-control" type="number" data-placement-dimension="width" min="0.005" max="30" step="any"></label>
@@ -686,8 +737,8 @@ window.enterLocation = async function(locationId) {
                     assetPlacement.hidden = !activeAsset || window.locationEditorTool !== 'assets';
                     if (!activeAsset) return;
                     assetPlacement.querySelector('[data-placement-name]').textContent = activeAsset.label;
-                    placementHeight.value = activeAsset.kind === 'lamp'
-                        ? activeAsset.height : activeAsset.elevation ?? 0;
+                    syncNumericInput(placementHeight, activeAsset.kind === 'lamp'
+                        ? activeAsset.height : activeAsset.elevation ?? 0);
                     placementHeight.max = activeAsset.kind === 'lamp'
                         ? String(10) : '10';
                     assetPlacement.querySelector('[data-placement-height-label]').textContent = activeAsset.kind === 'lamp'
@@ -702,31 +753,29 @@ window.enterLocation = async function(locationId) {
                         || activeAsset.kind === 'decor' || activeAsset.lightKind === 'spot' ? '' : 'none';
                     const dimensions = assetDimensions(activeAsset, activeAsset.kind, activeAsset.lightKind || activeAsset.id);
                     assetPlacement.querySelectorAll('[data-placement-dimension]').forEach(input => {
-                        input.value = dimensions[input.dataset.placementDimension];
+                        const axis = input.dataset.placementDimension;
+                        [input.min, input.max] = assetDimensionLimits(activeAsset.kind)[axis];
+                        syncNumericInput(input, dimensions[axis]);
                     });
                 };
-                assetPlacement.addEventListener('change', event => {
-                    if (!event.target.matches('[data-placement-dimension]') || !activeAsset) return;
-                    const dimensions = Object.fromEntries(Array.from(
-                        assetPlacement.querySelectorAll('[data-placement-dimension]'),
-                        input => [input.dataset.placementDimension, Number(input.value)],
-                    ));
-                    if (validAssetDimensions(dimensions)) {
+                assetPlacement.querySelectorAll('[data-placement-dimension]').forEach(input => {
+                    bindNumericInput(input, { onCommit: () => {
+                        if (!activeAsset) return false;
+                        const dimensions = Object.fromEntries(Array.from(
+                            assetPlacement.querySelectorAll('[data-placement-dimension]'),
+                            field => [field.dataset.placementDimension, readNumericInput(field, { report: true })],
+                        ));
+                        if (!validAssetDimensions(dimensions, activeAsset.kind)) return false;
                         activeAsset.dimensions = [dimensions.width, dimensions.depth, dimensions.height];
-                        setLocationAssetDimensions(dimensions);
-                    } else {
-                        showNotification('Размеры объекта вне допустимого диапазона', 'system');
-                    }
-                    renderPlacementSettings();
+                        return setLocationAssetDimensions(dimensions);
+                    } });
                 });
-                placementHeight.addEventListener('change', () => {
-                    if (!activeAsset) return;
-                    const value = Math.min(Number(placementHeight.max), clampAssetElevation(placementHeight.value));
-                    placementHeight.value = value;
+                bindNumericInput(placementHeight, { onCommit: value => {
+                    if (!activeAsset) return false;
                     if (activeAsset.kind === 'lamp') activeAsset.height = value;
                     else activeAsset.elevation = value;
                     setLocationAssetElevation(value);
-                });
+                } });
                 const renderAssetCards = () => {
                     assetTabs.replaceChildren();
                     assetGrid.replaceChildren();
@@ -801,7 +850,10 @@ window.enterLocation = async function(locationId) {
                         select.value = activeBuildingId;
                     }
                     for (const input of buildingFields) input.value = activeBuildingId;
-                    for (const input of levelFields) input.value = String(activeLevel);
+                    for (const input of levelFields) {
+                        if (input.type === 'number') syncNumericInput(input, activeLevel);
+                        else input.value = String(activeLevel);
+                    }
                     document.getElementById('loc-restore-generated-floor').hidden =
                         !canRestoreGeneratedLocationFloor(activeBuildingId, activeLevel);
                     document.getElementById('loc-generate-interior').disabled = !ids.includes(activeBuildingId);
@@ -827,10 +879,14 @@ window.enterLocation = async function(locationId) {
                     button.onclick = () => setActiveBuilding(
                         `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`, 0);
                 }
-                for (const input of levelFields) input.onchange = () => {
-                    setActiveBuilding(activeBuildingId, Number(input.value));
-                    setLocationViewLevel(Number(input.value));
-                };
+                for (const input of levelFields) {
+                    const commit = value => {
+                        setActiveBuilding(activeBuildingId, value);
+                        setLocationViewLevel(value);
+                    };
+                    if (input.type === 'number') bindNumericInput(input, { onCommit: commit });
+                    else input.onchange = () => commit(Number(input.value));
+                }
                 document.getElementById('loc-restore-generated-floor').onclick = async event => {
                     const button = event.currentTarget;
                     button.disabled = true;
@@ -849,13 +905,21 @@ window.enterLocation = async function(locationId) {
                     finally {button.disabled=false;renderBuildingControls();}
                 };
                 document.getElementById('loc-generate-anomalies').onclick=async event=>{
+                    const density = readNumericInput(document.querySelector('[data-building-anomaly-density]'), { report: true });
+                    if (!Number.isFinite(density)) return;
                     const button=event.currentTarget;button.disabled=true;
-                    try{await generateLocationBuildingAnomalies(activeBuildingId,{seed:globalThis.crypto?.randomUUID?.()||String(Math.random()),density:Number(document.querySelector('[data-building-anomaly-density]').value)});}
+                    try{await generateLocationBuildingAnomalies(activeBuildingId,{seed:globalThis.crypto?.randomUUID?.()||String(Math.random()),density});}
                     finally{button.disabled=false;renderBuildingControls();}
                 };
                 renderBuildingControls();
+                let lampInspectorSave = Promise.resolve();
+                const pendingInspectorSaves = new Map();
                 const renderAssetSelection = () => {
                     const selection = getSelectedLocationEditorAsset();
+                    if (selection && pendingInspectorSaves.has(selection.selectionKey)) return;
+                    // A socket echo must not discard a number still being typed.
+                    const focused = document.activeElement;
+                    if (assetInspector.contains(focused) && focused?.dataset.numericDraft === 'true') return;
                     if (selection?.kind === 'structure' && selection.selectedCount === 1) {
                         setActiveBuilding(selection.buildingId, selection.level);
                     }
@@ -872,7 +936,7 @@ window.enterLocation = async function(locationId) {
                         <div class="location-asset-selection-heading"><strong data-asset-name></strong><span data-asset-position></span></div>
                         <div class="location-asset-height-control">
                             <label>Высота от земли, м
-                                <input class="form-control" type="number" data-asset-elevation min="0" max="10" step="0.1">
+                                <input class="form-control" type="number" data-asset-elevation min="0" max="10" step="any">
                             </label>
                             <button type="button" data-height-step="-0.25" aria-label="Опустить на 25 см">−</button>
                             <button type="button" data-height-step="0.25" aria-label="Поднять на 25 см">+</button>
@@ -924,11 +988,11 @@ window.enterLocation = async function(locationId) {
                         <details class="location-asset-precise">
                             <summary>Точная настройка</summary>
                             <div class="location-asset-fields">
-                                <label>X, м <input class="form-control" type="number" data-asset-field="x" step="0.1"></label>
-                                <label>Z, м <input class="form-control" type="number" data-asset-field="z" step="0.1"></label>
-                                <label data-angle-label>Угол, ° <input class="form-control" type="number" data-asset-field="rotation" step="1"></label>
-                                <label data-lamp-field>Яркость <input class="form-control" type="number" data-asset-field="intensity" min="0" max="10" step="0.1"></label>
-                                <label data-lamp-field>Радиус, м <input class="form-control" type="number" data-asset-field="distance" min="1" max="30" step="0.1"></label>
+                                <label>X, м <input class="form-control" type="number" data-asset-field="x" step="any"></label>
+                                <label>Z, м <input class="form-control" type="number" data-asset-field="z" step="any"></label>
+                                <label data-angle-label>Угол, ° <input class="form-control" type="number" data-asset-field="rotation" step="any"></label>
+                                <label data-lamp-field>Яркость <input class="form-control" type="number" data-asset-field="intensity" min="0" max="10" step="any"></label>
+                                <label data-lamp-field>Радиус, м <input class="form-control" type="number" data-asset-field="distance" min="1" max="30" step="any"></label>
                                 <label>Цвет <input class="form-control" type="color" data-asset-field="color"></label>
                             </div>
                             <button type="button" class="btn btn-secondary" data-asset-save>Сохранить параметры</button>
@@ -962,7 +1026,9 @@ window.enterLocation = async function(locationId) {
                     assetInspector.querySelector('[data-asset-action="resize"]').hidden = selection.selectedCount > 1 || !selection.resizable;
                     assetInspector.querySelector('[data-selected-size]').hidden = selection.selectedCount > 1 || !selection.resizable;
                     if (selection.resizable) assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
-                        input.value = selection.dimensions[input.dataset.selectedDimension];
+                        const axis = input.dataset.selectedDimension;
+                        [input.min, input.max] = assetDimensionLimits(selection.kind)[axis];
+                        input.value = selection.dimensions[axis];
                     });
                     if(selection.roofWall)assetInspector.querySelector('[data-selected-dimension="height"]').parentElement.firstChild.textContent='Основная высота стены, м ';
                     const buildingIdInput = assetInspector.querySelector('[data-selected-building-id]');
@@ -991,7 +1057,11 @@ window.enterLocation = async function(locationId) {
                         for(const input of roofFields.querySelectorAll('[data-roof-setting]'))input.value=roofSettings[input.dataset.roofSetting];
                         roofFields.querySelector('[data-roof-apply]').onclick=async()=>{
                             const settings={scope:roofFields.querySelector('[data-roof-scope]').value};
-                            for(const input of roofFields.querySelectorAll('[data-roof-setting]'))settings[input.dataset.roofSetting]=input.type==='number'?Number(input.value):input.value;
+                            for (const input of roofFields.querySelectorAll('[data-roof-setting]')) {
+                                const value = input.type === 'number' ? readNumericInput(input, { report: true }) : input.value;
+                                if (input.type === 'number' && !Number.isFinite(value)) return;
+                                settings[input.dataset.roofSetting] = value;
+                            }
                             await updateSelectedLocationRoof(settings);
                         };
                     }
@@ -1017,31 +1087,58 @@ window.enterLocation = async function(locationId) {
                     if (selection.roofType !== undefined) roofTypeInput.value = selection.roofType;
                     for (const input of assetInspector.querySelectorAll('[data-asset-field]')) {
                         input.value = selection[input.dataset.assetField] ?? '';
-                    }
-                    const readFields = () => {
-                        const fields = {};
-                        for (const input of assetInspector.querySelectorAll('[data-asset-field]')) {
-                            fields[input.dataset.assetField] = input.type === 'color' ? input.value : Number(input.value);
+                        if (['x', 'z'].includes(input.dataset.assetField)) {
+                            input.min = '0';
+                            input.max = input.dataset.assetField === 'x'
+                                ? currentLocationData.grid_width : currentLocationData.grid_height;
+                            input.dataset.exclusiveMax = String(selection.kind !== 'lamp');
                         }
-                        fields[selection.kind === 'lamp' ? 'height' : 'elevation'] = Number(heightInput.value);
+                    }
+                    const readFields = (report = true) => {
+                        const fields = { rotation: selection.rotation };
+                        for (const input of assetInspector.querySelectorAll('[data-asset-field]')) {
+                            if (input.type === 'number' && input.closest('[hidden]')) continue;
+                            fields[input.dataset.assetField] = input.type === 'color' ? input.value
+                                : readNumericInput(input, { report, precision: selection.kind === 'lamp' ? 3 : undefined });
+                            if (input.type === 'number' && !Number.isFinite(fields[input.dataset.assetField])) return null;
+                        }
+                        const elevation = readNumericInput(heightInput, { report, precision: selection.kind === 'lamp' ? 3 : undefined });
+                        if (!Number.isFinite(elevation)) return null;
+                        fields[selection.kind === 'lamp' ? 'height' : 'elevation'] = elevation;
                         if (selection.kind === 'structure') {
                             if (buildingIdInput.value.trim() !== (selection.buildingId || '')) fields.buildingId = buildingIdInput.value.trim();
-                            if (Number(levelInput.value) !== selection.level) fields.level = Number(levelInput.value);
+                            const level = readNumericInput(levelInput, { report });
+                            if (!Number.isFinite(level)) return null;
+                            if (level !== selection.level) fields.level = level;
                         }
                         if (selection.roofType !== undefined) fields.roofType = roofTypeInput.value;
+                        if (selection.resizable && selection.selectedCount === 1) {
+                            fields.dimensions = Object.fromEntries(Array.from(
+                                assetInspector.querySelectorAll('[data-selected-dimension]'),
+                                input => [input.dataset.selectedDimension, readNumericInput(input,
+                                    { report, precision: selection.kind === 'lamp' ? 3 : undefined })],
+                            ));
+                            if (!validAssetDimensions(fields.dimensions, selection.kind)) return null;
+                        }
                         return fields;
                     };
-                    for (const input of [buildingIdInput, levelInput]) input.onchange = async () => {
-                        if (!await updateSelectedLocationAssetDetails(readFields())) renderAssetSelection();
+                    buildingIdInput.onchange = async () => {
+                        const fields = readFields();
+                        if (fields) await updateSelectedLocationAssetDetails(fields);
                     };
                     roofTypeInput.onchange = async () => {
-                        if (!await updateSelectedLocationAssetDetails(readFields())) renderAssetSelection();
+                        const fields = readFields();
+                        if (fields) await updateSelectedLocationAssetDetails(fields);
                     };
                     if (selection.kind === 'lamp') {
                         assetInspector.querySelector('.location-asset-fields').addEventListener('input', () => {
-                            previewSelectedLocationLamp(readFields());
+                            const fields = readFields(false);
+                            if (fields) previewSelectedLocationLamp(fields);
                         });
-                        heightInput.addEventListener('input', () => previewSelectedLocationLamp(readFields()));
+                        heightInput.addEventListener('input', () => {
+                            const fields = readFields(false);
+                            if (fields) previewSelectedLocationLamp(fields);
+                        });
                         assetInspector.querySelector('.location-asset-precise').addEventListener('toggle', event => {
                             if (!event.target.open) applyLocationLighting();
                         });
@@ -1055,50 +1152,57 @@ window.enterLocation = async function(locationId) {
                     assetInspector.querySelectorAll('[data-resize-axis]').forEach(button => {
                         button.onclick = () => setLocationAssetResizeAxis(button.dataset.resizeAxis);
                     });
-                    assetInspector.querySelector('[data-selected-size]').addEventListener('change', async event => {
-                        if (!event.target.matches('[data-selected-dimension]')) return;
-                        const dimensions = Object.fromEntries(Array.from(
-                            assetInspector.querySelectorAll('[data-selected-dimension]'),
-                            input => [input.dataset.selectedDimension, Number(input.value)],
-                        ));
-                        if (!validAssetDimensions(dimensions)) {
-                            showNotification('Размеры объекта вне допустимого диапазона', 'system');
-                            renderAssetSelection();
-                            return;
-                        }
-                        cancelLocationAssetResize();
-                        await updateSelectedLocationAssetDetails({
-                            ...readFields(), dimensions,
-                        });
+                    const saveDetails = fields => {
+                        const run = async () => {
+                            const key = selection.selectionKey;
+                            if (getSelectedLocationEditorAsset()?.selectionKey !== key) return false;
+                            pendingInspectorSaves.set(key, (pendingInspectorSaves.get(key) || 0) + 1);
+                            try { return await updateSelectedLocationAssetDetails(fields); }
+                            finally {
+                                const pending = pendingInspectorSaves.get(key) - 1;
+                                if (pending) pendingInspectorSaves.set(key, pending);
+                                else pendingInspectorSaves.delete(key);
+                                renderAssetSelection();
+                            }
+                        };
+                        if (selection.kind !== 'lamp') return run();
+                        // Lamp saves must also wait for the preceding REST/socket echo to settle.
+                        lampInspectorSave = lampInspectorSave.then(run, run);
+                        return lampInspectorSave;
+                    };
+                    const saveFields = async () => {
+                        const fields = readFields();
+                        return fields ? saveDetails(fields) : false;
+                    };
+                    bindNumericInput(levelInput, { onCommit: saveFields });
+                    assetInspector.querySelectorAll('[data-asset-field][type="number"]').forEach(input => {
+                        bindNumericInput(input, { precision: selection.kind === 'lamp' ? 3 : undefined,
+                            onCommit: saveFields });
+                    });
+                    bindNumericInput(heightInput, { precision: selection.kind === 'lamp' ? 3 : undefined,
+                        onCommit: saveFields });
+                    assetInspector.querySelectorAll('[data-selected-dimension]').forEach(input => {
+                        bindNumericInput(input, { precision: selection.kind === 'lamp' ? 3 : undefined,
+                            onCommit: async () => {
+                                const fields = readFields();
+                                if (!fields) return false;
+                                cancelLocationAssetResize();
+                                return saveDetails(fields);
+                            } });
                     });
                     assetInspector.querySelector('[data-asset-action="rotate"]').disabled = selection.selectedCount === 1
                         && selection.kind === 'lamp' && selection.lightKind !== 'spot';
-                    let savingHeight = false;
-                    const saveHeight = async value => {
-                        if (savingHeight) return;
-                        savingHeight = true;
-                        const next = clampAssetElevation(value);
-                        heightInput.value = next;
-                        const details = {
-                            x: selection.x, z: selection.z, rotation: selection.rotation,
-                            height: selection.height, intensity: selection.intensity,
-                            distance: selection.distance, color: selection.color,
-                            elevation: selection.elevation,
-                        };
-                        details[selection.kind === 'lamp' ? 'height' : 'elevation'] = next;
-                        const saved = await updateSelectedLocationAssetDetails(details);
-                        if (!saved) {
-                            heightInput.value = selection.elevation ?? 0;
-                            if (selection.kind === 'lamp') applyLocationLighting();
-                        }
-                        savingHeight = false;
-                    };
-                    heightInput.addEventListener('change', () => saveHeight(heightInput.value));
                     assetInspector.querySelectorAll('[data-height-step]').forEach(button => {
-                        button.onclick = () => saveHeight(Number(heightInput.value) + Number(button.dataset.heightStep));
+                        button.onclick = async () => {
+                            const value = readNumericInput(heightInput, { report: true });
+                            if (!Number.isFinite(value)) return;
+                            heightInput.value = Math.max(Number(heightInput.min), Math.min(Number(heightInput.max),
+                                value + Number(button.dataset.heightStep)));
+                            await saveFields();
+                        };
                     });
                     assetInspector.querySelector('[data-asset-save]').onclick = async () => {
-                        if (await updateSelectedLocationAssetDetails(readFields())) showNotification('Параметры обновлены', 'success');
+                        if (await saveFields()) showNotification('Параметры обновлены', 'success');
                     };
                     const resizeState = getLocationAssetResizeState();
                     const resizeTools = assetInspector.querySelector('[data-resize-tools]');
@@ -1173,11 +1277,12 @@ window.enterLocation = async function(locationId) {
                             <strong>Тёмные области</strong>
                             <button type="button" data-darkness-brush="paint" aria-pressed="false">Затемнять клетки</button>
                             <button type="button" data-darkness-brush="erase" aria-pressed="false">Стереть затемнение</button>
-                            <label class="location-darkness-radius">Размер кисти
-                                <input type="range" data-darkness-radius min="0" max="5" value="0">
+                            <label class="location-darkness-radius"><span>Размер кисти</span>
+                                <input type="range" id="loc-darkness-radius" data-darkness-radius min="0" max="5" value="0">
+                                <input class="form-control" type="number" id="loc-darkness-radius-number" data-world-number="loc-darkness-radius" min="0" max="5" step="1" aria-label="Радиус кисти затемнения" style="width:84px;">
                                 <output data-darkness-radius-value>1 × 1</output>
                             </label>
-                            <span>Выберите кисть перед рисованием.</span>
+                            <span>Выберите кисть. Мазок сохраняется при отпускании ЛКМ.</span>
                             <span data-darkness-count></span>
                         </div>
                         <div class="location-environment-actions">
@@ -1191,7 +1296,9 @@ window.enterLocation = async function(locationId) {
                 environmentSection.hidden = window.locationEditorTool !== 'light';
                 const environmentStatus = environmentSection.querySelector('[data-environment-status]');
                 let environmentEditor;
+                let environmentBase = structuredClone(currentLocationData.lighting);
                 const mountEnvironmentEditor = () => {
+                    environmentBase = structuredClone(currentLocationData.lighting);
                     environmentEditor = createLocationLightingEditor(
                         environmentSection.querySelector('.location-environment-editor'),
                         currentLocationData.lighting,
@@ -1215,7 +1322,7 @@ window.enterLocation = async function(locationId) {
                 environmentSection.querySelector('[data-darkness-radius-value]').textContent =
                     `${Number(darknessRadiusInput.value) * 2 + 1} × ${Number(darknessRadiusInput.value) * 2 + 1}`;
                 darknessRadiusInput.oninput = event => {
-                    setLocationBrushRadius(Number(event.target.value));
+                    setLocationBrushRadius(getWorldNumericValue('loc-darkness-radius'));
                 };
                 environmentSection.querySelectorAll('[data-darkness-brush]').forEach(button => {
                     button.onclick = () => {
@@ -1229,14 +1336,23 @@ window.enterLocation = async function(locationId) {
                 window.locationDarknessPaintAtTile = (x, z) => {
                     if (!darknessBrushMode) return;
                     const radius = Number(environmentSection.querySelector('[data-darkness-radius]').value);
-                    const next = paintDarkTiles(darkTilesDraft, currentLocationData.grid_width,
-                        currentLocationData.grid_height, x, z, radius, darknessBrushMode === 'erase');
-                    if (next === darkTilesDraft) return;
-                    darkTilesDraft = next;
-                    previewLocationDarkTiles(darkTilesDraft);
+                    if (!paintLocationDarknessAtTile(x, z, radius, darknessBrushMode === 'erase')) return;
+                    darkTilesDraft = structuredClone(currentLocationData.lighting.dark_tiles);
                     updateDarknessCount();
-                    environmentStatus.textContent = 'Предпросмотр: изменения ещё не сохранены';
+                    environmentStatus.textContent = 'Мазок сохраняется при отпускании ЛКМ';
                 };
+                if (window.locationLightingHistoryListener) window.removeEventListener('location-editor-lighting-applied', window.locationLightingHistoryListener);
+                window.locationLightingHistoryListener = event => {
+                    darkTilesDraft = structuredClone(currentLocationData.lighting.dark_tiles || []);
+                    updateDarknessCount();
+                    if (event.detail?.environment) mountEnvironmentEditor();
+                    else {
+                        const draft = environmentEditor.get(false);
+                        if (draft) applyLocationLighting(draft, false);
+                    }
+                    environmentStatus.textContent = 'Изменения сцены сохранены';
+                };
+                window.addEventListener('location-editor-lighting-applied', window.locationLightingHistoryListener);
                 environmentSection.querySelector('[data-revert-environment]').onclick = () => {
                     darkTilesDraft = (currentLocationData.lighting?.dark_tiles || []).map(tile => ({ ...tile }));
                     updateDarknessCount();
@@ -1246,10 +1362,11 @@ window.enterLocation = async function(locationId) {
                 };
                 environmentSection.querySelector('[data-save-environment]').onclick = async () => {
                     const settings = environmentEditor.get();
+                    if (!settings) return;
                     try {
-                        await Server.updateLocation(currentLobbyId, currentLocationData.id, { lighting: settings });
-                        applyLocationLighting(settings);
-                        darkTilesDraft = settings.dark_tiles.map(tile => ({ ...tile }));
+                        if (!await saveLocationEnvironment(settings, environmentBase)) return;
+                        const lighting = currentLocationData.lighting;
+                        darkTilesDraft = lighting.dark_tiles.map(tile => ({ ...tile }));
                         updateDarknessCount();
                         environmentStatus.textContent = 'Свет сохранён';
                         showNotification('Освещение сохранено', 'success');
@@ -1270,7 +1387,7 @@ window.enterLocation = async function(locationId) {
                 const radiationSpan = document.getElementById('loc-radiation-value');
                 if (radiationSlider) {
                     radiationSlider.oninput = (e) => {
-                        const val = parseFloat(e.target.value);
+                        const val = getWorldNumericValue('loc-edit-radiation');
                         setLocationBrushRadiation(val);
                     };
                     setLocationBrushRadiation(0);
@@ -1370,18 +1487,19 @@ window.enterLocation = async function(locationId) {
                 grassSubtypeSelect.onchange = (e) => setLocationGrassSubtype(e.target.value);
 
                 radiusSlider.oninput = (e) => {
-                    const val = parseInt(e.target.value);
+                    const val = getWorldNumericValue('loc-edit-radius');
                     setLocationBrushRadius(val);
                     document.getElementById('loc-radius-value').textContent = val;
                 };
 
                 heightSlider.oninput = (e) => {
-                    const val = parseFloat(e.target.value);
+                    const val = getWorldNumericValue('loc-edit-height');
                     setLocationBrushHeight(val);
-                    document.getElementById('loc-height-value').textContent = val.toFixed(1);
+                    document.getElementById('loc-height-value').textContent = String(val);
                 };
 
                 eraserCheck.onchange = (e) => setLocationEraserMode(e.target.checked);
+                initWorldNumericInputs();
                 selectLocationTool('select');
             }
         } else {
@@ -1432,6 +1550,8 @@ window.exitLocation = function() {
     delete window.selectLocationEditorTool;
     delete window.cancelLocationAssetPlacement;
     delete window.locationDarknessPaintAtTile;
+    if (window.locationLightingHistoryListener) window.removeEventListener('location-editor-lighting-applied', window.locationLightingHistoryListener);
+    delete window.locationLightingHistoryListener;
     window.currentLocationId = null;
     window.currentLocationCharacterId = null;
 
@@ -1795,28 +1915,33 @@ if (socket) {
     socket.on('location_tiles_updated', (data) => {
         if (data.location_id === getCurrentLocationId()) {
             import('./locationScene.js').then(module => {
-                module.applyLocationTilesUpdate(data.location_id, data.updates);
+                module.receiveLocationObjectEvent('applyLocationTilesUpdate', data.location_id, data.updates);
             });
+        }
+    });
+    socket.on('location_editor_objects_changed', (data) => {
+        if (Number(data.location_id) === Number(getCurrentLocationId())) {
+            import('./locationScene.js').then(module => module.applyLocationEditorObjectsChange(data));
         }
     });
     socket.on('location_objects_changed', (data) => {
         if (Number(data.location_id) === Number(getCurrentLocationId())) {
-            import('./locationScene.js').then(module => module.applyLocationObjectsChange(data));
+            import('./locationScene.js').then(module => module.receiveLocationObjectEvent('applyLocationObjectsChange', data));
         }
     });
     socket.on('location_object_created', (data) => {
         if (Number(data.location_id) === Number(getCurrentLocationId())) {
-            import('./locationScene.js').then(module => module.addLocationObject(data.object));
+            import('./locationScene.js').then(module => module.receiveLocationObjectEvent('addLocationObject', data.object));
         }
     });
     socket.on('location_object_deleted', (data) => {
         if (Number(data.location_id) === Number(getCurrentLocationId())) {
-            import('./locationScene.js').then(module => module.removeLocationObject(data.object_id));
+            import('./locationScene.js').then(module => module.receiveLocationObjectEvent('removeLocationObject', data.object_id));
         }
     });
     socket.on('location_object_updated', (data) => {
         if (Number(data.location_id) === Number(getCurrentLocationId())) {
-            import('./locationScene.js').then(module => module.updateLocationObject(data.object));
+            import('./locationScene.js').then(module => module.receiveLocationObjectEvent('updateLocationObject', data.object));
         }
     });
     socket.on('character_spawned', (data) => {

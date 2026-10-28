@@ -1480,15 +1480,21 @@ body.light-theme .lobby-time-field input[type="time"] {
   outline: 2px solid var(--username-color);
   outline-offset: 1px;
 }
+.map-tools input[aria-invalid="true"] {
+  border-color: #b96055;
+  outline: 1px solid #b96055;
+}
 .map-editor-section input[type="color"].form-control {
   padding: 3px;
   cursor: pointer;
 }
 .map-tools.is-location-editor {
   width: min(820px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
 }
 .map-tools.is-location-editor .map-editor-toolbar {
-  margin-top: 8px;
+  margin-top: 0;
 }
 .location-asset-library-heading,
 .location-asset-selection-heading {
@@ -1833,6 +1839,69 @@ body.light-theme .lobby-time-field input[type="time"] {
 .map-editor-help dt { color: var(--text-secondary); font-weight: 600; }
 .map-editor-help dd { margin: 0 0 7px 12px; }
 .map-editor-help p { margin: 7px 0 0; }
+/* Local editor: preserve the controls and palette, reduce repeated framing. */
+.is-location-editor .map-editor-inspector-grid { gap: 6px; margin-bottom: 0; }
+.location-editor-common { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.location-editor-common > label {
+  display: inline-flex; align-items: center; gap: 6px; margin: 0;
+  min-height: 28px; font-size: .78rem; color: var(--text-secondary);
+}
+.location-editor-common input[type="checkbox"] { margin: 0; flex: none; }
+.location-editor-help { margin-left: auto; }
+.location-editor-help > summary { padding: 5px 0; }
+.location-editor-help[open] { flex-basis: 100%; margin-left: 0; }
+.location-editor-help dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
+.location-editor-help dd { margin: 2px 0 0; }
+.is-location-editor .map-editor-toolbar { gap: 3px; }
+.is-location-editor .map-editor-toolbar button { min-height: 28px; padding: 5px 9px; }
+.is-location-editor .map-editor-section { padding: 8px; gap: 6px; min-width: 0; }
+.location-tool-settings { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; align-items: center; }
+.location-tool-settings[hidden] { display: none; }
+.location-history-controls { display: inline-flex; gap: 3px; margin-left: auto; }
+.location-history-controls button { min-width: 30px; min-height: 28px; padding: 3px 7px; }
+.location-history-controls button:disabled { opacity: .4; cursor: default; }
+.is-location-editor .location-tool-settings > .map-editor-section,
+.is-location-editor .location-selection-section { padding: 0; border: 0; background: none; }
+.location-tool-settings > .map-editor-section > .map-editor-section-heading,
+.location-selection-section > .map-editor-section-heading,
+.is-location-editor .location-environment-section > .map-editor-section-heading,
+.is-location-editor .location-asset-library-heading { display: none; }
+.is-location-editor .location-brush-control {
+  display: grid; grid-template-columns: auto minmax(60px, 1fr) 84px; gap: 6px; align-items: center;
+}
+.is-location-editor .location-brush-control:has(#loc-edit-radius) {
+  grid-template-columns: auto minmax(40px, 100px) 84px; justify-content: start;
+}
+.is-location-editor .location-brush-control > span[id$="-value"] { display: none; }
+.is-location-editor .location-brush-control input[type="range"] { width: 100%; min-width: 0; }
+.is-location-editor .location-selection-section > .location-asset-inspector { border-top: 0; padding-top: 0; }
+.is-location-editor .location-asset-selection-heading,
+.is-location-editor .location-asset-height-control { margin-bottom: 6px; }
+.is-location-editor .location-asset-dimensions { margin: 6px 0; }
+.is-location-editor .location-asset-precise { margin-top: 6px; }
+.is-location-editor .location-environment-body {
+  display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 8px 12px; padding-top: 0;
+}
+.is-location-editor .location-environment-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 8px; align-content: start; }
+.is-location-editor .location-lighting-field { gap: 3px; }
+.is-location-editor .location-lighting-mode { align-self: start; }
+.is-location-editor .location-lighting-manual {
+  grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; margin: 0;
+}
+.is-location-editor .location-lighting-hint { grid-column: 1 / -1; margin-top: 0; }
+.is-location-editor .location-darkness-controls { align-content: start; align-self: start; margin-top: 0; padding: 7px; gap: 6px; }
+.is-location-editor .location-darkness-radius { display: grid; grid-template-columns: minmax(40px, 1fr) 84px 48px; gap: 4px; min-width: 0; }
+.is-location-editor .location-darkness-radius > span { grid-column: 1 / -1; }
+.is-location-editor .location-darkness-radius input { min-width: 0; width: 100%; }
+.is-location-editor .location-environment-actions { grid-column: 1 / -1; margin-top: 0; }
+@media (max-width: 680px) {
+  .location-editor-help dl { grid-template-columns: minmax(0, 1fr); }
+  .is-location-editor .location-lighting-manual { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .is-location-editor .location-environment-body { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 8px; }
+}
+@media (max-width: 520px) {
+  .location-tool-settings, .is-location-editor .location-environment-body { grid-template-columns: minmax(0, 1fr); }
+}
 .location-character-label {
   max-width: 190px;
   padding: 3px 6px 2px;
