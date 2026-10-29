@@ -170,6 +170,46 @@ export function loadNaturalGrassAssets(THREE, outputEncoding = THREE.LinearEncod
     return assetPromise;
 }
 
+// Enclose the source box after the exact Float32 transform sent to the GPU.
+function expandGrassBounds(bounds, box, matrix, offset) {
+    const center = [(box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2,
+        (box.min.z + box.max.z) / 2];
+    const half = [(box.max.x - box.min.x) / 2, (box.max.y - box.min.y) / 2,
+        (box.max.z - box.min.z) / 2];
+    for (let axis = 0; axis < 3; axis++) {
+        let position = matrix[offset + 12 + axis], extent = 0;
+        for (let column = 0; column < 3; column++) {
+            const value = matrix[offset + column * 4 + axis];
+            position += value * center[column];
+            extent += Math.abs(value) * half[column];
+        }
+        bounds[axis] = Math.min(bounds[axis], position - extent);
+        bounds[axis + 3] = Math.max(bounds[axis + 3], position + extent);
+    }
+}
+
+function refreshGrassBounds(THREE, group) {
+    // r128 tests geometry.boundingSphere, not a sphere on InstancedMesh.
+    // Geometry is shared: its chunk-local bound must enclose every live chunk,
+    // including unchanged chunks at different heights after a local edit.
+    for (const [kind, { geometry }] of Object.entries(group.userData.naturalGrassResources)) {
+        const bounds = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+        for (const mesh of group.children) if (mesh.userData.naturalGrassKind === kind) {
+            const box = mesh.userData.naturalGrassBounds;
+            for (let axis = 0; axis < 3; axis++) {
+                bounds[axis] = Math.min(bounds[axis], box[axis]);
+                bounds[axis + 3] = Math.max(bounds[axis + 3], box[axis + 3]);
+            }
+        }
+        if (!Number.isFinite(bounds[0])) continue;
+        // Leave 2 cm beyond the transformed box for frustum-plane roundoff.
+        geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(
+            (bounds[0] + bounds[3]) / 2, (bounds[1] + bounds[4]) / 2,
+            (bounds[2] + bounds[5]) / 2), Math.hypot(bounds[3] - bounds[0],
+            bounds[4] - bounds[1], bounds[5] - bounds[2]) / 2 + 0.02);
+    }
+}
+
 export function addNaturalGrassInstances(THREE, group, placements, assets, getHeight) {
     const dummy = new THREE.Object3D();
     const color = new THREE.Color();
@@ -198,8 +238,6 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
         const source = assets[kind];
         if (!resources[kind]) {
             const geometry = source.geometry.clone();
-            // Instance coordinates are chunk-local; keep the existing conservative bound.
-            geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(6, 0, 6), 9.5);
             const material = source.material.clone();
             const textures = ['map', 'alphaMap', 'normalMap'].filter(key => material[key]).map(key => {
                 material[key] = material[key].clone();
@@ -220,6 +258,7 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
         for (const { cx, cz, plants: chunkPlants } of chunks.values()) {
             const mesh = new THREE.InstancedMesh(geometry, material, chunkPlants.length);
             mesh.position.set(cx * CHUNK_SIZE, 0, cz * CHUNK_SIZE);
+            const bounds = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
             for (let index = 0; index < chunkPlants.length; index++) {
                 const plant = chunkPlants[index];
                 const slope = slopes.get(plant);
@@ -231,6 +270,7 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
                     source.spread * plant.size * plant.depth);
                 dummy.updateMatrix();
                 mesh.setMatrixAt(index, dummy.matrix);
+                expandGrassBounds(bounds, source.geometry.boundingBox, mesh.instanceMatrix.array, index * 16);
                 color.setRGB(...(plant.tone < 0.16 ? [1.08, 1.03, 0.94]
                     : plant.tone < 0.42 ? [0.98, 1.03, 0.98]
                         : [1, 1, 1]));
@@ -240,6 +280,8 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
             mesh.instanceColor.needsUpdate = true;
             mesh.userData.naturalGrassKind = kind;
             mesh.userData.naturalGrassChunk = `${cx},${cz}`;
+            mesh.userData.naturalGrassBounds = bounds;
+            mesh.frustumCulled = true;
             mesh.castShadow = false;
             mesh.receiveShadow = false;
             mesh.raycast = () => {};
@@ -247,6 +289,7 @@ export function addNaturalGrassInstances(THREE, group, placements, assets, getHe
             Object.assign(state.get(`${cx},${cz}`), { mesh, added: chunkPlants.length });
         }
     }
+    refreshGrassBounds(THREE, group);
     return naturalGrassSummary(group, assets);
 }
 

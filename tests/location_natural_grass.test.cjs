@@ -107,16 +107,21 @@ test('optimized grass adds one shared instanced model at ground height', async (
             this.count = count;
             this.position = { set(x, y, z) { this.x = x; this.y = y; this.z = z; } };
             this.userData = {};
-            this.instanceMatrix = {};
+            this.instanceMatrix = { array: new Float32Array(count * 16) };
             this.instanceColor = {};
             this.transforms = [];
         }
-        setMatrixAt(index, matrix) { this.transforms[index] = matrix; }
+        setMatrixAt(index, matrix) {
+            this.transforms[index] = matrix;
+            const [x, y, z] = matrix.position, [sx, sy, sz] = matrix.scale;
+            this.instanceMatrix.array.set([sx,0,0,0, 0,sy,0,0, 0,0,sz,0, x,y,z,1], index * 16);
+        }
         setColorAt(index, color) { this.color = color.rgb; }
     }
     class Color { setRGB(...rgb) { this.rgb = rgb; } }
     const THREE = { Object3D, InstancedMesh, Color, Sphere: class {}, Vector3: class {} };
     const geometry = triangles => ({ clone() { return this; },
+        boundingBox: { min: { x: -.5, y: 0, z: -.5 }, max: { x: .5, y: 1, z: .5 } },
         index: { count: triangles * 3 } });
     const material = () => ({ clone() { return { ...this }; } });
     const assets = {

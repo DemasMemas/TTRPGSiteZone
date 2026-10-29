@@ -52,7 +52,10 @@ class Attribute {
     constructor(array, size) { this.array = new Float32Array(array); this.count = array.length / size; }
 }
 class Geometry {
-    constructor() { this.attributes = {}; this.disposals = 0; }
+    constructor() {
+        this.attributes = {}; this.disposals = 0;
+        this.boundingBox = { min: { x: -.5, y: -.2, z: -.5 }, max: { x: .5, y: 1, z: .5 } };
+    }
     setAttribute(name, value) { this.attributes[name] = value; }
     getAttribute(name) { return this.attributes[name]; }
     computeVertexNormals() {}
@@ -84,7 +87,9 @@ class InstancedMesh extends Mesh {
 }
 const THREE = { Object3D, Group: Object3D, Mesh, InstancedMesh, Color,
     BufferGeometry: Geometry, IcosahedronGeometry: Geometry, Float32BufferAttribute: Attribute,
-    MeshStandardMaterial: Material, MeshLambertMaterial: Material, Sphere: class {}, Vector3: class {} };
+    MeshStandardMaterial: Material, MeshLambertMaterial: Material,
+    Sphere: class { constructor(center, radius) { Object.assign(this, { center, radius }); } },
+    Vector3: class { constructor(x, y, z) { Object.assign(this, { x, y, z }); } } };
 const tilesFor = size => Array.from({ length: size }, () => Array.from({ length: size }, () =>
     ({ terrain: 'grass', height: 1 })));
 const meshes = h => h.context.grassDetailGroup.children.filter(mesh => mesh.userData.naturalGrassKind);
@@ -103,7 +108,7 @@ async function harness(tiles, objects = []) {
         grassDetailGroup: null, naturalGrassBuild: null, naturalGrassAssets: assets,
         locationWaterProfiles: null,
         naturalGrassLoading: false, grassGroundReady: true, grassGroundLoading: false,
-        naturalGrassReported: true, renderer: { outputEncoding: 0 }, pendingTerrainRefresh: null,
+        naturalGrassReported: true, renderer: { outputEncoding: 0 }, pendingTerrainRefresh: null, objectEdit: null,
         activeLightingProfile: { local_lights: [] }, characterModels: new Map(), editorSelection: null,
         getCurrentLocationId: () => 1, isObjectLightSource: () => false,
         refreshTerrainFoundation: () => false, updateTileCubes: () => false,
@@ -144,6 +149,8 @@ async function assertFullEquivalent(h) {
         assert.deepEqual(mesh.instanceColor.array, reference.instanceColor.array, key);
         assert.equal(mesh.castShadow, false); assert.equal(mesh.receiveShadow, false);
         assert.equal(mesh.frustumCulled, reference.frustumCulled);
+        assert.equal(mesh.frustumCulled, true);
+        assert.deepEqual(mesh.geometry.boundingSphere, reference.geometry.boundingSphere);
         assert.equal(mesh.material.userData.lightField, 'same-field');
         assert.equal(mesh.geometry.disposals, 0); assert.equal(mesh.material.disposals, 0);
     }
@@ -199,6 +206,37 @@ test('rotated grass roots sit just below flat and edited sloped terrain without 
     verify();
     assert.equal(JSON.stringify(tiles), saved);
     await assertFullEquivalent(h);
+});
+
+test('shared culling bounds contain tilted plants at chunk edges and arbitrary edited heights', async () => {
+    const h = await harness(tilesFor(40));
+    const distant = snapshot(h).get('3,3'), geometry = distant.geometry;
+    const verify = () => {
+        const { min, max } = h.assets.medium01.geometry.boundingBox;
+        for (const mesh of meshes(h)) {
+            assert.equal(mesh.geometry, geometry, 'keep shared geometry');
+            const { center, radius } = mesh.geometry.boundingSphere;
+            for (let i = 0; i < mesh.count; i++) {
+                const m = mesh.instanceMatrix.array.subarray(i * 16, i * 16 + 16);
+                for (const x of [min.x, max.x]) for (const y of [min.y, max.y]) for (const z of [min.z, max.z]) {
+                    const px = m[0]*x + m[4]*y + m[8]*z + m[12];
+                    const py = m[1]*x + m[5]*y + m[9]*z + m[13];
+                    const pz = m[2]*x + m[6]*y + m[10]*z + m[14];
+                    assert.ok(Math.hypot(px-center.x, py-center.y, pz-center.z) <= radius);
+                }
+            }
+        }
+    };
+    verify();
+    for (const height of [80, -60, 1]) {
+        const changed = [];
+        for (let z = 12; z < 24; z++) for (let x = 12; x < 24; x++) {
+            h.tiles[z][x].height = height; changed.push({ x, z });
+        }
+        h.edit(changed); verify();
+        assert.equal(snapshot(h).get('3,3'), distant, 'distant chunk survives bound refresh');
+        await assertFullEquivalent(h);
+    }
 });
 
 for (const size of [20, 40, 80]) for (const [label, x, z, replaced] of [
