@@ -359,6 +359,33 @@ class MapService:
             if 'water_profile' in item['updates']:
                 validate_water_profile(item['updates']['water_profile'])
 
+        # Height strokes and their undo/redo only guard the fields they read.
+        # Other clients' objects, radiation and materials remain untouched.
+        if any('expected_height' in item for item in updates_list):
+            for cx, cy in sorted(updates_by_chunk):
+                MapChunk.query.filter_by(lobby_id=lobby_id, chunk_x=cx, chunk_y=cy).with_for_update().first()
+            seen = set()
+            for item in updates_list:
+                if 'expected_height' not in item:
+                    raise ValidationError('Expected a complete guarded height stroke')
+                tx, ty = item['tile_x'], item['tile_y']
+                key = (item['chunk_x'], item['chunk_y'], tx, ty)
+                if (type(tx) is not int or type(ty) is not int or not 0 <= tx < CHUNK_SIZE
+                        or not 0 <= ty < CHUNK_SIZE or key in seen):
+                    raise ValidationError('Invalid or duplicate height cell')
+                seen.add(key)
+                height = item['updates'].get('height')
+                expected = item['expected_height']
+                if (set(item['updates']) != {'height'} or type(height) not in (int, float)
+                        or not math.isfinite(height) or not .5 <= height <= 3
+                        or type(expected) not in (int, float) or not math.isfinite(expected)):
+                    raise ValidationError('Invalid guarded height')
+                tile = MapService.get_tile_data(lobby_id, key[0]*CHUNK_SIZE+tx, key[1]*CHUNK_SIZE+ty)
+                if tile.get('height', 1) != expected or tile.get('terrain') != item.get('expected_terrain'):
+                    raise ConflictError('Рельеф участка изменён другим клиентом. Мазок или история не применены.')
+                if tile.get('terrain') == 'water':
+                    raise ValidationError('Sculpting water heights is not supported')
+
         # Optional optimistic guard for a confirmed fence line. Validate the
         # complete packet before changing any chunk; ordinary brushes are unchanged.
         if any('expected_objects' in item for item in updates_list):

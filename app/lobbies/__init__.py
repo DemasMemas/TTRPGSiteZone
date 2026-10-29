@@ -15,6 +15,7 @@ from app.extensions import socketio, db
 from app.services.lobby import LobbyService
 from app.services.participant import ParticipantService
 from app.services.map import MapService
+from app.services.world_editor_history import record_world_editor_command, apply_world_editor_command
 from app.services.character import CharacterService
 from app.services.character_roles import can_join_world_group, follows_world_time, is_npc
 from app.services.container_transfer import ContainerTransferService
@@ -2075,6 +2076,7 @@ def set_character_visibility(character_id):
 @lobbies_bp.route('/<int:lobby_id>/chunks/<int:chunk_x>/<int:chunk_y>/tile/<int:tile_x>/<int:tile_y>', methods=['PATCH'])
 @jwt_required()
 @requires_gm
+@record_world_editor_command
 def update_tile(lobby_id, lobby, chunk_x, chunk_y, tile_x, tile_y):
     data = request.get_json()
     if not data:
@@ -2111,6 +2113,7 @@ def get_chunks(lobby_id, lobby, participant):
 @lobbies_bp.route('/<int:lobby_id>/water-profile', methods=['POST'])
 @jwt_required()
 @requires_gm
+@record_world_editor_command
 def set_connected_water_profile(lobby_id, lobby):
     from app.services.water_profiles import connected_world_water_updates
     data = request.get_json(silent=True) or {}
@@ -2124,6 +2127,7 @@ def set_connected_water_profile(lobby_id, lobby):
 @lobbies_bp.route('/<int:lobby_id>/chunks/batch', methods=['POST'])
 @jwt_required()
 @requires_gm
+@record_world_editor_command
 def batch_update_tiles(lobby_id, lobby):
     data = request.get_json()
     if not data or not isinstance(data, list):
@@ -2131,7 +2135,7 @@ def batch_update_tiles(lobby_id, lobby):
 
     MapService.batch_update_tiles(lobby_id, lobby.gm_id, data)
     socketio.emit('tiles_updated', [
-        {key: value for key, value in item.items() if key != 'expected_objects'} for item in data
+        {key: value for key, value in item.items() if key not in {'expected_objects', 'expected_height', 'expected_terrain'}} for item in data
     ], room=f"lobby_{lobby_id}")
     return jsonify({'message': 'Tiles updated successfully'}), 200
 
@@ -2146,6 +2150,7 @@ def preview_world_road(lobby_id, lobby):
 @lobbies_bp.route('/<int:lobby_id>/world-roads/build', methods=['POST'])
 @jwt_required()
 @requires_gm
+@record_world_editor_command
 def build_world_road(lobby_id, lobby):
     from app.services.world_road_editor import build_world_road as build
     result = build(lobby_id, lobby.gm_id, request.get_json(silent=True))
@@ -2156,6 +2161,7 @@ def build_world_road(lobby_id, lobby):
 @lobbies_bp.route('/<int:lobby_id>/world-roads/connect', methods=['POST'])
 @jwt_required()
 @requires_gm
+@record_world_editor_command
 def connect_world_roads(lobby_id, lobby):
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -2168,12 +2174,22 @@ def connect_world_roads(lobby_id, lobby):
 @lobbies_bp.route('/<int:lobby_id>/world-objects/edit', methods=['POST'])
 @jwt_required()
 @requires_gm
+@record_world_editor_command
 def edit_world_object(lobby_id, lobby):
     result = MapService.edit_world_object(
         lobby_id, lobby.gm_id, request.get_json(silent=True),
     )
     socketio.emit('tiles_updated', result['updates'], room=f"lobby_{lobby_id}")
     return jsonify(result), 200
+
+@lobbies_bp.route('/<int:lobby_id>/world-editor/changes', methods=['POST'])
+@jwt_required()
+@requires_gm
+def apply_world_editor_changes(lobby_id, lobby):
+    result = apply_world_editor_command(lobby, request.get_json(silent=True))
+    socketio.emit('tiles_updated', result['updates'], room=f'lobby_{lobby_id}')
+    return jsonify(result), 200
+
 
 @lobbies_bp.route('/<int:lobby_id>/export', methods=['GET'])
 @jwt_required()

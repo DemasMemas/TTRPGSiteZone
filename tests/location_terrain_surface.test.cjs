@@ -10,7 +10,18 @@ function functionSource(name) {
     assert.ok(start >= 0, name);
     return source.slice(start, source.indexOf('\n}', start) + 2);
 }
-const surfaceSource = functionSource('rebuildLocationTerrainSurface');
+// Expand the shared builder in the existing allocation/lifecycle harness; the
+// benchmark still compares the old sampled flat loop with the current fast loop.
+const terrainSource = fs.readFileSync(path.join(directory, 'locationTerrain.js'), 'utf8');
+const builderStart = terrainSource.indexOf('export function buildTerrainSurfaceData(');
+const builder = terrainSource.slice(builderStart, terrainSource.indexOf('\n}', builderStart));
+const builderBody = builder.slice(builder.indexOf(') {') + 3)
+    .replace('    const width = tiles[0].length, height = tiles.length;',
+        '    const bounds = { minX:0, minZ:0, maxX:width-1, maxZ:height-1 };')
+    .replace('tileHeight(tiles, x, z)', 'getTileHeight(x, z)')
+    .replace('    return { positions, normals, uvs, indices };', '');
+const surfaceSource = functionSource('rebuildLocationTerrainSurface').replace(
+    '    const { positions, normals, uvs, indices } = buildTerrainSurfaceData(tiles, smoothData);', builderBody);
 
 // Previous flat-tile vertex loop. The rest of the real surface builder (including
 // slope copying, attributes, indices and geometry replacement) runs unchanged.
@@ -95,6 +106,7 @@ async function surfaceHarness(tiles, previous = false) {
     const run = new Function('THREE', 'terrain', 'createTerrainSurfaceHeightSampler',
         'currentLocationData', 'smoothTerrainMesh', 'initialSurface', `
         const { isSmoothTerrainTile } = terrain;
+        const updateRoofVisibility = {};
         let terrainSurfaceMesh = initialSurface;
         const terrainSurfaceTexture = {}, terrainGrassBlendTexture = {};
         const scene = { remove() {} };

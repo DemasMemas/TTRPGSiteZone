@@ -4,7 +4,7 @@ import { createCharacterSaver, getCharacterBase, rememberCharacterSnapshots } fr
 
 const token = localStorage.getItem('access_token');
 
-async function apiFetch(url, options = {}) {
+async function requestJson(url, options = {}) {
     const headers = {
         'Authorization': `Bearer ${token}`,
         ...options.headers,
@@ -22,6 +22,12 @@ async function apiFetch(url, options = {}) {
     return data;
 }
 
+function apiFetch(url,options={}) {
+    const match=String(url).match(/^\/lobbies\/(\d+)\/(?:chunks\/(?:batch|\d+\/\d+\/tile\/\d+\/\d+)|world-objects\/edit|world-roads\/(?:build|connect)|water-profile)$/);
+    return match&&options.method&&options.method!=='GET'&&globalThis.window?.runWorldEditorRequest
+        ? window.runWorldEditorRequest(Number(match[1]),()=>requestJson(url,options)) : requestJson(url,options);
+}
+
 const characterSaver = createCharacterSaver((characterId, updates) => apiFetch(`/lobbies/characters/${characterId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -29,6 +35,12 @@ const characterSaver = createCharacterSaver((characterId, updates) => apiFetch(`
 }), getCharacterBase);
 
 export const Server = {
+    async applyWorldEditorChange(lobbyId,payload) {
+        return apiFetch(`/lobbies/${lobbyId}/world-editor/changes`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    },
+    async setWorldWaterProfile(lobbyId,payload) {
+        return apiFetch(`/lobbies/${lobbyId}/water-profile`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    },
     async prepareDeferredConsumable(lobbyId, locationId, actionId) {
         return apiFetch(`/lobbies/${lobbyId}/locations/${locationId}/combat/deferred-consumable/${encodeURIComponent(actionId)}`);
     },

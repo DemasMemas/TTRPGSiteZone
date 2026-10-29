@@ -17,9 +17,13 @@ import {
     updatePreviewObject,
     removePreviewObject
 } from './lobby3d.js';
+import { updateWorldSculptHighlight } from './lobby3d.js';
 import { showFenceLinePreview, removeFenceLinePreview, sampleWorldGroundHeight } from './lobby3d.js';
 import { createFenceLineTool } from './worldFenceTool.js';
 import { createWorldRoadTool } from './worldRoadTool.js';
+import { initWorldSculpt } from './worldSculpt.js';
+import { initWorldEditorHistory } from './worldEditorHistory.js';
+import { initWorldClipboardEditor } from './worldClipboardEditor.js';
 import { showWorldRoadPreview, removeWorldRoadPreview, renderer } from './lobby3d.js';
 import { Server } from './api.js';
 import { showNotification } from './utils.js';
@@ -118,6 +122,8 @@ export function initMapEdit(lobbyId, authToken) {
     },{capture:true});
     loadAnomalyFieldCatalog();
     initWorldNumericInputs();
+    initWorldEditorHistory(lobbyId, AppState);
+    initWorldSculpt(lobbyId, AppState, selectWorldEditorTool);
     initDirectWorldObjectEditor({
         lobbyId, state: AppState, protectedTypes: PROTECTED_BUILDING_TYPES, labels: WORLD_OBJECT_LABELS,
         onDetails(selection) {
@@ -126,6 +132,7 @@ export function initMapEdit(lobbyId, authToken) {
             selectExistingWorldObject(selection.index);
         },
     });
+    initWorldClipboardEditor(AppState,selectWorldEditorTool);
 
     document.getElementById('panel-tools')?.addEventListener('click', event => {
         const button = event.target.closest('[data-world-tool]');
@@ -269,8 +276,16 @@ export function setEditMode(enabled) {
 
 export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     const root = document.getElementById('gm-only-controls');
-    if (!root || !['select', 'terrain', 'height', 'radiation', 'erase', 'objects'].includes(tool)) return;
+    if (!root || !['select', 'terrain', 'height', 'sculpt', 'radiation', 'erase', 'objects'].includes(tool)) return;
+    const heightMode = document.getElementById('world-sculpt-mode');
+    if (tool === 'sculpt' && heightMode.value === 'exact') heightMode.value = 'raise';
+    if (tool === 'height' && heightMode.value !== 'exact') tool = 'sculpt';
+    const panelTool = tool === 'sculpt' ? 'height' : tool;
+    if (window.getWorldSculptState?.().active) window.cancelWorldBrushStroke?.();
+    if (window.getWorldEditorHistoryState?.().kind==='brush') window.cancelWorldBrushStroke?.();
     const previousTool = window.worldEditorTool;
+    if(tool!=='select')window.cancelWorldClipboard?.();
+    if(previousTool==='sculpt'&&tool!=='sculpt')updateWorldSculptHighlight(null);
     if(tool!=='objects')window.cancelWorldRoadRoute?.();
     if(tool!=='objects')window.cancelWorldFenceLine?.();
     window.cancelCommonMapTool?.();
@@ -278,12 +293,16 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
     if (tool !== 'select') window.clearDirectWorldObjectSelection?.();
     if (tool !== 'objects' && roadLinkActive) toggleWorldRoadLink(false);
     if (previousTool === 'objects' && tool !== 'objects') cancelWorldObjectPlacement();
-    root.dataset.tool = tool;
+    root.dataset.tool = panelTool;
     window.worldEditorTool = tool;
     if (autoExpand) expandMapToolsPanelOnToolChange(previousTool, tool);
     root.querySelectorAll('[data-world-tool]').forEach(button => {
-        button.setAttribute('aria-pressed', String(button.dataset.worldTool === tool));
+        button.setAttribute('aria-pressed', String(button.dataset.worldTool === panelTool));
     });
+    document.getElementById('world-exact-height-controls').hidden = heightMode.value !== 'exact';
+    document.getElementById('world-sculpt-controls').hidden = heightMode.value === 'exact';
+    document.getElementById('world-sculpt-strength-label').textContent = heightMode.value === 'smooth'
+        ? 'Сила сглаживания, 1/с' : 'Сила, уровня/с';
     if (tool === 'objects') updateWorldObjectPreview(getHoveredTile());
     else if (previousTool === 'objects') removePreviewObject();
     const eraser = document.getElementById('eraser-checkbox');
@@ -294,6 +313,7 @@ export function selectWorldEditorTool(tool, { autoExpand = true } = {}) {
         select: 'Выбор без рисования. Двойной клик открывает настройки тайла.',
         terrain: 'Проведите кистью по карте, чтобы изменить покрытие.',
         height: 'Проведите кистью по карте, чтобы изменить высоту.',
+        sculpt: 'Удерживайте ЛКМ и ведите кисть. Esc — отмена мазка; Ctrl+Z / Ctrl+Y — история рельефа.',
         radiation: 'Проведите кистью по карте, чтобы изменить радиацию.',
         erase: 'Проведите по карте, чтобы удалить объекты с тайлов.',
         objects: 'Выберите объект и поставьте его кликом по карте. Двойной клик открывает точные настройки тайла.',
@@ -597,6 +617,7 @@ function updateGMControlsVisibility() {
 }
 
 function scheduleBatchUpdate() {
+    if(window.getWorldEditorHistoryState?.().kind==='brush')return;
     if (batchUpdateTimeout) clearTimeout(batchUpdateTimeout);
     batchUpdateTimeout = setTimeout(() => {
         if (pendingTileUpdates.length > 0) {
@@ -615,6 +636,7 @@ function scheduleBatchUpdate() {
         }
     }, 500);
 }
+window.clearPendingWorldBrushUpdates=()=>{clearTimeout(batchUpdateTimeout);batchUpdateTimeout=null;pendingTileUpdates=[];};
 
 let waterBasinPending=false;
 export async function applyWorldWaterProfile(centerTile,profile,radius=0){
@@ -625,9 +647,7 @@ export async function applyWorldWaterProfile(centerTile,profile,radius=0){
     if(document.getElementById('world-water-basin')?.checked){
         if(waterBasinPending)return;waterBasinPending=true;
         try{
-            const response=await fetch(`/lobbies/${currentLobbyId}/water-profile`,{method:'POST',
-                headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({x,z,profile})});
-            const result=await response.json();if(!response.ok)throw Error(result.error||'Не удалось изменить профиль воды');
+            const result=await Server.setWorldWaterProfile(currentLobbyId,{x,z,profile});
             for(const u of result.updates)updateTileInChunk(u.chunk_x,u.chunk_y,u.tile_x,u.tile_y,u.updates);
         }catch(error){showNotification(error.message);}finally{waterBasinPending=false;}
         return;
@@ -647,6 +667,10 @@ export function applyBrush(centerTile, updates, radius) {
     if (!AppState.isGM) {
         showNotification('Только ГМ может редактировать тайлы');
         return;
+    }
+    if(window.getWorldEditorHistoryState&&!window.getWorldEditorHistoryState().kind){
+        if(!window.beginWorldEditorStroke('brush'))return;
+        queueMicrotask(()=>window.endWorldEditorStroke(false));
     }
     if(updates.terrain==='water')updates={...updates,water_profile:updates.water_profile??document.getElementById('world-water-profile')?.value??'auto'};
     if(updates.water_profile!==undefined&&(updates.terrain!=='water'||document.getElementById('world-water-basin')?.checked))

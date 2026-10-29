@@ -1230,7 +1230,8 @@ body.light-theme .lobby-time-field input[type="time"] {
   background: var(--btn-primary-bg);
   border-color: rgba(184, 164, 110, 0.35);
 }
-.map-editor-toolbar button:focus-visible {
+.map-editor-toolbar button:focus-visible,
+#world-select-area:focus-visible {
   outline: 2px solid var(--username-color);
   outline-offset: 2px;
 }
@@ -1419,7 +1420,8 @@ body.light-theme .lobby-time-field input[type="time"] {
   font: inherit;
   cursor: pointer;
 }
-.world-road-link-controls button[aria-pressed="true"] {
+.world-road-link-controls button[aria-pressed="true"],
+#world-select-area[aria-pressed="true"] {
   border-color: var(--username-color);
   background: rgba(184, 164, 110, 0.2);
 }
@@ -1513,6 +1515,11 @@ body.light-theme .lobby-time-field input[type="time"] {
 .location-asset-search {
   width: 100%;
 }
+.location-sculpt-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.location-sculpt-controls[hidden], .location-tool-settings [hidden] { display: none !important; }
+.location-sculpt-controls label { display: flex; flex-direction: column; gap: 3px; }
+.location-sculpt-controls input { min-width: 0; width: 100%; }
+.location-sculpt-controls > span { grid-column: 1 / -1; font-size: .76rem; color: var(--text-muted); }
 .location-house-generator {
   display: flex;
   align-items: center;

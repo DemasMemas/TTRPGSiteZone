@@ -15,7 +15,7 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
     const field = name => document.getElementById(`world-selection-${name}`);
     const getTile = ref => chunksMap.get(`${ref.chunkX},${ref.chunkY}`)?.tilesData[ref.tileY]?.[ref.tileX];
     const available = () => state.isGM && state.editMode && !window.isLocationActive
-        && window.worldEditorTool === 'select' && !window.isWorldTravelSelectionActive?.();
+        && window.worldEditorTool === 'select' && !window.isWorldTravelSelectionActive?.() && !window.isWorldClipboardActive?.();
     let gesture = null;
     let previewChanges = {};
     let pointer = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
@@ -102,6 +102,7 @@ export function initDirectWorldObjectEditor({ lobbyId, state, protectedTypes, la
     window.hasDirectWorldObjectSelection = () => Boolean(selection.selected);
     window.isDirectWorldObjectTransformActive = () => Boolean(gesture);
     window.getDirectWorldObjectSelection = () => selection.members.map(member => ({ ...member, object: { ...member.object } }));
+    window.selectDirectWorldObjects = references => selection.selectMany(references);
     window.refreshDirectWorldObjectEditor = () => render(selection.selected, selection.busy);
     window.syncDirectWorldObjectSelection = (chunkX, chunkY, tileX, tileY) => {
         const selected = selection.selected;

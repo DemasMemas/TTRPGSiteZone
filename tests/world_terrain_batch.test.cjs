@@ -110,7 +110,7 @@ async function harness(keys = ['0,0'], size = 32) {
     const end = source.indexOf('\n// --- Функции для чанков ---', start);
     const updateStart = source.indexOf('export function updateTileInChunk(');
     const updateEnd = source.indexOf('\nexport function setBrushRadius(', updateStart);
-    const finishStart = source.indexOf('function finishWorldBrushStroke()');
+    const finishStart = source.indexOf('function finishWorldBrushStroke(');
     const finishEnd = source.indexOf('\nfunction canvasMouseDownHandler(', finishStart);
     vm.runInContext(source.slice(start, end)
         + source.slice(updateStart, updateEnd).replace('export ', '')
@@ -150,7 +150,7 @@ function assertLiveHeightGeometry(h, entry) {
         const cx = Math.floor(wx / size), cy = Math.floor(wz / size);
         return h.chunksMap.get(`${cx},${cy}`)?.tilesData[wz - cy * size]?.[wx - cx * size] || null;
     }));
-    const expected = h.terrain.buildSmoothTerrainData(padded,
+    const expected = h.context.clipWorldTerrainData(h.terrain.buildSmoothTerrainData(padded),
         (x, z) => x > 0 && x <= size && z > 0 && z <= size);
     const triangles = data => {
         const byTile = new Map();
@@ -420,7 +420,7 @@ test('height preview raises and lowers mixed soils with correct normals and foun
     assert.equal(h.buildRegions.length, previews);
     h.context.finishWorldBrushStroke(); h.flush();
     assertLiveHeightGeometry(h, entry);
-    assert.equal(h.buildRegions.filter(region => region.included === 1024).length, 1);
+    assert.equal(h.buildRegions.filter(region => region.included === 1156).length, 1);
 });
 
 test('fast 3x3 height stroke coalesces live geometry and roads while retaining object and shadow updates', async () => {
@@ -450,7 +450,7 @@ test('fast 3x3 height stroke coalesces live geometry and roads while retaining o
     assert.deepEqual(roads, [entry, entry]);
     h.context.finishWorldBrushStroke(); h.flush();
     assert.equal(roads.length, 2);
-    assert.equal(h.buildRegions.filter(region => region.included === 1024).length, 1);
+    assert.equal(h.buildRegions.filter(region => region.included === 1156).length, 1);
 });
 
 for (const [label, keys, x, z] of [
@@ -471,7 +471,7 @@ for (const [label, keys, x, z] of [
         for (const entry of h.chunksMap.values()) {
             assertLiveHeightGeometry(h, entry);
             assert.equal(h.buildRegions.filter(region => region.key === `${entry.chunkX},${entry.chunkY}`
-                && region.included === 1024).length, 1);
+                && region.included === 1156).length, 1);
         }
     });
 }
@@ -499,7 +499,7 @@ test('height preview refreshes water levels and the shore including diagonal lan
         assert.equal(entry.water.matrices[entry.waterIndices[11 * 32 + 11]].position[1], level / 2);
     }
     h.context.finishWorldBrushStroke(); h.flush();
-    assert.equal(h.buildRegions.filter(region => region.included === 1024).length, 1);
+    assert.equal(h.buildRegions.filter(region => region.included === 1156).length, 1);
 });
 
 test('single terrain edit completes on its timer and resolves existing refresh waiters', async () => {
@@ -542,7 +542,7 @@ test('active stroke updates pixels before release, once per frame, with one fina
     assert.ok(h.buildRegions.every(region => region.included < 1024));
     h.context.finishWorldBrushStroke();
     h.flush();
-    assert.equal(h.buildRegions.filter(region => region.included === 1024).length, 1);
+    assert.equal(h.buildRegions.filter(region => region.included === 1156).length, 1);
     const expected = h.pixels.createTerrainPixelsRegion((x, z) => entry.tilesData
         [Math.max(0, Math.min(31, z))][Math.max(0, Math.min(31, x))].terrain,
         -2, -2, 512, 12, false, null, true);
@@ -575,7 +575,7 @@ test('live sand and water edits replace stale slopes, land caps and shores befor
         h.context.refreshWorldTerrainBrushPreview();
         assert.equal(oldGeometry.disposed, true);
         const { padded } = h.generated.get('0,0');
-        const expected = h.terrain.buildSmoothTerrainData(padded,
+        const expected = h.context.clipWorldTerrainData(h.terrain.buildSmoothTerrainData(padded),
             (x, z) => x > 0 && x <= 32 && z > 0 && z <= 32);
         assert.deepEqual(triangles(entry.smoothTerrainData), triangles(expected));
         assert.equal(entry.water.count, kind === 'water' ? 1 : 0);
@@ -586,7 +586,7 @@ test('live sand and water edits replace stale slopes, land caps and shores befor
     }
     assert.ok(h.buildRegions.every(region => region.included < 1024));
     h.context.finishWorldBrushStroke(); h.flush();
-    assert.equal(h.buildRegions.filter(region => region.included === 1024).length, 1);
+    assert.equal(h.buildRegions.filter(region => region.included === 1156).length, 1);
 });
 
 test('live preview refreshes both sides of chunk corners without consuming the final queue', async () => {
@@ -608,7 +608,7 @@ test('live preview refreshes both sides of chunk corners without consuming the f
     assert.ok(h.buildRegions.every(region => region.included < 1024));
     h.context.finishWorldBrushStroke(); h.flush();
     for (const key of keys) assert.equal(h.buildRegions
-        .filter(region => region.key === key && region.included === 1024).length, 1);
+        .filter(region => region.key === key && region.included === 1156).length, 1);
 });
 
 test('live preview can create and release a land texture in a previously water-only chunk', async () => {

@@ -236,12 +236,14 @@ export function initSocket(lobbyId, token) {
     });
 
     socket.on('tile_updated', (data) => {
-        updateTileInChunk(data.chunk_x, data.chunk_y, data.tile_x, data.tile_y, data.updates);
+        if (window.deferWorldEditorUpdate?.(data)) return;
+        updateTileInChunk(data.chunk_x, data.chunk_y, data.tile_x, data.tile_y, data.state?{__editorState:data.state}:data.updates);
     });
 
     socket.on('tiles_updated', (updates) => {
         updates.forEach(item => {
-            updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.updates);
+            if (window.deferWorldEditorUpdate?.(item)) return;
+            updateTileInChunk(item.chunk_x, item.chunk_y, item.tile_x, item.tile_y, item.state?{__editorState:item.state}:item.updates);
         });
     });
 

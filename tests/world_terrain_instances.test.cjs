@@ -5,6 +5,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/lobby3d.js'), 'utf8');
+const clipStart = source.indexOf('function clipWorldTerrainData(');
+const clipCode = source.slice(clipStart, source.indexOf('\n}', clipStart) + 2);
+
 
 test('smooth terrain picking retains full triangle order and restores render indices on failure', () => {
     const start = source.indexOf('function raycastSmoothTerrain(');
@@ -17,7 +20,7 @@ test('smooth terrain picking retains full triangle order and restores render ind
         if (fail) throw new Error('pick failed');
         hits.push({ faceIndex: 0 });
     } } } } });
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     const hits = [];
     context.raycastSmoothTerrain.call({ geometry }, {}, hits);
     assert.equal(hits[0].faceIndex, 0);
@@ -70,7 +73,7 @@ function harness({ deferTimers = false } = {}) {
         refreshWorldTerrainSurface() {},
         buildSmoothTerrainData: () => {
             terrainBuilds++;
-            return { positions: [], tileByFace: [] };
+            return { positions: [], tileByFace: [], foundationByTile: new Map() };
         },
         indexWaterGeometry: () => {},
         buildWorldWaterData: () => {
@@ -195,7 +198,7 @@ test('baked world surface covers land tops, skips water, and reuses its texture 
             RGBAFormat: 1, UnsignedByteType: 2, LinearFilter: 3,
             LinearMipmapLinearFilter: 4, sRGBEncoding: 5, DoubleSide: 6 },
     });
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     context.refreshWorldTerrainSurface(entry, smoothData);
     const positions = entry.terrainSurface.geometry.attributes.position.array;
     const uvs = entry.terrainSurface.geometry.attributes.uv.array;
@@ -284,7 +287,7 @@ test('water-only world chunks skip terrain texture and release it across land tr
             RGBAFormat: 1, UnsignedByteType: 2, LinearFilter: 3,
             LinearMipmapLinearFilter: 4, sRGBEncoding: 5, DoubleSide: 6 },
     });
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     const smoothData = { topByVertex: [], positions: [], normals: [] };
     context.refreshWorldTerrainSurface(entry, smoothData);
     assert.deepEqual([counts.generated, counts.textures, counts.geometries,
@@ -390,7 +393,7 @@ test('height brush coalesces chunk rebuilds and ignores the echoed batch', () =>
 });
 
 test('releasing the world brush schedules its pending terrain refresh without camera movement', () => {
-    const start = source.indexOf('function finishWorldBrushStroke()');
+    const start = source.indexOf('function finishWorldBrushStroke(');
     const end = source.indexOf('\nfunction canvasMouseDownHandler(', start);
     assert.ok(start >= 0 && end > start);
     let scheduled = 0;
@@ -405,7 +408,7 @@ test('releasing the world brush schedules its pending terrain refresh without ca
         clearTimeout() {}, setTimeout(callback, delay) { scheduled++; assert.equal(delay, 0); return 7; },
         flushWorldTerrainRefresh() {}, worldTerrainRefreshTimer: 3,
     });
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     context.finishWorldBrushStroke();
     assert.equal(context.brushActive, false);
     assert.equal(context.controls.enabled, true);
@@ -453,7 +456,7 @@ test('slope overlay hides only its cube and restores it when the slope disappear
         refreshWorldTerrainSurface() {},
         raycastSmoothTerrain() {},
         buildSmoothTerrainData: () => sloped ? {
-            positions: [1, 1, 1, 2, 1.5, 1, 1, 1, 2], topByVertex: [1, 1, 1],
+            positions: [1, 1, 1, 2, 1.5, 1, 1, 1, 2], normals: [0,1,0,0,1,0,0,1,0], topByVertex: [1, 1, 1],
             tileByFace: [{ x: 1, z: 1 }],
             tileByVertex: Array.from({ length: 3 }, () => ({ x: 1, z: 1 })),
             foundationByTile: new Map([['1,1', 0.8]]),
@@ -468,7 +471,7 @@ test('slope overlay hides only its cube and restores it when the slope disappear
             } },
         },
     });
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     context.refreshWorldTerrainChunk(entry);
     assert.ok(Math.abs(matrices[0].scale[1] - 0.715) < 1e-9);
     assert.ok(Math.abs(matrices[0].position[1] - matrices[0].scale[1] / 2) < 1e-9);
@@ -523,7 +526,7 @@ async function neighborRefreshHarness(terrain = 'grass') {
         refreshWorldTerrainPixels() { counts.pixels++; entry.terrainTextureRegion = null; },
         refreshWorldWaterChunk(target) { counts.water++; target.waterShoreDirty = false; },
     });
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     return { context, entry, chunksMap, metrics, counts };
 }
 
@@ -591,7 +594,7 @@ test('chunk arrival order schedules full builds only for new chunks; edits still
             rebuildRoadMeshes(entry) { roads.push(`${entry.chunkX},${entry.chunkY}`); },
             setTimeout() { return 1; }, clearTimeout() {}, lastHoverRaycastAt: 0,
         });
-        vm.runInContext(source.slice(start, end), context);
+        vm.runInContext(clipCode + source.slice(start, end), context);
         for (const index of order) {
             const x = index % 2;
             const y = Math.floor(index / 2);
@@ -620,7 +623,7 @@ test('world landmarks use their actual lowest vertex as the ground offset', () =
         WORLD_LANDMARKS: { forest: landmark },
         getBaseDimensions: type => ({ height: type === 'tree' ? 1 : 1.5 }),
     });
-    vm.runInContext(source.slice(start, end).replaceAll('export function ', 'function '), context);
+    vm.runInContext(clipCode + source.slice(start, end).replaceAll('export function ', 'function '), context);
     assert.equal(context.getObjectHeightOffset('forest'), 0.31);
     assert.equal(context.getObjectHeightOffset('tree'), 0.5);
 });
@@ -664,7 +667,7 @@ test('removing a chunk releases instance buffers but keeps shared terrain resour
     const roadEnd = source.indexOf('\nfunction rebuildRoadMeshes(', roadStart);
     assert.ok(roadStart >= 0 && roadEnd > roadStart);
     vm.runInContext(source.slice(roadStart, roadEnd), context);
-    vm.runInContext(source.slice(start, end).replace('export ', ''), context);
+    vm.runInContext(clipCode + source.slice(start, end).replace('export ', ''), context);
     context.removeChunk(0, 0);
     assert.equal(chunksMap.has('0,0'), false);
     assert.deepEqual(cancelled, [7]);
@@ -692,7 +695,7 @@ test('boundary terrain and height edits refresh loaded cardinal and diagonal roa
     const start = source.indexOf('function refreshRoadNeighborhood(');
     const end = source.indexOf('\nfunction rebuildRoadMeshes(', start);
     assert.ok(start >= 0 && end > start);
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     context.updateTileInChunk(0, 0, 1, 1, { terrain: 'rock', height: 5 });
     assert.deepEqual(roads, [entry, east, diagonal]);
     assert.equal(entry.roadBoundaryDirty, false);
@@ -783,7 +786,7 @@ test('side-only ground rendering preserves full-box picking and restores geometr
             hits.push({ instanceId: 19 });
         } } } },
     });
-    vm.runInContext(source.slice(start, end), context);
+    vm.runInContext(clipCode + source.slice(start, end), context);
     context.raycastGroundInstances.call(mesh, ray, hits);
     assert.equal(hits[0].instanceId, 19);
     assert.equal(mesh.geometry, rendered);

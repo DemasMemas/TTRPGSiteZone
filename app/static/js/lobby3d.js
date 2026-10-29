@@ -556,6 +556,17 @@ let currentBrushRadius = 0;
 const highlightBoxGeo = new THREE.BoxGeometry(1.1, 0.1, 1.1);
 const highlightBoxMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.5 });
 const highlightBox = new THREE.Mesh(highlightBoxGeo, highlightBoxMat);
+const worldSculptBrushGeo = new THREE.RingGeometry(.48,.5,64).rotateX(-Math.PI/2);
+export function updateWorldSculptHighlight(x,z,radius=0) {
+    if(x==null){highlightBox.visible=false;return;}
+    const size=radius*2+1,cx=radius===0?Math.floor(x)+.5:x,cz=radius===0?Math.floor(z)+.5:z;
+    const positions=worldSculptBrushGeo.attributes.position;
+    for(let i=0;i<positions.count;i++)positions.setY(i,sampleWorldGroundHeight(
+        Math.min(window.MAP_CHUNKS_WIDTH*CHUNK_SIZE-.00001,Math.max(0,cx+positions.getX(i)*size)),
+        Math.min(window.MAP_CHUNKS_HEIGHT*CHUNK_SIZE-.00001,Math.max(0,cz+positions.getZ(i)*size)))+.045);
+    positions.needsUpdate=true;worldSculptBrushGeo.computeBoundingSphere();
+    highlightBox.geometry=worldSculptBrushGeo;highlightBox.scale.set(size,1,size);highlightBox.position.set(cx,0,cz);highlightBox.visible=true;
+}
 highlightBox.position.set(0, 0.05, 0);
 scene.add(highlightBox);
 highlightBox.visible = false;
@@ -677,6 +688,18 @@ export function createPreviewObject(tile, params) {
     }
     removePreviewObject();
 
+    const obj = createWorldObjectPreviewMesh(tile,params);
+    scene.add(obj);
+    previewObject = obj;
+}
+
+export function createWorldObjectPreviewMesh(tile, params) {
+    const { type, anomalyType, color, offsetX, offsetZ, scale, rotation } = params;
+    const worldX = tile.chunkX * CHUNK_SIZE + tile.tileX + .5 + offsetX;
+    const worldZ = tile.chunkY * CHUNK_SIZE + tile.tileY + .5 + offsetZ;
+    const height = tile.tileData.height ?? 1;
+    const baseHalf = getBaseGroundOffset(type, anomalyType);
+    const yPos = type==='road'&&params.bridge ? roadSurfaceHeight(tile.tileData,params) : height+baseHalf*scale;
     let obj;
     if (type === 'anomaly') {
         obj = createAnomalyPreview(worldX, yPos, worldZ, anomalyType, color, scale);
@@ -695,8 +718,7 @@ export function createPreviewObject(tile, params) {
     obj.userData.previewType = type;
     obj.userData.anomalyType = anomalyType;
     obj.userData.privateGeometry = type === 'anomaly';
-    scene.add(obj);
-    previewObject = obj;
+    return obj;
 }
 
 export function updatePreviewObject(params) {
@@ -1143,6 +1165,20 @@ const smoothGroundMat = new THREE.MeshStandardMaterial({
 });
 worldTerrainMaterials.apply(groundMat, { sides: true });
 worldTerrainMaterials.apply(smoothGroundMat, { sides: true, smooth: true });
+let worldTerrainSidesPrepared = false;
+function prepareWorldTerrainSides() {
+    if (worldTerrainSidesPrepared || renderer.isUnavailableRenderer) return;
+    worldTerrainSidesPrepared = true;
+    const geometry = new THREE.BufferGeometry();
+    for (const [name,size] of [['position',3],['normal',3],['color',3],['uv',2],['terrainTop',1],['terrainTileCoord',2]]) {
+        geometry.setAttribute(name,new THREE.Float32BufferAttribute(new Float32Array(size*3),size));
+    }
+    const mesh = new THREE.Mesh(geometry,smoothGroundMat);
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+    try { renderer.compile(scene,camera); }
+    finally { scene.remove(mesh);geometry.dispose(); }
+}
 worldTerrainMaterials.apply(worldWaterBankMat, { sides:true, smooth:true, shore:true });
 
 function refreshWorldTerrainSurface(entry, smoothData) {
@@ -1341,6 +1377,20 @@ function fillChunkTerrainInstances(ground, water, tilesData, chunkX, chunkY, vis
     return { groundIndices, waterIndices };
 }
 
+function clipWorldTerrainData(data, include) {
+    const result={positions:[],normals:[],topByVertex:[],tileByFace:[],tileByVertex:[],foundationByTile:new Map()};
+    for(const [key,height] of data.foundationByTile){const [x,z]=key.split(',').map(Number);if(include(x,z))result.foundationByTile.set(key,height);}
+    data.tileByFace.forEach((tile,face)=>{
+        if(!include(tile.x,tile.z))return;
+        result.tileByFace.push(tile);
+        for(let corner=0;corner<3;corner++){
+            const i=face*3+corner;result.tileByVertex.push(tile);result.topByVertex.push(data.topByVertex[i]);
+            for(let axis=0;axis<3;axis++){result.positions.push(data.positions[i*3+axis]);result.normals.push(data.normals[i*3+axis]);}
+        }
+    });
+    return result;
+}
+
 function buildWorldTerrainPreviewData(entry, padded) {
     const region = entry.terrainPreviewRegion;
     const baseX = entry.chunkX * CHUNK_SIZE - 1;
@@ -1349,9 +1399,10 @@ function buildWorldTerrainPreviewData(entry, padded) {
     const minX = region.minX - baseX - 2, maxX = region.maxX - baseX + 2;
     const minZ = region.minZ - baseZ - 2, maxZ = region.maxZ - baseZ + 2;
     const affected = (x, z) => x >= minX && x <= maxX && z >= minZ && z <= maxZ;
-    const patch = buildSmoothTerrainData(padded, (x, z) =>
-        x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE
-        && x >= minX - 1 && x <= maxX + 1 && z >= minZ - 1 && z <= maxZ + 1);
+    // Neighbor faces contribute to normals even across the chunk boundary.
+    const patch = clipWorldTerrainData(buildSmoothTerrainData(padded, (x, z) =>
+        x >= minX - 1 && x <= maxX + 1 && z >= minZ - 1 && z <= maxZ + 1),
+        (x,z)=>x>0&&x<=CHUNK_SIZE&&z>0&&z<=CHUNK_SIZE);
     const previous = entry.smoothTerrainData;
     const result = { positions: [], normals: [], topByVertex: [], tileByFace: [],
         tileByVertex: [], foundationByTile: new Map(previous.foundationByTile) };
@@ -1428,7 +1479,7 @@ function refreshWorldTerrainChunk(entry, neighborOnly = false, preview = false) 
         entry.smoothTerrainBounds = null;
     }
     const data = preview ? buildWorldTerrainPreviewData(entry, padded)
-        : buildSmoothTerrainData(padded,
+        : clipWorldTerrainData(buildSmoothTerrainData(padded, () => true),
             (x, z) => x > 0 && x <= CHUNK_SIZE && z > 0 && z <= CHUNK_SIZE);
     entry.terrainPreviewRegion = null;
     entry.smoothTerrainData = data;
@@ -2092,6 +2143,7 @@ export function addChunk(cx, cy, tilesData) {
     fenceGroundSamplers.clear();
     refreshFenceChunkNeighbors(cx,cy);
     refreshWorldTerrainNeighborhood(cx, cy, null, null, true, true, true, true, true);
+    prepareWorldTerrainSides();
     worldWaterProfiles.updateRegion(cx*CHUNK_SIZE,cy*CHUNK_SIZE,CHUNK_SIZE,CHUNK_SIZE);
     lastChunkVisibilityAt = -Infinity;
     lastHoverRaycastAt = -Infinity;
@@ -2425,6 +2477,18 @@ export function updateTileInChunk(chunkX, chunkY, tileX, tileY, updates) {
     if (!entry) return;
 
     const tile = entry.tilesData[tileY][tileX];
+    if(updates.__editorState){
+        const state=updates.__editorState;
+        const patch={};
+        for(const field of Object.keys(state))if(!worldObjectDataEqual(tile[field],state[field]))patch[field]=state[field];
+        for(const field of Object.keys(tile))if(!Object.hasOwn(state,field))patch[field]=field==='objects'?[]:field==='radiation'?0:null;
+        updateTileInChunk(chunkX,chunkY,tileX,tileY,patch);
+        for(const key of Object.keys(tile))if(!Object.hasOwn(state,key))delete tile[key];
+        Object.assign(tile,state);
+        entry.objectStateSnapshots[tileY][tileX]={objects:copyWorldObjectData(tile.objects),anomaly_field:copyWorldObjectData(tile.anomaly_field)};
+        return;
+    }
+    globalThis.window?.touchWorldEditorCell?.(chunkX,chunkY,tileX,tileY);
     const objectState = updates.objects !== undefined || updates.anomaly_field !== undefined
         ? entry.objectStateSnapshots[tileY][tileX] : null;
     const changedObjects = updates.objects !== undefined && !worldObjectDataEqual(updates.objects, objectState.objects);
@@ -2777,14 +2841,18 @@ function performRaycast(clientX, clientY) {
 
                 const areaSize = window.worldEditorTool === 'objects' && !window.isWorldVegetationBrush?.()
                     ? 1 : 2 * currentBrushRadius + 1;
-                highlightBox.scale.set(areaSize, 0.1, areaSize);
-                highlightBox.position.set(worldX, height + 0.1, worldZ);
-                highlightBox.visible = true;
+                if(editMode&&window.worldEditorTool==='sculpt')updateWorldSculptHighlight(globalX,globalZ,currentBrushRadius);
+                else {
+                    highlightBox.geometry=highlightBoxGeo;
+                    highlightBox.scale.set(areaSize, 0.1, areaSize);
+                    highlightBox.position.set(worldX, height + 0.1, worldZ);
+                    highlightBox.visible = true;
+                }
 
                 if (tileInfoDiv && tileInfoContent && !window.hasDirectWorldObjectSelection?.()) {
                     tileInfoContent.innerHTML = `
                         <b>(${chunkX * CHUNK_SIZE + tileX}, ${chunkY * CHUNK_SIZE + tileY})</b><br>
-                        Высота: ${tileData.height}<br>
+                        Высота: ${window.worldEditorTool==='sculpt' ? Number(Number(tileData.height).toFixed(3)) : tileData.height}<br>
                         Радиация: ${tileData.radiation ?? 0}
                     `;
                     tileInfoDiv.style.display = 'block';
@@ -2795,7 +2863,9 @@ function performRaycast(clientX, clientY) {
     if (editMode && window.worldEditorTool === 'objects') window.updateWorldObjectPreview?.(hoveredTile);
 }
 
-function finishWorldBrushStroke() {
+function finishWorldBrushStroke(cancel = false) {
+    window.endWorldSculptStroke?.(cancel === true || ['blur','pointercancel'].includes(cancel?.type));
+    if(window.getWorldEditorHistoryState?.().kind==='brush')void window.endWorldEditorStroke(cancel === true || ['blur','pointercancel'].includes(cancel?.type));
     if (!brushActive && !globalMouseUpHandler) return;
     isMouseDown = false;
     lastProcessedTileKey = null;
@@ -2814,10 +2884,13 @@ function finishWorldBrushStroke() {
         worldTerrainRefreshTimer = setTimeout(flushWorldTerrainRefresh, 0);
     }
 }
+window.cancelWorldBrushStroke = () => finishWorldBrushStroke(true);
 
 function canvasMouseDownHandler(event) {
     if (window.isLocationActive) return;
+    if(window.handleWorldClipboardPointerDown?.(event))return;
     if (event.button === 2 && editMode) {
+        finishWorldBrushStroke(true);
         controls.enabled = true;
         controlsDisabled = false;
         brushActive = false;
@@ -2840,7 +2913,7 @@ function canvasMouseDownHandler(event) {
     lastProcessedTileKey = null;
 
     const isEditing = editMode && !window.isWorldTravelSelectionActive?.()
-        && ['terrain', 'height', 'radiation', 'erase', 'objects'].includes(window.worldEditorTool);
+        && ['terrain', 'height', 'sculpt', 'radiation', 'erase', 'objects'].includes(window.worldEditorTool);
 
     if (isEditing) {
         event.preventDefault();
@@ -2849,6 +2922,15 @@ function canvasMouseDownHandler(event) {
         controls.enabled = false;
         controlsDisabled = true;
         brushActive = true;
+        if (window.worldEditorTool === 'sculpt') {
+            if (!window.beginWorldSculptStroke?.(event,hoveredTile)) finishWorldBrushStroke(true);
+            return;
+        }
+        if ((['terrain','height','radiation','erase'].includes(window.worldEditorTool)
+            || window.worldEditorTool==='objects'&&window.isWorldVegetationBrush?.())
+            && window.beginWorldEditorStroke && !window.beginWorldEditorStroke('brush')) {
+            finishWorldBrushStroke(true);return;
+        }
         if (window.worldEditorTool === 'objects') window.beginWorldVegetationStroke?.();
 
         if (hoveredTile && window.tileClickCallback) {
@@ -2914,6 +2996,7 @@ window.addEventListener('click', (event) => {
 
 window.addEventListener('dblclick', (event) => {
     if (window.isLocationActive) return;
+    if (editMode && window.worldEditorTool === 'sculpt') return;
     if(editMode&&window.worldEditorTool==='objects'&&window.isWorldRoadRouteTool?.())return;
     if(editMode && window.worldEditorTool==='objects' && window.isWorldFenceLineTool?.())return;
     if (event.target.closest('.ui-overlay')) return;
@@ -2972,6 +3055,8 @@ function animate() {
     }
     const frameWorkStartedAt = performance.now();
     if (!renderer.isUnavailableRenderer) {
+        window.updateWorldClipboard?.();
+        window.updateWorldSculpt?.(now);
         refreshWorldTerrainBrushPreview();
         updateGlobalCameraMovement(Math.min(0.1, Math.max(0, delta)));
         const cameraMoved = controls.update();

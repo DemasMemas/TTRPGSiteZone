@@ -173,7 +173,7 @@ test('a changed height also refreshes neighboring tile geometry', () => {
     assert.match(scene, /neighbors\.add\(nz \* currentLocationData\.grid_width \+ nx\)/);
     assert.match(scene, /for \(const index of neighbors\)[\s\S]*?updateTileInstance/);
     assert.match(scene, /updateTileCubes\(changed\)/);
-    assert.match(scene, /if \(work\.smooth\) rebuildSmoothTerrainMesh\(true\)/);
+    assert.match(scene, /if \(work\.smooth && !localSculpt\) rebuildSmoothTerrainMesh\(true\)/);
 });
 
 test('fast brush movement fills intermediate cells and combines work before rendering', () => {
@@ -186,7 +186,7 @@ test('fast brush movement fills intermediate cells and combines work before rend
     assert.equal(line(1, 1, 4, 3).length, 4);
     assert.match(scene, /applyLocationBrush\(path, null, updates, brushRadius\)/);
     assert.match(scene, /flushPendingTerrainRefresh\(\);[\s\S]*?renderer\.render\(scene, camera\)/);
-    assert.match(scene, /if \(work\.surface\) rebuildLocationTerrainSurface\(true, true\)/);
+    assert.match(scene, /if \(work\.surface && !localSculpt\) rebuildLocationTerrainSurface\(true, true\)/);
     assert.match(scene, /reusableMesh\.geometry\.dispose\(\);\s*reusableMesh\.geometry = geometry/);
 });
 
@@ -243,7 +243,7 @@ test('terrain grid omits covered floor tiles and rebuilds when surfaces change',
         const mark = name => (...args) => calls.push({ name, args });
         const context = vm.createContext({
             pendingTerrainRefresh: { changed: new Map([['1,0', { x: 1, z: 0 }]]), ...flags },
-            scene: {}, currentLocationData: { grid_width: 2 }, editorSelection: null,
+            scene: {}, currentLocationData: { grid_width: 2 }, editorSelection: null, objectEdit: null,
             characterModels: new Map(),
             rebuildSmoothTerrainMesh: mark('smooth'), updateSmoothTerrainColors: mark('smoothColors'),
             updateLocationTerrainSurfaceTexture: mark('texture'),
@@ -340,7 +340,7 @@ test('fog surface follows smoothed tile heights without gaps on shared edges', a
     assert.ok(shared.every(y => Math.abs(y - 1.545) < 1e-8));
     const scene = read('locationScene.js');
     assert.match(scene, /fogSurfaceData \?\?= buildFogSurfaceData\(currentLocationData\.tiles_data\)/);
-    assert.match(scene, /if \(work\.fogGeometry\) clearFogOverlay\(\)/);
+    assert.match(scene, /if \(work\.fogGeometry && !localSculpt\) clearFogOverlay\(\)/);
 });
 
 function viewToggleHarness(isGM, exitWidth = 145.2) {

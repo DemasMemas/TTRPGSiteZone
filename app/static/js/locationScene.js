@@ -23,12 +23,14 @@ import { createDeferredActionResumer } from './deferredCombatActions.js';
 import { createAnomalyEffect, animateAnomalyEffects } from './anomalies.js';
 import { createMutantModel } from './mutantModels.js';
 import { anomalyCoversTile } from './locationAnomalyArea.js';
+import { sculptHeightChanges } from './locationSculpt.js';
+import { createLocationSculptPreview } from './locationSculptPreview.js';
 import { createFpsCounter } from './fpsCounter.js';
 import { horizontalCameraAxes, isTypingTarget } from './cameraPan.js';
 import { createWaterMaterial, WATER_PROFILE_COLOR_GLSL } from './waterSurface.js';
 import { createTerrainMaterialLayer } from './terrainMaterialLayer.js';
 import {
-    buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData,
+    buildFloorGridData, buildFogSurfaceData, buildSmoothTerrainData, buildTerrainGridData, buildTerrainSurfaceData,
     createTerrainSurfaceHeightSampler, isSmoothTerrainTile, terrainFoundationHeight,
     waterSurfaceAdjustments,
 } from './locationTerrain.js';
@@ -431,6 +433,75 @@ let brushRadius = 0;
 let currentBrushTerrain = 'grass';
 let currentBrushGrassSubtype = 'plain';
 let currentBrushHeight = 1.0;
+let sculptSettings = { mode: 'exact', strength: 1, softness: .7 };
+let sculptPreview = null;
+let lastSculptDiagnostics = null;
+export function setLocationSculptSettings(settings) {
+    if (objectEdit?.phase === 'stroke') return false;
+    const next = { ...sculptSettings, ...settings };
+    if (!['exact', 'raise', 'lower', 'smooth'].includes(next.mode)
+        || !Number.isFinite(next.strength) || next.strength < .05 || next.strength > 3
+        || !Number.isFinite(next.softness) || next.softness < .05 || next.softness > 1) return false;
+    sculptSettings = next;
+    return true;
+}
+export function getLocationSculptSettings() { return { ...sculptSettings }; }
+export function getLocationSculptDiagnostics() {
+    return sculptPreview?.diagnostics() || lastSculptDiagnostics;
+}
+function sculpting() { return window.locationEditorTool === 'height' && sculptSettings.mode !== 'exact'; }
+
+function updateLocationSculpt(now = performance.now(), final = false) {
+    const stroke = objectEdit?.phase === 'stroke' && objectEdit.sculpt;
+    if (!stroke || !currentLocationData) return;
+    if (!window.locationEditMode || !sculpting() || document.hidden) {
+        if (final) return;
+        void finishLocationBrushStroke(true);
+        return;
+    }
+    const seconds = (now - stroke.time) / 1000;
+    if (!final && seconds < 1 / 30) return;
+    stroke.time = now;
+    const client = hoveredPointerClient;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const inside = client && client.x >= rect.left && client.x <= rect.right
+        && client.y >= rect.top && client.y <= rect.bottom;
+    const point = inside ? getPointerWorldPoint(client.x, client.y, stroke.planeHeight) : null;
+    if (!point) { stroke.previous = null; return; }
+    const to = {x:point.x, z:point.z}, from = stroke.previous || to;
+    stroke.previous = to;
+    // Integrate all elapsed time; low FPS must not reduce the brush's speed.
+    // Blur/visibility loss cancels the stroke instead of accumulating paint.
+    const elapsed = Math.max(0, seconds);
+    const steps = Math.max(1, Math.min(60, Math.ceil(elapsed * 60)));
+    const tiles = currentLocationData.tiles_data, changed = new Map();
+    for(let i=0;i<steps;i++){
+        const a={x:from.x+(to.x-from.x)*i/steps,z:from.z+(to.z-from.z)*i/steps};
+        const b={x:from.x+(to.x-from.x)*(i+1)/steps,z:from.z+(to.z-from.z)*(i+1)/steps};
+        for(const cell of sculptHeightChanges(tiles,a,b,elapsed/steps,stroke.settings)){
+            touchStrokeCell(cell.x,cell.z);
+            const key=`${cell.x},${cell.z}`;
+            if(!changed.has(key))changed.set(key,{...cell,before:tiles[cell.z][cell.x].height});
+            else changed.get(key).height=cell.height;
+            tiles[cell.z][cell.x].height=cell.height;
+        }
+    }
+    for(const cell of changed.values())tiles[cell.z][cell.x].height=cell.before;
+    if(changed.size)applyLocationTilesUpdate(currentLocationId,[...changed.values()]);
+    if(hoveredTileCoords){
+        const {x,z}=hoveredTileCoords,tile=tiles[z][x];
+        updateHighlight(x,z,getTileHeight(x,z));
+        const info=document.getElementById('location-tile-info');
+        if(info){info.innerHTML=`<b>(${x}, ${z})</b><br>Ландшафт: ${tile.terrain}<br>Высота: <span data-sculpt-height>${Number(getTileHeight(x,z).toFixed(3))}</span><br>Радиация: ${tile.radiation ?? 0}<br>`;info.style.display='block';}
+    }
+}
+
+function clearSculptPreview() {
+    if (!sculptPreview) return;
+    lastSculptDiagnostics = sculptPreview.diagnostics();
+    sculptPreview.dispose();
+    sculptPreview = null;
+}
 let eraserMode = false;
 let brushRadiation = 0.0;
 let brushObjectMode = false;
@@ -7485,6 +7556,7 @@ export function initLocationScene(containerId) {
         const cameraMoved = Boolean(cameraPose && previousProfileCamera
             && cameraPose.some((value, index) => Math.abs(value - previousProfileCamera[index]) > 0.0001));
         previousProfileCamera = cameraPose;
+        updateLocationSculpt(frameTime);
         flushPendingTerrainRefresh();
         updateLocationCameraMovement(deltaSeconds);
         if (controls) controls.update();
@@ -7593,6 +7665,36 @@ function createHighlight() {
 
 function updateHighlight(x, z, height) {
     if (!highlightBox) createHighlight();
+    if (window.locationEditMode && sculpting()) {
+        if (!highlightBox.userData.sculpt) {
+            highlightBox.geometry.dispose();
+            highlightBox.geometry = new THREE.RingGeometry(.48,.5,64).rotateX(-Math.PI/2);
+            highlightBox.userData.sculpt = true;
+        }
+        const radius=objectEdit?.sculpt?.settings.radius ?? brushRadius;
+        const size=1+radius*2;
+        const client=hoveredPointerClient;
+        const point=client && getPointerWorldPoint(client.x,client.y,objectEdit?.sculpt?.planeHeight ?? height);
+        const cx=radius===0 ? x+.5 : point?.x ?? x+.5,cz=radius===0 ? z+.5 : point?.z ?? z+.5;
+        const positions=highlightBox.geometry.attributes.position;
+        const sample=createTerrainSurfaceHeightSampler(currentLocationData.tiles_data);
+        for(let i=0;i<positions.count;i++){
+            const px=cx+positions.getX(i)*size,pz=cz+positions.getZ(i)*size;
+            positions.setY(i,sample(Math.min(currentLocationData.grid_width-.00001,Math.max(0,px)),
+                Math.min(currentLocationData.grid_height-.00001,Math.max(0,pz)))+.065);
+        }
+        positions.needsUpdate=true;
+        highlightBox.scale.set(size,1,size);
+        highlightBox.position.set(cx,0,cz);
+        highlightBox.geometry.computeBoundingSphere();
+        highlightBox.visible=true;
+        return;
+    }
+    if (highlightBox.userData.sculpt) {
+        highlightBox.geometry.dispose();
+        highlightBox.geometry=new THREE.BoxGeometry(1,.1,1);
+        highlightBox.userData.sculpt=false;
+    }
     const holes = !window.locationEditMode && (currentLocationData?.objects || []).filter(o =>
         ['hatch','floor_opening'].includes(o.type) && structureLevel(o) === locationViewLevel
             && (o.type === 'floor_opening' || o.properties?.is_open)
@@ -13725,6 +13827,12 @@ export function paintLocationDarknessAtTile(x, z, radius, erase) {
 export async function finishLocationBrushStroke(cancel = false) {
     const context = objectEdit;
     if (context?.phase !== 'stroke') return false;
+    if (context.sculpt) {
+        if (!cancel) updateLocationSculpt(performance.now(), true);
+        clearSculptPreview();
+        // Return to the established merged meshes once, after the stroke.
+        queueTerrainRefresh([...context.cells.values()], { smooth:true, surface:true, grid:true, water:context.sculpt.water, fogGeometry:true, fog:true });
+    }
     context.phase = 'save';
     const change = { objects: [...context.objects.values()].map(before => ({ id: before.id, before, after: null })), tiles: [],
         cells: [...context.cells.values()].map(i => ({ ...i, after: copy(currentLocationData.tiles_data[i.z][i.x]) }))
@@ -15301,21 +15409,53 @@ function flushPendingTerrainRefresh() {
     if (!work || !scene || !currentLocationData) return;
     const changed = [...work.changed.values()];
     const indices = new Set(changed.map(({ x, z }) => z * currentLocationData.grid_width + x));
-    if (work.smooth) rebuildSmoothTerrainMesh(true);
+    const localSculpt = objectEdit?.phase === 'stroke' && objectEdit.sculpt && work.height;
+    if (localSculpt && work.surface) {
+        if (!sculptPreview && terrainSurfaceMesh) {
+            // Establish a sides material on a previously completely flat map.
+            if (!smoothTerrainMesh) rebuildSmoothTerrainMesh(true);
+            if (smoothTerrainMesh) sculptPreview = createLocationSculptPreview(THREE, scene,
+                currentLocationData.tiles_data, smoothTerrainMesh, terrainSurfaceMesh, terrainFoundationY);
+        }
+        sculptPreview?.update(changed, (x,z)=>new THREE.Color(terrainColors[currentLocationData.tiles_data[z][x].terrain] || 0x3a5f0b)
+            .multiplyScalar(darknessFactorAt(x,z)), terrainFoundationY);
+    }
+    if (work.smooth && !localSculpt) rebuildSmoothTerrainMesh(true);
     else if (work.terrainColor) updateSmoothTerrainColors(indices);
     if (work.texture) updateLocationTerrainSurfaceTexture(changed);
-    if (work.surface) rebuildLocationTerrainSurface(true, true);
-    if (work.water) rebuildWaterSurfaceMesh();
-    if (work.grid) rebuildLocationGrid();
+    if (work.surface && !localSculpt) rebuildLocationTerrainSurface(true, true);
+    if (work.water) {
+        if (localSculpt) objectEdit.sculpt.water = true;
+        else rebuildWaterSurfaceMesh();
+    }
+    if (work.grid) {
+        if (localSculpt) {
+            if (locationGridMesh) {
+                const positions=locationGridMesh.geometry.attributes.position;
+                const sample=createTerrainSurfaceHeightSampler(currentLocationData.tiles_data);
+                const affected=new Set();
+                for(const {x,z} of changed)for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++)affected.add(`${x+dx},${z+dz}`);
+                const floors=new Map((currentLocationData.objects || []).filter(o=>o.type==='floor').map(o=>[o.id,o]));
+                locationGridMesh.userData.tileByVertex.forEach(({x,z,floor,floorId},i)=>{
+                    if (!floor && affected.has(`${x},${z}`)) positions.setY(i,sample(positions.getX(i),positions.getZ(i))+.025);
+                    const object=floor && floors.get(floorId);
+                    if (object && affected.has(`${object.tile_x},${object.tile_y}`)) positions.setY(i,
+                        getTileHeight(object.tile_x,object.tile_y)+structureLevelOffset(object)+clampAssetElevation(object.properties?.elevation)+.03);
+                });
+                positions.needsUpdate=true;
+                locationGridMesh.geometry.computeBoundingSphere();
+            }
+        } else rebuildLocationGrid();
+    }
     else if (work.terrainColor) updateLocationGridColors(indices);
     if (work.grass) rebuildGrassDetailMesh(changed);
     if (work.roofs) rebuildLocationRoofs();
-    if (work.fogGeometry) clearFogOverlay();
+    if (work.fogGeometry && !localSculpt) clearFogOverlay();
     if (work.lighting) {
         applyLocationLighting();
         queueStaticLightFieldRefresh();
     }
-    else if (work.fog) applyFogOfWar();
+    else if (work.fog && !localSculpt) applyFogOfWar();
     if (work.height) queueStaticLightFieldRefresh();
     if (work.selection && editorSelection) updateEditorSelectionVisual();
     if (work.height) characterModels.forEach(entry => {
@@ -15363,7 +15503,7 @@ function rebuildLocationGrid() {
     const objects = currentLocationData.objects || [];
     const floors = objects.filter(object => object.type === 'floor').flatMap(object => {
         const pose = floorVisualPose(object, objects);
-        return floorSlabParts(object, objects).map(part => ({ ...pose,
+        return floorSlabParts(object, objects).map(part => ({ ...pose, id:object.id,
             x:pose.x+part.x*pose.axis.x+part.z*pose.normal.x,
             z:pose.z+part.x*pose.axis.z+part.z*pose.normal.z,
             width:part.width,depth:part.depth,level:structureLevel(object),
@@ -15404,14 +15544,8 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
     }
     const data = buildSmoothTerrainData(currentLocationData.tiles_data, () => true, terrainFoundationY);
     tileCubes = [locationTileMesh, waterTileMesh];
-    if (!data.positions.length) {
-        if (reusableMesh) {
-            scene.remove(reusableMesh);
-            disposeObject(reusableMesh);
-            smoothTerrainMesh = null;
-        }
-        return;
-    }
+    // Keep the sides material on flat maps too. It is prepared during loading,
+    // so the first continuous height stroke does not compile a new shader.
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(data.positions.length), 3));
@@ -15432,6 +15566,7 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
     if (reusableMesh) {
         reusableMesh.geometry.dispose();
         reusableMesh.geometry = geometry;
+        reusableMesh.frustumCulled = data.positions.length > 0;
         reusableMesh.userData.tileByFace = data.tileByFace;
         reusableMesh.userData.tileByVertex = data.tileByVertex;
         updateSmoothTerrainColors();
@@ -15452,6 +15587,7 @@ function rebuildSmoothTerrainMesh(reuseMaterial = false) {
                 '#include <clipping_planes_fragment>\nif (vTerrainTop > 0.5) discard;');
     };
     smoothTerrainMesh = new THREE.Mesh(geometry, material);
+    smoothTerrainMesh.frustumCulled = data.positions.length > 0;
     locationTerrainMaterials?.apply(material, { sides: true, smooth: true, waterSides: true });
     smoothTerrainMesh.userData.tileByFace = data.tileByFace;
     smoothTerrainMesh.userData.tileByVertex = data.tileByVertex;
@@ -15538,57 +15674,13 @@ function rebuildLocationTerrainSurface(preserveTexture = false, reuseMaterial = 
         terrainGrassBlendTexture.needsUpdate = true;
     }
 
-    const positions = [];
-    const normals = [];
-    const uvs = [];
-    const indices = [];
-    const subdivisions = 4;
-    for (let z = 0; z < height; z++) {
-        for (let x = 0; x < width; x++) {
-            if (tiles[z][x].terrain === 'water' || isSmoothTerrainTile(tiles, x, z)) continue;
-            const first = positions.length / 3;
-            // Non-smooth tiles have a constant surface; slopes are copied below.
-            const flatHeight = getTileHeight(x, z);
-            for (let row = 0; row <= subdivisions; row++) {
-                for (let column = 0; column <= subdivisions; column++) {
-                    const px = x + column / subdivisions;
-                    const pz = z + row / subdivisions;
-                    positions.push(px, flatHeight + 0.002, pz);
-                    uvs.push(px / width, pz / height);
-                    normals.push(0, 1, 0);
-                }
-            }
-            for (let row = 0; row < subdivisions; row++) {
-                for (let column = 0; column < subdivisions; column++) {
-                    const a = first + row * (subdivisions + 1) + column;
-                    const b = a + 1;
-                    const d = a + subdivisions + 1;
-                    const c = d + 1;
-                    indices.push(a, d, b, b, d, c);
-                }
-            }
-        }
-    }
-    if (smoothTerrainMesh) {
-        const smoothGeometry = smoothTerrainMesh.geometry;
-        const sourcePositions = smoothGeometry.getAttribute('position');
-        const sourceNormals = smoothGeometry.getAttribute('normal');
-        const topFlags = smoothGeometry.getAttribute('terrainTop');
-        for (let face = 0; face < smoothTerrainMesh.userData.tileByFace.length; face++) {
-            if (topFlags.getX(face * 3) < 0.5) continue;
-            const { x, z } = smoothTerrainMesh.userData.tileByFace[face];
-            const first = positions.length / 3;
-            for (let corner = 0; corner < 3; corner++) {
-                const source = face * 3 + corner;
-                const px = sourcePositions.getX(source);
-                const pz = sourcePositions.getZ(source);
-                positions.push(px, sourcePositions.getY(source) + 0.002, pz);
-                normals.push(sourceNormals.getX(source), sourceNormals.getY(source), sourceNormals.getZ(source));
-                uvs.push(px / width, pz / height);
-            }
-            indices.push(first, first + 1, first + 2);
-        }
-    }
+    const smoothData = smoothTerrainMesh ? {
+        positions: smoothTerrainMesh.geometry.attributes.position.array,
+        normals: smoothTerrainMesh.geometry.attributes.normal.array,
+        topByVertex: smoothTerrainMesh.geometry.attributes.terrainTop.array,
+        tileByFace: smoothTerrainMesh.userData.tileByFace,
+    } : null;
+    const { positions, normals, uvs, indices } = buildTerrainSurfaceData(tiles, smoothData);
     if (!positions.length) {
         if (reusableMesh) {
             scene.remove(reusableMesh);
@@ -16918,7 +17010,11 @@ function setupCharacterDragging() {
     const onFocusIn = e => {
         if (isKeyboardInputTarget(e.target) || e.target.closest?.('.modal')) onWindowBlur();
     };
-    const onVisibilityChange = () => { if (document.hidden) onWindowBlur(); };
+    const onVisibilityChange = () => {
+        if (!document.hidden) return;
+        onWindowBlur();
+        if (objectEdit?.phase === 'stroke' && objectEdit.sculpt) void finishLocationBrushStroke(true);
+    };
     document.addEventListener('focusin', onFocusIn);
     document.addEventListener('visibilitychange', onVisibilityChange);
     handlers.document.focusin = onFocusIn;
@@ -16937,7 +17033,7 @@ function getEditBrushUpdates() {
     if (tool === 'terrain') return { terrain: currentBrushTerrain,
         ...(currentBrushTerrain === 'grass' ? { grass_subtype: currentBrushGrassSubtype } : {}),
         ...(currentBrushTerrain === 'water' ? {water_profile:document.getElementById('loc-water-profile')?.value||'auto'} : {}) };
-    if (tool === 'height') return { height: currentBrushHeight };
+    if (tool === 'height') return sculpting() ? {} : { height: currentBrushHeight };
     return {};
 }
 
@@ -16964,6 +17060,15 @@ export function setupLocationEditing() {
     const onPointerMove = (e) => {
         if (!locationActive) return;
         if(e.buttons&2)return;
+        if (objectEdit?.phase === 'stroke' && objectEdit.sculpt) {
+            hoveredPointerClient = {x:e.clientX,y:e.clientY};
+            const point=getPointerWorldPoint(e.clientX,e.clientY,objectEdit.sculpt.planeHeight);
+            const x=Math.floor(point?.x ?? -1),z=Math.floor(point?.z ?? -1);
+            hoveredTileCoords=currentLocationData.tiles_data[z]?.[x] ? {x,z} : null;
+            if (hoveredTileCoords) updateHighlight(x,z,getTileHeight(x,z));
+            else { hideHighlight();locInfo.style.display='none'; }
+            return;
+        }
         if (editorRotateMode && e.target === canvas) {
             editorRotateHotkeyPending = false;
             updateEditorRotatePreview(e.clientX, e.clientY, e.shiftKey, e.ctrlKey);
@@ -17218,6 +17323,14 @@ export function setupLocationEditing() {
         canvas.setPointerCapture(e.pointerId);
         const { x, z } = hoveredTileCoords;
         if (!(buildMode === 'structure' && !eraserMode) && !beginLocationBrushStroke(e.pointerId)) return;
+        if (sculpting() && objectEdit?.phase === 'stroke') {
+            const planeHeight = getTileHeight(x,z);
+            const point = getPointerWorldPoint(e.clientX,e.clientY,planeHeight);
+            objectEdit.sculpt = { time:performance.now(), planeHeight,
+                previous:point ? {x:point.x,z:point.z} : null,
+                settings:{...sculptSettings,radius:brushRadius} };
+            return;
+        }
         if (buildMode === 'structure' && (eraserMode || (!e.altKey && !e.shiftKey))) {
             if (eraserMode) removeStructuresAtTile(x, z, brushRadius);
             else placeStructureAtTile(x, z);
@@ -17241,6 +17354,7 @@ export function setupLocationEditing() {
         if ((['assets','building'].includes(window.locationEditorTool) && !e.altKey && !e.shiftKey) || editorMoveMode || editorRotateMode || editorResizeMode) return;
         if (!hoveredTileCoords) return;
         if (e.target !== canvas) return;
+        if (objectEdit.sculpt) return; // Time-based updates run in the render loop.
         const { x, z } = hoveredTileCoords;
         if (window.locationEditorTool === 'light' && !e.altKey && !e.shiftKey) {
             for (const [cx, cz] of lastBrushTile ? brushStrokeTiles(lastBrushTile.x, lastBrushTile.z, x, z) : [[x, z]]) {
@@ -17994,6 +18108,7 @@ export function addLocationFloorMenu() {
 }
 
 export function destroyLocationScene() {
+    clearSculptPreview();
     locationSceneLoading = false;
     locationRenderBatches?.dispose();
     locationRenderBatches = null;

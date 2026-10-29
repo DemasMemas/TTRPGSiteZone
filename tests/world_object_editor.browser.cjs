@@ -117,7 +117,7 @@ else:
         await request('/auth/register', { username: 'browser-gm', email: 'browser-gm@example.test', password: 'browser-test-password' });
         const login = await request('/auth/login', { username: 'browser-gm', password: 'browser-test-password' });
         const token = login.access_token;
-        const waterGeometry=process.env.VTT_WATER_GEOMETRY==='1'||process.env.VTT_WATER_FINAL==='1';
+        const waterGeometry=process.env.VTT_WATER_GEOMETRY==='1'||process.env.VTT_WATER_FINAL==='1'||process.env.VTT_WORLD_SCULPT==='1';
         const lobby = await request('/lobbies/', { name: 'Direct object browser test', map_type: 'empty', chunks_width: 2, chunks_height: waterGeometry?2:1 }, token);
         await request(`/lobbies/${lobby.id}/chunks?min_chunk_x=0&max_chunk_x=1&min_chunk_y=0&max_chunk_y=${waterGeometry?1:0}`, null, token, 'GET');
         await request(`/lobbies/${lobby.id}/chunks/0/0/tile/31/10`, { objects: [
@@ -128,7 +128,7 @@ else:
         await request(`/lobbies/${lobby.id}/chunks/1/0/tile/0/10`, { objects: [{ type: 'house', x: -0.4, z: -0.4 }] }, token, 'PATCH');
         browser = spawn(process.env.BROWSER_EXECUTABLE || 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
             '--headless=new', '--no-sandbox', '--no-first-run', '--ignore-certificate-errors',
-            ...((process.env.VTT_LOC_LIGHT_CLEANUP === '1' || process.env.VTT_LOC_NUMERIC === '1' || process.env.VTT_LOC_HISTORY === '1' || process.env.VTT_LOC_BRUSH === '1' || process.env.VTT_LOC_CLIPBOARD === '1') ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] : []),
+            ...((process.env.VTT_LOC_SCULPT === '1' || process.env.VTT_LOC_LIGHT_CLEANUP === '1' || process.env.VTT_LOC_NUMERIC === '1' || process.env.VTT_LOC_HISTORY === '1' || process.env.VTT_LOC_BRUSH === '1' || process.env.VTT_LOC_CLIPBOARD === '1') ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] : []),
             ...(process.env.VTT_PERF_UNCAPPED==='1'?['--disable-frame-rate-limit','--disable-gpu-vsync']:[]),
             ...(process.env.VTT_BROWSER_GPU==='1'?[]:['--use-angle=swiftshader','--enable-unsafe-swiftshader']), '--window-size=1440,900',
             '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
@@ -164,6 +164,22 @@ else:
         }
         if (process.env.VTT_LOC_LIGHT_CLEANUP === '1') {
             await require('./location_light_cleanup.browser.cjs')({ page, request, token, lobby, base, connect, debugPort });
+            return;
+        }
+        if (process.env.VTT_SCULPT_FOCUS === '1') {
+            await require('./sculpt_focus.browser.cjs')({page,request,token,lobby});
+            return;
+        }
+        if (process.env.VTT_WORLD_HISTORY === '1') {
+            await require('./world_editor_history.browser.cjs')({page,request,token,lobby,base,connect,debugPort});
+            return;
+        }
+        if (process.env.VTT_WORLD_SCULPT === '1') {
+            await require('./world_sculpt.browser.cjs')({page,request,token,lobby,base,connect,debugPort});
+            return;
+        }
+        if (process.env.VTT_LOC_SCULPT === '1') {
+            await require('./location_sculpt.browser.cjs')({page,request,token,lobby,base,connect,debugPort});
             return;
         }
         if (process.env.VTT_LOC_CLIPBOARD === '1') {

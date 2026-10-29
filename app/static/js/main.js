@@ -1,6 +1,7 @@
 import { waterProfileControls } from './waterProfiles.js';
 // static/js/main.js
 import { initWorldNumericInputs, getWorldNumericValue, bindNumericInput, readNumericInput, syncNumericInput } from './worldNumericInputs.js';
+
 import { addTerrainMaterialOptions } from './terrainMaterialCatalog.js';
 import { initSocket } from './socketHandlers.js';
 import { initCharacters, initMutantForm, loadLobbyCharacters, showCreateCharacterForm, showCreateMutantForm } from './characters.js';
@@ -42,6 +43,7 @@ import {
     addLocationGridButton, addLocationRoofButton, addLocationFloorMenu,
     getLocationViewLevel, setLocationViewLevel, destroyLocationScene,
     setLocationBrushRadius, setLocationBrushHeight, setLocationBrushTerrain, setLocationGrassSubtype,
+    setLocationSculptSettings, getLocationSculptSettings,
     setLocationEraserMode, setLocationEditMode,
     getLocationEditMode, getHoveredTileCoords, updateHighlightByCoords, setLocationBrushRadiation, setLocationBrushObjectMode,
     setLocationBrushObjectType, setLocationBrushObjectColor, setLocationBrushObjectOffsetX, setLocationBrushObjectOffsetZ,
@@ -100,6 +102,12 @@ function buildLocationAnomalyOptions(anomalies) {
     }).join('');
 }
 import * as THREE from 'three';
+
+// A canvas click ends a sculpt-control draft before pointer handlers start a stroke.
+window.addEventListener('pointerdown', event => {
+    if (event.target.matches?.('#canvas-container canvas, #location-canvas canvas')
+        && document.activeElement?.matches('[data-canvas-editor-control]')) document.activeElement.blur();
+}, { capture: true });
 
 initWeather();
 
@@ -594,6 +602,41 @@ window.enterLocation = async function(locationId) {
                     row.classList.add('location-brush-control');
                     row.style.cssText = '';
                 }
+                const exactHeightRow = document.getElementById('loc-edit-height').parentElement;
+                const sculptModeRow = document.createElement('label');
+                sculptModeRow.innerHTML = `Режим <select class="form-control" id="loc-height-mode">
+                    <option value="exact">Точная высота</option>
+                    <option value="raise">Скульптор: поднять</option>
+                    <option value="lower">Скульптор: опустить</option>
+                    <option value="smooth">Скульптор: сгладить</option>
+                </select>`;
+                exactHeightRow.before(sculptModeRow);
+                const sculptControls = document.createElement('div');
+                sculptControls.className = 'location-sculpt-controls';
+                sculptControls.innerHTML = `<label><span data-sculpt-strength-label>Сила, м/с</span>
+                    <input class="form-control" id="loc-sculpt-strength" type="number" min="0.05" max="3" step="any" aria-label="Сила скульптора"></label>
+                    <label>Мягкость края (0,05–1)
+                    <input class="form-control" id="loc-sculpt-softness" type="number" min="0.05" max="1" step="any" aria-label="Мягкость скульптора"></label>
+                    <span>Удерживайте ЛКМ и ведите кисть. Esc — отмена мазка. Используется общий радиус кисти; вода сохраняет свой уровень.</span>`;
+                sections.height.appendChild(sculptControls);
+                const heightMode = sculptModeRow.querySelector('select');
+                const syncSculpt = () => {
+                    const settings = getLocationSculptSettings();
+                    heightMode.value = settings.mode;
+                    exactHeightRow.hidden = settings.mode !== 'exact';
+                    sculptControls.hidden = settings.mode === 'exact';
+                    sculptControls.querySelector('[data-sculpt-strength-label]').textContent = settings.mode === 'smooth' ? 'Сила сглаживания, 1/с' : 'Сила, м/с';
+                    syncNumericInput(document.getElementById('loc-sculpt-strength'), settings.strength);
+                    syncNumericInput(document.getElementById('loc-sculpt-softness'), settings.softness);
+                };
+                heightMode.dataset.canvasEditorControl = '';
+                heightMode.onchange = () => { setLocationSculptSettings({mode:heightMode.value}); syncSculpt(); heightMode.blur(); };
+                for(const [id,key] of [['loc-sculpt-strength','strength'],['loc-sculpt-softness','softness']]) {
+                    const input = document.getElementById(id);
+                    input.dataset.canvasEditorControl = '';
+                    bindNumericInput(input, { blurOnCommit:true, onCommit:value=>setLocationSculptSettings({[key]:value}) });
+                }
+                syncSculpt();
 
                 const eraseSettings = document.createElement('section');
                 eraseSettings.className = 'map-editor-section';

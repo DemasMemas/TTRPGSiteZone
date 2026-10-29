@@ -1,0 +1,42 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const root=path.join(__dirname,'../app/static/js'),read=n=>fs.readFileSync(path.join(root,n),'utf8');
+const url=s=>'data:text/javascript;base64,'+Buffer.from(s).toString('base64');
+const history=url(read('locationEditorHistory.js')),selection=url(read('worldObjectSelection.js'));
+const load=()=>import(url(read('worldClipboard.js').replace("'./locationEditorHistory.js'",JSON.stringify(history)).replace("'./worldObjectSelection.js'",JSON.stringify(selection))));
+const data=new Map();const get=(x,z)=>x<0||z<0||x>=64||z>=64?null:data.get(`${x},${z}`)||{terrain:'grass',height:1,objects:[]};
+const member=(x,z,index=0)=>({chunkX:Math.floor(x/32),chunkY:Math.floor(z/32),tileX:x%32,tileY:z%32,index,object:structuredClone(get(x,z).objects[index])});
+test('group copies preserve precise relative positions, scales, rotation and original data',async()=>{
+    const C=await load();data.clear();data.set('31,10',{terrain:'grass',height:1,objects:[{type:'tree',x:.125,z:-.25,rotation:12.345,scale:3,color:'#123456'}]});
+    data.set('32,10',{terrain:'grass',height:1,objects:[{type:'house',x:-.2,z:.3,rotation:45.125,scale:.7}]});
+    const original=structuredClone([...data]);
+    const clip=C.captureWorldObjects([member(31,10),member(32,10)],get);
+    const plan=C.planWorldPaste(clip,{x:40.625,z:20.25},{getTile:get,width:64,height:64});
+    assert.equal(plan.objects[0].object.scale,3);assert.equal(plan.objects[1].object.scale,.7);
+    assert.equal(plan.objects[0].object.rotation,12.345);
+    const positions=plan.objects.map(i=>[i.x+.5+i.object.x,i.z+.5+i.object.z]);
+    assert.ok(Math.abs(positions[1][0]-positions[0][0]-.675)<1e-9);
+    assert.ok(Math.abs(positions[1][1]-positions[0][1]-.55)<1e-9);
+    assert.deepEqual([...data],original);
+});
+test('area copies all tile properties, removes outgoing road links and guards replacement fields',async()=>{
+    const C=await load();data.clear();
+    data.set('31,4',{terrain:'sand',height:1.123456,radiation:.125,objects:[{type:'road',connections:['W','E'],manual_connections:['W','E'],scale:1}]});
+    data.set('32,4',{terrain:'rock',height:2,objects:[{type:'road',connections:['W','E'],manual_connections:['W','E'],scale:1}]});
+    data.set('10,12',{terrain:'grass',height:1,radiation:5,name:'Old',objects:[{type:'tree'}]});
+    const clip=C.captureWorldArea({minX:31,maxX:32,minZ:4,maxZ:4},get);
+    const plan=C.planWorldPaste(clip,{x:10.9,z:12.4},{getTile:get,width:64,height:64});
+    assert.equal(plan.cells[0].state.height,1.123456);assert.equal(plan.cells[0].state.radiation,.125);
+    assert.deepEqual(plan.cells[0].state.objects[0].connections,['E']);assert.deepEqual(plan.cells[1].state.objects[0].connections,['W']);
+    assert.deepEqual(plan.command.cells[0].after.name,{present:false});
+    assert.deepEqual(plan.command.cells[1].before.radiation,undefined);
+    assert.deepEqual(get(31,4).objects[0].connections,['W','E']);
+});
+test('clipboard rejects unloaded/outside regions, stale selection and linked game entities',async()=>{
+    const C=await load();data.clear();data.set('5,5',{terrain:'grass',height:1,objects:[{type:'house',location_id:42}]});
+    assert.throws(()=>C.captureWorldObjects([member(5,5)],get),/ссылки/);
+    const clip=C.captureWorldArea({minX:30,maxX:31,minZ:1,maxZ:2},get);
+    assert.throws(()=>C.planWorldPaste(clip,{x:5,z:5},{getTile:get,width:64,height:64}),/ссылки/);
+    assert.throws(()=>C.planWorldPaste(clip,{x:63,z:63},{getTile:get,width:64,height:64}),/границы/);
+    assert.throws(()=>C.captureWorldArea({minX:0,maxX:100,minZ:0,maxZ:100},get),/4096/);
+    assert.throws(()=>C.captureWorldArea({minX:0,maxX:1,minZ:0,maxZ:1},()=>null),/загрузки/);
+});

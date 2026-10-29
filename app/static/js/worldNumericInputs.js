@@ -35,7 +35,7 @@ export function readNumericInput(input, { report = false, precision } = {}) {
     return value;
 }
 
-export function bindNumericInput(input, { onCommit = () => {}, onInput, precision } = {}) {
+export function bindNumericInput(input, { onCommit = () => {}, onInput, precision, blurOnCommit = false } = {}) {
     let committed = input.value.trim() === '' ? NaN : Number(input.value);
     numericBindings.set(input, value => {
         committed = Number(value);
@@ -67,13 +67,16 @@ export function bindNumericInput(input, { onCommit = () => {}, onInput, precisio
         input.dataset.numericDraft = String(value !== committed);
         if (Number.isFinite(value)) onInput?.(value);
     });
-    input.addEventListener('change', () => commit());
+    const finish = async report => {
+        if (await commit(report) && blurOnCommit && input.dataset.numericDraft !== 'true') input.blur();
+    };
+    input.addEventListener('change', () => finish(false));
     input.addEventListener('blur', () => commit());
     input.addEventListener('keydown', event => {
         if (event.key !== 'Enter') return;
         event.preventDefault();
         event.stopPropagation();
-        commit(true);
+        finish(true);
     });
     return commit;
 }

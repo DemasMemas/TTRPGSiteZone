@@ -40,7 +40,7 @@ export function worldObjectGroupTransform(members, changes = {}, target = null, 
     const position = member => ({ x: member.chunkX * 32 + member.tileX + 0.5 + (member.object.x || 0), z: member.chunkY * 32 + member.tileY + 0.5 + (member.object.z || 0) });
     const pivot = position(first);
     let ratio = changes.scale === undefined ? 1 : changes.scale / (base.scale ?? 1);
-    ratio = Math.max(...members.map(member => 0.2 / (member.object.scale ?? 1)),
+    if(changes.scale !== undefined) ratio = Math.max(...members.map(member => 0.2 / (member.object.scale ?? 1)),
         Math.min(ratio, ...members.map(member => 2 / (member.object.scale ?? 1))));
     const angle = changes.rotation === undefined ? 0 : changes.rotation - (base.rotation || 0);
     const radians = angle * Math.PI / 180, cos = Math.cos(radians), sin = Math.sin(radians);

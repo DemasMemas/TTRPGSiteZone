@@ -210,11 +210,16 @@
                         <button type="button" data-world-tool="radiation" aria-pressed="false">Радиация</button>
                         <button type="button" data-world-tool="erase" aria-pressed="false">Ластик</button>
                         <button type="button" data-world-tool="objects" aria-pressed="false">Объекты</button>
+                        <button type="button" data-world-undo disabled title="Отмена (Ctrl+Z)">↶</button>
+                        <button type="button" data-world-redo disabled title="Повтор (Ctrl+Y / Ctrl+Shift+Z)">↷</button>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="select">
                         <label><input type="checkbox" data-map-editor-auto-expand checked> Раскрывать панель при смене инструмента</label>
+                        <button type="button" id="world-select-area" class="btn btn-secondary btn-sm" aria-pressed="false">Выделить участок для копирования</button>
+                        <span>Shift + клик — группа объектов. Ctrl+C / Ctrl+V — копирование и предпросмотр вставки.</span>
 
                     </div>
+                    <p id="world-clipboard-status" role="status"></p>
                     <div class="map-editor-inspector" data-world-settings="terrain">
                         <label>Покрытие <select id="tile-type-select" class="character-select">
                             <option value="grass">🌿 Трава</option>
@@ -225,8 +230,15 @@
                         </select></label>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="height">
+                        <label>Режим <select id="world-sculpt-mode" class="form-control"><option value="exact">Точная высота</option><option value="raise">Скульптор: поднять</option><option value="lower">Скульптор: опустить</option><option value="smooth">Скульптор: сгладить</option></select></label>
+                        <div id="world-exact-height-controls">
                         <label>Уровень <input type="range" id="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" oninput="setTileHeightFromInput(this.dataset.worldExactValue ?? this.value)"> <input type="number" class="world-number-input" id="tile-height-number" data-world-number="tile-height" min="0.5" max="3.0" step="0.1" value="1.0" aria-label="Высота"></label>
                         <output id="tile-height-value" for="tile-height">1.0</output>
+                        </div>
+                        <div id="world-sculpt-controls" hidden>
+                        <label><span id="world-sculpt-strength-label">Сила, уровня/с</span> <input id="world-sculpt-strength" class="form-control" type="number" min="0.05" max="3" step="any" value="0.5"></label>
+                        <label>Мягкость края <input id="world-sculpt-softness" class="form-control" type="number" min="0.05" max="1" step="any" value="0.7"></label>
+                        </div>
                     </div>
                     <div class="map-editor-inspector" data-world-settings="radiation">
                         <label>Уровень радиации <input type="range" id="world-brush-radiation" min="0" max="10" step="0.5" value="0" oninput="setWorldBrushRadiation(this.dataset.worldExactValue ?? this.value)"> <input type="number" class="world-number-input" id="world-brush-radiation-number" data-world-number="world-brush-radiation" min="0" max="10" step="0.5" value="0" aria-label="Радиация"></label>

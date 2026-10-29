@@ -291,7 +291,7 @@ export function buildFloorGridData(floors) {
         }));
         const segment = (a, b) => {
             positions.push(a.x, floor.top + 0.025, a.z, b.x, floor.top + 0.025, b.z);
-            tileByVertex.push({ ...a, floor: true }, { ...b, floor: true });
+            tileByVertex.push({ ...a, floor: true, floorId: floor.id }, { ...b, floor: true, floorId: floor.id });
         };
         for (const axis of ['x', 'z']) {
             const other = axis === 'x' ? 'z' : 'x';
@@ -341,15 +341,15 @@ export function buildFogSurfaceData(tiles) {
     return { positions, tileIndices };
 }
 
-export function buildSmoothTerrainData(tiles, includeTile = () => true, foundationY = 0) {
+export function buildSmoothTerrainData(tiles, includeTile = () => true, foundationY = 0, bounds = null) {
     const positions = [];
     const tileByFace = [];
     const tileByVertex = [];
     const topByVertex = [];
     const foundationByTile = new Map();
 
-    for (let z = 0; z < tiles.length; z++) {
-        for (let x = 0; x < (tiles[z]?.length || 0); x++) {
+    for (let z = bounds?.minZ ?? 0; z <= (bounds?.maxZ ?? tiles.length - 1); z++) {
+        for (let x = bounds?.minX ?? 0; x <= (bounds?.maxX ?? tiles[z].length - 1); x++) {
             if (!includeTile(x, z) || !isSmoothTerrainTile(tiles, x, z)) continue;
             const height = tileHeight(tiles, x, z);
             const ring = tileSurfaceRing(tiles, x, z);
@@ -380,4 +380,57 @@ export function buildSmoothTerrainData(tiles, includeTile = () => true, foundati
     }
     return { positions, normals: smoothTopNormals(positions, topByVertex),
         tileByFace, tileByVertex, topByVertex, foundationByTile };
+}
+
+// Shared cap builder for the merged surface and temporary local sculpt regions.
+export function buildTerrainSurfaceData(tiles, smoothData, bounds = { minX: 0, minZ: 0, maxX: tiles[0].length - 1, maxZ: tiles.length - 1 }) {
+    const width = tiles[0].length, height = tiles.length;
+    const positions = [];
+    const normals = [];
+    const uvs = [];
+    const indices = [];
+    const subdivisions = 4;
+    for (let z = bounds.minZ; z <= bounds.maxZ; z++) {
+        for (let x = bounds.minX; x <= bounds.maxX; x++) {
+            if (tiles[z][x].terrain === 'water' || isSmoothTerrainTile(tiles, x, z)) continue;
+            const first = positions.length / 3;
+            // Non-smooth tiles have a constant surface; slopes are copied below.
+            const flatHeight = tileHeight(tiles, x, z);
+            for (let row = 0; row <= subdivisions; row++) {
+                for (let column = 0; column <= subdivisions; column++) {
+                    const px = x + column / subdivisions;
+                    const pz = z + row / subdivisions;
+                    positions.push(px, flatHeight + 0.002, pz);
+                    uvs.push(px / width, pz / height);
+                    normals.push(0, 1, 0);
+                }
+            }
+            for (let row = 0; row < subdivisions; row++) {
+                for (let column = 0; column < subdivisions; column++) {
+                    const a = first + row * (subdivisions + 1) + column;
+                    const b = a + 1;
+                    const d = a + subdivisions + 1;
+                    const c = d + 1;
+                    indices.push(a, d, b, b, d, c);
+                }
+            }
+        }
+    }
+    if (smoothData) {
+        for (let face = 0; face < smoothData.tileByFace.length; face++) {
+            if (smoothData.topByVertex[face * 3] < 0.5) continue;
+            const { x, z } = smoothData.tileByFace[face];
+            if (x < bounds.minX || x > bounds.maxX || z < bounds.minZ || z > bounds.maxZ) continue;
+            const first = positions.length / 3;
+            for (let corner = 0; corner < 3; corner++) {
+                const source = (face * 3 + corner) * 3;
+                const px = smoothData.positions[source], pz = smoothData.positions[source + 2];
+                positions.push(px, smoothData.positions[source + 1] + 0.002, pz);
+                normals.push(smoothData.normals[source], smoothData.normals[source + 1], smoothData.normals[source + 2]);
+                uvs.push(px / width, pz / height);
+            }
+            indices.push(first, first + 1, first + 2);
+        }
+    }
+    return { positions, normals, uvs, indices };
 }
