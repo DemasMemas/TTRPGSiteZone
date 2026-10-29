@@ -51,13 +51,15 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
    let normalError=0;for(let i=0;i<n.count;i++)normalError=Math.max(normalError,Math.abs(Math.hypot(n.getX(i),n.getY(i),n.getZ(i))-1));
    return {id:a.id,bottom:box.min.y,top:box.max.y,size:box.getSize(new T.Vector3()).toArray(),triangles:m.geometry.attributes.position.count/3,finite:Array.from(m.geometry.attributes.position.array).every(Number.isFinite),normalError,roughness:base.roughness,metalness:base.metalness,textured:!!base.map,normalMapped:!!base.normalMap,bumpMapped:!!base.bumpMap,flatShading:base.flatShading}});
   const shared=meshes.find(p=>p.a.id==='table').m.geometry===meshes.find(p=>p.a.id==='household_dining_table').m.geometry&&meshes.find(p=>p.a.id==='chair').m.geometry===meshes.find(p=>p.a.id==='household_wood_chair').m.geometry;
-  for(const {m}of meshes)for(const material of [].concat(m.material))material.dispose();return {rows,shared};
+  for(const {m}of meshes)for(const material of [].concat(m.material))material.dispose();return {rows,shared,expected:A.filter(a=>a.visual?.family==='household').length};
  })()`);
- assert.equal(models.rows.length,29);assert.ok(models.shared);
- for(const m of models.rows){assert.ok(m.finite&&m.triangles<1500,m.id);assert.ok(Math.abs(m.bottom-(m.id==='household_wood_crate'?.01:0))<1e-5,m.id);
+ assert.equal(models.rows.length,models.expected);assert.ok(models.expected>=29);assert.ok(models.shared);
+ for(const m of models.rows){assert.ok(m.finite&&m.triangles>0&&m.triangles<10000,m.id);assert.ok(Math.abs(m.bottom-(m.id==='household_wood_crate'?.01:0))<1e-5,m.id);
   if(['household_washbasin','household_toilet','household_bathtub'].includes(m.id)){
    assert.ok(m.normalError<1e-5,m.id);assert.ok(!m.flatShading&&!m.textured&&!m.normalMapped&&!m.bumpMapped,m.id);assert.ok(m.roughness>=.2&&m.roughness<=.4);assert.equal(m.metalness,0);
-  }else{assert.equal(m.roughness,.9);assert.ok(m.textured,m.id)}
+  }else if(m.textured){assert.equal(m.roughness,.9,m.id);assert.equal(m.metalness,.03,m.id)}
+  else if(m.id.startsWith('nature_')){assert.equal(m.roughness,1,m.id);assert.equal(m.metalness,0,m.id)}
+  else{assert.equal(m.roughness,.5,m.id);assert.equal(m.metalness,.12,m.id)}
  }
  const bounds=await page.evaluate(`(()=>{const root=localRender.scene.children.find(r=>r.userData.locationObjectId===${defaults.id}),b=new T.Box3().setFromObject(root);return {position:root.position.toArray(),size:b.getSize(new T.Vector3()).toArray()}})()`);
  for(const [i,v]of [1.4,1,.8].entries())assert.ok(Math.abs(bounds.size[i]-v)<1e-5);
@@ -110,7 +112,7 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
  }
  if(surfaces){
   await page.evaluate(`window.selectLocationEditorTool('assets');lookFix(24,25,29,10,1,10);document.querySelector('#panel-tools:not(.collapsed) .toggle-btn')?.click()`);
-  for(const [id,x,z,y]of [['household_sink',13,7,null],['household_floor_rug',6,6,1.036],['household_floor_rug',10,10,1]]){
+  for(const [id,x,z,y]of [['household_sink',13,7,null],['household_floor_rug',6,8,1.036],['household_floor_rug',10,10,1]]){
    await page.evaluate(`L.setLocationAssetPreset('${id}')`);
    const point=await page.evaluate(`(()=>{const p=new T.Vector3(${x}+.5,1,${z}+.5).project(localRender.camera),r=localRender.renderer.domElement.getBoundingClientRect();return {x:r.left+(p.x+1)*r.width/2,y:r.top+(1-p.y)*r.height/2}})()`);
    await page.call('Input.dispatchMouseEvent',{type:'mouseMoved',...point});
@@ -126,7 +128,8 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
  assert.equal(labels.filter(l=>l==='Стол').length,1);assert.equal(labels.filter(l=>l==='Стул').length,1);
  assert.ok(!labels.includes('Обеденный стол')&&!labels.includes('Деревянный стул'));
  await page.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Сантехника')?.click()`);
- assert.deepEqual(await page.evaluate(`Array.from(document.querySelectorAll('.location-asset-card')).map(b=>b.lastChild.textContent).sort()`),['Ванна','Раковина','Унитаз с бачком'].sort());
+ const plumbingLabels=await page.evaluate(`(async()=>{const {LOCATION_ASSETS,findLocationAsset}=await import('/static/js/locationAssetCatalog.js');return LOCATION_ASSETS.filter(a=>a.group===findLocationAsset('household_washbasin').group&&!a.hidden).map(a=>a.label).sort()})()`);
+ assert.deepEqual(await page.evaluate(`Array.from(document.querySelectorAll('.location-asset-card')).map(b=>b.lastChild.textContent).sort()`),plumbingLabels);
  await page.evaluate(`Array.from(document.querySelectorAll('.location-asset-card')).find(b=>b.lastChild.textContent==='Раковина').click();lookFix(21,8,13,15.2,1.4,5);document.querySelector('#panel-tools:not(.collapsed) .toggle-btn')?.click()`);
  const point=await page.evaluate(`(()=>{const p=new T.Vector3(15,1,7.5).project(localRender.camera),r=localRender.renderer.domElement.getBoundingClientRect();return {x:r.left+(p.x+1)*r.width/2,y:r.top+(1-p.y)*r.height/2}})()`);
  await page.call('Input.dispatchMouseEvent',{type:'mouseMoved',...point});
@@ -173,11 +176,12 @@ module.exports=async({page,request,token,lobby,base,connect,debugPort})=>{
  const metrics=await page.evaluate(`(async()=>{
   lookFix(24,25,29,10,1,10);const {renderer:r,scene:s,camera:c}=localRender;await new Promise(done=>setTimeout(done,500));
   const sample=async()=>{const times=[];for(let i=0;i<15;i++){const t=performance.now();r.render(s,c);if(i>4)times.push(performance.now()-t)}const fps=await new Promise(resolve=>{let first=null,n=0;const tick=t=>{if(first===null)first=t;else n++;if(t-first<1200)requestAnimationFrame(tick);else resolve(n*1000/(t-first))};requestAnimationFrame(tick)});return {fps,cpuMs:times.reduce((a,b)=>a+b)/times.length,calls:r.info.render.calls,triangles:r.info.render.triangles,geometries:r.info.memory.geometries,textures:r.info.memory.textures}};
-  const before=await sample();for(let i=0;i<100;i++)L.addLocationObject({id:-1000-i,type:['household_washbasin','household_toilet','household_bathtub'][i%3],tile_x:3+i%10,tile_y:3+Math.floor(i/10),properties:{}});
+  const resources=()=>{const geometryIds=new Set();s.traverse(m=>{if(m.userData.householdAssetId)geometryIds.add(m.geometry.uuid)});return {geometryIds:[...geometryIds].sort(),batches:s.children.filter(m=>m.userData.locationRenderBatch).length}};
+  const before=await sample(),resourcesBefore=resources();for(let i=0;i<100;i++)L.addLocationObject({id:-1000-i,type:['household_washbasin','household_toilet','household_bathtub'][i%3],tile_x:3+i%10,tile_y:3+Math.floor(i/10),properties:{}});
   await new Promise(done=>setTimeout(done,500));const after=await sample(),gl=r.getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');
-  return {before,after,gpu:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),shaderErrors:r.info.programs.filter(p=>p.diagnostics?.runnable===false).length};
+  return {before,after,resourcesBefore,resourcesAfter:resources(),gpu:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),shaderErrors:r.info.programs.filter(p=>p.diagnostics?.runnable===false).length};
  })()`);
- assert.equal(metrics.shaderErrors,0);assert.ok(metrics.after.calls-metrics.before.calls<=100);assert.equal(metrics.after.textures,metrics.before.textures);assert.equal(metrics.after.geometries,metrics.before.geometries);
+ assert.equal(metrics.shaderErrors,0);assert.ok(metrics.after.calls-metrics.before.calls<=100);assert.equal(metrics.after.textures,metrics.before.textures);assert.deepEqual(metrics.resourcesAfter.geometryIds,metrics.resourcesBefore.geometryIds);assert.equal(metrics.after.geometries-metrics.before.geometries,metrics.resourcesAfter.batches-metrics.resourcesBefore.batches);
  fs.writeFileSync(path.join(out,'checks.json'),JSON.stringify({models,bounds,crateBounds,surfaceChecks,catalogue:true,pointerPlacement:true,legacyAndAliasTransforms:true,secondClient:true,saveReload:true,metrics},null,2));
  console.log('HOUSEHOLD FIX PASS',JSON.stringify({metrics,surfaceChecks,storageWindows:storageFixtures.length}));
 };

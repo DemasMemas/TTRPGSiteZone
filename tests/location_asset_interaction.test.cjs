@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 
@@ -40,7 +42,7 @@ test('asset dimensions preserve legacy uniform scale and validate independent ax
     const source = read('locationAssetDimensions.js')
         .replace(/^import .*;\r?\n/, '')
         .replaceAll('export ', '');
-    const context = vm.createContext({
+    const context = createSceneContext({
         findLocationAsset: type => ({ tree: { dimensions: [0.92, 0.92, 1.72] } }[type]),
     });
     vm.runInContext(source, context);
@@ -79,7 +81,7 @@ test('resize preview changes one axis and saves only after the click', async () 
     const start = scene.indexOf('function updateEditorResizePreview(');
     const end = scene.indexOf('async function commitEditorAssetRotation()', start);
     let saves = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorResizeMode: true, editorResizeAxis: 'width',
         editorResizeDimensions: { width: 2, depth: 1, height: 1 },
         editorResizeBaseDimensions: { width: 2, depth: 1, height: 1 },
@@ -121,7 +123,7 @@ test('R keeps uniform preview for decor while structure resizing uses face handl
     const start = scene.indexOf('function updateEditorResizePreview(');
     const end = scene.indexOf('async function commitEditorAssetResize()', start);
     const dimensions = { width: 2, depth: 1, height: 3 };
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorResizeMode: true, editorResizeAxis: 'all',
         editorResizeDimensions: { ...dimensions }, editorResizeBaseDimensions: { ...dimensions },
         editorResizeAnchor: null, editorResizeSymmetric: false,
@@ -144,9 +146,9 @@ test('asset color is editable beyond lamps and is persisted on structures and de
     const main = read('main.js');
     const scene = read('locationScene.js');
     assert.match(main, /<label>Цвет <input[^>]+data-asset-field="color"/);
-    assert.match(scene, /color: source\.properties\?\.color/);
+    assert.match(scene, /color: `#\$\{locationObjectMaterialColor\(source\)\.getHexString\(\)\}`/);
     assert.match(scene, /color: source\.color/);
-    assert.match(scene, /\.\.\.\(color !== undefined \? \{ color \} : \{\}\)/);
+    assert.match(scene, /\.\.\.\(color !== undefined && color\.toLowerCase\(\) !==/);
     assert.match(scene, /if \(color !== undefined\) source\.color = color/);
 });
 
@@ -158,7 +160,7 @@ test('local water has a solid backing and surface grid fits both map dimensions'
     assert.match(local, /new THREE\.InstancedMesh\(waterBoxGeometry, \[/);
     assert.match(local, /waterBoxGeometry\.setAttribute\('waterSideMask'/);
     assert.match(local, /waterMaterial, waterMaterial, waterTopMaterial/);
-    assert.match(world, /const waterMat = createWaterMaterial\(\)/);
+    assert.match(world, /const waterMat = createWaterMaterial\(\{ world:true,profileLayer:worldWaterProfiles \}\)/);
     assert.match(local, /buildTerrainGridData\(currentLocationData\.tiles_data, uncovered\)/);
     const terrain = read('locationTerrain.js');
     const url = `data:text/javascript;base64,${Buffer.from(terrain).toString('base64')}`;
@@ -195,7 +197,7 @@ test('rebuilding anomaly tile retains its effect model instead of replacing it w
         scale: { y: 1 },
     };
     const added = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         currentLocationData: { tiles_data: tiles },
         locationLevelVisible:()=>true, decorDisplayLevel:()=>0, refreshLocationFloorMenu(){},
         getTileHeight(x, z) { return tiles[z][x].height; },
@@ -226,7 +228,7 @@ test('rebuilding a decor tile releases the removed mesh once', () => {
     const old = { userData: { tileX: 0, tileZ: 0 } };
     const removed = [];
     const disposed = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         currentLocationData: { tiles_data: [[{ height: 0, objects: [] }]] },
         refreshLocationFloorMenu(){},
         getTileHeight: () => 0,

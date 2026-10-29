@@ -345,6 +345,7 @@ test('near roof cuts away while distant roof remains complete on any viewed floo
     const view = { minLevel: 0, maxLevel: 1, distant: false, plan: roof.userData.roofPlan };
     let visibilityUpdates = 0;
     const context = vm.createContext({
+        currentLocationData: { tiles_data: [] },
         camera: { position: { x: 5, y: 8, z: 5,
             distanceTo(target) { return Math.hypot(this.x - target.x, this.y - target.y, this.z - target.z); } } },
         controls: { target: { x: 5, y: 0, z: 5 } }, roofMeshes: [roof], locationObjectMeshes: [],

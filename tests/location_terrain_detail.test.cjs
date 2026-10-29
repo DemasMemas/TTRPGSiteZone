@@ -92,7 +92,7 @@ test('surface families have distinct base patterns and sparse defects', async ()
         patterns.set(kind, sample.join(','));
     }
     assert.equal(new Set(patterns.values()).size, patterns.size);
-    assert.match(waterSource, /createSurfaceTexture\(THREE, 'water'\)/);
+    assert.match(waterSource, /createSurfaceTexture\(THREE,\s*'water'\)/);
     assert.match(sceneSource, /asset\.id === 'art_worn_plaster' \|\| asset\.id === 'art_aged_wood'/);
     assert.match(sceneSource, /const usePbrMaterial = asset\?\.visual\?\.renderMode === 'pbr' && !quietHouseFinish/);
     assert.match(sceneSource, /quietGable \? quietHouseColor\(plan\.gableColor, 'wall'\)/);
@@ -100,7 +100,7 @@ test('surface families have distinct base patterns and sparse defects', async ()
 
 test('world and local surfaces reuse world-space textures without replacing custom colors', async () => {
     const { applySurfacePattern } = await import(moduleUrl(textureSource));
-    const material = { onBeforeCompile: shader => { shader.uniforms.existing = { value: true }; } };
+    const material = { userData: {}, onBeforeCompile: shader => { shader.uniforms.existing = { value: true }; } };
     const texture = { id: 'wall' };
     applySurfacePattern(material, texture, 0.25);
     const shader = {
@@ -115,11 +115,11 @@ test('world and local surfaces reuse world-space textures without replacing cust
     assert.match(sceneSource, /\['wall', 'floor'\]\.includes\(obj\.type\)/);
     assert.match(sceneSource, /createFenceModel\(THREE, width, height, depth, fenceColor\)/);
     assert.match(worldSource, /applySurfacePattern\(roadMaterial/);
-    assert.match(worldSource, /applySurfacePattern\(fenceMat/);
+    assert.match(worldSource, /const fenceMat = po2Fence\.material/);
     assert.doesNotMatch(worldSource, /applySurfacePattern\(groundMat/);
     assert.match(sceneSource, /createLocationTerrainPixels\(tiles, 32, true\)/);
 
-    const top = {};
+    const top = { userData: {} };
     applySurfacePattern(top, texture, 0.14, 'top');
     const topShader = {
         uniforms: {}, vertexShader: '#include <common>\n#include <project_vertex>',

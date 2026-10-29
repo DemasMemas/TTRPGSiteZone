@@ -3,11 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
 
 test('cutaway keeps basement boundary walls and renders below surface openings without exposing labels', () => {
-    const context=vm.createContext({locationViewLevel:-2,
+    const context=createSceneContext({locationViewLevel:-2,
         currentLocationData:{objects:[]},structureLevel:o=>o.properties?.level||0,
         structureBuildingId:o=>o.properties?.building_id||null,
         getLocationBuildingViews:()=>new Map(),locationBuildingAt:()=>null});
@@ -26,7 +28,7 @@ test('cutaway keeps basement boundary walls and renders below surface openings w
 });
 
 test('terrain occludes basement interaction rays except through the rendered cutaway', () => {
-    const context=vm.createContext({locationTerrainCutawayFootprints:()=>[],cutawayContains:rects=>rects.length>0});
+    const context=createSceneContext({locationTerrainCutawayFootprints:()=>[],cutawayContains:rects=>rects.length>0});
     vm.runInContext(functionSource('locationHitOccludedByTerrain','updateStoreyTerrainVisibility'),context);
     const terrain={distance:4,point:{x:2,z:3}},basement={distance:8};
     assert.equal(context.locationHitOccludedByTerrain(basement,terrain),true);
@@ -36,7 +38,7 @@ test('terrain occludes basement interaction rays except through the rendered cut
 });
 
 test('picking rejects other floors, hidden ancestors, and fully transparent materials', () => {
-    const context=vm.createContext({scene:{},locationViewLevel:-2,
+    const context=createSceneContext({scene:{},locationViewLevel:-2,
         structureLevel:o=>o.properties?.level||0,decorDisplayLevel:o=>o.level||0,
         lampDisplayLevel:o=>o.level||0,currentLocationData:{lighting:{local_lights:[{level:-1}]}}});
     vm.runInContext(functionSource('visibleEditorHit','projectedEditorLamp'),context);
@@ -52,7 +54,7 @@ test('picking rejects other floors, hidden ancestors, and fully transparent mate
 });
 
 test('select and eraser pointer planes follow all five signed levels', () => {
-    const context=vm.createContext({window:{locationEditMode:true,locationEditorTool:'select'},
+    const context=createSceneContext({window:{locationEditMode:true,locationEditorTool:'select'},
         locationViewLevel:0,STOREY_HEIGHT:2.4,editorMoveMode:false,eraserMode:false,buildMode:'terrain',
         currentLocationData:{grid_width:40,grid_height:40},structureLevelOffset:()=>0,getTileHeight:()=>1,
         getPointerWorldPoint:(x,y,height)=>({x:12+height,z:12+height})});
@@ -75,7 +77,7 @@ test('select and eraser pointer planes follow all five signed levels', () => {
 test('delete policy uses the selected building and protects the base and intermediate storeys', () => {
     const objects=[-2,-1,0,1,2].map(level=>({properties:{building_id:'A',level}}));
     objects.push({properties:{building_id:'B',level:4}},{properties:{building_id:'B',level:-4}});
-    const context=vm.createContext({currentLocationData:{objects},
+    const context=createSceneContext({currentLocationData:{objects},
         structureBuildingId:o=>o.properties.building_id,structureLevel:o=>o.properties.level});
     vm.runInContext(functionSource('locationFloorDeletionReason','refreshLocationFloorDeleteAction'),context);
     for(const level of [-1,0,1])assert.ok(context.locationFloorDeletionReason('A',level));
@@ -105,7 +107,7 @@ test('saved building IDs produce separate storey ranges and rotated footprints',
     ];
     const roofPlan = { floorId: 2, x: 0.5, z: 0.5, angle: Math.PI / 4,
         width: 4, depth: 4, eaveY: 5, rise: 1 };
-    const context = vm.createContext({
+    const context = createSceneContext({
         STOREY_HEIGHT: 2.4, locationViewLevel: 0, locationBuildingViews: new Map(),
         locationBuildingViewsDirty: true, currentLocationData: { objects },
         roofMeshes: [{ userData: { roofPlan } }], camera: null, controls: null,
@@ -149,7 +151,7 @@ test('near multi-storey houses retain lower floors while single-storey houses st
         userData: { sourceObject: { elevation: 2.4, type: 'chair' } } });
     const character = { gmHidden: false, camouflaged: false,
         model: { visible: true, position: { x: 1, z: 1 } }, label: { visible: true } };
-    const context = vm.createContext({
+    const context = createSceneContext({
         STOREY_HEIGHT: 2.4, locationViewLevel: 0, scene: {}, currentLocationData: {},
         locationBuildingViews: new Map([['multi', multi], ['single', single]]),
         locationBuildingViewsDirty: false,
@@ -188,7 +190,7 @@ test('floor list includes saved upper floors and lamp fixtures follow the viewed
         plan: { x: 1, z: 1, angle: 0, width: 4, depth: 4 } };
     const single = { minLevel: 0, maxLevel: 0, distant: false,
         plan: { x: 10, z: 1, angle: 0, width: 4, depth: 4 } };
-    const context = vm.createContext({
+    const context = createSceneContext({
         STOREY_HEIGHT: 2.4, locationViewLevel: 0,
         locationBuildingViews: new Map([['multi', multi], ['single', single]]),
         locationBuildingViewsDirty: false,
@@ -224,7 +226,7 @@ test('floor list includes saved upper floors and lamp fixtures follow the viewed
 
 test('changing viewed floor updates fog, fixtures and roofs without changing placement data', () => {
     const calls = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         locationViewLevel: 0, editorSelection: { kind: 'structure', id: 7 },
         lampRenderSources: [],
         locationFloorCount: () => 3, locationMinimumLevel: () => 0, hideHighlight() {},
@@ -251,7 +253,7 @@ test('GM floor menu synchronizes the existing placement level without editing sa
     let changes = 0;
     const placementLevel = { value: '0', options: [{ value: '0' }, { value: '1' }],
         dispatchEvent() { changes++; } };
-    const context = vm.createContext({
+    const context = createSceneContext({
         locationViewLevel: 0, editorSelection: null, lampRenderSources: [],
         locationFloorCount: () => 3, locationMinimumLevel: () => 0, hideHighlight() {},
         document: { getElementById: () => placementLevel }, Event: class {},
@@ -275,7 +277,7 @@ test('floor menu releases keyboard focus after choosing a level or using its but
         appendChild(child) { this.children.push(child); },
     });
     const chosen = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: { isGM: true }, addFloorAboveSelectedLocationAsset() {},
         locationViewLevel: 0,
         document: { createElement: makeElement, getElementById(id) {

@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const asUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
@@ -13,7 +15,7 @@ test('eraser intersects a wide slab away from its anchor and deletes only the ac
         properties:{level,building_id:'house',dimensions:{width:10,depth:10,height:.12}}}));
     const scene=read('locationScene.js'),start=scene.indexOf('async function removeStructuresAtTile(');
     const calls=[];
-    const context=vm.createContext({...architecture,window:{currentLobbyId:1},currentLocationId:1,
+    const context=createSceneContext({...architecture,window:{currentLobbyId:1},currentLocationId:1,
         currentLocationData:{objects},locationViewLevel:-2,structureDeletionInFlight:new Set(),
         Server:{changeLocationObjects:async(...args)=>{calls.push(args);return {deleted_ids:args[2].object_ids}}},
         applyLocationObjectsChange(){},showNotification(){throw Error('Unexpected error');}});
@@ -109,7 +111,7 @@ test('failed atomic shell creation preserves unrelated manual objects', async ()
     const data = {objects:[manual],grid_width:30,grid_height:30};
     const saved = [], deleted = [];
     let requests = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         performance,houseCreationPending:false,currentLocationData:data,currentLocationId:1,houseSceneEpoch:1,
         window:{currentLobbyId:2},crypto:{randomUUID:()=> 'unique-run'},
         document:{querySelector:s=>({value:s==='[data-house-kind]'?'shell':'0'})},
@@ -135,7 +137,7 @@ test('shell roof sections use the saved editable building extent for camera cuta
     const plan = house.planBuildingShell({minX:2,minZ:2,width:10,depth:12,shape:'L',storeys:3,buildingId:'shell'});
     const objects=plan.objects.map((o,i)=>({...o,id:i+1}));
     const scene=read('locationScene.js');
-    const context=vm.createContext({...architecture,...roof,currentLocationData:{objects},
+    const context=createSceneContext({...architecture,...roof,currentLocationData:{objects},
         locationBuildingViewsDirty:true,locationBuildingViews:new Map(),roofMeshes:[],camera:null,controls:null,
         getTileHeight:()=>1});
     vm.runInContext(scene.slice(scene.indexOf('function getLocationBuildingViews('),scene.indexOf('function locationBuildingAt(')),context);
@@ -315,7 +317,7 @@ test('the restore action creates only one ordinary floor and refuses a second re
     const end = sceneSource.indexOf('function createPosterMesh(', start);
     assert.ok(start > 0 && end > start);
     const created = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         currentLocationData: data, currentLocationId: 5, houseFloorRestorePending: false, houseSceneEpoch: 1,
         window: { currentLobbyId: 9 }, restorableGeneratedFloor: house.restorableGeneratedFloor,
         Server: { createLocationObject: async (lobby, location, spec) => {
@@ -378,7 +380,7 @@ test('house draw uses the existing editor pointer and object persistence paths',
     const main = read('main.js');
     assert.match(scene, /houseDrawStart = \{ \.\.\.hoveredTileCoords \}/);
     assert.match(scene, /void createResidentialHouse\(start, end\)/);
-    assert.match(scene, /Server\.changeLocationObjects\(lobbyId, locationId, \{ objects: plan.objects \}\)/);
+    assert.match(scene, /editorChangeObjects\(lobbyId, locationId, \{ objects: plan.objects \}\)/);
     assert.match(main, /data-house-draw/);
     assert.match(main, /setLocationHouseDrawMode\(enabled\)/);
 });

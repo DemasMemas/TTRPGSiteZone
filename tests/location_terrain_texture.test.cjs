@@ -295,12 +295,12 @@ test('world texture updates only the edited neighborhood without changing distan
 
 test('land overlay follows slope geometry and water has a solid backing', () => {
     assert.match(scene, /createLocationTerrainPixels\(tiles, 32, true\)/);
-    assert.match(scene, /if \(topFlags\.getX\(face \* 3\) < 0\.5\) continue/);
+    assert.match(fs.readFileSync(path.join(__dirname, '../app/static/js/locationTerrain.js'), 'utf8'), /if \(smoothData\.topByVertex\[face \* 3\] < 0\.5\) continue/);
     assert.match(scene, /new THREE\.InstancedMesh\(waterBoxGeometry, \[/);
     assert.match(scene, /waterBoxGeometry\.setAttribute\('waterSideMask'/);
     assert.match(scene, /waterTopMaterial = new THREE\.MeshBasicMaterial\(\{ colorWrite: false, depthWrite: false \}\)/);
     assert.match(scene, /bankGeometry\.setAttribute\('uv', new THREE\.Float32BufferAttribute\(data\.bankUvs, 2\)\)/);
-    assert.match(scene, /map: terrainSurfaceTexture, vertexColors: true, side: THREE\.DoubleSide/);
+    assert.match(scene, /map: terrainSurfaceTexture, side: THREE\.DoubleSide/);
     assert.match(scene, /applySurfaceDarkness\(bankMaterial, locationDarknessTexture/);
     assert.doesNotMatch(scene, /function updateTerrainSurfaceDarkness\(/);
 });

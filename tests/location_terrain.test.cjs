@@ -294,7 +294,7 @@ test('one connected water surface follows the median shoreline and manual height
     ]], new Set(['1,0']));
     assert.deepEqual(separate.map(item => item.x), [1]);
     const scene = read('locationScene.js');
-    assert.match(scene, /if \(terrainChanged && changed\.length\) \{\s*const changedByTile/);
+    assert.match(scene, /if \(waterTopologyChanged && changed\.length\) \{\s*const changedByTile/);
 });
 
 test('floor grid lies above the slab and is clipped to its footprint', async () => {
@@ -319,7 +319,7 @@ test('floor grid lies above the slab and is clipped to its footprint', async () 
     const scene = read('locationScene.js');
     assert.match(scene, /const floorData = buildFloorGridData\(floors\)/);
     assert.match(scene, /const color = floor \? floorGridColor/);
-    assert.match(scene, /\['wall', 'door', 'window', 'floor'\]\.includes\(source\.type\)/);
+    assert.match(scene, /\['wall', 'door', 'window', 'floor', 'stairs', 'ladder', 'hatch', 'floor_opening'\]\.includes\(source\.type\)/);
     assert.match(scene, /if \(preset === 'floor'\) return \{ width: structureWidth, depth: structureDepth, height: 0\.12 \}/);
 });
 

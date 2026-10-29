@@ -1,3 +1,5 @@
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const read=name=>fs.readFileSync(path.join(__dirname,'../app/static/js',name),'utf8');
@@ -100,7 +102,7 @@ test('floor menu uses the actual signed levels with zero as ground',()=>{
     const menu={querySelector:s=>s==='select'?select:s==='[data-floor-down]'?down:up};
     const container={},dock={appendChild(m){m.parentNode=this;}},actions={};
     menu.parentNode=container;
-    const context=vm.createContext({locationViewLevel:-1,locationFloorCount:()=>3,locationMinimumLevel:()=>-3,
+    const context=createSceneContext({locationViewLevel:-1,locationFloorCount:()=>3,locationMinimumLevel:()=>-3,
         window:{locationEditMode:true,locationEditorTool:'building'},
         refreshLocationFloorDeleteAction(){},
         document:{getElementById:id=>id==='location-floor-menu'?menu:id==='location-building-actions'?actions:dock},Option:class{constructor(text,value){this.text=text;this.value=value;}}});
@@ -117,7 +119,7 @@ test('floor menu uses the actual signed levels with zero as ground',()=>{
 test('stair movement tolerates a RAF timestamp before the event and ends at server height',()=>{
     const vector=(x=0,y=0,z=0)=>({x,y,z,set(x,y,z){Object.assign(this,{x,y,z});},copy(v){this.set(v.x,v.y,v.z);},clone(){return vector(this.x,this.y,this.z);}});
     const callbacks=[],entry={floorLevel:0,model:{position:vector(1.5,1,1.5),traverse(){}},label:{position:vector()}};
-    const context=vm.createContext({getCharacterModelEntry:()=>entry,STOREY_HEIGHT:2.4,currentLocationData:{objects:[]},
+    const context=createSceneContext({getCharacterModelEntry:()=>entry,STOREY_HEIGHT:2.4,currentLocationData:{objects:[]},
         getTileHeight:()=>1,attachStaticLightFieldToRoot(){},locationStaticLightField:null,
         tintLocationMesh(){},darknessFactorAt:()=>1,characterLabelOffset:()=>1.9,
         invalidateMovementMapCache(){},applyFogOfWar(){},performance:{now:()=>100},document:{hidden:false},
@@ -134,7 +136,7 @@ test('an old manual covering panel cannot protrude through a newly added upper s
     const architecture=await load(),roof=make('roof',5,5,2,2,0,{elevation:2.4});
     const floor=make('floor',5,5,8,8,1),child={isMesh:true,material:{}};
     const mesh={userData:{locationObject:roof},position:{y:3.4},traverse:callback=>callback(child)};
-    const context=vm.createContext({...architecture,currentLocationData:{objects:[floor,roof]},
+    const context=createSceneContext({...architecture,currentLocationData:{objects:[floor,roof]},
         locationObjectMeshes:[mesh],roofMeshes:[],camera:{position:{distanceTo:()=>20}},controls:{target:{}},
         locationViewLevel:1,locationRoofsVisible:true,editMode:false,getTileHeight:()=>1,FLOOR_SURFACE_OFFSET:.035,
         updateStoreyTerrainVisibility(){},getLocationBuildingViews:()=>new Map(),locationBuildingViewsDirty:false,
@@ -166,7 +168,7 @@ test('drop is a distinct action for old hatches and lidless openings, never an u
     const architecture=await load(),actor={floorLevel:2,model:{userData:{characterId:7}}};
     const opening=make('floor_opening',5,5,1,1,2),closed=make('hatch',7,5,1,1,2,{is_open:false,interactions:['toggle_door']});
     const emitted=[];
-    const context=vm.createContext({...architecture,currentLocationData:{objects:[opening,closed]},currentLocationId:9,
+    const context=createSceneContext({...architecture,currentLocationData:{objects:[opening,closed]},currentLocationId:9,
         getCurrentInteractionActor:()=>actor,getCharacterTileDistance:()=>1,getActionRequirement:()=>({max_distance:1}),
         localStorage:{getItem:()=> 'test-token'},window:{socket:{emit:(name,payload)=>emitted.push({name,payload})}},
         hideHighlight(){},hideStructureInteraction(){},pendingStructureAction:null,

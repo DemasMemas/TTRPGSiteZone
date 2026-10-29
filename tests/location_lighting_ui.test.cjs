@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const lightingSource = fs.readFileSync(path.join(__dirname, '../app/static/js/locationLighting.js'), 'utf8');
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(lightingSource).toString('base64')}`;
@@ -56,7 +58,7 @@ test('unchanged lamps keep their editable fixtures across lighting updates', () 
     const start = scene.indexOf('function takeReusableLampFixtures(');
     const end = scene.indexOf('export function applyLocationLighting(', start);
     assert.ok(start >= 0 && end > start);
-    const context = vm.createContext({});
+    const context = createSceneContext({});
     vm.runInContext(scene.slice(start, end), context);
     const sources = Array.from({ length: 20 }, (_, index) => ({ kind: 'point', x: index, intensity: 2 }));
     const fixtures = sources.map((source, index) => ({
@@ -81,7 +83,7 @@ test('lamp profile includes fixed preview slots even at zero intensity', () => {
     const start = scene.indexOf('function localLightRenderCounts(');
     const end = scene.indexOf('function beginLampEditTrace(', start);
     assert.ok(start >= 0 && end > start);
-    const context = vm.createContext({
+    const context = createSceneContext({
         locationLightGroup: { traverseVisible(callback) {
             callback({ isLight: true, isPointLight: true, intensity: 0, castShadow: false });
             callback({ isLight: true, isPointLight: true, intensity: 2, castShadow: true });
@@ -168,12 +170,12 @@ test('lamp diagnostics separate preview, server wait, scene rebuild, darkness an
     assert.match(scene, /darknessRefreshMs/);
     assert.match(scene, /lightingApplyCount/);
     assert.match(scene, /socketApplyMs/);
-    assert.match(sockets, /applyLocationLighting\(data\.updates\.lighting, true, 'socket'\)/);
+    assert.match(sockets, /receiveLocationObjectEvent\('applyLocationLighting', data\.updates\.lighting, true, 'socket'\)/);
     assert.match(scene, /finishLampEditTrace\(lampTrace,/);
     assert.match(scene, /previewLightCreated/);
     assert.match(scene, /persistLocationLights\(lights, 'place'\)/);
     assert.match(scene, /persistLocationLights\(lights, 'delete'\)/);
-    assert.match(scene, /export function destroyLocationScene\(\) \{\s*lampLightingEchoes\.reset\(\);\s*lampEditTrace = null;/);
+    assert.match(scene, /export function destroyLocationScene\(\) \{[\s\S]*?lampLightingEchoes\.reset\(\);\s*lampEditTrace = null;/);
 });
 
 test('lamp profile captures the first lit frame before REST settles in either event order', () => {
@@ -185,7 +187,7 @@ test('lamp profile captures the first lit frame before REST settles in either ev
         let now = 1;
         const logs = [];
         const timers = [];
-        const context = vm.createContext({
+        const context = createSceneContext({
             performance: { now: () => now },
             document: { hidden: false },
             setTimeout: callback => timers.push(callback),
@@ -235,7 +237,7 @@ test('asset card selects a lamp through the tool once, without rebuilding its pr
 test('side inspector saves live lighting while location edits avoid resending unchanged tiles', () => {
     const source = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
     assert.match(source, /const settings = environmentEditor\.get\(\)/);
-    assert.match(source, /Server\.updateLocation\(currentLobbyId, currentLocationData\.id, \{ lighting: settings \}\)/);
+    assert.match(source, /saveLocationEnvironment\(settings, environmentBase\)/);
     assert.match(source, /applyLocationLighting\(settings, false\)/);
     assert.match(source, /if \(tempTiles \|\| newWidth !== locationData\.grid_width \|\| newHeight !== locationData\.grid_height\) \{\s*updates\.tiles_data = finalTiles;/);
 });
@@ -246,9 +248,9 @@ test('location tools keep light, asset library and selection inspector in separa
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
     const toolbar = main.match(/toolbar\.innerHTML = `([\s\S]*?)`;/)?.[1] || '';
     assert.deepEqual([...toolbar.matchAll(/data-location-tool="([^"]+)"/g)].map(match => match[1]),
-        ['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'light']);
+        ['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'building', 'light']);
     assert.doesNotMatch(toolbar, /data-location-action="resize"/);
-    assert.match(main, /assetSection\.hidden = tool !== 'assets'/);
+    assert.match(main, /assetSection\.hidden = !\['assets','building'\]\.includes\(tool\)/);
     assert.match(main, /environmentSection\.hidden = tool !== 'light'/);
     assert.match(main, /sections\.select\.appendChild\(assetInspector\)/);
     assert.match(main, /window\.selectLocationEditorTool\?\.\('erase'\)/);
@@ -261,10 +263,10 @@ test('location tools keep light, asset library and selection inspector in separa
 test('asset tool selects existing objects only when placement is inactive', () => {
     const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
     const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
-    assert.match(scene, /if \(window\.locationEditorTool === 'assets' && !e\.altKey && \(!e\.shiftKey \|\| !selectedLocationAsset\)\) \{\s*if \(!selectedLocationAsset\) \{\s*if \(selectEditorAsset\(e\.clientX, e\.clientY, e\.shiftKey\)\)/);
+    assert.match(scene, /if \(\['assets','building'\]\.includes\(window\.locationEditorTool\) && !e\.altKey && \(!e\.shiftKey \|\| !selectedLocationAsset\)\) \{\s*if \(!selectedLocationAsset\) \{\s*if \(selectEditorAsset\(e\.clientX, e\.clientY, e\.shiftKey\)\)/);
     assert.match(scene, /window\.selectLocationEditorTool\?\.\('select'\);\s*\}\s*return;\s*\}\s*e\.preventDefault\(\);\s*e\.stopImmediatePropagation\(\);\s*placeSelectedLocationAsset/);
     assert.match(main, /if \(activeAsset\?\.id === asset\.id\) \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\)/);
-    assert.match(main, /if \(previousTool === 'assets' && tool !== 'assets'\) \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\)/);
+    assert.match(main, /if \(\['assets','building'\]\.includes\(previousTool\) && previousTool !== tool\) \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\)/);
 });
 
 test('lighting editor fields share the location editor control styling', () => {
@@ -316,13 +318,13 @@ test('legacy decor angle control displays a wall poster direction without clampi
     const end = scene.indexOf('// ========== Остальные экспорты', start);
     const input = { value: '' };
     const span = { textContent: '' };
-    const context = vm.createContext({
+    const context = createSceneContext({
         brushObjectRotation: 0,
         document: { getElementById: id => id === 'loc-obj-rotation' ? input : span },
         syncLocationPlacementAngle() {},
         updateBuildPreview() {},
     });
-    vm.runInContext(scene.slice(start, end).replace('export ', ''), context);
+    vm.runInContext(scene.slice(start, end).replaceAll('export ', ''), context);
     context.setLocationBrushObjectRotation(-90);
     assert.equal(context.brushObjectRotation, 270);
     assert.equal(input.value, '270');
@@ -344,7 +346,7 @@ test('map rotation previews the cursor angle and commits only on click', async (
         kind: 'lamp', lightKind: 'spot', x: 3.5, z: 4.5,
         height: 2, intensity: 3, distance: 8, color: '#ffe0aa', rotation: 0,
     };
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorRotateMode: true,
         editorSelection: { kind: 'lamp', index: 0 },
         editorRotateAngle: 0,
@@ -376,7 +378,7 @@ test('poster offset and elevation survive moving it to another tile', async () =
     const tiles = Array.from({ length: 5 }, () => Array.from({ length: 5 }, () => ({ objects: [] })));
     tiles[1][1].objects.push(source);
     const sent = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelection: { kind: 'decor', x: 1, z: 1, index: 0 },
         editorSelections: [{ kind: 'decor', x: 1, z: 1, index: 0 }],
         currentLocationData: { grid_width: 5, grid_height: 5, tiles_data: tiles },
@@ -385,7 +387,7 @@ test('poster offset and elevation survive moving it to another tile', async () =
         sendDecorTileUpdates: positions => sent.push(positions),
         showNotification() {},
     });
-    vm.runInContext(scene.slice(start, end).replace('export ', ''), context);
+    vm.runInContext(scene.slice(start, end).replaceAll('export ', ''), context);
     assert.equal(await context.updateSelectedLocationAssetDetails({ x: 2.5, z: 3.63, rotation: 90, elevation: 2 }), true);
     assert.equal(tiles[1][1].objects.length, 0);
     assert.equal(tiles[3][2].objects[0], source);
@@ -401,7 +403,7 @@ test('structure rotation and elevation save in Three.js coordinates', async () =
     const end = scene.indexOf('export function previewSelectedLocationLamp(', start);
     const source = { id: 7, properties: { rotation: 0, elevation: 0 } };
     let saved;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelection: { kind: 'structure', id: 7 },
         currentLocationData: { grid_width: 5, grid_height: 5 },
         getSelectedEditorSource: () => source,
@@ -414,7 +416,7 @@ test('structure rotation and elevation save in Three.js coordinates', async () =
         notifyEditorSelection() {},
         showNotification() {},
     });
-    vm.runInContext(scene.slice(start, end).replace('export ', ''), context);
+    vm.runInContext(scene.slice(start, end).replaceAll('export ', ''), context);
     assert.equal(await context.updateSelectedLocationAssetDetails({ x: 2.25, z: 3.75, rotation: 90, elevation: 2.1 }), true);
     assert.equal(saved.tile_x, 2);
     assert.equal(saved.tile_y, 3);
@@ -430,7 +432,7 @@ test('clicking a tile places the chosen lamp at its center', async () => {
     const end = scene.indexOf('export function loadLocation(data)', start);
     assert.ok(start >= 0 && end > start);
     const saved = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         selectedLocationAsset: {
             id: 'warm_lamp', kind: 'lamp', height: 2.2,
             color: '#ffd090', intensity: 2.5, distance: 8,

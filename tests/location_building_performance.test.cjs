@@ -1,3 +1,5 @@
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const {modules}=require('./location_furniture_fixture.cjs');
 const scene=fs.readFileSync(path.join(__dirname,'../app/static/js/locationScene.js'),'utf8');
@@ -5,7 +7,7 @@ const code=name=>{const start=scene.indexOf(`function ${name}(`);assert.ok(start
 
 test('new building composes existing shell, rooms and furniture for complex shapes without changing the shell',async()=>{
     const {H,I,F,A}=await modules();
-    const c=vm.createContext({...H,I,F,structureLevel:A.structureLevel,characterModels:new Map()});
+    const c=createSceneContext({...H,I,F,structureLevel:A.structureLevel,characterModels:new Map()});
     vm.runInContext('async '+code('planNewBuilding').replace("await import('./locationInteriorGenerator.js')",'I')
         .replace("await import('./locationFurnitureGenerator.js')",'F'),c);
     for(const shape of ['rectangle','L','T','U','C','cross','compound']){
@@ -23,8 +25,8 @@ test('new building composes existing shell, rooms and furniture for complex shap
 test('furniture batches retain architecture and terrain, with idempotent socket echoes',async()=>{
     const {A}=await modules(),calls={};
     const floor={id:1,type:'floor',tile_x:4,tile_y:4,properties:{building_id:'b',level:0,dimensions:{width:6,depth:6,height:.12}}};
-    const c=vm.createContext({...A,performance,currentLocationId:1,currentLocationData:{objects:[floor],grid_width:36,grid_height:36},editorSelections:[],
-        isObjectLightSource:o=>o?.type==='campfire',...Object.fromEntries(['addLocationObjectMesh','removeLocationObjectMesh','refreshArchitecturalMeshes','rebuildGrassDetailMesh','queueStaticLightFieldRefresh','applyFogOfWar','refreshLocationDarkness','refreshLocationFloorMenu','invalidateMovementMapCache','notifyEditorBuildingsChanged','syncFireObjectLight'].map(name=>[name,()=>{calls[name]=(calls[name]||0)+1}]))});
+    const c=createSceneContext({...A,performance,currentLocationId:1,currentLocationData:{objects:[floor],grid_width:36,grid_height:36},editorSelections:[],
+        isObjectLightSource:o=>o?.type==='campfire',...Object.fromEntries(['addLocationObjectMesh','removeLocationObjectMesh','refreshArchitecturalMeshes','rebuildGrassDetailMesh','queueStaticLightFieldRefresh','applyFogOfWar','refreshLocationDarkness','refreshLocationFloorMenu','invalidateMovementMapCache','notifyEditorBuildingsChanged','refreshObjectLightSource'].map(name=>[name,()=>{calls[name]=(calls[name]||0)+1}]))});
     vm.runInContext(code('buildingGrassChangedTiles')+'\n'+code('applyLocationObjectsChange'),c);
     const batch={location_id:1,objects:[{id:2,type:'household_bed_single',properties:{building_id:'b',level:0}}]};
     c.applyLocationObjectsChange(batch);c.applyLocationObjectsChange(batch);
@@ -34,12 +36,19 @@ test('furniture batches retain architecture and terrain, with idempotent socket 
     c.applyLocationObjectsChange({location_id:1,deleted_ids:[2]});
     assert.equal(c.currentLocationData.objects[0],floor);assert.equal(calls.rebuildGrassDetailMesh,undefined);
     c.applyLocationObjectsChange({location_id:1,objects:[{id:3,type:'campfire',properties:{level:0}}]});
-    assert.equal(calls.queueStaticLightFieldRefresh,1);assert.equal(calls.syncFireObjectLight,1);
+    assert.equal(calls.queueStaticLightFieldRefresh,1);assert.equal(calls.refreshObjectLightSource,1);
+    c.applyLocationObjectsChange({location_id:1,objects:[{id:4,type:'campfire',properties:{level:0}}]});
+    const before={...calls};
+    c.applyLocationObjectsChange({location_id:1,deleted_ids:[3,4]});
+    assert.equal(calls.refreshObjectLightSource-before.refreshObjectLightSource,2);
+    assert.equal(calls.refreshLocationDarkness-before.refreshLocationDarkness,1,'batch deletion refreshes darkness once');
+    assert.equal(calls.queueStaticLightFieldRefresh-before.queueStaticLightFieldRefresh,1);
+    assert.deepEqual(c.currentLocationData.objects,[floor]);
 });
 
 test('grass coverage refresh includes old and new rotated slabs and ignores unchanged coverage',async()=>{
     const {A}=await modules();
-    const c=vm.createContext({...A,currentLocationData:{grid_width:48,grid_height:48}});
+    const c=createSceneContext({...A,currentLocationData:{grid_width:48,grid_height:48}});
     vm.runInContext(code('buildingGrassChangedTiles'),c);
     const old={id:1,type:'floor',tile_x:5,tile_y:5,properties:{building_id:'b',level:0,rotation:.4,dimensions:{width:6,depth:4,height:.12}}};
     const moved={...old,tile_x:17};

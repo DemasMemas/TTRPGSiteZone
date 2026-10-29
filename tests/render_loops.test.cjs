@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 function frameHarness(local) {
     const source = fs.readFileSync(path.join(__dirname, '../app/static/js/',
@@ -13,7 +15,7 @@ function frameHarness(local) {
     const calls = [];
     const mark = name => (...args) => calls.push([name, ...args]);
     const fpsCounter = { frame: mark('fps'), pause: mark('fpsPause'), setDetails: mark('fpsDetails') };
-    const context = vm.createContext({
+    const context = createSceneContext({
         performance: { now: () => 100 }, document: { hidden: false }, window: { isLocationActive: false },
         requestAnimationFrame: mark('schedule'), lastTime: 0, previousFrameTime: 0,
         renderer: { render: mark('render') }, labelRenderer: { render: mark('labels') },
@@ -26,7 +28,8 @@ function frameHarness(local) {
         updateLocationCameraMovement: mark('camera'), updateGlobalCameraMovement: mark('camera'),
         flushPendingTerrainRefresh: mark('terrainRefresh'),
         updateAnomalyRenderLights: mark('anomalyLights'), locationProfiler: null,
-        updateLampRenderLights: mark('lampLights'), lampEditTrace: null,
+        updateLampRenderLights: mark('lampLights'), updateLampPreviewLights: mark('lampPreviewLights'), lampEditTrace: null,
+        locationShadowPass: null, locationRenderBatches: null, locationShadowCache: null,
         locationLoadTrace: null, staticFieldFirstFrame: null,
         locationFrameWorkMs: 0, locationSampleFrames: 0,
         locationSampleAt: 100, previousProfileCamera: null,

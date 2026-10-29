@@ -30,10 +30,10 @@ function setup() {
     class Object3D {
         constructor() {
             this.position = new Vector3(); this.scale = new Vector3(); this.rotation = new Vector3();
-            this.quaternion = { setFromUnitVectors() {} }; this.matrix = {};
+            this.quaternion = { setFromUnitVectors() {} }; this.matrix = { fromArray(elements) { this.elements = elements; } };
         }
         updateMatrix() {
-            this.matrix = { position: [this.position.x, this.position.y, this.position.z],
+            this.matrix = { fromArray(elements) { this.elements = elements; }, position: [this.position.x, this.position.y, this.position.z],
                 scale: [this.scale.x, this.scale.y, this.scale.z],
                 rotation: [this.rotation.x, this.rotation.y, this.rotation.z] };
         }
@@ -46,7 +46,7 @@ function setup() {
         }
         setMatrixAt(index, matrix) {
             this.matrices ??= [];
-            this.matrices[index] = structuredClone(matrix);
+            this.matrices[index] = structuredClone(Object.fromEntries(Object.entries(matrix).filter(([, value]) => typeof value !== 'function')));
             m.matrixWrites++;
         }
         setColorAt() { this.instanceColor = {}; }
@@ -61,7 +61,7 @@ function setup() {
     const landmarkTypes = ['forest', 'hamlet', 'village', 'factory', 'base', 'camp'];
     const shared = { dispose() { throw new Error('shared resource disposed'); } };
     const context = vm.createContext({
-        CHUNK_SIZE: 32, chunksMap: new Map(),
+        CHUNK_SIZE: 32, chunksMap: new Map(), sampleWorldGroundHeight: () => 1,
         THREE: { Vector3, Object3D, InstancedMesh, InstancedBufferAttribute: class {},
             SphereGeometry: class {}, MeshBasicMaterial: class {}, Color: class {},
             MathUtils: { degToRad: n => n * Math.PI / 180 } },
@@ -71,8 +71,18 @@ function setup() {
         WORLD_LANDMARK_TYPES: landmarkTypes,
         WORLD_LANDMARKS: Object.fromEntries(landmarkTypes.map(type => [type, { geometry: shared }])),
         scene: { add() {}, remove() {} },
+        // This fixture contains ordinary roads only; bridges have a separate renderer suite.
+        createWorldRoadBridgeMeshes: () => [], loadedWorldTile: () => null,
+        // Substitute only the merged surface allocation, retaining real road topology.
+        roadSurfaceMesh(pads, links) {
+            if (!pads.length && !links.length) return null;
+            const mesh = new InstancedMesh(null, shared, 1);
+            mesh.userData = { roadSurface: true };
+            mesh.geometry = { dispose: () => mesh.dispose() };
+            return mesh;
+        },
         getBaseGroundOffset: () => 0.5, getDefaultColorForType: () => '#808080',
-        markWorldShadowsDirty() {}, lastChunkVisibilityAt: 0, lastHoverRaycastAt: 0,
+        markWorldShadowsDirty() {}, queueWorldBridgeSpanRefresh() {}, invalidateFenceGround() {}, refreshWorldFenceNeighborhood() {}, refreshFenceChunkNeighbors() {}, fenceGroundSamplers: new Map(), worldWaterProfiles: { updateRegion() {} }, lastChunkVisibilityAt: 0, lastHoverRaycastAt: 0,
         createAnomalyLOD(x, y, z) {
             m.effectsCreated++;
             return { position: new Vector3(x, y, z), userData: {}, traverse(callback) {
@@ -84,7 +94,9 @@ function setup() {
         },
         cancelAnimationFrame(id) { m.cancelled++; frames.delete(id); },
     });
-    vm.runInContext(topology
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../app/static/js/worldFenceLine.js'), 'utf8').replaceAll('export ', '')
+        + slice('function setFenceMatrix(', '\nexport function removeFenceLinePreview(')
+        + topology
         + slice('function createAnomalyFieldLOD(', '\nfunction updateFarAnomalyInstances(')
         + slice('function createLandmarkMeshes(', '\nexport function addChunk(')
         + slice('function rebuildChunkObjects(', '\nexport function setBrushRadius(').replaceAll('export ', ''),
@@ -243,7 +255,7 @@ test('boundary echoes skip all road work but real changes preserve existing neig
     h.update([{ type: 'tree' }], 31); h.flush();
     assert.equal(h.m.rebuilds, 1);
     assert.equal(h.m.roadBuilds, 3);
-    assert.equal(h.m.created, 7);
+    assert.equal(h.m.created, 4); // One tree and three merged road surfaces.
     const after = { ...h.m };
     h.update([{ type: 'tree' }], 31); h.flush();
     assert.deepEqual(h.m, after);
@@ -348,7 +360,7 @@ test('tree changes preserve houses, fences, landmarks, their indices and anomaly
     assert.equal(h.main.farAnomalyActive, active);
     assert.equal(h.m.effectsCreated, 0);
     assert.equal(h.m.effectsDisposed, 0);
-    assert.equal(h.m.created, 3); // Tree plus the unchanged broad road rebuild.
+    assert.equal(h.m.created, 2); // Tree plus one merged road surface.
     assert.equal(h.main.trees.matrices[0].position[0], 10.7);
 });
 

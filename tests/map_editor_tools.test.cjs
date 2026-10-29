@@ -21,7 +21,7 @@ test('world editor tool selection keeps eraser and toolbar state in sync', () =>
     const state = { eraserMode: false, setEraserMode(value) { this.eraserMode = value; } };
     const expansions = [];
     const context = vm.createContext({
-        document: { getElementById(id) { return { 'gm-only-controls': root, 'eraser-checkbox': eraser, 'world-editor-hint': hint }[id]; } },
+        document: { getElementById(id) { return { 'gm-only-controls': root, 'eraser-checkbox': eraser, 'world-editor-hint': hint, 'world-sculpt-mode': { value: 'exact' }, 'world-exact-height-controls': {}, 'world-sculpt-controls': {}, 'world-sculpt-strength-label': {} }[id]; } },
         AppState: state, window: {}, roadLinkActive: false,
         getHoveredTile() { return null; }, updateWorldObjectPreview() {}, removePreviewObject() {},
         expandMapToolsPanelOnToolChange(previous, next) { expansions.push([previous, next]); },
@@ -194,7 +194,7 @@ test('location brush uses only the active tool, regardless of Alt and Shift', ()
     assert.ok(start >= 0 && end > start);
     const context = vm.createContext({
         window: { locationEditorTool: 'select' }, eraserMode: false,
-        brushRadiation: 4, currentBrushTerrain: 'sand', currentBrushHeight: 2,
+        brushRadiation: 4, currentBrushTerrain: 'sand', currentBrushHeight: 2, sculpting: () => false,
     });
     vm.runInContext(source.slice(start, end), context);
     const updates = event => JSON.parse(JSON.stringify(context.getEditBrushUpdates(event)));
@@ -296,10 +296,11 @@ test('world radiation brush updates every tile in its radius', () => {
 test('world brush batch sends each tile once with its latest fields', () => {
     const source = read('mapEdit.js');
     const start = source.indexOf('function scheduleBatchUpdate()');
-    const end = source.indexOf('\nexport function applyBrush(', start);
+    const end = source.indexOf('\nwindow.clearPendingWorldBrushUpdates', start);
     assert.ok(start >= 0 && end > start);
     const sent = [];
     const context = vm.createContext({
+        window: {},
         pendingTileUpdates: [
             { chunk_x: 0, chunk_y: 0, tile_x: 2, tile_y: 3, updates: { terrain: 'sand', height: 2 } },
             { chunk_x: 0, chunk_y: 0, tile_x: 4, tile_y: 3, updates: { height: 3 } },
@@ -676,80 +677,7 @@ test('location eraser removes structures only when its option is enabled', () =>
     assert.equal((source.match(/removeStructuresAtTile\(x, z, brushRadius\)/g) || []).length, 4);
 });
 
-test('location eraser deletes each structure in its radius and refreshes once', async () => {
-    const source = read('locationScene.js');
-    const start = source.indexOf('async function removeStructuresAtTile(');
-    const end = source.indexOf('\nexport function setLocationBuildMode(', start);
-    assert.ok(start >= 0 && end > start);
-    const objects = [
-        { id: 1, type: 'campfire', tile_x: 3, tile_y: 3 },
-        { id: 2, type: 'wall', tile_x: 4, tile_y: 4 },
-        { id: 3, type: 'floor', tile_x: 2, tile_y: 3 },
-        { id: 4, type: 'crate', tile_x: 5, tile_y: 3 },
-    ];
-    const calls = { deleted: [], removed: [], lights: [], fog: 0, architecture: 0, floor: 0, floorMenu: 0 };
-    const context = vm.createContext({
-        window: { currentLobbyId: 1 }, currentLocationData: { objects },
-        getObjectGridPosition: object => ({ x: object.tile_x, y: object.tile_y }),
-        structureDeletionInFlight: new Set(),
-        locationBuildingViewsDirty: false,
-        refreshLocationFloorMenu: () => { calls.floorMenu++; },
-        Server: { deleteLocationObject: async (_lobby, id) => { calls.deleted.push(id); } },
-        removeLocationObjectMesh: (id, refreshFog) => calls.removed.push([id, refreshFog]),
-        isFireObject: object => object?.type === 'campfire',
-        isObjectLightSource: object => object?.type === 'campfire',
-        syncFireObjectLight: (_object, id, refresh) => calls.lights.push([id, refresh]),
-        activeLightingProfile: { dark_tiles: [] },
-        rebuildGrassDetailMesh: () => { calls.floor++; },
-        refreshArchitecturalMeshes: () => { calls.architecture++; calls.fog++; },
-        applyFogOfWar: () => { calls.fog++; },
-        fogIsActive: () => true,
-        invalidateMovementMapCache() {}, showNotification() {},
-    });
-    vm.runInContext(source.slice(start, end), context);
-    await context.removeStructuresAtTile(3, 3, 1);
-    assert.deepEqual(calls.deleted.sort(), [1, 2, 3]);
-    assert.deepEqual(calls.removed.map(([id]) => id).sort(), [1, 2, 3]);
-    assert.ok(calls.removed.every(([, refresh]) => refresh === false));
-    assert.deepEqual(calls.lights, [[1, false]]);
-    assert.equal(calls.fog, 1);
-    assert.equal(calls.architecture, 1);
-    assert.equal(calls.floor, 1);
-    assert.equal(calls.floorMenu, 1);
-    assert.equal(context.locationBuildingViewsDirty, true);
-    assert.equal(context.structureDeletionInFlight.size, 0);
-    assert.deepEqual(context.currentLocationData.objects.map(object => object.id), [4]);
-});
-
-test('erasing several fire objects batches the darkness refresh', async () => {
-    const source = read('locationScene.js');
-    const start = source.indexOf('async function removeStructuresAtTile(');
-    const end = source.indexOf('\nexport function setLocationBuildMode(', start);
-    const objects = [{ id: 1, type: 'campfire', tile_x: 1, tile_y: 1 },
-        { id: 2, type: 'torch', tile_x: 2, tile_y: 1 }];
-    const calls = { lights: 0, darkness: 0, fog: 0, floorMenu: 0 };
-    const context = vm.createContext({
-        window: { currentLobbyId: 1 }, currentLocationData: { objects },
-        getObjectGridPosition: object => ({ x: object.tile_x, y: object.tile_y }),
-        structureDeletionInFlight: new Set(),
-        locationBuildingViewsDirty: false,
-        refreshLocationFloorMenu: () => { calls.floorMenu++; },
-        Server: { deleteLocationObject: async () => {} },
-        removeLocationObjectMesh() {}, isFireObject: () => true,
-        isObjectLightSource: () => true,
-        syncFireObjectLight: () => { calls.lights++; },
-        activeLightingProfile: { dark_tiles: [{ x: 1, z: 1 }] },
-        refreshLocationDarkness: () => { calls.darkness++; },
-        applyFogOfWar: () => { calls.fog++; },
-        invalidateMovementMapCache() {}, showNotification() {},
-    });
-    vm.runInContext(source.slice(start, end), context);
-    await context.removeStructuresAtTile(1, 1, 1);
-    assert.deepEqual(calls, { lights: 2, darkness: 1, fog: 0, floorMenu: 1 });
-    assert.equal(context.locationBuildingViewsDirty, true);
-    assert.equal(context.structureDeletionInFlight.size, 0);
-    assert.equal(context.currentLocationData.objects.length, 0);
-});
+// Atomic erasure and fire refresh are covered in location_house_generator and location_building_performance.
 
 test('held Q selects the highlighted full-ring sector on release', async () => {
     const source = read('mapEditorQuickMenu.js')
@@ -916,7 +844,7 @@ test('right drag while painting remains available to world and location cameras'
         editMode: true,
         controls: { enabled: false },
         controlsDisabled: true,
-        brushActive: true,
+        brushActive: true, finishWorldBrushStroke() {},
     });
     vm.runInContext(worldSource.slice(start, end), context);
     let prevented = false;

@@ -187,7 +187,7 @@ test('GM right-click edits ordinary markers while double-click behavior stays un
     });
 
     hitId = 'cache_1';
-    handlers.get('contextmenu')(event());
+    handlers.get('secondaryclick')(event());
     assert.deepEqual(calls, ['prevent', 'stop-immediate', 'edit:cache_1']);
     calls.length = 0;
     handlers.get('dblclick')(event());
@@ -195,7 +195,7 @@ test('GM right-click edits ordinary markers while double-click behavior stays un
 
     calls.length = 0;
     hitId = 'loc_2';
-    handlers.get('contextmenu')(event());
+    handlers.get('secondaryclick')(event());
     assert.deepEqual(calls, ['prevent', 'stop-immediate', 'location-edit:loc_2']);
     calls.length = 0;
     handlers.get('dblclick')(event());
@@ -203,10 +203,10 @@ test('GM right-click edits ordinary markers while double-click behavior stays un
 
     calls.length = 0;
     hitId = null;
-    handlers.get('contextmenu')(event());
+    handlers.get('secondaryclick')(event());
     assert.deepEqual(calls, []);
     hitId = 'cache_1';
     context.AppState.isGM = false;
-    handlers.get('contextmenu')(event());
+    handlers.get('secondaryclick')(event());
     assert.deepEqual(calls, []);
 });

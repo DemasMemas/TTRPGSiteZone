@@ -59,15 +59,15 @@ test('darkness brush paints and erases square areas without leaving the map', as
     assert.equal(paintDarkTiles(erased, 5, 4, 1, 1, 0, true), erased);
 });
 
-test('sunlight and local lights cast shadows while a cutaway roof remains a caster', () => {
+test('sunlight casts shadows and local sources refresh the permanent field', () => {
     const scene = read('locationScene.js');
     const roof = read('locationRoof.js');
     assert.match(scene, /locationDirectionalLight\.castShadow = true/);
     assert.match(roof, /shadowCaster\.castShadow = true/);
     assert.match(roof, /roof\.userData\.visualMeshes = gable \? \[roofFace, gable\] : \[roofFace\]/);
-    assert.match(scene, /child\.castShadow = obj\.type !== 'floor' && !child\.userData\.fireFlame/);
+    assert.match(scene, /child\.castShadow = !\['floor', 'household_floor_rug', 'anomaly'\]\.includes\(obj\.type\) && !child\.userData\.fireFlame/);
     assert.match(scene, /child\.receiveShadow = true/);
-    assert.match(scene, /const castsShadow = role\.endsWith\('Shadow'\);[\s\S]*?light\.castShadow = castsShadow/);
+    assert.match(scene, /function refreshObjectLightSource\([^)]*\) \{\s*queueStaticLightFieldRefresh\(\)/);
 });
 
 test('editor forwards painted cells to lighting save and map pointer handling', () => {
@@ -76,10 +76,9 @@ test('editor forwards painted cells to lighting save and map pointer handling', 
     const editor = read('locationLightingEditor.js');
     assert.match(editor, /value\.dark_tiles = getDarkTiles\(\)/);
     assert.match(main, /window\.locationDarknessPaintAtTile = \(x, z\)/);
-    assert.match(main, /Server\.updateLocation\(currentLobbyId, currentLocationData\.id, \{ lighting: settings \}\)/);
+    assert.match(main, /saveLocationEnvironment\(settings, environmentBase\)/);
     assert.match(scene, /window\.locationDarknessPaintAtTile\?\.\(hoveredTileCoords\.x, hoveredTileCoords\.z\)/);
-    assert.match(scene, /window\.locationDarknessPaintAtTile\?\.\(x, z\)/);
     assert.match(main, /data-darkness-radius/);
-    assert.match(main, /previewLocationDarkTiles\(darkTilesDraft\)/);
+    assert.match(main, /paintLocationDarknessAtTile\(x, z, radius,/);
     assert.match(scene, /refreshDarknessEditorOverlay\(profile\.dark_tiles \|\| \[\]\)/);
 });

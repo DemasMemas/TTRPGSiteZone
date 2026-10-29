@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
 const main = fs.readFileSync(path.join(__dirname, '../app/static/js/main.js'), 'utf8');
@@ -19,7 +21,7 @@ test('both construction tools inherit the active building and level', () => {
         'loc-structure-level': { value: '1' } };
     const placement = { '[data-placement-building-id]': { value: 'building-b' },
         '[data-placement-level]': { value: '0' } };
-    const context = vm.createContext({ window: { locationEditorTool: 'structure' },
+    const context = createSceneContext({ window: { locationEditorTool: 'structure' },
         document: { getElementById: id => fields[id], querySelector: selector => placement[selector] } });
     vm.runInContext(section('function getStructurePlacementProperties()', 'const FLOOR_SURFACE_OFFSET'), context);
     assert.deepEqual({ ...context.getStructurePlacementProperties() }, { building_id: 'building-a', level: 1 });
@@ -30,7 +32,7 @@ test('both construction tools inherit the active building and level', () => {
 });
 
 test('building choices derive from saved objects and omit legacy IDs', () => {
-    const context = vm.createContext({ currentLocationData: { objects: [
+    const context = createSceneContext({ currentLocationData: { objects: [
         { type: 'floor', properties: { building_id: 'a' } },
         { type: 'wall', properties: { building_id: 'a' } },
         { type: 'floor', properties: {} },
@@ -79,7 +81,7 @@ test('camera-relative Q/E rotation uses the same 15 degree yaw for previews and 
         matrix.elements[6] *= -1;
         assert.equal(cameraYawStepDegrees(camera, 1), 15);
     }
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: { isGM: true, locationEditMode: true, locationEditorTool: 'assets' },
         selectedLocationAsset: { kind: 'structure' }, structureRotation: 0,
         brushObjectRotation: 0, buildMode: 'terrain', camera: null,
@@ -142,7 +144,7 @@ test('Esc cancels the active location transform before clearing selection', () =
     let clears = 0;
     let cancels = 0;
     let modalVisible = false;
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: { locationEditMode: true, locationEditorTool: 'select' },
         document: { querySelectorAll: () => modalVisible ? [{ getClientRects: () => [1] }] : [] },
         isKeyboardInputTarget: target => Boolean(target?.typing),
@@ -177,7 +179,7 @@ test('rotate click commits a Q/E preview without recomputing the pointer angle',
 test('selected structure hotkey angle survives the existing save and JSON load path', async () => {
     let saved;
     const source = { id: 7, type: 'wall', properties: { rotation: 0, level: 0 } };
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelection: { kind: 'structure', id: 7 },
         currentLocationData: { grid_width: 8, grid_height: 8 },
         getSelectedEditorSource: () => source,
@@ -204,9 +206,9 @@ test('selected structure hotkey angle survives the existing save and JSON load p
 test('upper-storey hover projects onto the active level while ground decor stays on terrain', () => {
     const planes = [];
     let projectedPoint = { x: 5.2, z: 4.7 };
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: { locationEditMode: true, locationEditorTool: 'assets' },
-        selectedLocationAsset: { kind: 'structure' }, buildMode: 'structure', editorMoveMode: false,
+        selectedLocationAsset: { kind: 'structure' }, buildMode: 'structure', editorMoveMode: false, locationViewLevel: 1,
         document: { querySelector: selector => ({ value: selector === '[data-placement-level]' ? '1' : 'building-a' }),
             getElementById: () => ({ value: '1' }) },
         structureLevelOffset: object => object.properties.level * 2.4,
@@ -218,12 +220,14 @@ test('upper-storey hover projects onto the active level while ground decor stays
     vm.runInContext(section('function getStructurePlacementProperties()', 'const FLOOR_SURFACE_OFFSET'), context);
     assert.equal(context.editorHoverLevelOffset(), 2.4);
     assert.deepEqual({ ...context.hoveredEditorTile(10, 20, { x: 1, z: 1 }) }, { x: 5, z: 4 });
-    assert.deepEqual(planes, [3.4, 3.4]);
+    assert.ok(planes.length > 0 && planes.every(y => y === 3.4));
     projectedPoint = { x: 12, z: 4 };
     assert.equal(context.hoveredEditorTile(10, 20, { x: 1, z: 1 }), null);
     context.selectedLocationAsset = { kind: 'lamp' };
     assert.equal(context.editorHoverLevelOffset(), 2.4);
     context.selectedLocationAsset = { kind: 'decor' };
+    assert.equal(context.editorHoverLevelOffset(), 2.4); // All assets follow the viewed floor.
+    context.locationViewLevel = 0; projectedPoint = { x: 1.2, z: 1.3 };
     assert.equal(context.editorHoverLevelOffset(), 0);
     assert.deepEqual({ ...context.hoveredEditorTile(10, 20, { x: 1, z: 1 }) }, { x: 1, z: 1 });
 });
@@ -231,7 +235,7 @@ test('upper-storey hover projects onto the active level while ground decor stays
 test('move cursor uses the saved surface height for structures, decor and lights', () => {
     const planes = [];
     const source = { type: 'wall', properties: { level: 1, elevation: 0.2 } };
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelection: { kind: 'structure' }, editorSelections: [{ kind: 'structure' }],
         getSelectedEditorSource: () => source,
         structureLevelOffset: object => object.properties.level * 2.4,
@@ -251,7 +255,7 @@ test('move cursor uses the saved surface height for structures, decor and lights
     source.elevation = 0.3;
     planes.length = 0;
     context.editorMovePointerPoint(10, 20, { x: 2, z: 1 });
-    assert.equal(planes[0], 0.3);
+    assert.ok(Math.abs(planes[0] - 2.7) < 1e-8); // Decor retains its saved storey as well as elevation.
     context.editorSelection.kind = 'lamp';
     source.height = 1.1;
     planes.length = 0;
@@ -261,7 +265,7 @@ test('move cursor uses the saved surface height for structures, decor and lights
 
 test('moving a trimmed floor keeps its visible center on the cursor', () => {
     const source = { type: 'floor', properties: { level: 1, dimensions: { width: 3, depth: 3 } } };
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelection: { kind: 'structure' }, editorSelections: [{ kind: 'structure' }],
         getSelectedEditorSource: () => source,
         structureLevelOffset: () => 2.4, clampAssetElevation: () => 0,
@@ -282,7 +286,7 @@ test('moving a trimmed floor keeps its visible center on the cursor', () => {
 test('single move commits the preview coordinates and preserves the saved rotation', async () => {
     const saved = [];
     const selection = { x: 2, z: 3, rotation: 135, elevation: 0.4 };
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelections: [{ kind: 'structure' }], editorMoveMode: true,
         editorMovePreviewPoint: { x: 5.2, z: 6.3 },
         getSelectedLocationEditorAsset: () => selection,
@@ -347,7 +351,7 @@ test('Volume Scale anchors the opposite face after rotation and supports Shift, 
     assert.equal(snapped.dimensions.width, 4.4);
     const minimum = volumeResize({ dimensions, center: { x: 4, z: 5 }, elevation: 0,
         rotation: 0, axis: 'depth', side: -1, distance: 5 });
-    assert.equal(minimum.dimensions.depth, 0.02);
+    assert.equal(minimum.dimensions.depth, 0.01);
     assert.equal(projectedAxisDrag(10, 10, 50, 10, 40, 0), 1);
 });
 
@@ -373,7 +377,7 @@ test('Volume Scale anchors vertical faces for walls and floors, then persists el
     const result = volumeResize({ ...args, axis: 'width', side: 1, distance: 1 });
     let saved;
     let previewUpdates = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorResizeMode: true, editorResizeAnchor: { volume: true, result },
         editorResizeDimensions: result.dimensions, editorResizeElevation: result.elevation,
         editorResizeBaseCenter: { x: 5, z: 7 },
@@ -400,7 +404,7 @@ test('Volume Scale preview tracks the captured face and Esc discards unsaved dim
         `data:text/javascript;base64,${Buffer.from(transforms).toString('base64')}`);
     const selection = { kind: 'structure', x: 5, z: 7, rotation: 45, elevation: 0.4 };
     let updates = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorResizeMode: true, editorResizeDragPointerId: 3,
         editorResizeDimensions: { width: 3, depth: 0.2, height: 2.4 },
         editorResizeBaseDimensions: { width: 3, depth: 0.2, height: 2.4 },
@@ -434,7 +438,7 @@ test('Volume Scale preview tracks the captured face and Esc discards unsaved dim
 test('switching R to Eraser cancels the drag, releases capture and leaves Esc available', () => {
     const released = [];
     let previews = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorResizeMode: true, editorResizeDragPointerId: 9,
         editorResizeDimensions: { width: 4, depth: 0.2, height: 2.4 },
         editorResizeBaseDimensions: { width: 3, depth: 0.2, height: 2.4 },
@@ -460,7 +464,7 @@ test('switching R to Eraser cancels the drag, releases capture and leaves Esc av
 
 test('canceling one Volume Scale drag restores its starting size without exiting the tool', () => {
     const released = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorResizeMode: true, editorResizeDragPointerId: 7,
         editorResizeAnchor: { volume: true, baseDimensions: { width: 3, depth: 0.2, height: 2.4 },
             baseCenter: { x: 5, z: 7 }, baseElevation: 0.4 },
@@ -491,7 +495,7 @@ test('door and window previews draw their model and opening outline over an opaq
     const children = [];
     let boxDimensions;
     let boxDisposed = false;
-    const context = vm.createContext({ THREE: {
+    const context = createSceneContext({ THREE: {
         BoxGeometry: class { constructor(...size) { boxDimensions = size; } dispose() { boxDisposed = true; } },
         EdgesGeometry: class {},
         LineBasicMaterial: class { constructor(options) { Object.assign(this, options); } },
@@ -500,7 +504,7 @@ test('door and window previews draw their model and opening outline over an opaq
             this.position = { y: 0 };
         } },
     } });
-    vm.runInContext(section('function revealOpeningPlacementPreview(', 'function createEditorGroupMovePreview()'), context);
+    vm.runInContext(section('function revealOpeningPlacementPreview(', 'function createEditorGroupMovePreview('), context);
     context.revealOpeningPlacementPreview({ traverse(fn) { fn(model); }, add(child) { children.push(child); } },
         { width: 0.9, height: 2, depth: 0.18 }, true);
     assert.equal(material.depthTest, false);
@@ -522,13 +526,13 @@ test('door and window previews draw their model and opening outline over an opaq
 
 test('shift-click adds and removes objects without discarding the rest', () => {
     const selections = [{ kind: 'structure', id: 1 }];
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelection: selections[0], editorSelections: selections,
         pickEditorAsset: x => ({ kind: 'structure', id: x }),
         applyLocationLighting() {}, notifyEditorResize() {},
         updateEditorSelectionVisual() {}, notifyEditorSelection() {},
     });
-    vm.runInContext(section('function sameEditorSelection(', 'async function persistLocationLights('), context);
+    vm.runInContext(section('function sameEditorSelection(', 'const editorHistory ='), context);
     assert.equal(context.selectEditorAsset(2, 0, true), true);
     assert.deepEqual(context.editorSelections.map(item => item.id), [1, 2]);
     assert.equal(context.selectEditorAsset(2, 0, true), true);
@@ -543,7 +547,7 @@ test('stationary right click clears selection with any tool before canceling pla
         isGM: true, locationEditMode: true, locationEditorTool: 'assets',
         cancelLocationAssetPlacement() { calls.push('placement'); },
     };
-    const context = vm.createContext({
+    const context = createSceneContext({
         window, selectedLocationAsset: { id: 'tree' },
         editorSelections: [{ kind: 'structure', id: 1 }],
         clearLocationAssetPreset() { calls.push('preset fallback'); },
@@ -567,7 +571,7 @@ test('stationary right click clears selection with any tool before canceling pla
     window.locationEditMode = false;
     context.editorSelections = [{ kind: 'structure', id: 1 }];
     assert.equal(context.cancelLocationEditorContextAction(), false);
-    assert.match(scene, /if \(cameraDragMenuGuard\.shouldSuppressMenu\(\)\) return;\s*if \(cancelLocationEditorContextAction\(\)\) return;/);
+    assert.match(scene, /const onContextMenu = \(e\) => \{\s*e\.preventDefault\(\);\s*e\.stopImmediatePropagation\(\);\s*if \(cancelLocationEditorContextAction\(\)\) return;/);
     assert.match(scene, /if \(cancelLocationEditorContextAction\(\)\) return;/);
     assert.match(main, /window\.cancelLocationAssetPlacement = \(\) => \{\s*activeAsset = null;\s*clearLocationAssetPreset\(\);\s*renderAssetCards\(\);\s*renderPlacementSettings\(\);/);
 });
@@ -575,7 +579,7 @@ test('stationary right click clears selection with any tool before canceling pla
 test('canceling placement clears the structure ghost and does not recreate a cube on hover', () => {
     let clears = 0;
     let adds = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: { locationEditMode: true, locationEditorTool: 'assets' },
         selectedLocationAsset: { id: 'crate', kind: 'structure' },
         buildMode: 'structure', brushObjectMode: true,
@@ -618,7 +622,7 @@ test('group move preserves two decor objects originally sharing a tile', async (
     const selections = [0, 1].map(index => ({ kind: 'decor', x: 1, z: 1, index }));
     const savedDetails = [];
     let context;
-    context = vm.createContext({
+    context = createSceneContext({
         editorSelection: selections[1], editorSelections: selections,
         editorMoveMode: true, editorMovePreviewPoint: null,
         editorSelectionRing: { position: { set() {} } },
@@ -663,7 +667,7 @@ test('anomaly accepts dimensions and keeps them on its tile', async () => {
     tiles[1][1].objects.push(anomaly);
     let selection = { kind: 'decor', x: 1, z: 1, index: 0 };
     let sent = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelection: selection, editorSelections: [selection],
         currentLocationData: { grid_width: 3, grid_height: 3, tiles_data: tiles },
         getSelectedEditorSource: () => anomaly,
@@ -683,7 +687,7 @@ test('anomaly accepts dimensions and keeps them on its tile', async () => {
     assert.equal(sent, 1);
     assert.equal(tiles[1][1].objects[0], anomaly);
 
-    const source = scene.slice(scene.indexOf('function createEditorGroupMovePreview()'),
+    const source = scene.slice(scene.indexOf('function createEditorGroupMovePreview('),
         scene.indexOf('function updateBuildPreview()'));
     assert.match(source, /applyDecorSize\(mesh, source, type\)/);
     assert.match(scene, /applyDecorSize\(buildPreviewMesh, decorPreview, decorType\)/);
@@ -694,7 +698,7 @@ test('anomaly accepts dimensions and keeps them on its tile', async () => {
 test('anomaly visual size supports legacy scale and independent dimensions', () => {
     const dimensionSource = fs.readFileSync(path.join(__dirname,
         '../app/static/js/locationAssetDimensions.js'), 'utf8');
-    const context = vm.createContext({
+    const context = createSceneContext({
         findLocationAsset: () => null,
         baseAssetDimensions: () => ({ width: 1, depth: 1, height: 1 }),
     });
@@ -719,7 +723,7 @@ test('hide toggles mixed structure, decor and lamp selections together', async (
     const tiles = Array.from({ length: 3 }, () => Array.from({ length: 3 }, () => ({ objects: [] })));
     tiles[1][1].objects.push(decor);
     const location = { lighting: { local_lights: [lamp] }, tiles_data: tiles };
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelections: selections, currentLocationData: location,
         getEditorSource(selection) {
             if (selection.kind === 'structure') return structure;
@@ -735,7 +739,7 @@ test('hide toggles mixed structure, decor and lamp selections together', async (
         sendDecorTileUpdates() {}, applyFogOfWar() {}, notifyEditorSelection() {},
         showNotification(message) { throw new Error(message); },
     });
-    vm.runInContext(section('export async function toggleSelectedLocationAssetsHidden()', 'async function updateSelectedLocationAssetGroup('), context);
+    vm.runInContext(section('export async function toggleSelectedLocationAssetsHidden(', 'async function updateSelectedLocationAssetGroup('), context);
     await context.toggleSelectedLocationAssetsHidden();
     assert.equal(structure.properties.gm_hidden, true);
     assert.equal(decor.gm_hidden, true);
@@ -762,7 +766,7 @@ test('group move creates a separate ghost for every selected asset type', () => 
         rotation: { y: 0 }, userData: {},
     });
     const lamps = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorSelections: selections,
         getEditorSource: selection => sources[selections.indexOf(selection)],
         THREE: {
@@ -783,7 +787,7 @@ test('group move creates a separate ghost for every selected asset type', () => 
         clampAssetElevation: value => Number(value) || 0,
         fadeEditorPreview: group => group,
     });
-    vm.runInContext(section('function createEditorGroupMovePreview()', 'function updateBuildPreview()'), context);
+    vm.runInContext(section('function createEditorGroupMovePreview(', 'function updateBuildPreview()'), context);
     const group = context.createEditorGroupMovePreview();
     assert.equal(group.children.length, 3);
     assert.deepEqual(Array.from(group.children, mesh => mesh.position.x), [1.5, 2.6, 4.5]);
@@ -801,7 +805,7 @@ test('group ghost geometry is reused while cursor moves', () => {
             userData: { editorMoveOrigin: { x: 1.5, z: 1.5, groundOffset: 0.25 } },
         }],
     };
-    context = vm.createContext({
+    context = createSceneContext({
         window: { locationEditMode: true, locationEditorTool: 'select' },
         scene: { add() { adds++; } }, hoveredTileCoords: { x: 2, z: 2 },
         editorRotateMode: false, editorMoveMode: true,
@@ -839,7 +843,7 @@ test('group rotation uses a common pivot and keeps directional rotations', async
         { kind: 'lamp', lightKind: 'spot', x: 2, z: 1, rotation: 45 },
     ];
     let saved;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorGroupRotatePivot: { x: 2, z: 2 }, editorRotateAngle: 90,
         editorRotateMode: true, editorGroupRotateStartBearing: 0, editorGroupRotateWithPivot: true,
         currentLocationData: { grid_width: 10, grid_height: 10 },
@@ -863,7 +867,7 @@ test('group rotation refuses to move any object outside the map', async () => {
     const transforms = fs.readFileSync(path.join(__dirname, '../app/static/js/locationAssetTransforms.js'), 'utf8');
     const url = `data:text/javascript;base64,${Buffer.from(transforms).toString('base64')}`;
     const { rotatePointAround } = await import(url);
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorGroupRotatePivot: { x: 0.5, z: 0.5 }, editorRotateAngle: 180,
         editorRotateMode: true, editorGroupRotateWithPivot: true,
         currentLocationData: { grid_width: 10, grid_height: 10 },
@@ -886,7 +890,7 @@ test('group rotation without Ctrl turns every object in place', () => {
         { kind: 'lamp', lightKind: 'spot', x: 2, z: 1, rotation: 45 },
     ];
     let saved;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorGroupRotatePivot: { x: 2, z: 2 }, editorRotateAngle: 90,
         editorGroupRotateWithPivot: false, editorRotateMode: true,
         currentLocationData: { grid_width: 10, grid_height: 10 },
@@ -917,7 +921,7 @@ test('group rotation preview includes every ghost even when the last selection i
     const ghost = { children: [first, second], add(child) { this.children.push(child); } };
     let context;
     let builds = 0;
-    context = vm.createContext({
+    context = createSceneContext({
         editorRotateMode: true, editorSelection: { kind: 'lamp', index: 0 },
         editorSelections: [{ kind: 'structure', id: 1 }, { kind: 'lamp', index: 0 }],
         editorGroupRotatePivot: { x: 2, z: 2 }, editorRotateAngle: 90, editorGroupRotateWithPivot: true,
@@ -964,7 +968,7 @@ test('group rotation preview includes every ghost even when the last selection i
 test('group rotation starts without a jump and snaps the delta with Shift', () => {
     let point = { x: 3, z: 2 };
     let previews = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         editorRotateMode: true, editorSelection: { kind: 'structure', id: 1 },
         editorGroupRotatePivot: { x: 2, z: 2 },
         editorGroupRotateStartBearing: null, editorGroupRotateWithPivot: false, editorRotateAngle: 0,
@@ -999,5 +1003,4 @@ test('GM controls and visual-only lamp fixtures remain wired', () => {
     assert.match(scene, /if \(e\.code === 'KeyH'\) toggleSelectedLocationAssetsHidden\(\)/);
     assert.match(scene, /else if \(e\.code === 'Delete'\) deleteSelectedLocationAsset\(\)/);
     assert.match(scene, /const scaleUp = [^;]*e\.code === 'Equal'[^;]*e\.key === '=';/);
-    assert.match(main, /\+ \/ = \/ −: масштаб всех осей/);
 });

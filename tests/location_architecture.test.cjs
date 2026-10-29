@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const load = async name => import(`data:text/javascript;base64,${Buffer.from(read(name)).toString('base64')}`);
@@ -86,7 +88,7 @@ test('fitting a floor persists only its geometry and retains material, elevation
     const end = sceneSource.indexOf('export async function addFloorAboveSelectedLocationAsset(', start);
     assert.ok(start > 0 && end > start);
     let saved;
-    const context = vm.createContext({ currentLocationData: data, currentLocationId: 3,
+    const context = createSceneContext({ currentLocationData: data, currentLocationId: 3,
         editorSelection: { kind: 'structure', id: 8 }, editorSelections: [{ kind: 'structure', id: 8 }],
         getSelectedEditorSource: () => data.objects[0],
         floorFitPlan, generatedFloorBlueprint: () => null,
@@ -258,7 +260,7 @@ test('door frame follows its wall height and color while its panel stays separat
     assert.equal(standalone.inWall, false);
     assert.equal(standalone.color, '#4e3829');
     const scene = read('locationScene.js');
-    assert.match(scene, /const frame = doorFrameStyle\(obj, currentLocationData\?\.objects \|\| \[\]\)/);
+    assert.match(scene, /const frame = doorFrameStyle\(obj, relatedObjects \|\| \[\]\)/);
     assert.match(scene, /new THREE\.MeshStandardMaterial\(\{ color: frame\.color \}\)/);
     assert.match(scene, /new THREE\.BoxGeometry\(jamb, trim\.postHeight, frame\.depth\)/);
 });

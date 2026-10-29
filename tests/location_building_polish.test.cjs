@@ -75,9 +75,10 @@ test('tall furniture backs meet solid walls and leave windows clear',async()=>{
         properties:{building_id:'b',level:0,offset_x:x-Math.floor(x)-.5,offset_z:z-Math.floor(z)-.5,
             dimensions:{width,depth,height},...extra}});
     const source=[object('floor',6,6,8,8,.12),object('wall',6,2,8,.2,2.4),object('wall',6,10,8,.2,2.4),
-        object('window',6,2,7.5,.14,1,{elevation:1})];
+        object('window',6,2,7.5,.14,1,{elevation:1}),
+        object('ceiling',6,6,8,8,.12,{elevation:2.4})];
     const room=F.getFurnitureRooms(source,'b')[0];
-    const plan=F.planBuildingFurniture(source,{buildingId:'b',scope:'room',roomId:room.id,role:'bedroom',wealth:'rich'});
+    const plan=F.planBuildingFurniture(source,{buildingId:'b',scope:'room',roomId:room.id,role:'bedroom',wealth:'rich',condition:'intact'});
     const wardrobe=plan.objects.find(o=>o.type==='household_wardrobe');
     assert.ok(wardrobe);
     const p=A.structurePose(wardrobe);
@@ -93,7 +94,8 @@ test('furnished homes pair tables with seats, keep cookers in poor kitchens, and
     for(const wealth of ['poor','ordinary','rich']) {
         const {rooms,plan}=await fixture({shellOptions:{width:16,depth:16,wealth,basements:0,storeys:1}});
         const bathroom=rooms.find(r=>r.name==='Санузел');
-        assert.ok(bathroom&&bathroom.cells.length<=16);
+        if(wealth==='poor')assert.equal(bathroom,undefined,'poor homes use the existing utility/storage layout');
+        else assert.ok(bathroom&&bathroom.cells.length<=16);
         assert.ok(plan.objects.some(o=>o.type==='household_cooker'&&o.properties.furniture_generation.role==='kitchen'));
         const tables=plan.objects.filter(o=>o.type==='table');assert.ok(tables.length);
         for(const table of tables) {

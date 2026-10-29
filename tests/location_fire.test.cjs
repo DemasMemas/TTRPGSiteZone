@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationFire.js'), 'utf8');
 const scene = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
@@ -67,25 +69,23 @@ test('catalog, model, interactions and GM inspector expose all fire variants', (
     assert.match(editor, /toggleSelectedLocationFire\(\)/);
 });
 
-test('switching a placed fire updates its existing light instead of rebuilding all lights', async () => {
+test('switching a placed fire refreshes the permanent field without rebuilding native lights', async () => {
     const { fireLightSource } = await import(moduleUrl);
-    const unlit = fireLightSource({ type: 'campfire', tile_x: 1, tile_y: 1,
-        properties: { is_lit: false } }, true);
-    assert.equal(unlit.intensity, 0);
-    assert.match(scene, /light\.userData\.fireObjectId = objectId/);
-    assert.match(scene, /const light = existing \|\| locationLightGroup\.children\.find/);
-    assert.match(scene, /light\.intensity = source\.intensity/);
-    assert.match(scene, /existing\.intensity = 0;\s*existing\.userData\.fireObjectId = null/);
-    assert.match(scene, /fireLightCapacity = Math\.max\(MIN_FIRE_LIGHT_POOL/);
-    assert.doesNotMatch(scene.slice(scene.indexOf('function syncFireObjectLight('),
-        scene.indexOf('\nfunction getLocationDecorFireSources(', scene.indexOf('function syncFireObjectLight('))),
-    /locationLightGroup\.remove\(existing\)/);
-    assert.match(scene, /if \(fire\) \{\s*syncFireObjectLight\(object\)/);
-    assert.match(scene, /if \(currentLocationData\.objects\.some\(item => String\(item\.id\) === String\(object\.id\)\)\) return/);
-    assert.match(scene, /light\.castShadow = false/);
-    assert.match(scene, /if \(fire\) syncFireObjectLight\(null, objectId\)/);
-    assert.match(scene, /if \(isObjectLightSource\(object\)\) syncFireObjectLight\(null, objectId, false\)/);
-    assert.match(catalog, /id: 'fire_barrel'.*dimensions: \[0\.72, 0\.72, 0\.78\]/);
+    assert.equal(fireLightSource({ type: 'campfire', properties: { is_lit: false } }), null);
+    let queued = 0, darkness = 0;
+    const context = createSceneContext({
+        activeLightingProfile: { dark_tiles: [{ x: 1, z: 1 }] },
+        queueStaticLightFieldRefresh() { queued++; },
+        refreshLocationDarkness() { darkness++; },
+    });
+    const start = scene.indexOf('function refreshObjectLightSource(');
+    const end = scene.indexOf('\nfunction getLocationDecorFireSources(', start);
+    assert.ok(start >= 0 && end > start);
+    vm.runInContext(scene.slice(start, end), context);
+    context.refreshObjectLightSource();
+    assert.equal(queued, 1); assert.equal(darkness, 1);
+    context.refreshObjectLightSource(false);
+    assert.equal(queued, 2); assert.equal(darkness, 1);
 });
 
 test('fire placement preview follows the cursor without rebuilding its model', async () => {
@@ -97,7 +97,7 @@ test('fire placement preview follows the cursor without rebuilding its model', a
         const asset = LOCATION_ASSETS.find(item => item.id === type);
         assert.equal(asset?.kind, 'structure', type);
         const created = [];
-        const context = vm.createContext({
+        const context = createSceneContext({
             houseDrawMode: false, editorRotateMode: false, editorResizeMode: false,
             editorSelections: [], editorSelection: null,
             editorMoveMode: false, editorMovePreviewPoint: null, editorRotateAngle: 0,
@@ -114,7 +114,7 @@ test('fire placement preview follows the cursor without rebuilding its model', a
             placementForLocationAsset: source => ({ type: source.id, visualAsset: null }),
             isFireObject: object => object.type === type, isElectricFixture: () => false,
             createLocationObjectMesh(object) {
-                const mesh = { position: { set(x, y, z) { Object.assign(this, { x, y, z }); } } };
+                const mesh = { userData: { locationObject: object }, position: { set(x, y, z) { Object.assign(this, { x, y, z }); } } };
                 created.push({ object, mesh });
                 return mesh;
             },
@@ -138,55 +138,17 @@ test('fire placement preview follows the cursor without rebuilding its model', a
     }
 });
 
-test('fire light stays in the scene after deletion and is reused on the next placement', () => {
-    const start = scene.indexOf('const MIN_FIRE_LIGHT_POOL =');
-    const end = scene.indexOf('\nfunction getLocationDecorFireSources(', start);
-    assert.ok(start >= 0 && end > start);
-    const group = { children: [], add(light) { this.children.push(light); light.parent = this; } };
-    class PointLight {
-        constructor(color, intensity, distance) {
-            this.userData = {}; this.color = { set(value) { this.value = value; } };
-            this.intensity = intensity; this.distance = distance;
-            this.position = { set() {} }; this.shadow = { mapSize: { set() {} } };
-        }
-    }
-    const context = vm.createContext({
-        THREE: { PointLight }, locationLightGroup: group, locationStaticLightField: null,
-        queueStaticLightFieldRefresh() {},
-        fireLightSource: object => object ? { x: 1, z: 1, tileX: 0, tileZ: 0,
-            height: 0.5, color: '#fff', intensity: 2, distance: 4 } : null,
-        electricFixtureLightSource: () => null,
-        getTileHeight: () => 1, activeLightingProfile: { dark_tiles: [] },
-    });
-    vm.runInContext(scene.slice(start, end), context);
-    context.syncFireObjectLight({ id: 1 }, 1);
-    const first = group.children[0];
-    context.syncFireObjectLight(null, 1);
-    assert.equal(group.children.length, 1);
-    assert.equal(first.intensity, 0);
-    context.syncFireObjectLight({ id: 2 }, 2);
-    assert.equal(group.children.length, 1);
-    assert.equal(group.children[0], first);
-    assert.equal(first.userData.fireObjectId, 2);
-    context.locationStaticLightField = {};
-    context.syncFireObjectLight({ id: 2 }, 2);
-    assert.equal(first.visible, false, 'the field replaces the stationary PointLight');
-    context.locationStaticLightField = null;
-    context.syncFireObjectLight({ id: 2 }, 2);
-    assert.equal(first.visible, true, 'legacy light returns when the field is disabled');
-});
-
 test('socket echo and POST response add one fire only once', () => {
     const start = scene.indexOf('export function addLocationObject(object) {');
     const end = scene.indexOf('\nwindow.addLocationObject = addLocationObject;', start);
     assert.ok(start >= 0 && end > start);
     const calls = { mesh: 0, light: 0, fog: 0 };
-    const context = vm.createContext({
+    const context = createSceneContext({
         currentLocationData: { objects: [] }, activeLightingProfile: { dark_tiles: [] },
         isFireObject: object => object.type === 'campfire',
         isObjectLightSource: object => object.type === 'campfire',
         addLocationObjectMesh: () => { calls.mesh++; },
-        syncFireObjectLight: () => { calls.light++; },
+        refreshObjectLightSource: () => { calls.light++; },
         applyFogOfWar: () => { calls.fog++; },
         fogIsActive: () => true,
         invalidateMovementMapCache() {},
@@ -206,7 +168,7 @@ test('adding a fire recolors only dark tiles whose light changed', () => {
     let rebuiltOverlay = false;
     const profile = { mode: 'fixed', ambient_intensity: 1, directional_intensity: 1,
         dark_tiles: [{ x: 1, z: 0 }], local_lights: [] };
-    const context = vm.createContext({
+    const context = createSceneContext({
         currentLocationData: { grid_width: 2, grid_height: 2, objects: [],
             tiles_data: Array.from({ length: 2 }, () => Array.from({ length: 2 }, () => ({ terrain: 'grass' }))) },
         activeLightingProfile: profile, locationDarknessFactors: Float32Array.from([1, 0.2, 1, 1]),

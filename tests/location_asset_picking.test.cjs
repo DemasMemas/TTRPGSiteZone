@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const sceneSource = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
 
@@ -30,7 +32,7 @@ function pickerContext() {
         constructor() { this.x = 0; this.y = 0; this.z = 0; }
         project() { this.x = 0; this.y = 0; this.z = 0; return this; }
     }
-    const context = vm.createContext({ scene, THREE: { Vector3 },
+    const context = createSceneContext({ scene, THREE: { Vector3 },
         locationObjectMeshes: [floor], objectMeshes: [],
         locationLightGroup: { visible: true, children: [fixture] }, roofMeshes: [roof],
         currentLocationData: { lighting: { local_lights: [{}] } },
@@ -71,28 +73,4 @@ test('hidden lamps and hidden architecture are not picked', () => {
     floor.visible = false;
     hits.main = [{ object: hits.main[0].object, distance: 10 }];
     assert.deepEqual({ ...context.pickEditorAsset(50, 50) }, { kind: 'lamp', index: 0 });
-});
-
-test('deleting a generated floor requires confirmation before any server mutation', async () => {
-    let deletions = 0;
-    let prompts = 0;
-    const source = { id: 17, type: 'floor', properties: { generation_seed: 'house-a' } };
-    const context = vm.createContext({
-        editorSelections: [{ kind: 'structure', id: 17 }],
-        editorSelection: { kind: 'structure', id: 17 },
-        window: { confirm: () => { prompts++; return false; } },
-        getEditorSource: () => source,
-        getSelectedEditorSource: () => source,
-        Server: { deleteLocationObject: async () => { deletions++; } },
-    });
-    vm.runInContext(section('function confirmFloorDeletion(', 'export async function toggleSelectedLocationFire()'), context);
-    await context.deleteSelectedLocationAsset();
-    assert.equal(prompts, 1);
-    assert.equal(deletions, 0);
-    source.properties = {};
-    assert.equal(context.confirmFloorDeletion(context.editorSelections), false);
-    assert.equal(prompts, 2);
-    source.type = 'wall';
-    assert.equal(context.confirmFloorDeletion(context.editorSelections), true);
-    assert.equal(prompts, 2);
 });

@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 
@@ -22,7 +24,7 @@ test('weather audio starts on player input without an external library', () => {
         play() { this.paused = false; this.plays += 1; return Promise.resolve(); }
         pause() { this.paused = true; }
     }
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: { Audio: FakeAudio, addEventListener: (name, handler) => listeners.set(name, handler) },
         document: {
             createElement() { return button; },
@@ -58,7 +60,7 @@ test('lobby clock blends twilight and cloud clarity changes lighting', () => {
     const directionalLight = { color: new FakeColor(), intensity: 0 };
     const ambientLight = { color: new FakeColor(), intensity: 0 };
     const fillLight = { intensity: 0 };
-    const context = vm.createContext({
+    const context = createSceneContext({
         Math, Number, THREE: { Color: FakeColor }, directionalLight, ambientLight, fillLight,
         setSkyConditions: (daylight, clarity, starlight) => conditions.push({ daylight, clarity, starlight }),
         setCelestialTime: minutes => times.push(minutes),
@@ -135,7 +137,7 @@ test('sky conditions fade stars and celestial discs with cloud cover and twiligh
     const stars = { material: {}, visible: false };
     const sunDisc = { material: {} };
     const moonDisc = { material: {} };
-    const context = vm.createContext({
+    const context = createSceneContext({
         THREE: { MathUtils: { clamp: (value, low, high) => Math.max(low, Math.min(high, value)) }, Color: FakeColor },
         worldSkySphere, stars, sunDisc, moonDisc, scene: { background: { copy() {} } },
     });
@@ -176,7 +178,7 @@ test('low sun and moon cap world object shadows at about 1.25 times their height
     }
     const position = new Vector3();
     const target = { position: new Vector3(), updateMatrixWorld() {} };
-    const context = vm.createContext({
+    const context = createSceneContext({
         Math, Number, THREE: { Vector3 }, MAX_CHUNK_X: 31, MAX_CHUNK_Y: 31, CHUNK_SIZE: 16,
         sunDisc: { position: new Vector3() }, moonDisc: { position: new Vector3() },
         worldSkySphere: { material: { uniforms: { starRotation: {} } } },
@@ -196,7 +198,7 @@ test('fog overlay distinguishes explored from unknown tiles and hides for GM', (
     const end = source.indexOf('function applyFogOfWar()', start);
     assert.ok(start >= 0 && end > start);
     const fogOverlayMeshes = new Map();
-    const context = vm.createContext({
+    const context = createSceneContext({
         fogOverlayMeshes,
         fogMemory: new Map([['1:0', {}]]),
         currentLocationData: { grid_width: 2, grid_height: 2, tiles_data: [] },
@@ -246,7 +248,7 @@ test('deleting ground container closes the open exchange and removes its model',
     let closed = 0;
     let removed = 0;
     let refreshed = 0;
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: {},
         currentLocationData: { objects: [{ id: 17, type: 'ground_item' }] },
         containerInteractionState: { objectId: '17' },
@@ -321,7 +323,7 @@ test('mutant group placement uses nearby distinct free cells', async () => {
     const end = source.indexOf('export async function openOwnerSelectionModal(', start);
     assert.ok(start >= 0 && end > start);
     const placed = [];
-    const context = vm.createContext({
+    const context = createSceneContext({
         getMovementMap: () => ({ blockedTiles: new Set(['3:3', '2:2']) }),
         currentLocationData: { grid_width: 8, grid_height: 8 },
         spawnCharacterAtTile: async (id, x, y, owner) => { placed.push({ id, x, y, owner }); },

@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const source = read('locationScene.js');
@@ -69,7 +71,7 @@ async function harness(data = building('gable', 1)) {
         mesh.userData = { locationObject: object, locationObjectId: object.id };
         return mesh;
     });
-    const context = vm.createContext({ ...architecture, ...roof,
+    const context = createSceneContext({ ...architecture, ...roof,
         clampAssetElevation: transforms.clampAssetElevation, THREE,
         currentLocationData: data, scene: { add() {}, remove() {} },
         locationObjectMeshes: objects, objectMeshes: [], roofMeshes: [],

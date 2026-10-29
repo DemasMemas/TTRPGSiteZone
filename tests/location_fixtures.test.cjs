@@ -3,6 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const sceneContext = require('./helpers/locationSceneContext.cjs');
+const createSceneContext = values => vm.createContext(sceneContext(values));
 
 const read = name => fs.readFileSync(path.join(__dirname, '../app/static/js', name), 'utf8');
 const importSource = source => import(`data:text/javascript,${encodeURIComponent(source)}`);
@@ -83,7 +85,7 @@ test('electric fixtures have visible solid models in both switch states', async 
     }
     const scene = read('locationScene.js');
     assert.match(scene, /group\.add\(createElectricFixtureModel\(/);
-    assert.match(scene, /fireLightSource\(object, true\) \|\| electricFixtureLightSource\(object, true\)/);
+    assert.match(scene, /fireLightSource\(object\) \|\| electricFixtureLightSource\(object\)/);
     assert.match(scene, /isObjectLightSource\(object\)/);
     assert.match(scene, /electric: isElectricFixture\(source\)/);
     assert.match(read('main.js'), /selection\.electric\s*\? \(selection\.isLit \? 'Выключить' : 'Включить'\)/);
@@ -101,7 +103,7 @@ test('wall bulb mounting plate meets solid wall faces on the selected storey', a
         dimensions: { width: 4, depth: 0.2, height: 2.4 },
     } };
     const data = { grid_width: 12, grid_height: 12, objects: [wall] };
-    const context = vm.createContext({ currentLocationData: data,
+    const context = createSceneContext({ currentLocationData: data,
         wallVisualPlan, structurePose, structureLevel, structureBuildingId, getTileHeight: () => 0 });
     vm.runInContext(scene.slice(start, end), context);
     const dimensions = { width: 0.38, depth: 0.4, height: 0.36 };
@@ -145,7 +147,7 @@ test('placing a wall bulb saves the snapped pose and rejects an unmatched wall',
     const notices = [];
     const mount = { x: 5.5, z: 5.78, tileX: 5, tileZ: 5,
         rotation: Math.PI, buildingId: 'house' };
-    const context = vm.createContext({
+    const context = createSceneContext({
         window: { currentLobbyId: 19, locationEditorTool: 'assets' },
         currentLocationId: 23,
         structurePreset: 'wall_bulb', structureColor: '#ffe2aa', structureRotation: 0,

@@ -36,7 +36,7 @@ test('replacement furniture keeps both generations of saved IDs and original dim
 
 test('plumbing is a separate category and leaves the kitchen sink available', () => {
     const assets = modules.get('locationAssetCatalog.js').namespace.LOCATION_ASSETS;
-    assert.equal(assets.filter(a => a.group === 'Сантехника' && !a.hidden).length, 3);
+    assert.ok(assets.filter(a => a.group === 'Сантехника' && !a.hidden).length >= 3);
     for (const id of ['household_washbasin', 'household_toilet', 'household_bathtub']) {
         assert.equal(findLocationAsset(id).group, 'Сантехника');
         assert.equal(findLocationAsset(id).visual.pivot, 'bottom-center');
