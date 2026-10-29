@@ -32,7 +32,7 @@ module.exports = async ({ page, request, token, lobby, base }) => {
         window.enterLocation(${location.id});
     })()`);
     await page.until('Boolean(window.releaseDetail)', 'location request');
-    assert.equal(await page.evaluate(`document.getElementById('scene-loading-cancel').textContent`), 'Отменить и на карту');
+    assert.equal(await page.evaluate(`document.getElementById('scene-loading-cancel').textContent`), 'Отменить и вернуться на карту');
     await page.evaluate(`document.getElementById('scene-loading-cancel').click(); releaseDetail(); restoreFetch();`);
     await page.until(`!window.isLocationActive && ${hidden}`, 'cancel to world');
     assert.equal(await page.evaluate('detailSignal.aborted'), true);
@@ -89,7 +89,7 @@ module.exports = async ({ page, request, token, lobby, base }) => {
     ` });
     await page.call('Page.navigate', { url: `${base}/lobbies/${lobby.id}/page` });
     await page.until(`document.getElementById('scene-loading-title')?.textContent === ${JSON.stringify(lobby.name)} && typeof window.cancelSceneLoading === 'function'`, 'lobby name during load');
-    assert.equal(await page.evaluate(`document.getElementById('scene-loading-cancel').textContent`), 'Отменить и в меню');
+    assert.equal(await page.evaluate(`document.getElementById('scene-loading-cancel').textContent`), 'Отменить и вернуться в меню');
     await capture('world-loading');
     await page.evaluate(`document.getElementById('scene-loading-cancel').click()`);
     await page.until(`location.pathname === '/'`, 'cancel to menu');

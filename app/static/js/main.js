@@ -2321,7 +2321,7 @@ function showSceneLoading(sceneType) {
     if (cancel) {
         cancel.hidden = false;
         cancel.textContent = sceneType === 'location' && Number.isInteger(window.MAP_CHUNKS_WIDTH)
-            ? 'Отменить и на карту' : 'Отменить и в меню';
+            ? 'Отменить и вернуться на карту' : 'Отменить и вернуться в меню';
     }
     setSceneLoadingProgress(token, 0);
     return token;
@@ -2384,7 +2384,7 @@ function escapeHtml(unsafe) {
         await loadLobbyInfo();
         if (!isCurrentSceneLoading(startupToken)) return;
         if (!directLocationId) setSceneLoadingLocationName(startupToken, document.getElementById('lobby-name').textContent);
-        else document.getElementById('scene-loading-cancel').textContent = 'Отменить и на карту';
+        else document.getElementById('scene-loading-cancel').textContent = 'Отменить и вернуться на карту';
         setSceneLoadingProgress(startupToken, 5, 'Загружаем персонажей комнаты.');
         await loadLobbyCharacters();
         initHotkeys();

@@ -7513,7 +7513,9 @@ export function initLocationScene(containerId) {
     locationDirectionalLight = new THREE.DirectionalLight(0xffffff, 1);
     locationDirectionalLight.castShadow = true;
     locationDirectionalLight.shadow.mapSize.set(2048, 2048);
-    locationDirectionalLight.shadow.bias = -0.0001;
+    // Keep narrow wall caps out of the sun's PCF self-shadow band.
+    // Retain the small normal offset so furniture shadows stay near their feet.
+    locationDirectionalLight.shadow.bias = -0.0005;
     locationDirectionalLight.shadow.normalBias = 0.02;
     locationDirectionalLight.shadow.radius = 2;
     scene.add(locationDirectionalLight);
