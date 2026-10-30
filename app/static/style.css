@@ -409,7 +409,6 @@ body.character-sheet-open #location-canvas > :not(canvas) {
 .widget-block-view .health-readonly-value { background: var(--input-bg); }
 
 /* Global-map controls must not show through the local scene's canvas. */
-body.location-view-active .lobby-menu,
 body.location-view-active #settings-panel,
 body.location-view-active #tile-info,
 body.location-view-active .world-group-context-menu {
@@ -673,7 +672,43 @@ body.location-view-active .world-group-context-menu {
 .common-dice-form[hidden] { display: none; }
 .common-dice-form input { width: 110px; max-width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--panel-border); border-radius: 5px; padding: 5px; }
 #common-map-result { display: block; max-width: 390px; font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px; }
-body.location-view-active #panel-common-tools { display: none; }
+/* Existing room launchers join the local scene's view buttons. */
+body.location-view-active .lobby-menu { display: none; }
+#location-view-toggle-group > .menu-item {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 42px; height: 34px; padding: 7px 11px; box-sizing: border-box;
+  border: none; border-radius: 8px; background: #465261; color: white; cursor: pointer;
+}
+#location-view-toggle-group > .menu-item.is-active { background: #3d7959; }
+#location-view-toggle-group > .menu-item:focus-visible { outline: 2px solid var(--username-color); outline-offset: 2px; }
+body.location-view-active #panel-common-tools { bottom: 128px; left: clamp(15px, calc(100vw - 380px), 392px); }
+body:has(#panel-chat[data-chat-docked="true"]:not([hidden])) #panel-characters {
+  max-height: calc(100vh - 96px);
+}
+.common-map-toolbar button:disabled { opacity: .45; cursor: default; }
+#combat-status-panel { display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden; }
+#combat-status-panel .combat-hud-header { flex: 0 0 auto; }
+#combat-status-panel .combat-hud-body { min-height: 0; overflow-y: auto; }
+#combat-action-menu .combat-radial-action {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px; padding: 4px !important;
+}
+.combat-radial-icon { font-size: 17px; line-height: 18px; }
+.combat-radial-label { max-width: 64px; font-size: 10px; line-height: 11px; overflow-wrap: anywhere; }
+.combat-radial-cost { max-width: 66px; font-size: 9px; line-height: 11px; color: #d8cf9b; }
+#combat-action-menu .combat-radial-action[aria-disabled="true"] { border-style: dashed !important; cursor: help !important; }
+#combat-action-menu .combat-radial-action:focus-visible { outline: 2px solid #d8cf9b; outline-offset: 3px; }
+#combat-menu-tooltip {
+  white-space: pre-line;
+  position: absolute; width: 250px; box-sizing: border-box; padding: 10px 12px;
+  color: var(--text-color); background: var(--panel-bg); border: 1px solid var(--panel-border);
+  border-radius: 8px; font-size: 12px; line-height: 1.4; box-shadow: var(--panel-shadow);
+  pointer-events: none; z-index: 2;
+}
+.map-tools.is-location-editor.location-editor-idle { width: 250px; }
+.location-editor-idle .location-editor-root > :not(.location-editor-common),
+.location-editor-idle .location-editor-common > :not(.location-edit-toggle) { display: none !important; }
+.location-editor-idle .location-editor-common { margin: 0; }
 .chat-panel .panel-content { display: flex; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
 .chat-panel[data-chat-docked="true"] .panel-content { flex: 1; }
 .chat-panel[data-chat-docked="true"] .chat-messages { flex: 1; height: auto; min-height: 0; }
@@ -1016,7 +1051,7 @@ body.light-theme .chat-roll .message-kind { color: #3d5796; }
 @media (max-width: 700px) {
   .lobby-menu { max-width: calc(100vw - 30px); }
 }
-body.location-view-active #common-tools-toggle { display: none; }
+
 .lobby-menu .exit-btn {
   background: var(--btn-danger-bg);
   width: 30px;

@@ -114,11 +114,14 @@ module.exports = async ({ page, request, token, lobby, base, connect, debugPort 
 
     await mount(page);
     await page.evaluate('locationControls.object.position.set(8,20,22);locationControls.target.set(8,1,8);locationControls.update()');
-    const peerTarget=await page.call('Target.createTarget',{url:`${base}/lobbies/${lobby.id}/page`,background:true});
+    const peerTarget=await page.call('Target.createTarget',{url:'about:blank',background:true});
     const tabs=await(await fetch(`http://127.0.0.1:${debugPort}/json`)).json();
     const peer=await connect(tabs.find(t=>t.id===peerTarget.targetId).webSocketDebuggerUrl);
     try {
-        await peer.call('Runtime.enable');await peer.until('Boolean(window.enterLocation&&window.isGM)','peer startup');await mount(peer);
+        await peer.call('Page.enable');await peer.call('Runtime.enable');
+        await peer.evaluate('0'); // Install the shared dependency interception before navigation.
+        await peer.call('Page.navigate',{url:`${base}/lobbies/${lobby.id}/page`});
+        await peer.until('Boolean(window.enterLocation&&window.isGM)','peer startup');await mount(peer);
         await page.call('Page.bringToFront');await selectBox();
         const initial=await detail();
         await ctrl('KeyC');

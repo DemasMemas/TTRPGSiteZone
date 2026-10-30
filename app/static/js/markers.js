@@ -4,6 +4,8 @@ import { scene, camera, renderer, controls, getHoveredTile } from './lobby3d.js'
 import { showNotification } from './utils.js';
 import {Server} from './api.js';
 import AppState from './ui_interactions.js';
+import { getMapSceneContext, sameMapScope } from './mapSceneContext.js';
+let markerCreateScope = null;
 
 let socket;
 let currentLobbyId;
@@ -148,7 +150,13 @@ function createMarkerSprite(marker) {
 
     sprite.position.set(position.x, position.y + 0.8, position.z);
     sprite.userData = { type: 'marker', markerId: marker.id, markerData: marker };
-    scene.add(sprite);
+    if (marker.location_id != null) {
+        sprite.material.sizeAttenuation=false;
+        sprite.scale.setScalar(type==='place'?.10:.045);
+        sprite.scale.z=1;
+        const context=getMapSceneContext();
+        if(sameMapScope(marker,context)){context.scene.add(sprite);positionLocalMarker(sprite,marker,context);}
+    } else scene.add(sprite);
     return sprite;
 }
 
@@ -193,6 +201,7 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
             }
         });
         uniqueRouteIds.forEach(id => updateRouteLines(id));
+        refreshMapMarkers();
     });
 
     socket.on('marker_added', (marker) => {
@@ -240,10 +249,13 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
         }
         if (previousRouteId && previousRouteId !== entry.data.routeId) updateRouteLines(previousRouteId);
         if (entry.data.routeId) updateRouteLines(entry.data.routeId);
+        refreshMapMarkers();
         updateRouteDatalists();
     });
 
     socket.on('marker_moved', (data) => {
+        const marker=markers.get(data.id);
+        if(marker){if(data.floor_level!==undefined)marker.data.floor_level=data.floor_level;if(data.surface_offset!==undefined)marker.data.surface_offset=data.surface_offset;}
         moveMarkerInScene(data.id, data.position);
         const entry = markers.get(data.id);
         if (entry && entry.data.routeId) updateRouteLines(entry.data.routeId);
@@ -254,6 +266,7 @@ export function initMarkers(lobbyId, authToken, socketInstance) {
         const routeId = entry?.data?.routeId;
         removeMarkerFromScene(data.id);
         if (routeId) updateRouteLines(routeId);
+        refreshMapMarkers();
         updateRouteDatalists();
     });
 
@@ -309,7 +322,6 @@ function addMarkerToScene(marker) {
     }
     const sprite = createMarkerSprite(marker);
     sprite.userData = { type: 'marker', markerId: marker.id, markerData: marker };
-    scene.add(sprite);
     markers.set(marker.id, { sprite, data: marker });
 }
 
@@ -333,12 +345,13 @@ function moveMarkerInScene(id, position) {
     if (!entry) return;
     entry.sprite.position.set(position.x, position.y + 0.8, position.z);
     entry.data.position = position;
+    refreshMapMarkers();
 }
 
 function removeMarkerFromScene(id) {
     const entry = markers.get(id);
     if (!entry) return;
-    scene.remove(entry.sprite);
+    entry.sprite.parent?.remove(entry.sprite);
     entry.sprite.material.map?.dispose();
     entry.sprite.material.dispose();
     markers.delete(id);
@@ -353,7 +366,7 @@ function clearSocketMarkers() {
         if (!String(id).startsWith('loc_')) removeMarkerFromScene(id);
     }
     routeLines.forEach(line => {
-        scene.remove(line);
+        line.parent?.remove(line);
         line.geometry.dispose();
         line.material.dispose();
     });
@@ -382,6 +395,38 @@ function hideTooltip() {
     tooltipDiv.style.display = 'none';
 }
 window.hideTooltip = hideTooltip;
+
+function positionLocalMarker(sprite, marker, context) {
+    const p=marker.position, height=context.surface(p.x,p.z,marker.floor_level??0);
+    sprite.position.set(p.x,(height??p.y)+Number(marker.surface_offset||0)+.16,p.z);
+    sprite.visible=height!=null&&context.visibleLevel(marker.floor_level);
+}
+
+function refreshMapMarkers() {
+    const context=getMapSceneContext();
+    for(const {sprite,data} of markers.values()){
+        if(data.location_id==null)continue;
+        if(sameMapScope(data,context)){context.scene.add(sprite);positionLocalMarker(sprite,data,context);}
+        else sprite.parent?.remove(sprite);
+    }
+    const routes=new Set([...markers.values()].map(e=>e.data.routeId).filter(Boolean));
+    for(const id of routes)updateRouteLines(id);
+}
+window.addEventListener('keydown',event=>{
+    if(event.key!=='Escape')return;
+    if(dragState?.cancel){event.preventDefault();event.stopImmediatePropagation();dragState.cancel();}
+    if(awaitingTilePick){awaitingTilePick=false;tilePickCallback=null;const modal=document.getElementById('marker-create-modal');if(modal)modal.style.display='none';}
+},{capture:true});
+window.addEventListener('location-editor-buildings-changed',()=>window.dispatchEvent(new Event('map-surface-changed')));
+window.addEventListener('map-scene-changing',()=>{
+    dragState?.cancel?.(); awaitingTilePick=false;tilePickCallback=null;
+    for(const {sprite,data} of markers.values())if(data.location_id!=null)sprite.parent?.remove(sprite);
+    for(const line of routeLines.values()){line.parent?.remove(line);line.geometry.dispose();line.material.dispose();}routeLines.clear();
+    resetHoveredMarker();closeMarkerEditModal();
+    const create=document.getElementById('marker-create-modal');if(create)create.style.display='none';
+});
+window.addEventListener('map-scene-changed',()=>{refreshMapMarkers();const context=getMapSceneContext();if(context?.locationId)setupMarkerInteraction(context);});
+window.addEventListener('map-surface-changed',refreshMapMarkers);
 
 function canSeeMarkerForCurrentUser(marker) {
     const userId = parseInt(localStorage.getItem('user_id'));
@@ -427,7 +472,7 @@ function updateRouteLines(routeId) {
     // Удаляем старую линию
     if (routeLines.has(routeId)) {
         const previous = routeLines.get(routeId);
-        scene.remove(previous);
+        previous.parent?.remove(previous);
         previous.geometry.dispose();
         previous.material.dispose();
         routeLines.delete(routeId);
@@ -436,7 +481,7 @@ function updateRouteLines(routeId) {
     // Собираем все точки с данным routeId
     const points = [];
     markers.forEach((entry) => {
-        if (entry.data.type === 'route_point' && entry.data.routeId === routeId && entry.data.routeOrder !== undefined) {
+        if (sameMapScope(entry.data) && entry.sprite.visible && entry.data.type === 'route_point' && entry.data.routeId === routeId && entry.data.routeOrder !== undefined) {
             points.push({
                 order: entry.data.routeOrder,
                 pos: entry.sprite.position.clone()
@@ -456,22 +501,29 @@ function updateRouteLines(routeId) {
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     const material = new THREE.LineBasicMaterial({ color: 0xffaa00 });
     const line = new THREE.Line(geometry, material);
-    scene.add(line);
+    getMapSceneContext()?.scene.add(line);
     routeLines.set(routeId, line);
 }
 
-export function setupMarkerInteraction() {
-    const canvas = renderer.domElement;
+export function setupMarkerInteraction(context = getMapSceneContext()) {
+    if(!context?.canvas || context.canvas.dataset.markerInteraction==='true')return;
+    const {canvas,camera,controls}=context;
+    canvas.dataset.markerInteraction='true';
+    const editable=()=>context.locationId?!window.locationEditMode:!AppState.editMode;
+    const sprites=()=>Array.from(markers.values()).map(e=>e.sprite).filter(sprite=>sprite.parent===context.scene&&sprite.visible);
+    const localPoint=event=>context.point(event.clientX,event.clientY);
+    const canEdit=data=>AppState.isGM||Number(data.createdBy)===Number(localStorage.getItem('user_id'));
+    const hoverPoint=()=>context.locationId?null:getHoveredTile();
 
     canvas.addEventListener('secondaryclick', event => {
-        if (!AppState.isGM || window.isLocationActive) return;
+        if (context.locationId ? !editable() : (!AppState.isGM || window.isLocationActive)) return;
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-        const hit = raycaster.intersectObjects(Array.from(markers.values()).map(entry => entry.sprite))[0];
+        const hit = raycaster.intersectObjects(sprites())[0];
         const marker = hit && markers.get(hit.object.userData.markerId)?.data;
-        if (!marker) return;
+        if (!marker || (!canEdit(marker) && marker.type!=='location')) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         if (marker.type === 'location') {
@@ -482,7 +534,7 @@ export function setupMarkerInteraction() {
     });
 
     canvas.addEventListener('mousemove', (event) => {
-        if (AppState.editMode) {
+        if (!editable()) {
             if (hoveredMarkerId !== null) {
                 hoveredMarkerId = null;
                 hideTooltip();
@@ -495,7 +547,7 @@ export function setupMarkerInteraction() {
         mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
         raycaster.setFromCamera(mouse, camera);
-        const markerSprites = Array.from(markers.values()).map(e => e.sprite);
+        const markerSprites = sprites();
         const intersects = raycaster.intersectObjects(markerSprites);
 
         if (intersects.length > 0) {
@@ -519,10 +571,15 @@ export function setupMarkerInteraction() {
     });
 
     canvas.addEventListener('click', (event) => {
+        if (awaitingTilePick && context.locationId) {
+            const point=localPoint(event);if(!point)return;
+            event.preventDefault();event.stopImmediatePropagation();
+            tilePickCallback?.(point.x,point.y,point.z);return;
+        }
         if (awaitingTilePick) {
             event.preventDefault();
-            event.stopPropagation();
-            const hovered = getHoveredTile();
+            event.stopImmediatePropagation();
+            const hovered = hoverPoint();
             if (!hovered) {
                 showNotification('Не удалось определить тайл', 'error');
                 return;
@@ -540,8 +597,8 @@ export function setupMarkerInteraction() {
 
         if (window.awaitingLocationPick) {
             event.preventDefault();
-            event.stopPropagation();
-            const hovered = getHoveredTile();
+            event.stopImmediatePropagation();
+            const hovered = hoverPoint();
             if (!hovered) {
                 showNotification('Не удалось определить тайл', 'error');
                 return;
@@ -558,31 +615,31 @@ export function setupMarkerInteraction() {
         mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-        const markerSprites = Array.from(markers.values()).map(e => e.sprite);
+        const markerSprites = sprites();
         const intersects = raycaster.intersectObjects(markerSprites);
         if (intersects.length > 0) {
             const markerId = intersects[0].object.userData.markerId;
             const markerEntry = markers.get(markerId);
             if (markerEntry && markerEntry.data.type === 'location') {
                 event.preventDefault();
-                event.stopPropagation();
+                event.stopImmediatePropagation();
                 return;
             }
         }
     });
 
     canvas.addEventListener('pointerdown', (event) => {
-        if (event.button !== 0) return;
+        if (event.button !== 0 || !editable() || window.commonMapToolMode) return;
         if (hoveredMarkerId === null) return;
 
         const markerId = hoveredMarkerId;
         const entry = markers.get(markerId);
         if (!entry) return;
-        if (entry.data.type === 'location') return;
+        if (entry.data.type === 'location' || !canEdit(entry.data)) return;
 
         const sprite = entry.sprite;
         event.preventDefault();
-        event.stopPropagation();
+        event.stopImmediatePropagation();
         canvas.setPointerCapture(event.pointerId);
 
         const spritePos = sprite.position.clone();
@@ -619,6 +676,12 @@ export function setupMarkerInteraction() {
             const newPoint = new THREE.Vector3();
             if (!raycaster.ray.intersectPlane(dragState.plane, newPoint)) return;
 
+            if(context.locationId){
+                const point=localPoint(e);if(!point)return;
+                const entry=markers.get(dragState.markerId);
+                dragState.localPosition=point;
+                entry.sprite.position.set(point.x,point.y+Number(entry.data.surface_offset||0)+.16,point.z);return;
+            }
             const deltaX = newPoint.x - dragState.startPoint.x;
             const deltaZ = newPoint.z - dragState.startPoint.z;
             const newPos = dragState.startSpritePos.clone();
@@ -641,31 +704,44 @@ export function setupMarkerInteraction() {
                     token,
                     lobby_id: currentLobbyId,
                     marker_id: dragState.markerId,
-                    position: { x: newPos.x, y: newPos.y - 0.8, z: newPos.z }
+                    position: context.locationId?{x:newPos.x,y:newPos.y-.16,z:newPos.z}:{ x: newPos.x, y: newPos.y - 0.8, z: newPos.z },
+                    ...(context.locationId?{floor_level:context.level,surface_offset:Number(entry.data.surface_offset||0)}:{})
                 });
                 if (entry.data.routeId) updateRouteLines(entry.data.routeId);
             }
 
-            canvas.releasePointerCapture(e.pointerId);
+            if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);
             dragState = null;
             controls.enabled = true;
             canvas.style.cursor = 'default';
 
             canvas.removeEventListener('pointermove', onPointerMove);
             canvas.removeEventListener('pointerup', onPointerUp);
+            canvas.removeEventListener('pointercancel',cancelDrag);
         };
 
         canvas.addEventListener('pointermove', onPointerMove);
         canvas.addEventListener('pointerup', onPointerUp);
+        const cancelDrag = () => {
+            if(!dragState || dragState.pointerId!==event.pointerId)return;
+            sprite.position.copy(spritePos);
+            if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);
+            dragState=null;controls.enabled=true;canvas.style.cursor='default';
+            canvas.removeEventListener('pointermove',onPointerMove);
+            canvas.removeEventListener('pointerup',onPointerUp);
+            canvas.removeEventListener('pointercancel',cancelDrag);
+        };
+        dragState.cancel=cancelDrag;
+        canvas.addEventListener('pointercancel',cancelDrag,{once:true});
     }, { capture: true });
 
     canvas.addEventListener('dblclick', (event) => {
-        if (AppState.editMode) return;
+        if (!editable()) return;
         const rect = canvas.getBoundingClientRect();
         mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-        const markerSprites = Array.from(markers.values()).map(e => e.sprite);
+        const markerSprites = sprites();
         const intersects = raycaster.intersectObjects(markerSprites);
         if (intersects.length > 0) {
             const markerId = intersects[0].object.userData.markerId;
@@ -682,21 +758,22 @@ export function setupMarkerInteraction() {
                     showNotification('Функция входа в локацию не определена');
                 }
                 event.preventDefault();
-                event.stopPropagation();
+                event.stopImmediatePropagation();
                 return;
             }
             openMarkerEditModal(markerData);
             event.preventDefault();
-            event.stopPropagation();
+            event.stopImmediatePropagation();
         } else {
-            const hovered = getHoveredTile();
+            const hovered = hoverPoint();
+            if(context.locationId){const point=localPoint(event);if(point)openCreateMarkerModal(point);return;}
             if (hovered) {
                 const worldX = hovered.chunk.chunkX * 32 + hovered.tileX + 0.5;
                 const worldZ = hovered.chunk.chunkY * 32 + hovered.tileY + 0.5;
                 const height = hovered.tileData.height || 1.0;
                 openCreateMarkerModal({ x: worldX, y: height + 0.8, z: worldZ });
                 event.preventDefault();
-                event.stopPropagation();
+                event.stopImmediatePropagation();
             }
         }
     }, { capture: true });
@@ -704,17 +781,25 @@ export function setupMarkerInteraction() {
 
 // ---------- Функции для выбора тайла ----------
 export function pickTileForMarker() {
+    if(getMapSceneContext()?.locationId){const button=document.querySelector('[data-common-map-tool="marker"]');if(button?.getAttribute('aria-pressed')!=='true')button?.click();}
     document.getElementById('marker-create-modal').style.display = 'none';
     awaitingTilePick = true;
     showNotification('Кликните по тайлу на карте', 'system');
     tilePickCallback = (worldX, height, worldZ) => {
+        if(markerCreateScope)markerCreateScope.floor_level=getMapSceneContext()?.level??markerCreateScope.floor_level;
         document.getElementById('marker-create-pos-x').value = worldX.toFixed(2);
-        document.getElementById('marker-create-pos-y').value = (height + 0.8).toFixed(2);
+        document.getElementById('marker-create-pos-y').value = (height + (markerCreateScope ? 0 : 0.8)).toFixed(2);
         document.getElementById('marker-create-pos-z').value = worldZ.toFixed(2);
         document.getElementById('marker-create-modal').style.display = 'flex';
         awaitingTilePick = false;
         tilePickCallback = null;
     };
+}
+
+export function completeMarkerTilePick(point) {
+    if(!awaitingTilePick || !getMapSceneContext()?.locationId)return false;
+    tilePickCallback?.(point.x,point.y,point.z);
+    return true;
 }
 
 // ---------- Функции для работы с выпадающим списком маршрутов ----------
@@ -728,6 +813,8 @@ function toggleRouteFields(modalType) {
 
 // ---------- Модальное окно создания ----------
 export function openCreateMarkerModal(position = null) {
+    const context=getMapSceneContext();
+    markerCreateScope=context?.locationId?{location_id:context.locationId,floor_level:context.level}:null;
     updateRouteDatalists();
     if (position) {
         document.getElementById('marker-create-pos-x').value = position.x.toFixed(2);
@@ -755,6 +842,8 @@ export function openCreateMarkerModal(position = null) {
 }
 
 export function openCreateMarkerModalAtCenter() {
+    const context=getMapSceneContext();
+    if(context?.locationId){const x=context.width/2,z=context.height/2,height=context.surface(x,z);if(height!=null)openCreateMarkerModal({x,y:height,z});return;}
     const centerX = mapWidthTiles / 2;
     const centerZ = mapHeightTiles / 2;
     import('./lobby3d.js').then(({ getTileHeightAt }) => {
@@ -767,6 +856,8 @@ export function openCreateMarkerModalAtCenter() {
 }
 
 export function fillCenterCoordinates() {
+    const context=getMapSceneContext();
+    if(context?.locationId){const x=context.width/2,z=context.height/2,height=context.surface(x,z);if(height!=null){for(const [k,v] of Object.entries({x,y:height,z}))document.getElementById('marker-create-pos-'+k).value=v.toFixed(2);}return;}
     const centerX = mapWidthTiles / 2;
     const centerZ = mapHeightTiles / 2;
     import('./lobby3d.js').then(({ getTileHeightAt }) => {
@@ -798,6 +889,14 @@ export function submitCreateMarker() {
         routeId: null,
         routeOrder: null
     };
+    if(markerCreateScope){
+        const context=getMapSceneContext();
+        if(!sameMapScope(markerCreateScope,context))return;
+        Object.assign(marker,markerCreateScope);
+        const height=context.surface(marker.position.x,marker.position.z,marker.floor_level);
+        if(height==null){showNotification('На выбранном этаже в этой точке нет поверхности.','error');return;}
+        marker.surface_offset=marker.position.y-height;
+    }
     if (type === 'route_point') {
         marker.routeId = document.getElementById('marker-create-route-id').value || null;
         marker.routeOrder = parseInt(document.getElementById('marker-create-route-order').value) || null;
@@ -956,6 +1055,7 @@ function openMarkerEditModal(marker) {
     posXField.value = marker.position.x.toFixed(2);
     posYField.value = marker.position.y.toFixed(2);
     posZField.value = marker.position.z.toFixed(2);
+    if(marker.location_id!=null){const context=getMapSceneContext();const height=context?.surface(marker.position.x,marker.position.z,marker.floor_level);if(height!=null)posYField.value=(height+Number(marker.surface_offset||0)).toFixed(2);}
 
     if (routeIdField) routeIdField.value = marker.routeId || '';
     if (routeOrderField) routeOrderField.value = marker.routeOrder !== undefined ? marker.routeOrder : '';
@@ -965,6 +1065,10 @@ function openMarkerEditModal(marker) {
     typeSelect.removeEventListener('change', () => toggleRouteFields('edit'));
     typeSelect.addEventListener('change', () => toggleRouteFields('edit'));
     toggleRouteFields('edit');
+
+    const editable=AppState.isGM||Number(marker.createdBy)===Number(localStorage.getItem('user_id'));
+    document.querySelectorAll('#marker-edit-modal input,#marker-edit-modal select,#marker-edit-modal textarea,#marker-edit-modal button:not([onclick="closeMarkerEditModal()"])')
+        .forEach(control=>control.disabled=!editable);
 
     document.getElementById('marker-edit-modal').style.display = 'flex';
 }
@@ -994,6 +1098,13 @@ export function saveMarkerEdit() {
         routeId: null,
         routeOrder: null
     };
+    const marker=markers.get(id)?.data;
+    if(marker?.location_id!=null){
+        const context=getMapSceneContext();if(!sameMapScope(marker,context))return;
+        const height=context.surface(updates.position.x,updates.position.z,marker.floor_level);
+        if(height==null){showNotification('На выбранном этаже в этой точке нет поверхности.','error');return;}
+        updates.surface_offset=updates.position.y-height;
+    }
     if (type === 'route_point') {
         updates.routeId = document.getElementById('marker-edit-route-id').value || null;
         updates.routeOrder = parseInt(document.getElementById('marker-edit-route-order').value) || null;
@@ -1009,6 +1120,8 @@ export function saveMarkerEdit() {
 }
 
 export function fillEditCenterCoordinates() {
+    const context=getMapSceneContext();
+    if(context?.locationId){const x=context.width/2,z=context.height/2,height=context.surface(x,z);if(height!=null){for(const [k,v] of Object.entries({x,y:height,z}))document.getElementById('marker-edit-pos-'+k).value=v.toFixed(2);}return;}
     const centerX = mapWidthTiles / 2;
     const centerZ = mapHeightTiles / 2;
     import('./lobby3d.js').then(({ getTileHeightAt }) => {
@@ -1038,7 +1151,7 @@ export function deleteMarker() {
 function updateRouteDatalists() {
     const routeIds = new Set();
     markers.forEach(entry => {
-        if (entry.data.type === 'route_point' && entry.data.routeId) {
+        if (sameMapScope(entry.data) && entry.data.type === 'route_point' && entry.data.routeId) {
             routeIds.add(entry.data.routeId);
         }
     });

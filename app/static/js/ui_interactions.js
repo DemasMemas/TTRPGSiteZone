@@ -96,7 +96,10 @@ function makeDraggable(panel, handle, panelId) {
         if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"], [draggable="true"], .toggle-btn, .close, .character-card, .character-card *')) return;
         e.preventDefault();
         panel.style.transition = 'none';
-        panel.style.zIndex = '110';
+        document.querySelectorAll('.draggable-panel').forEach(other => {
+            if (other !== panel && other.style.zIndex === '130') other.style.zIndex = '100';
+        });
+        panel.style.zIndex = '130';
         const rect = panel.getBoundingClientRect();
         panel.style.left = rect.left + 'px';
         panel.style.top = rect.top + 'px';
@@ -107,8 +110,8 @@ function makeDraggable(panel, handle, panelId) {
         startMouseY = e.clientY;
         startLeft = rect.left;
         startTop = rect.top;
-        startWidth = panel.offsetWidth;
-        startHeight = panel.offsetHeight;
+        startWidth = rect.width;
+        startHeight = rect.height;
         isDragging = true;
         panel.style.cursor = 'grabbing';
     };
@@ -123,8 +126,8 @@ function makeDraggable(panel, handle, panelId) {
         const winW = window.innerWidth;
         const winH = window.innerHeight;
         // Keep a visible grab area even when a panel is larger than the viewport.
-        newLeft = Math.min(Math.max(newLeft, 0), Math.max(0, winW - Math.min(startWidth, 80)));
-        newTop = Math.min(Math.max(newTop, 0), Math.max(0, winH - Math.min(startHeight, 56)));
+        newLeft = Math.min(Math.max(newLeft, 0), Math.max(0, winW - Math.min(startWidth, panelId === 'panel-characters' ? winW : 80)));
+        newTop = Math.min(Math.max(newTop, 0), Math.max(0, winH - Math.min(startHeight, panelId === 'panel-characters' ? winH : 56)));
         panel.style.left = newLeft + 'px';
         panel.style.top = newTop + 'px';
     };
@@ -134,9 +137,9 @@ function makeDraggable(panel, handle, panelId) {
             isDragging = false;
             panel.style.cursor = '';
             panel.style.transition = '';
-            panel.style.zIndex = '100';
             const rect = panel.getBoundingClientRect();
             savePanelState(panelId, { position: { left: rect.left, top: rect.top } });
+            panel.dispatchEvent(new Event('panel-position-changed'));
         }
     };
 
@@ -154,16 +157,65 @@ function applyPosition(panel, pos) {
     requestAnimationFrame(() => {
         const winW = window.innerWidth;
         const winH = window.innerHeight;
-        const panelW = panel.offsetWidth;
-        const panelH = panel.offsetHeight;
-        const left = Math.min(Math.max(pos.left, 0), winW - panelW);
-        const top = Math.min(Math.max(pos.top, 0), winH - panelH);
+        const rect = panel.getBoundingClientRect();
+        const panelW = rect.width;
+        const panelH = rect.height;
+        const left = Math.min(Math.max(Number.isFinite(pos.left) ? pos.left : 0, 0), Math.max(0, winW - panelW));
+        const top = Math.min(Math.max(Number.isFinite(pos.top) ? pos.top : 0, 0), Math.max(0, winH - panelH));
         panel.style.left = left + 'px';
         panel.style.top = top + 'px';
         panel.style.bottom = 'auto';
         panel.style.right = 'auto';
         panel.style.transform = 'none';
     });
+}
+
+function initCharacterPanelLayout(panel) {
+    const chat = document.getElementById('panel-chat');
+    if (!chat) return;
+    let wasDocked = false;
+    let originalStyle = null;
+    let frame = null;
+    const place = (left, top) => {
+        Object.assign(panel.style, {left: `${left}px`, top: `${top}px`, right: 'auto', bottom: 'auto', transform: 'none'});
+    };
+    const recover = () => {
+        const r = panel.getBoundingClientRect();
+        const left = Math.max(0, Math.min(r.left, Math.max(0, innerWidth - r.width)));
+        const top = Math.max(0, Math.min(r.top, Math.max(0, innerHeight - r.height)));
+        if (left !== r.left || top !== r.top) place(left, top);
+    };
+    const layout = () => {
+        frame = null;
+        const docked = !chat.hidden && chat.dataset.chatDocked === 'true';
+        if (!docked && originalStyle) {
+            Object.assign(panel.style, originalStyle);
+            originalStyle = null;
+        }
+        recover();
+        if (docked && !wasDocked) {
+            const r = panel.getBoundingClientRect(), c = chat.getBoundingClientRect();
+            const overlaps = (left, top) => left < c.right && left + r.width > c.left && top < c.bottom && top + r.height > c.top;
+            if (overlaps(r.left, r.top)) {
+                const candidates = [[c.left - r.width - 16, r.top], [c.right + 16, r.top],
+                    [r.left, c.top - r.height - 16], [r.left, c.bottom + 16]];
+                const position = candidates.find(([left, top]) => left >= 0 && top >= 0
+                    && left + r.width <= innerWidth && top + r.height <= innerHeight && !overlaps(left, top));
+                if (position) {
+                    originalStyle = Object.fromEntries(['left','top','right','bottom','transform'].map(key => [key, panel.style[key]]));
+                    place(...position);
+                }
+            }
+        }
+        wasDocked = docked;
+    };
+    const schedule = () => { if (frame === null) frame = requestAnimationFrame(layout); };
+    // A manual move becomes the preferred position; chat transitions must not undo it.
+    panel.addEventListener('panel-position-changed', () => { originalStyle = null; });
+    new MutationObserver(schedule).observe(chat, {attributes: true, attributeFilter: ['hidden','data-chat-docked','class']});
+    new ResizeObserver(schedule).observe(panel);
+    window.addEventListener('resize', schedule);
+    schedule();
 }
 
 export function initDraggablePanels() {
@@ -197,6 +249,7 @@ export function initDraggablePanels() {
         }
         panel._disposeDrag = makeDraggable(panel, header, panelId);
         panel.dataset.draggableInitialized = 'true';
+        if (panelId === 'panel-characters') initCharacterPanelLayout(panel);
         if (panelId === 'panel-common-tools') {
             const launcher = document.getElementById('common-tools-toggle');
             const setOpen = open => {

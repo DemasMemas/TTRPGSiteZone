@@ -10,6 +10,48 @@ from app.services.exceptions import ValidationError
 from app.services.location_navigation import find_path, surface
 
 
+def test_short_ground_route_stays_straight_and_preserves_weighted_optimal_cost():
+    import heapq
+    import random
+    location = SimpleNamespace(grid_width=24, grid_height=20,
+                               tiles_data=[[{'height': 1} for _ in range(24)] for _ in range(20)])
+    route = find_path(location, [], (2, 10, 0), (7, 10, 0), lambda level: (set(), {}))
+    assert route['path'] == [(x, 10) for x in range(2, 8)]
+    for seed in range(12):
+        rng = random.Random(seed)
+        blocked = {(x, y) for x in range(24) for y in range(20) if rng.random() < .18}
+        blocked -= {(2, 10), (21, 10)}
+        costs = {(x, y): 5 for x in range(24) for y in range(20) if rng.random() < .08}
+        costs.pop((21, 10), None)
+        queue, best = [(0, (2, 10))], {(2, 10): 0}
+        while queue:
+            cost, key = heapq.heappop(queue)
+            if cost != best[key]:
+                continue
+            for dx, dy in [(1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)]:
+                p = (key[0]+dx, key[1]+dy)
+                if p in blocked or not (0 <= p[0] < 24 and 0 <= p[1] < 20):
+                    continue
+                candidate = cost+1+costs.get(p, 0)
+                if candidate < best.get(p, float('inf')):
+                    best[p] = candidate
+                    heapq.heappush(queue, (candidate, p))
+        route = find_path(location, [], (2,10,0), (21,10,0), lambda level: (blocked, costs))
+        assert (route['cost'] if route else None) == best.get((21,10))
+        if route:
+            assert all(p not in blocked for p in route['path'])
+
+
+def test_navigation_keeps_legacy_top_level_floor_numbers():
+    location = SimpleNamespace(grid_width=10, grid_height=10,
+                               tiles_data=[[{'height': 1} for _ in range(10)] for _ in range(10)])
+    floor = {'type': 'floor', 'tile_x': 5, 'tile_y': 5, 'level': 1,
+             'properties': {'dimensions': {'width': 6, 'depth': 6, 'height': .12}}}
+    route = find_path(location, [floor], (4,4,1), (6,4,1), lambda level: (set(), {}))
+    assert route and route['cost'] == 2
+    assert all(n['level'] == 1 for n in route['surfaces'])
+
+
 def obj(kind, x, y, level, width=8, depth=8, height=.12, **extra):
     return SimpleNamespace(id=len(extra), type=kind, name=kind, tile_x=x, tile_y=y, properties={
         'level': level, 'building_id': 'A', 'dimensions': {'width': width, 'depth': depth, 'height': height}, **extra})

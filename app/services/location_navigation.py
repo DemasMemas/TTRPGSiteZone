@@ -217,12 +217,18 @@ def connects(a, b):
 def find_path(location, objects, start, end, maps):
     """maps(level) returns the established blocked cells and climb costs."""
     levels = {0, start[2], end[2]} | {level_of(o) for o in objects}
+    # Surface geometry only uses these structures. Collision maps still include
+    # every object. Snapshot ORM fields once rather than reading them per node.
+    surface_objects = [dict(type=value(o, 'type'), level=level_of(o), tile_x=value(o, 'tile_x'),
+                     tile_y=value(o, 'tile_y'), properties=value(o, 'properties', {}) or {})
+                for o in objects if value(o, 'type') in {'floor', 'stairs', 'ladder', 'hatch', 'floor_opening'}]
+    surface_geometry = [o for o in surface_objects if o['type'] in {'floor', 'stairs', 'hatch'}]
     cache = {}
 
     def node(key):
         if key not in cache:
             x, y, level = key
-            cache[key] = surface(location, objects, x, y, level)
+            cache[key] = surface(location, surface_geometry, x, y, level)
         return cache[key]
 
     source, target = node(start), node(end)
@@ -231,10 +237,18 @@ def find_path(location, objects, start, end, maps):
     blocked, costs = maps(end[2])
     if (end[0], end[1]) in blocked and end != start or costs.get(end[:2], 0) > 0:
         return None
-    queue = [(0, start)]
+    def estimate(key):
+        return max(abs(end[i] - key[i]) for i in range(3))
+
+    def distance(key):
+        return sum((end[i] - key[i]) ** 2 for i in range(3))
+
+    # Each edge costs at least one and changes each coordinate by at most one.
+    # Chebyshev distance is admissible, including stairs and vertical ladders.
+    queue = [(estimate(start), distance(start), 0, start)]
     best, previous = {start: 0}, {}
     while queue:
-        cost, key = heapq.heappop(queue)
+        _, _, cost, key = heapq.heappop(queue)
         if cost != best[key]:
             continue
         if key == end:
@@ -263,7 +277,7 @@ def find_path(location, objects, start, end, maps):
                 candidate = (x, y, level)
                 b = node(candidate)
                 vertical = dx == dy == 0
-                if not b or not (ladder_connection(location, objects, a, b) if vertical else connects(a, b)):
+                if not b or not (ladder_connection(location, surface_objects, a, b) if vertical else connects(a, b)):
                     continue
                 blocked, costs = maps(level)
                 if (x, y) in blocked:
@@ -271,5 +285,5 @@ def find_path(location, objects, start, end, maps):
                 new_cost = cost + (max(1, math.ceil(abs(a['height']-b['height']))) if vertical else 1) + costs.get((x, y), 0)
                 if new_cost < best.get(candidate, math.inf):
                     best[candidate], previous[candidate] = new_cost, key
-                    heapq.heappush(queue, (new_cost, candidate))
+                    heapq.heappush(queue, (new_cost + estimate(candidate), distance(candidate), new_cost, candidate))
     return None

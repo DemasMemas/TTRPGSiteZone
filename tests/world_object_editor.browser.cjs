@@ -23,9 +23,9 @@ async function connect(url) {
     socket.onmessage = event => {
         const message = JSON.parse(event.data);
         if(message.method==='Fetch.requestPaused'){
-            const p=message.params,name=new URL(p.request.url).pathname.split('/').pop(),dir=process.env.VTT_WATER_BASELINE_DIR;
+            const p=message.params,name=new URL(p.request.url).pathname.split('/').pop(),dir=new URL(p.request.url).pathname.startsWith('/static/js/')?process.env.VTT_WATER_BASELINE_DIR:process.env.VTT_BROWSER_VENDOR_DIR;
             const file=dir&&path.join(dir,name);
-            (file&&fs.existsSync(file)?call('Fetch.fulfillRequest',{requestId:p.requestId,responseCode:200,responseHeaders:[{name:'Content-Type',value:'application/javascript'}],body:fs.readFileSync(file).toString('base64')}):call('Fetch.continueRequest',{requestId:p.requestId})).catch(console.error);
+            (file&&fs.existsSync(file)?call('Fetch.fulfillRequest',{requestId:p.requestId,responseCode:200,responseHeaders:[{name:'Content-Type',value:'application/javascript'},{name:'Access-Control-Allow-Origin',value:'*'}],body:fs.readFileSync(file).toString('base64')}):call('Fetch.continueRequest',{requestId:p.requestId})).catch(console.error);
         }
         if (message.method) events.set(message.method, message.params);
         if (process.env.VTT_NETWORK === '1' && /^(Network\.webSocket|Runtime\.exceptionThrown|Log\.entryAdded)/.test(message.method || '')) networkEvents.push(message);
@@ -46,7 +46,14 @@ async function connect(url) {
         });
         socket.send(JSON.stringify({ id, method, params }));
     });
+    let vendorIntercepted = false;
     const evaluate = async expression => {
+        if(process.env.VTT_BROWSER_VENDOR_DIR&&!vendorIntercepted) {
+            await call('Fetch.enable',{patterns:[{urlPattern:'*/static/js/*',requestStage:'Request'},
+                {urlPattern:'*unpkg.com/three@0.128.0/*',requestStage:'Request'},
+                {urlPattern:'*cdnjs.cloudflare.com/ajax/libs/socket.io/*',requestStage:'Request'}]});
+            vendorIntercepted = true;
+        }
         const result = await call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
         assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
         return result.result.value;
@@ -56,7 +63,7 @@ async function connect(url) {
             if (await evaluate(expression)) return;
             await pause(250);
         }
-        console.error(await evaluate(`JSON.stringify({url:location.href,gm:window.isGM,token:Boolean(localStorage.getItem('access_token')),body:document.body.innerText.slice(0,500)})`));
+        console.error(await evaluate(`JSON.stringify({url:location.href,gm:window.isGM,token:Boolean(localStorage.getItem('access_token')),body:document.body?.innerText.slice(0,500)})`));
         throw new Error(`Timed out: ${label}`);
     };
     if (process.env.VTT_NETWORK === '1') await call('Network.enable');
@@ -81,6 +88,9 @@ TestingConfig.SOCKETIO_ASYNC_MODE = ${process.env.VTT_NETWORK_WERKZEUG === '1' ?
 from app import create_app, socketio
 from app.extensions import db
 import os, runpy
+if ${process.env.VTT_NAVIGATION_SOURCE ? 'True' : 'False'}:
+    import app.services.location_navigation as navigation
+    exec(compile(open(${JSON.stringify(process.env.VTT_NAVIGATION_SOURCE || '')},encoding='utf-8-sig').read(), 'navigation-baseline', 'exec'), navigation.__dict__)
 original_run = socketio.run
 def run_with_database(app, **kwargs):
     with app.app_context():
@@ -98,7 +108,8 @@ else:
     let serverErrors = '';
     server.stderr.on('data', data => { serverErrors = process.env.VTT_NETWORK === '1' ? serverErrors + data : (serverErrors + data).slice(-10000); });
     server.stdout.on('data', data => { if(process.env.VTT_NETWORK === '1' && String(data).includes('NETWORK SERVER')) console.log(String(data).trim()); });
-    const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'vtt-object-editor-'));
+    const profile = process.env.VTT_BROWSER_PROFILE || fs.mkdtempSync(path.join(os.tmpdir(), 'vtt-object-editor-'));
+    if (process.env.VTT_BROWSER_PROFILE) fs.rmSync(path.join(profile,'DevToolsActivePort'),{force:true});
     let browser, page, observer, playerPage, browserProtocol;
     try {
         for (let i = 0; i < 100; i++) {
@@ -110,7 +121,9 @@ else:
                 headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
                 ...(payload ? { body: JSON.stringify(payload) } : {}),
             });
-            const result = await response.json();
+            const body = await response.text();
+            assert.ok(response.headers.get('content-type')?.includes('application/json'), `${url}: ${body}`);
+            const result = JSON.parse(body);
             assert.ok(response.ok, JSON.stringify(result));
             return result;
         };
@@ -128,7 +141,7 @@ else:
         await request(`/lobbies/${lobby.id}/chunks/1/0/tile/0/10`, { objects: [{ type: 'house', x: -0.4, z: -0.4 }] }, token, 'PATCH');
         browser = spawn(process.env.BROWSER_EXECUTABLE || 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
             '--headless=new', '--no-sandbox', '--no-first-run', '--ignore-certificate-errors',
-            ...((process.env.VTT_LOC_SCULPT === '1' || process.env.VTT_LOC_LIGHT_CLEANUP === '1' || process.env.VTT_LOC_NUMERIC === '1' || process.env.VTT_LOC_HISTORY === '1' || process.env.VTT_LOC_BRUSH === '1' || process.env.VTT_LOC_CLIPBOARD === '1') ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] : []),
+            ...((process.env.VTT_PRIPYAT === '1' || process.env.VTT_UI_REGRESSION === '1' || process.env.VTT_UI_LAYOUT === '1' || process.env.VTT_LOC_SCULPT === '1' || process.env.VTT_LOC_LIGHT_CLEANUP === '1' || process.env.VTT_LOC_NUMERIC === '1' || process.env.VTT_LOC_HISTORY === '1' || process.env.VTT_LOC_BRUSH === '1' || process.env.VTT_LOC_CLIPBOARD === '1') ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] : []),
             ...(process.env.VTT_PERF_UNCAPPED==='1'?['--disable-frame-rate-limit','--disable-gpu-vsync']:[]),
             ...(process.env.VTT_BROWSER_GPU==='1'?[]:['--use-angle=swiftshader','--enable-unsafe-swiftshader']), '--window-size=1440,900',
             '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
@@ -144,16 +157,67 @@ else:
         await page.call('Page.enable');
         await page.call('Runtime.enable');
         await page.call('Log.enable');
-        if(process.env.VTT_WATER_BASELINE_DIR)await page.call('Fetch.enable',{patterns:[{urlPattern:'*/static/js/*',requestStage:'Request'}]});
+        if ((process.env.VTT_UI_REGRESSION === '1' || process.env.VTT_PRIPYAT === '1') && !process.env.VTT_WATER_BASELINE_DIR) {
+            const modules = path.join(profile, 'regression-modules');
+            fs.mkdirSync(modules,{recursive:true});
+            const source = process.env.VTT_PRIPYAT_LEGACY === '1'
+                ? fs.readFileSync(path.join(root,'tmp/ui-regression-modules/locationScene.js'),'utf8').split('\nexport {showCombatActionMenu,')[0]
+                : fs.readFileSync(path.join(root,'app/static/js/locationScene.js'),'utf8');
+            fs.writeFileSync(path.join(modules,'locationScene.js'), source + `
+export {showCombatActionMenu, showFacingMenu, updateFacingPreview, closeFacingMenu, findMovementPath, hasStoreyNavigation, beginCharacterMoveMode, updateMovementPreview, commitMovementPreview, resolveFacingCell};
+export function facingPreviewCount(){return facingPreviewMesh?.count || 0;}
+export function navigationPreviewSettled(sx,sy,x,y,c,l){return [...navigationPreviews.entries()].some(([key,value])=>key.endsWith(\`:\${c}:\${sx}:\${sy}:\${x}:\${y}:\${l}\`)&&value!==null);}
+export function characterPose(id){const e=getCharacterModelEntry(id);return {x:e.posX,y:e.posY,fx:e.facingX,fy:e.facingY};}
+export function movementHintText(){return movementPreviewHint?.textContent;}
+export function previewDiagnostics(){return {count:facingPreviewMesh?.count||0,pending:!!pendingFacingSelection,pose:pendingFacingSelection&&characterPose(pendingFacingSelection.characterId)};}
+export function previewComplete(){return facingPreviewState?.complete===true;}
+export function previewTiles(){return Array.from({length:facingPreviewMesh?.count||0},(_,i)=>[Math.round(facingPreviewMesh.instanceMatrix.array[i*16+12]-.5),Math.round(facingPreviewMesh.instanceMatrix.array[i*16+14]-.5)]);}
+export function expectedPreview(id,x,y){const s={...getCharacterModelEntry(id),facingX:x-getCharacterModelEntry(id).posX,facingY:y-getCharacterModelEntry(id).posY};return facingPreviewState.cells.filter(c=>isPointVisibleToPlayer(c.x,c.y,c.height+1.65,[s])).map(c=>[c.x,c.y]);}
+export function visibilitySnapshot(){return JSON.stringify({fog:[...fogMemory],characters:[...characterModels.values()].map(e=>e.model.visible),objects:locationObjectMeshes.map(m=>m.visible),decor:objectMeshes.map(m=>m.visible)});}
+export function characterVisible(id){return getCharacterModelEntry(id)?.model.visible;}
+export function previewFixturePose(id,x,y,level){closeFacingMenu();const height=getVisionObjectIndex().floors.get(level)?.get(\`\${x}:\${y}\`)??getTileHeight(x,y);updateCharacterPosition(id,x,y,{floor_level:level,height});setLocationViewLevel(level);return height;}
+if(typeof renderFacingPreview==='function'){const original=renderFacingPreview;renderFacingPreview=()=>{const t=performance.now();try{return original();}finally{(window.previewRenderSamples ||= []).push(performance.now()-t);}};}
+`);
+            process.env.VTT_WATER_BASELINE_DIR = modules;
+        }
+        if(process.env.VTT_WATER_BASELINE_DIR || process.env.VTT_BROWSER_VENDOR_DIR)await page.call('Fetch.enable',{patterns:[{urlPattern:'*/static/js/*',requestStage:'Request'},
+            ...(process.env.VTT_BROWSER_VENDOR_DIR?[{urlPattern:'*unpkg.com/three@0.128.0/*',requestStage:'Request'},{urlPattern:'*cdnjs.cloudflare.com/ajax/libs/socket.io/*',requestStage:'Request'}]:[])]});
         await page.call('Page.navigate', { url: base });
         await page.until('location.origin === ' + JSON.stringify(base), 'origin');
         await page.evaluate(`localStorage.setItem('access_token', ${JSON.stringify(token)});localStorage.setItem('user_id', ${JSON.stringify(String(login.user_id))});`);
         if(process.env.VTT_FORCE_WEBGL1==='1')await page.call('Page.addScriptToEvaluateOnNewDocument',{source:"const originalGetContext=HTMLCanvasElement.prototype.getContext;HTMLCanvasElement.prototype.getContext=function(type,...args){return type==='webgl2'?null:originalGetContext.call(this,type,...args)}"});
         await page.call('Page.navigate', { url: `${base}/lobbies/${lobby.id}/page` });
         await page.until(`Boolean(window.toggleEditMode && window.beginDirectWorldObjectEdit && window.isGM)`, 'game startup');
+        if(process.env.VTT_BROWSER_VENDOR_DIR) {
+            fs.mkdirSync(process.env.VTT_BROWSER_VENDOR_DIR,{recursive:true});
+            const {frameTree}=await page.call('Page.getResourceTree');
+            for(const resource of frameTree.resources) {
+                if(!/unpkg.com\/three@0.128.0\/|cdnjs.cloudflare.com\/ajax\/libs\/socket.io\//.test(resource.url))continue;
+                const name=new URL(resource.url).pathname.split('/').pop();
+                if(!['three.module.js','OrbitControls.js','CSS2DRenderer.js','socket.io.js','GLTFLoader.js','BufferGeometryUtils.js'].includes(name))continue;
+                const body=await page.call('Page.getResourceContent',{frameId:frameTree.frame.id,url:resource.url});
+                fs.writeFileSync(path.join(process.env.VTT_BROWSER_VENDOR_DIR,name),Buffer.from(body.content,body.base64Encoded?'base64':'utf8'));
+            }
+        }
         await page.evaluate(`(async()=>{window.sceneModule=await import('/static/js/lobby3d.js');window.threeModule=await import('three')})()`);
         await page.until(`sceneModule.chunksMap.size===${waterGeometry?4:2} && document.getElementById('scene-loading-screen').classList.contains('is-hidden')`, 'world chunks');
         assert.equal(await page.evaluate('Boolean(sceneModule.renderer.isUnavailableRenderer)'), false);
+        if (process.env.VTT_PRIPYAT === '1') {
+            await require('./pripyat_ui.browser.cjs')({page,request,token,lobby,base,connect,debugPort});
+            return;
+        }
+        if (process.env.VTT_UI_REGRESSION === '1') {
+            await require('./ui_regression.browser.cjs')({ page, request, token, lobby, base, connect, debugPort });
+            return;
+        }
+        if (process.env.VTT_LOCAL_MAP_TOOLS === '1') {
+            await require('./local_map_tools.browser.cjs')({ page, request, token, lobby, base, connect, debugPort });
+            return;
+        }
+        if (process.env.VTT_UI_LAYOUT === '1') {
+            await require('./ui_layout.browser.cjs')({ page, request, token, lobby, base, connect, debugPort });
+            return;
+        }
         if (process.env.VTT_SCENE_LOADING === '1') {
             await require('./scene_loading.browser.cjs')({ page, request, token, lobby, base });
             return;
@@ -947,6 +1011,20 @@ else:
         console.error(serverErrors.slice(-2500).replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g,'[test token]'));
         throw error;
     } finally {
+        if (page && browser?.exitCode === null) {
+            await page.call('Browser.close').catch(() => {});
+            if (browser.exitCode === null) {
+                await new Promise(resolve => {
+                    const timer = setTimeout(resolve, 5000);
+                    browser.once('exit', () => { clearTimeout(timer); resolve(); });
+                });
+            }
+        }
         page?.close(); observer?.close(); playerPage?.close(); browserProtocol?.close(); browser?.kill(); server.kill(); clearInterval(keepAlive);
+        const profilePath = path.resolve(profile);
+        if (!process.env.VTT_BROWSER_PROFILE && path.dirname(profilePath) === path.resolve(os.tmpdir())
+            && path.basename(profilePath).startsWith('vtt-object-editor-')) {
+            fs.rmSync(profilePath, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+        }
     }
 })().catch(error => { console.error(error); process.exitCode = 1; });

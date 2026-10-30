@@ -55,7 +55,7 @@ def handle_join_location(data):
         lobby_id=location.lobby_id,
         user_id=user.id,
     ).first()
-    if not participant:
+    if not participant or participant.is_banned or not location.lobby.is_active:
         emit('error', {'message': 'Not in lobby'}, room=request.sid)
         return
 
@@ -139,6 +139,8 @@ def handle_join_location(data):
 
     combat_state = CombatService.get_state(location_id, user.id)
     emit('combat_state', combat_state, room=request.sid)
+    from .map_tools import sync_measurements
+    sync_measurements(location.lobby_id, request.sid)
 
 
 @socketio.on('leave_location')

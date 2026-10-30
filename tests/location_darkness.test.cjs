@@ -13,6 +13,18 @@ const wall = { type: 'wall', tile_x: 2, tile_y: 2,
 const door = { type: 'door', tile_x: 2, tile_y: 2,
     properties: { dimensions: { width: 0.9, depth: 0.18, height: 2 }, is_open: false } };
 
+test('prepared sight rays preserve wall openings and ignore walls on another storey', async () => {
+    const {lightPathOpen}=await import(darknessUrl);
+    const {structurePose,doorOnWall}=await import(architectureUrl);
+    const record={object:wall,pose:structurePose(wall),bottom:1,top:3.4,minX:1,maxX:4,minZ:2.4,maxZ:2.6,openings:[]};
+    const a={x:2.5,z:1.5},b={x:2.5,z:3.5};
+    assert.equal(lightPathOpen(a,b,[],{walls:[record],fromHeight:2.65,toHeight:2.65}),false);
+    assert.equal(lightPathOpen(a,b,[],{walls:[record],fromHeight:5.05,toHeight:5.05}),true);
+    record.openings=[doorOnWall({...door,properties:{...door.properties,is_open:true}},wall)];
+    assert.equal(lightPathOpen(a,b,[],{walls:[record],fromHeight:2.65,toHeight:2.65}),true);
+    assert.equal(lightPathOpen(a,b,[],{walls:[record],fromHeight:3.2,toHeight:3.2}),false);
+});
+
 test('dark cells stay dim until a lamp has a clear path through the wall', async () => {
     const { computeDarknessFactors, lightPathOpen } = await import(darknessUrl);
     const cells = [{ x: 2, z: 3 }];

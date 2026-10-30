@@ -19,7 +19,7 @@ export function createLocationLightingEditor(container, initial, onPreview = () 
                 <option value="manual">Ручной: помещение, подземелье</option>
             </select>
         </label>
-        <label class="location-lighting-field">Визуальный пресет (только для этой сцены)
+        <label class="location-lighting-field">Визуальный пресет
             <select class="form-control" data-lighting-preset>
                 <option value="current">Текущий свет</option>
                 <option value="natural_daylight">Естественный дневной</option>

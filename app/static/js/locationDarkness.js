@@ -18,8 +18,7 @@ export function paintDarkTiles(tiles, width, height, centerX, centerZ, radius, e
     return changed ? (erase ? next.filter(tile => existing.has(key(tile.x, tile.z))) : next) : tiles;
 }
 
-function segmentCrossing(start, end, wall) {
-    const pose = structurePose(wall);
+function segmentCrossing(start, end, wall, pose = structurePose(wall)) {
     const dx = end.x - start.x;
     const dz = end.z - start.z;
     const determinant = dx * pose.axis.z - dz * pose.axis.x;
@@ -29,18 +28,31 @@ function segmentCrossing(start, end, wall) {
     const alongRay = (wx * pose.axis.z - wz * pose.axis.x) / determinant;
     const alongWall = (wx * dz - wz * dx) / determinant;
     if (alongRay <= 0.001 || alongRay >= 0.999 || Math.abs(alongWall) > pose.width / 2) return null;
-    return alongWall;
+    return { along: alongWall, fraction: alongRay };
 }
 
-export function lightPathOpen(start, end, objects) {
+export function lightPathOpen(start, end, objects, sight = null) {
+    if (sight) {
+        for (const wall of sight.walls) {
+            if (Math.max(start.x,end.x) < wall.minX || Math.min(start.x,end.x) > wall.maxX
+                || Math.max(start.z,end.z) < wall.minZ || Math.min(start.z,end.z) > wall.maxZ) continue;
+            const crossing = segmentCrossing(start,end,wall.object,wall.pose);
+            if (!crossing) continue;
+            const height = sight.fromHeight + (sight.toHeight-sight.fromHeight)*crossing.fraction;
+            if (height < wall.bottom || height > wall.top) continue;
+            if (!wall.openings.some(o=>Math.abs(crossing.along-o.along)<o.width/2
+                && height >= wall.bottom+o.bottom && height <= wall.bottom+o.bottom+o.height)) return false;
+        }
+        return true;
+    }
     for (const wall of objects || []) {
         if (wall?.type !== 'wall') continue;
-        const along = segmentCrossing(start, end, wall);
-        if (along === null) continue;
+        const crossing = segmentCrossing(start, end, wall);
+        if (crossing === null) continue;
         const portal = (objects || []).some(object => {
             if (!['door', 'window'].includes(object.type) || !object.properties?.is_open) return false;
             const opening = doorOnWall(object, wall);
-            return opening && Math.abs(along - opening.along) < opening.width / 2;
+            return opening && Math.abs(crossing.along - opening.along) < opening.width / 2;
         });
         if (!portal) return false;
     }

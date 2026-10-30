@@ -47,6 +47,7 @@ test('removing a marker releases its own texture but not the shared Sprite geome
     assert.ok(start >= 0 && end > start);
     const removed = [];
     const sprite = {
+        parent: { remove() { removed.push('sprite'); } },
         material: {
             map: { dispose() { removed.push('texture'); } },
             dispose() { removed.push('material'); },
@@ -150,11 +151,12 @@ test('GM can pick a world tile, rename, and deliberately delete a sublocation fr
 });
 
 test('GM right-click edits ordinary markers while double-click behavior stays unchanged', () => {
-    const start = source.indexOf('export function setupMarkerInteraction()');
+    const start = source.indexOf('export function setupMarkerInteraction(');
     const end = source.indexOf('\n// ---------- Функции для выбора тайла', start);
     assert.ok(start >= 0 && end > start);
     const handlers = new Map();
     const canvas = {
+        dataset: {},
         addEventListener(name, handler) { handlers.set(name, handler); },
         getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100 }; },
     };
@@ -165,6 +167,8 @@ test('GM right-click edits ordinary markers while double-click behavior stays un
     let hitId = null;
     const calls = [];
     const context = vm.createContext({
+        getMapSceneContext: () => ({canvas,camera:{},controls:{},scene:{},locationId:null}),
+        localStorage: {getItem:()=> '42'},
         renderer: { domElement: canvas }, AppState: { isGM: true, editMode: false },
         window: { isLocationActive: false, enterLocation(id) { calls.push(`enter:${id}`); } },
         markers, mouse: { x: 0, y: 0 }, camera: {},
@@ -177,7 +181,7 @@ test('GM right-click edits ordinary markers while double-click behavior stays un
         openMarkerEditModal(marker) { calls.push(`edit:${marker.id}`); },
         openLocationMarkerEditModal(marker) { calls.push(`location-edit:${marker.id}`); },
     });
-    vm.runInContext(source.slice(start, end).replace('export function setupMarkerInteraction()', 'function setupMarkerInteraction()'), context);
+    vm.runInContext(source.slice(start, end).replace('export function', 'function'), context);
     context.setupMarkerInteraction();
     const event = () => ({
         clientX: 50, clientY: 50,
@@ -191,7 +195,7 @@ test('GM right-click edits ordinary markers while double-click behavior stays un
     assert.deepEqual(calls, ['prevent', 'stop-immediate', 'edit:cache_1']);
     calls.length = 0;
     handlers.get('dblclick')(event());
-    assert.deepEqual(calls, ['edit:cache_1', 'prevent', 'stop']);
+    assert.deepEqual(calls, ['edit:cache_1', 'prevent', 'stop-immediate']);
 
     calls.length = 0;
     hitId = 'loc_2';
@@ -199,7 +203,7 @@ test('GM right-click edits ordinary markers while double-click behavior stays un
     assert.deepEqual(calls, ['prevent', 'stop-immediate', 'location-edit:loc_2']);
     calls.length = 0;
     handlers.get('dblclick')(event());
-    assert.deepEqual(calls, ['enter:2', 'prevent', 'stop']);
+    assert.deepEqual(calls, ['enter:2', 'prevent', 'stop-immediate']);
 
     calls.length = 0;
     hitId = null;

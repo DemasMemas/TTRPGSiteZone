@@ -9732,6 +9732,8 @@ class CombatService:
                     if level_of(obj) != floor_level:
                         continue
                     profile = CombatService._object_movement_profile(obj)
+                    if not profile['blocked'] and profile['climb_cost'] <= 0:
+                        continue
                     footprint_source = {
                         **obj,
                         'tile_x': obj.get('tile_x', obj.get('x', x)),
@@ -9750,6 +9752,8 @@ class CombatService:
             if level_of(obj) != floor_level or obj.type in {'stairs', 'ladder', 'hatch', 'floor_opening'}:
                 continue
             profile = CombatService._object_movement_profile(obj)
+            if not profile['blocked'] and profile['climb_cost'] <= 0:
+                continue
             doorway_tiles = set()
             if obj.type == 'wall':
                 for door in open_doors:

@@ -267,6 +267,14 @@ function resumeWorldMapLoad() {
 
 function setLocationViewActive(active) {
     document.body.classList.toggle('location-view-active', active);
+    if (!active) {
+        const menu = document.querySelector('.lobby-menu');
+        const anchor = document.getElementById('edit-toggle');
+        for (const id of ['chat-toggle', 'common-tools-toggle']) {
+            const launcher = document.getElementById(id);
+            if (menu && launcher) menu.insertBefore(launcher, anchor);
+        }
+    }
     document.getElementById('canvas-container').style.display = active ? 'none' : 'block';
     document.getElementById('location-container').style.display = active ? 'block' : 'none';
 }
@@ -363,6 +371,7 @@ window.enterLocation = async function(locationId) {
                 const editorBuildingId = getLocationBuildingIds()[0]
                     || `building-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
                 toolsPanel.classList.add('is-location-editor');
+                toolsPanel.classList.toggle('location-editor-idle', !window.locationEditMode);
                 if (!window._originalToolsContent) {
                     window._originalToolsContent = toolsPanel.querySelector('.panel-content').innerHTML;
                 }
@@ -487,7 +496,7 @@ window.enterLocation = async function(locationId) {
                 `;
 
                 const toolsRoot = panelContent.firstElementChild;
-                toolsRoot.className = 'map-editor map-editor-inspector-grid';
+                toolsRoot.className = 'map-editor map-editor-inspector-grid location-editor-root';
                 toolsRoot.style.cssText = '';
                 const createToolSection = (title, elements) => {
                     const section = document.createElement('section');
@@ -649,6 +658,7 @@ window.enterLocation = async function(locationId) {
                 let assetSection = null;
                 let environmentSection = null;
                 const selectLocationTool = tool => {
+                    window.cancelCommonMapTool?.();
                     if (!['select', 'terrain', 'height', 'radiation', 'erase', 'assets', 'building', 'light'].includes(tool)) return;
                     cancelLocationPaste();
                     cancelLocationAssetResize(false);
@@ -1640,7 +1650,7 @@ window.exitLocation = function() {
     if (window.isGM && window._originalToolsContent) {
         const toolsPanel = document.getElementById('panel-tools');
         if (toolsPanel) {
-            toolsPanel.classList.remove('is-location-editor');
+            toolsPanel.classList.remove('is-location-editor', 'location-editor-idle');
             toolsPanel.querySelector('.panel-content').innerHTML = window._originalToolsContent;
             initWorldNumericInputs();
             window.refreshDirectWorldObjectEditor?.();
@@ -2064,7 +2074,11 @@ if (socket) {
     socket.on('location_character_facing_updated', (data) => {
         if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
         import('./locationScene.js').then(module => {
+            if (Number(data.location_id) !== Number(getCurrentLocationId())) return;
             module.applyCharacterFacingVisual(data.character_id, data.facing_x, data.facing_y);
+        }).catch(error => {
+            console.error('Не удалось обновить направление персонажа', error);
+            showNotification('Не удалось обновить направление персонажа', 'system');
         });
     });
     socket.on('location_teams_updated', (data) => {

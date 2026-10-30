@@ -1,4 +1,6 @@
 import { syncWorldNumber } from './worldNumericInputs.js';
+import { setLocalMapSceneContext } from './mapSceneContext.js';
+import { combatMenuPresentation } from './combatMenuPresentation.js';
 import { copy, equal, objectChanges, createLocationEditorHistory } from './locationEditorHistory.js';
 import { captureLocationClipboard, planLocationPaste, freshClipboardBuildingId } from './locationClipboard.js';
 import { createWaterProfileLayer, connectedWaterCells, normalizeWaterProfile } from './waterProfiles.js';
@@ -406,6 +408,7 @@ let fogMemoryDecorationTemplates = new Map();
 const fogOverlayMeshes = new Map();
 let fogSurfaceData = null;
 let visionBlockerHeightCache = null;
+let visionObjectIndex = null;
 let gmVisionCharacterId = null;
 const tileInstanceTransform = new THREE.Object3D();
 let objectMeshes = [];
@@ -562,6 +565,9 @@ let postureMenu = null;
 let facingMenu = null;
 let pendingFacingSelection = null;
 let facingPreviewMesh = null;
+let facingPreviewState = null;
+let facingPreviewFrame = null;
+let facingPreviewPointer = null;
 let combatParticipantMenu = null;
 let combatStartRequestMenu = null;
 const pendingCombatStartRequests = new Map();
@@ -903,6 +909,8 @@ function ensureMovementPreviewHint() {
 }
 
 function clearMovementPreview() {
+    if (movementPreviewRefreshFrame !== null) cancelAnimationFrame(movementPreviewRefreshFrame);
+    movementPreviewRefreshFrame = null;
     if (movementPreviewGhost && scene) {
         scene.remove(movementPreviewGhost);
         movementPreviewGhost.traverse((child) => {
@@ -933,6 +941,19 @@ function clearMovementPreview() {
 function invalidateMovementMapCache() {
     movementMapVersion += 1;
     movementMapCache.clear();
+    navigationPreviews.clear();
+    navigationPreviewErrors.clear();
+    if (navigationPreviewQueued) {
+        navigationPreviewRequests.delete(navigationPreviewQueued.key);
+        navigationPreviewQueued = null;
+    }
+    if (movementPreviewLine?.userData) movementPreviewLine.userData.targetKey = null;
+    if (movementPreviewCharacterId && navigationPointer && movementPreviewRefreshFrame === null) {
+        movementPreviewRefreshFrame = requestAnimationFrame(() => {
+            movementPreviewRefreshFrame = null;
+            if (movementPreviewCharacterId && navigationPointer) updateMovementPreview(navigationPointer.x,navigationPointer.y);
+        });
+    }
     locationObjectPickCache = { key: null, result: null };
 }
 
@@ -1070,10 +1091,19 @@ function isCurrentCombatTurnForCharacter(characterId) {
 
 let movementTargetLevel = 0;
 let navigationPointer = null;
+let movementPreviewRefreshFrame = null;
 const navigationPreviews = new Map();
+const navigationPreviewRequests = new Set();
+const navigationPreviewErrors = new Set();
+let navigationPreviewBusy = false;
+let navigationPreviewQueued = null;
+
+function navigationPreviewKey(startX, startY, endX, endY, characterId, level) {
+    return `${currentLocationId}:${movementMapVersion}:${characterId}:${startX}:${startY}:${endX}:${endY}:${level}`;
+}
 
 function hasStoreyNavigation() {
-    return (currentLocationData?.objects || []).some(o => structureLevel(o) !== 0 || ['stairs','ladder','hatch','floor_opening'].includes(o.type));
+    return (currentLocationData?.objects || []).some(o => structureLevel(o) !== 0 || ['stairs','ladder'].includes(o.type));
 }
 
 function getMovementPointerPoint(clientX, clientY, entry) {
@@ -1095,24 +1125,50 @@ function getMovementPointerPoint(clientX, clientY, entry) {
 }
 
 function serverMovementPreview(startX,startY,endX,endY,characterId,level) {
-    const key = `${currentLocationId}:${movementMapVersion}:${characterId}:${startX}:${startY}:${endX}:${endY}:${level}`;
+    const key = navigationPreviewKey(startX,startY,endX,endY,characterId,level);
     if (navigationPreviews.has(key)) return navigationPreviews.get(key);
-    if (navigationPreviews.size > 128) navigationPreviews.clear();
+    if (navigationPreviewRequests.has(key)) return null;
+    if (navigationPreviews.size > 128) {
+        navigationPreviews.clear();
+        navigationPreviewErrors.clear();
+    }
     navigationPreviews.set(key, null);
-    const id = currentLocationId;
+    navigationPreviewRequests.add(key);
+    navigationPreviewErrors.delete(key);
+    if (navigationPreviewQueued) {
+        navigationPreviewRequests.delete(navigationPreviewQueued.key);
+        navigationPreviews.delete(navigationPreviewQueued.key);
+    }
+    navigationPreviewQueued = {key,id:currentLocationId,version:movementMapVersion,
+        characterId,endX,endY,level};
+    sendQueuedNavigationPreview();
+    return null;
+}
+
+function sendQueuedNavigationPreview() {
+    if (navigationPreviewBusy || !navigationPreviewQueued) return;
+    const {key,id,version,characterId,endX,endY,level} = navigationPreviewQueued;
+    navigationPreviewQueued = null;
+    navigationPreviewBusy = true;
     fetch(`/lobbies/${window.currentLobbyId}/locations/${id}/movement-preview`, {
         method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${localStorage.getItem('access_token')}`},
         body:JSON.stringify({character_id:characterId,x:endX,y:endY,floor_level:level}),
     }).then(async response => {
         if (!response.ok) throw new Error('Movement preview unavailable');
         const result = await response.json();
+        if (id !== currentLocationId || version !== movementMapVersion) return;
         navigationPreviews.set(key, result.route);
-        if (id === currentLocationId && movementPreviewCharacterId && navigationPointer) {
+    }).catch(()=>{
+        if (id === currentLocationId && version === movementMapVersion) navigationPreviewErrors.add(key);
+    }).finally(()=>{
+        navigationPreviewBusy = false;
+        navigationPreviewRequests.delete(key);
+        if (id === currentLocationId && version === movementMapVersion && movementPreviewCharacterId && navigationPointer) {
             if (movementPreviewLine?.userData) movementPreviewLine.userData.targetKey = null;
             updateMovementPreview(navigationPointer.x,navigationPointer.y);
         }
-    }).catch(()=>{ navigationPreviews.delete(key); });
-    return null;
+        sendQueuedNavigationPreview();
+    });
 }
 
 function buildRoutePoints(startX, startY, endX, endY, movingCharacterId = null) {
@@ -1157,7 +1213,9 @@ function buildRoutePoints(startX, startY, endX, endY, movingCharacterId = null) 
         pushPoint(x + 0.5, (path.surfaces?.[index]?.height ?? getTileHeight(x, y)) + 0.4, y + 0.5);
     });
 
-    const climbCost = routePath.slice(1).reduce((sum, [x, y]) => {
+    const climbCost = path.climb_cost !== undefined && routePath.length === path.path.length
+        ? Math.max(0,Number(path.climb_cost)||0)
+        : routePath.slice(1).reduce((sum, [x, y]) => {
         const profile = getTileMovementProfile(x, y, movingCharacterId);
         return sum + Math.max(0, Number(profile.climbCost) || 0);
     }, 0);
@@ -1231,7 +1289,7 @@ function getMovementModeAvailability(movementType, route = null, evasion = armed
             const stepX = Number(tile?.[0]) - Number(previous?.[0]);
             const stepY = Number(tile?.[1]) - Number(previous?.[1]);
             const facingX = Number(current.facing_x) || 0;
-            const facingY = Number(current.facing_y) || 1;
+            const facingY = Number(current.facing_y ?? 1) || 0;
             return stepX * facingX + stepY * facingY > 0;
         });
 
@@ -1335,9 +1393,14 @@ function updateMovementPreview(clientX, clientY) {
     const movementType = armedMovementType || 'walk';
     const movementMode = COMBAT_MOVEMENT_TYPES[movementType] || COMBAT_MOVEMENT_TYPES.walk;
     const availability = getMovementModeAvailability(movementType, route);
+    const isCombatActive = combatState?.status === 'active';
+    const previewKey = navigationPreviewKey(startX,startY,targetX,targetY,movementPreviewCharacterId,movementTargetLevel);
+    const calculating = !route && navigationPreviewRequests.has(previewKey);
+    const previewFailed = !route && navigationPreviewErrors.has(previewKey);
+    const previewColor = calculating || previewFailed ? 0xd3b66a : route && (!isCombatActive || availability.allowed) ? 0x54d17a : 0xff6b6b;
 
     if (!movementPreviewLine) {
-        movementPreviewLine = createPreviewLine(availability.allowed ? 0x54d17a : 0xff6b6b);
+        movementPreviewLine = createPreviewLine(previewColor);
         scene.add(movementPreviewLine);
         movementPreviewLine.userData = {
             targetKey,
@@ -1346,20 +1409,22 @@ function updateMovementPreview(clientX, clientY) {
             points,
         };
     }
-    movementPreviewLine.material.color.setHex(availability.allowed ? 0x54d17a : 0xff6b6b);
+    movementPreviewLine.material.color.setHex(previewColor);
     movementPreviewLine.geometry.setFromPoints(points);
 
     const hint = ensureMovementPreviewHint();
     const costLabel = availability.usesClimbAction
         ? `ОП ${availability.travelMovementPoints}/${available} + ${availability.climbActionPoints} ОД`
         : `ОП ${cost}/${available}`;
-    hint.textContent = route
-        ? `${movementMode.label}: ${availability.distance} м · ${costLabel}${availability.reason ? ` · ${availability.reason}` : ''}`
+    hint.textContent = calculating ? 'Расчёт маршрута…' : previewFailed ? 'Не удалось проверить маршрут. Выберите точку повторно.' : route
+        ? isCombatActive
+            ? `${movementMode.label}: ${availability.distance} м · ${costLabel}${availability.reason ? ` · ${availability.reason}` : ''}`
+            : `Движение: ${route.distance} м`
         : 'Путь заблокирован';
     hint.style.left = `${clientX + 14}px`;
     hint.style.top = `${clientY + 14}px`;
     hint.style.display = 'block';
-    hint.style.color = availability.allowed ? '#d7ffe5' : '#ffd0d0';
+    hint.style.color = calculating || previewFailed ? '#fff' : route && (!isCombatActive || availability.allowed) ? '#d7ffe5' : '#ffd0d0';
 }
 
 function updateAttackPreview(clientX, clientY) {
@@ -1538,7 +1603,15 @@ function commitMovementPreview(clientX, clientY) {
     const availability = getMovementModeAvailability(movementType, route);
 
     if (!route) {
-        showNotification('Путь к выбранной клетке заблокирован', 'system');
+        const key = navigationPreviewKey(startX,startY,targetX,targetY,movementPreviewCharacterId,movementTargetLevel);
+        if (navigationPreviewRequests.has(key)) {
+            showNotification('Маршрут ещё рассчитывается. Дождитесь предпросмотра.', 'system');
+        } else if (navigationPreviewErrors.has(key)) {
+            navigationPreviews.delete(key);
+            navigationPreviewErrors.delete(key);
+            if (movementPreviewLine?.userData) movementPreviewLine.userData.targetKey = null;
+            updateMovementPreview(clientX,clientY);
+        } else showNotification('Путь к выбранной клетке заблокирован', 'system');
         return false;
     }
 
@@ -1681,8 +1754,8 @@ function closeCombatMenus() {
 
 function updateCombatHudPosition(left, top) {
     if (!combatHud) return;
-    combatHud.style.left = `${Math.max(8, left)}px`;
-    combatHud.style.top = `${Math.max(8, top)}px`;
+    combatHud.style.left = `${Math.min(Math.max(8, left), Math.max(8, innerWidth - combatHud.offsetWidth - 8))}px`;
+    combatHud.style.top = `${Math.min(Math.max(8, top), Math.max(8, innerHeight - combatHud.offsetHeight - 8))}px`;
 }
 
 function ensureCombatHudDragging() {
@@ -1693,6 +1766,7 @@ function ensureCombatHudDragging() {
         if (!header || !combatHud.contains(header)) return;
         if (event.target.closest?.('button')) return;
         if (event.button !== 0) return;
+        combatHud.dataset.moved = 'true';
         combatHudDragState = {
             offsetX: event.clientX - combatHud.getBoundingClientRect().left,
             offsetY: event.clientY - combatHud.getBoundingClientRect().top,
@@ -2628,18 +2702,21 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     let menuItems = [
         {
             label: 'Движение',
+            key: 'movement',
             title: 'Перетащить персонажа по карте',
             angle: -90,
             action: () => startCharacterMoveMode(characterId),
         },
         {
             label: 'Атака',
+            key: 'attack',
             title: 'Выбрать оружие или природную атаку',
             angle: -38,
             action: () => openCharacterAttackSelection(characterId),
         },
         {
             label: 'Положение',
+            key: 'posture',
             icon: '↕',
             title: 'Встать, сесть или лечь',
             angle: 222,
@@ -2653,15 +2730,18 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             allowAlways: true,
         },
         {
-            label: 'Мед',
+            label: 'Медицина',
+            key: 'medical',
             icon: '✚',
             title: 'Быстрый выбор расходников',
             angle: 66,
             action: () => showMedicalConsumableMenu(characterId),
         },
         {
-            label: 'ОП',
-            title: 'Преобразовать СД в ОП',
+            label: 'Получить ОП',
+            actionKey: 'convert_free_action_to_movement',
+            requiresCombat: true,
+            title: 'Добавить очки перемещения.',
             angle: 170,
             action: () => {
                 const combatCharacter = findCombatCharacterByCharacterId(characterId);
@@ -2683,8 +2763,9 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         if (isCurrentTurn && combatCharacter?.active_anomaly) {
             menuItems.push({
                 label: '\u0412\u044b\u0440\u0432\u0430\u0442\u044c\u0441\u044f',
+                actionKey: 'escape_anomaly',
                 icon: '\u21f1',
-                title: `\u0412\u044b\u0439\u0442\u0438 \u0438\u0437 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438 \u00ab${combatCharacter.active_anomaly.name}\u00bb \u0437\u0430 3 \u041e\u0414`,
+                title: `\u0412\u044b\u0439\u0442\u0438 \u0438\u0437 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438 \u00ab${combatCharacter.active_anomaly.name}\u00bb`,
                 angle: 278,
                 ringRadius: 165,
                 requiresCombat: true,
@@ -2713,10 +2794,12 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             const { remaining, limit } = getMustDoUsage(combatCharacter);
             if (remaining > 0) {
                 menuItems.push({
-                    label: `Должен ${remaining}/${limit}`, icon: '!',
+                    label: 'Должен это сделать', icon: '!',
+                    actionKey: 'must_do_it',
                     title: retry
-                        ? `Повторить проверку «${retry.name || 'действие'}», получить 1 стресс. Осталось применений: ${remaining}/${limit}`
-                        : `Выполнить разрешённый ГМом повтор, получить 1 стресс. Осталось применений: ${remaining}/${limit}`,
+                        ? `Повторить проверку «${retry.name || 'действие'}».`
+                        : 'Ручной повтор по разрешению ведущего.',
+                    conditions: `Осталось попыток: ${remaining}/${limit}.`,
                     angle: 194, ringRadius: 165, requiresCombat: true,
                     action: () => performMustDoRetry(combatCharacter),
                 });
@@ -2724,12 +2807,14 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         }
         menuItems.push({
             label: 'Утешить', icon: '♡',
-            title: 'Помочь союзнику справиться со стрессом за 3 ОД',
+            actionKey: 'console_ally',
+            title: 'Помочь союзнику справиться со стрессом.',
             angle: 230, ringRadius: 165, requiresCombat: true,
             action: () => showConsolationMenu(combatCharacter),
         });
         menuItems.push({
             label: '\u0420\u0430\u0437\u0432\u043e\u0440\u043e\u0442',
+            key: 'facing',
             icon: '\u21bb',
             title: '\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0432\u0437\u0433\u043b\u044f\u0434\u0430 \u0438 \u043e\u0431\u0437\u043e\u0440\u0430',
             angle: 18,
@@ -2742,7 +2827,9 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             && combatCharacter?.drawn_weapon_index !== undefined
         ) {
             menuItems.push({
-                label: 'Ствол в упор',
+                label: 'Приставить ствол',
+                key: 'gunpoint',
+                actionKey: 'place_gunpoint',
                 icon: '⊙',
                 title: 'Приставить ствол к выбранной части тела соседней цели',
                 angle: 302,
@@ -2767,8 +2854,9 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         if (!isCurrentTurn && gunpointTargetTurn) {
             menuItems.push({
                 label: 'Выстрелить',
+                actionKey: 'gunpoint_shot',
                 icon: '✹',
-                title: `Выстрелить в упор в ${combatCharacter.gunpoint.target_name || 'цель'} за 1 ОД`,
+                title: `Выстрелить в упор в ${combatCharacter.gunpoint.target_name || 'цель'}.`,
                 angle: 302,
                 ringRadius: 165,
                 requiresCombat: true,
@@ -2798,6 +2886,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         if (isCurrentTurn && !hasReserve) {
             menuItems.push({
                 label: 'Реакция',
+                key: 'reaction',
                 icon: '↯',
                 title: 'Отложить часть ОД, СД и ОП для действия в чужой ход',
                 angle: 122,
@@ -2807,7 +2896,8 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             });
             menuItems.push({
                 label: 'Помощь',
-                icon: '✚',
+                key: 'help',
+                icon: '⇧',
                 title: 'Заявить помощь другому персонажу и зарезервировать ОД',
                 angle: 158,
                 ringRadius: 165,
@@ -2817,6 +2907,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         } else if (!isCurrentTurn && hasReserve) {
             menuItems.push({
                 label: 'Реакция',
+                key: 'reserved_reaction',
                 icon: '↯',
                 title: 'Запросить у ГМа разрешение на отложенную реакцию',
                 angle: 122,
@@ -2831,6 +2922,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     if (condition.state === 'pain_shock') {
         menuItems = condition.can_recover === false ? [{
             label: 'Боль 10',
+            actionKey: 'recover_from_shock',
             icon: '!',
             title: 'Выход из болевого шока невозможен, пока боль не снизится до 9',
             angle: -90,
@@ -2842,6 +2934,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             ),
         }] : [{
             label: 'Очнуться',
+            actionKey: 'recover_from_shock',
             icon: '◉',
             title: 'Совершить проверку Воли и попытаться выйти из болевого шока',
             angle: -90,
@@ -2875,6 +2968,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
     if (condition.state === 'active') {
         menuItems.push({
             label: 'Другое',
+            key: 'narrative',
             icon: '…',
             title: 'Описать произвольное действие, списать ОД и при необходимости бросить навык',
             angle: -10,
@@ -2884,6 +2978,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         });
         menuItems.push({
             label: 'Ближний бой',
+            key: 'melee',
             icon: '⚔',
             title: 'Замах, блок, толкание, захват и другие действия ближнего боя',
             angle: -116,
@@ -2894,6 +2989,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
 
         menuItems.splice(2, 0, {
             label: 'Взаим.',
+            key: 'interaction',
             title: 'Действия со структурой или недееспособным персонажем',
             angle: 14,
             action: () => beginStructureInteractionMode(characterId),
@@ -2937,7 +3033,7 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             && condition.state === 'active') {
             menuItems.push({
                 label: 'Начать бой',
-                icon: '⚔',
+                icon: '▶',
                 title: 'Начать бой действием этого персонажа; он будет первым',
                 angle: -18,
                 ringRadius: 165,
@@ -2970,8 +3066,26 @@ function showCombatActionMenu(clientX, clientY, characterId) {
         });
     }
 
-    combatActionMenu.style.width = '410px';
-    combatActionMenu.style.height = '410px';
+    // Outside combat, omit combat-only commands; their existing entry points remain in battle.
+    if (combatState?.status !== 'active') menuItems = menuItems.filter(item => !item.requiresCombat);
+    // Keep both rings, reserving a distinct slot even for disabled actions.
+    // A diagonal chord must clear the complete button box, including its padding.
+    let previousRadius = 0;
+    const positions = new Map();
+    for (const outer of [false, true]) {
+        const ring = menuItems.filter(item => Boolean(item.ringRadius) === outer)
+            .sort((a, b) => ((a.angle + 360) % 360) - ((b.angle + 360) % 360));
+        if (!ring.length) continue;
+        const radius = Math.max(outer ? previousRadius + 116 : 112,
+            ring.length > 1 ? 82 * Math.SQRT2 / (2 * Math.sin(Math.PI / ring.length)) : 112);
+        ring.forEach((item, index) => positions.set(item, {
+            angle: -90 + index * 360 / ring.length, radius,
+        }));
+        previousRadius = radius;
+    }
+    const menuSize = Math.ceil((previousRadius + 46) * 2);
+    combatActionMenu.style.width = `${menuSize}px`;
+    combatActionMenu.style.height = `${menuSize}px`;
 
     combatActionMenu.innerHTML = `
         <div class="combat-menu-core" style="
@@ -2993,23 +3107,27 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             font-size:13px;
             box-shadow:0 12px 30px rgba(0,0,0,0.4);
             backdrop-filter: blur(8px);
-        ">${condition.state === 'active' ? (canAct ? 'Действия' : 'Просмотр') : condition.label}</div>
+        ">${condition.state === 'active' ? (hasFullAccess ? 'Действия' : 'Просмотр') : condition.label}</div>
     `;
 
-    const radius = 98;
+    const menuTooltip = document.createElement('div');
+    menuTooltip.id = 'combat-menu-tooltip';
+    menuTooltip.setAttribute('role', 'tooltip');
+    menuTooltip.hidden = true;
+    combatActionMenu.appendChild(menuTooltip);
     menuItems.forEach((item) => {
-        const angle = item.angle;
-        const itemRadius = item.ringRadius || radius;
+        const { angle, radius: itemRadius } = positions.get(item);
         const button = document.createElement('button');
         button.type = 'button';
-        button.innerHTML = item.icon ? `<span style="font-size:22px; line-height:1;">${item.icon}</span>` : item.label;
-        button.title = item.title;
+        button.className = 'combat-radial-action';
+        button.setAttribute('aria-label', item.label);
         button.style.cssText = `
             position:absolute;
             left:50%;
             top:50%;
             width:74px;
-            min-height:74px;
+            height:74px;
+            box-sizing:border-box;
             transform: translate(-50%, -50%) translate(${Math.cos((angle * Math.PI) / 180) * itemRadius}px, ${Math.sin((angle * Math.PI) / 180) * itemRadius}px);
             border-radius:50%;
             border:1px solid rgba(255,255,255,0.18);
@@ -3030,18 +3148,39 @@ function showCombatActionMenu(clientX, clientY, characterId) {
             || (item.allowIncapacitated && canControlCharacter(characterId) && isCurrentTurn)
         )
             && (!item.requiresCombat || combatState?.status === 'active');
-        button.disabled = !allowed;
-        button.style.opacity = allowed ? '1' : '0.45';
+        const presentation = combatMenuPresentation({
+            item, actor: combatCharacter, catalog: combatState?.available_actions,
+            active: combatState?.status === 'active', controlled: canControlCharacter(characterId),
+            currentTurn: isCurrentTurn, condition, allowed,
+            reactionInProgress: combatState?.reaction?.return_location_character_id != null,
+        });
+        button.setAttribute('aria-disabled', String(!presentation.allowed));
+        button.dataset.cost = presentation.cost;
+        button.dataset.unavailableReason = presentation.reason;
+        button.innerHTML = `${item.icon ? `<span class="combat-radial-icon" aria-hidden="true">${escapeHtml(item.icon)}</span>` : ''}
+            <span class="combat-radial-label">${escapeHtml(item.label)}</span>
+            ${presentation.cost ? `<span class="combat-radial-cost">${escapeHtml(presentation.cost)}</span>` : ''}`;
+        button.style.opacity = presentation.allowed ? '1' : '0.55';
+        button.setAttribute('aria-describedby', 'combat-menu-tooltip');
+        const explain = () => {
+            const rect = button.getBoundingClientRect();
+            const menuRect = combatActionMenu.getBoundingClientRect();
+            menuTooltip.textContent = `${item.label}\n${presentation.detail}${presentation.tooltipCost ? `\nСтоимость: ${presentation.tooltipCost}.` : ''}`;
+            menuTooltip.hidden = false;
+            menuTooltip.style.left = `${Math.max(8, Math.min(rect.right + 8, innerWidth - menuTooltip.offsetWidth - 8)) - menuRect.left}px`;
+            menuTooltip.style.top = `${Math.max(8, Math.min(rect.top, innerHeight - menuTooltip.offsetHeight - 8)) - menuRect.top}px`;
+        };
+        button.addEventListener('mouseenter', explain);
+        button.addEventListener('focus', explain);
+        button.addEventListener('mouseleave', () => { menuTooltip.hidden = true; });
+        button.addEventListener('blur', () => { menuTooltip.hidden = true; });
         if (item.danger) {
             button.style.background = 'rgba(105, 31, 28, 0.97)';
             button.style.borderColor = 'rgba(225, 108, 94, 0.72)';
         }
-        if (item.icon) {
-            button.style.fontSize = '22px';
-            button.style.fontWeight = '800';
-        }
         button.onclick = (event) => {
             event.stopPropagation();
+            if (!presentation.allowed) { explain(); return; }
             combatActionMenu.style.display = 'none';
             combatActionMenuCharacterId = null;
             item.action();
@@ -3924,9 +4063,14 @@ function closeFacingMenu() {
     facingMenu = null;
     pendingFacingSelection = null;
     clearFacingPreview();
+    if (renderer) renderer.domElement.style.cursor = 'default';
 }
 
 function clearFacingPreview() {
+    if (facingPreviewFrame !== null) cancelAnimationFrame(facingPreviewFrame);
+    facingPreviewFrame = null;
+    facingPreviewState = null;
+    facingPreviewPointer = null;
     if (!facingPreviewMesh) return;
     scene?.remove(facingPreviewMesh);
     facingPreviewMesh.geometry?.dispose();
@@ -3935,76 +4079,68 @@ function clearFacingPreview() {
 }
 
 function updateFacingPreview(clientX, clientY) {
-    if (!pendingFacingSelection || !currentLocationData || !scene) {
+    facingPreviewPointer = {clientX, clientY};
+    if (facingPreviewFrame === null) facingPreviewFrame = requestAnimationFrame(renderFacingPreview);
+}
+
+function renderFacingPreview() {
+    facingPreviewFrame = null;
+    if (!pendingFacingSelection || !currentLocationData || !scene || !facingPreviewPointer) return;
+    const {clientX,clientY} = facingPreviewPointer;
+    const tile = getLocationTileAtScreen(clientX,clientY);
+    const character = getCharacterModelEntry(pendingFacingSelection.characterId);
+    if (!tile || !character) { if(facingPreviewMesh) facingPreviewMesh.count=0; return; }
+    const sourceX=character.posX,sourceY=character.posY,level=character.floorLevel||0;
+    const dx=tile.x-sourceX,dy=tile.y-sourceY,length=Math.hypot(dx,dy);
+    if (!length) { if(facingPreviewMesh) facingPreviewMesh.count=0; return; }
+    const index=getVisionObjectIndex();
+    const key=`${movementMapVersion}:${sourceX}:${sourceY}:${level}:${character.posture}:${visionEyeHeight(character)}`;
+    if (facingPreviewState?.key!==key) {
         clearFacingPreview();
-        return;
+        facingPreviewPointer={clientX,clientY};
+        const cells=[];
+        for(let y=Math.max(0,sourceY-FOG_VIEW_RADIUS);y<=Math.min(currentLocationData.grid_height-1,sourceY+FOG_VIEW_RADIUS);y++)
+            for(let x=Math.max(0,sourceX-FOG_VIEW_RADIUS);x<=Math.min(currentLocationData.grid_width-1,sourceX+FOG_VIEW_RADIUS);x++) {
+                const distance=Math.hypot(x-sourceX,y-sourceY);
+                if(distance>FOG_VIEW_RADIUS) continue;
+                const height=index.floors.get(level)?.get(`${x}:${y}`)??(level===0?getTileHeight(x,y):null);
+                if(height===null) continue;
+                const transform=new THREE.Object3D();
+                transform.position.set(x+.5,height+.04,y+.5);transform.rotation.x=-Math.PI/2;transform.updateMatrix();
+                cells.push({x,y,height,distance,matrix:transform.matrix.clone(),visible:undefined});
+            }
+        facingPreviewState={key,cells,complete:false};
+        facingPreviewMesh=new THREE.InstancedMesh(new THREE.PlaneGeometry(.9,.9),
+            new THREE.MeshBasicMaterial({color:0xd3b66a,transparent:true,opacity:.24,side:THREE.DoubleSide,depthWrite:false,depthTest:false}),Math.max(1,cells.length));
+        facingPreviewMesh.count=0;facingPreviewMesh.renderOrder=18;facingPreviewMesh.raycast=()=>{};
+        facingPreviewMesh.frustumCulled=false;
+        scene.add(facingPreviewMesh);
     }
-    const tile = getLocationTileAtScreen(clientX, clientY);
-    const character = pendingFacingSelection.isCombatActive
-        ? findCombatCharacterByCharacterId(pendingFacingSelection.characterId)
-        : getCharacterModelEntry(pendingFacingSelection.characterId);
-    if (!tile || !character) {
-        clearFacingPreview();
-        return;
-    }
-    const sourceX = Number(character.x ?? character.posX);
-    const sourceY = Number(character.y ?? character.posY);
-    const facingX = tile.x - sourceX;
-    const facingY = tile.y - sourceY;
-    const facingLength = Math.hypot(facingX, facingY);
-    if (!facingLength) {
-        clearFacingPreview();
-        return;
-    }
-    const visibleTiles = [];
-    const sourceHeight = visionEyeHeight({
-        posX: sourceX,
-        posY: sourceY,
-        posture: character.posture || 'standing',
-    });
-    const minX = Math.max(0, Math.floor(sourceX - FOG_VIEW_RADIUS));
-    const maxX = Math.min(currentLocationData.grid_width - 1, Math.ceil(sourceX + FOG_VIEW_RADIUS));
-    const minY = Math.max(0, Math.floor(sourceY - FOG_VIEW_RADIUS));
-    const maxY = Math.min(currentLocationData.grid_height - 1, Math.ceil(sourceY + FOG_VIEW_RADIUS));
-    for (let y = minY; y <= maxY; y += 1) {
-        for (let x = minX; x <= maxX; x += 1) {
-            const dx = x - sourceX;
-            const dy = y - sourceY;
-            const distance = Math.hypot(dx, dy);
-            if (!distance || distance > FOG_VIEW_RADIUS) continue;
-            const cosine = (dx * facingX + dy * facingY) / (distance * facingLength);
-            if (cosine < Math.cos(FOG_VIEW_HALF_ANGLE)) continue;
-            if (!hasLineOfSight(sourceX, sourceY, x, y, sourceHeight, getTileHeight(x, y) + 1.65)) continue;
-            visibleTiles.push({ x, y });
+    const started=performance.now(),previousCache=visionBlockerHeightCache;
+    visionBlockerHeightCache=new Map();
+    let count=0,pending=false;
+    try {
+        for(const cell of facingPreviewState.cells) {
+            if(cell.distance && ((cell.x-sourceX)*dx+(cell.y-sourceY)*dy)/(cell.distance*length)<Math.cos(FOG_VIEW_HALF_ANGLE)) continue;
+            if(cell.visible===undefined) {
+                if(performance.now()-started>5) {pending=true;continue;}
+                // Reuse the real sight rules with a detached source. Never change
+                // character facing, fog memory, or scene/object visibility here.
+                cell.visible=isPointVisibleToPlayer(cell.x,cell.y,cell.height+1.65,[{
+                    ...character,facingX:cell.x-sourceX,facingY:cell.y-sourceY,
+                }]);
+            }
+            if(cell.visible) facingPreviewMesh.setMatrixAt(count++,cell.matrix);
         }
-    }
-    clearFacingPreview();
-    if (!visibleTiles.length) return;
-    const geometry = new THREE.PlaneGeometry(0.9, 0.9);
-    const material = new THREE.MeshBasicMaterial({
-        color: 0xd3b66a,
-        transparent: true,
-        opacity: 0.24,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-    });
-    facingPreviewMesh = new THREE.InstancedMesh(geometry, material, visibleTiles.length);
-    const transform = new THREE.Object3D();
-    visibleTiles.forEach(({ x, y }, index) => {
-        transform.position.set(x + 0.5, getTileHeight(x, y) + 0.035, y + 0.5);
-        transform.rotation.set(-Math.PI / 2, 0, 0);
-        transform.updateMatrix();
-        facingPreviewMesh.setMatrixAt(index, transform.matrix);
-    });
-    facingPreviewMesh.instanceMatrix.needsUpdate = true;
-    facingPreviewMesh.renderOrder = 18;
-    facingPreviewMesh.raycast = () => {};
-    scene.add(facingPreviewMesh);
+    } finally { visionBlockerHeightCache=previousCache; }
+    facingPreviewMesh.count=count;facingPreviewMesh.instanceMatrix.needsUpdate=true;
+    facingPreviewState.complete=!pending;
+    if(pending) facingPreviewFrame=requestAnimationFrame(renderFacingPreview);
 }
 
 function getFacingChangeOptions(character, targetX, targetY) {
     const fromX = Number(character.facing_x ?? character.facingX) || 0;
-    const fromY = Number(character.facing_y ?? character.facingY) || 1;
+    const fromY = Number(character.facing_y ?? character.facingY ?? 1) || 0;
     const dot = fromX * targetX + fromY * targetY;
     const lengths = Math.hypot(fromX, fromY) * Math.hypot(targetX, targetY);
     const degrees = Math.round(Math.acos(Math.max(-1, Math.min(1, dot / lengths))) * 180 / Math.PI);
@@ -4153,6 +4289,12 @@ function showFacingMenuLegacy(characterId) {
 
 function getLocationTileAtScreen(clientX, clientY) {
     if (!renderer || !camera) return null;
+    const actor = pendingFacingSelection && getCharacterModelEntry(pendingFacingSelection.characterId);
+    if (actor?.floorLevel) {
+        const point = getPointerWorldPoint(clientX,clientY,actor.physicalHeight ?? actor.model.position.y);
+        const x = Math.floor(point?.x ?? -1), y = Math.floor(point?.z ?? -1);
+        return x>=0 && y>=0 && x<currentLocationData.grid_width && y<currentLocationData.grid_height ? {x,y} : null;
+    }
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
@@ -4303,6 +4445,11 @@ function showFacingMenu(characterId) {
         return;
     }
     closeFacingMenu();
+    window.cancelCommonMapTool?.();
+    armedMoveCharacterId = null;
+    clearMovementPreview();
+    pendingCombatAction = null;
+    clearAttackPreview();
     pendingFacingSelection = { characterId, isCombatActive };
     renderer?.domElement && (renderer.domElement.style.cursor = 'crosshair');
     showNotification('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043a\u043b\u0435\u0442\u043a\u0443, \u0432 \u0441\u0442\u043e\u0440\u043e\u043d\u0443 \u043a\u043e\u0442\u043e\u0440\u043e\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436 \u0434\u043e\u043b\u0436\u0435\u043d \u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c. Esc \u2014 \u043e\u0442\u043c\u0435\u043d\u0430.', 'system');
@@ -4521,6 +4668,7 @@ function beginCharacterMoveMode(characterId, movementType = 'walk', evasion = fa
 }
 
 export function beginPendingCombatAction(action) {
+    window.cancelCommonMapTool?.();
     if (!combatState || combatState.status !== 'active') {
         if (action?.actionKey !== 'use_item' || !canControlCharacter(action.actorCharacterId)
             || getLocationCharacterCondition(action.actorCharacterId).state !== 'active') {
@@ -4596,6 +4744,7 @@ export function registerDeferredCombatAction(actionId, payload) {
 }
 
 export function startCharacterMoveMode(characterId) {
+    window.cancelCommonMapTool?.();
     const entry = characterModels.get(characterId);
     if (!entry) {
         showNotification('Персонаж не найден на локации', 'system');
@@ -5670,19 +5819,58 @@ function getFogObjectHeight(object) {
     }[type] || 1.5;
 }
 
+function getVisionObjectIndex() {
+    if (visionObjectIndex?.location === currentLocationData && visionObjectIndex.version === movementMapVersion) return visionObjectIndex;
+    const cells = new Map(), walls = [], floors = new Map();
+    const portals = (currentLocationData?.objects || []).filter(o=>['door','window'].includes(o.type)&&o.properties?.is_open);
+    for (const object of currentLocationData?.objects || []) {
+        if (object.type === 'floor') {
+            const level = structureLevel(object), pose = floorVisualPose(object,currentLocationData.objects);
+            const parts = floorSlabParts(object,currentLocationData.objects);
+            if (!floors.has(level)) floors.set(level,new Map());
+            const hx = (Math.abs(pose.axis.x)*pose.width+Math.abs(pose.normal.x)*pose.depth)/2;
+            const hz = (Math.abs(pose.axis.z)*pose.width+Math.abs(pose.normal.z)*pose.depth)/2;
+            for(let y=Math.max(0,Math.floor(pose.z-hz));y<Math.min(currentLocationData.grid_height,Math.ceil(pose.z+hz));y++)
+                for(let x=Math.max(0,Math.floor(pose.x-hx));x<Math.min(currentLocationData.grid_width,Math.ceil(pose.x+hx));x++) {
+                    const dx=x+.5-pose.x,dz=y+.5-pose.z;
+                    const a=dx*pose.axis.x+dz*pose.axis.z,b=dx*pose.normal.x+dz*pose.normal.z;
+                    if(parts.some(p=>Math.abs(a-p.x)<=p.width/2&&Math.abs(b-p.z)<=p.depth/2)) {
+                        const key=`${x}:${y}`;
+                        if(!floors.get(level).has(key)) floors.get(level).set(key,getTileHeight(object.tile_x,object.tile_y)
+                            +structureLevelOffset(object)+Number(object.properties?.elevation||0)+FLOOR_SURFACE_OFFSET);
+                    }
+                }
+        }
+        if (!blocksVision(object)) continue;
+        for (const tile of getObjectFootprintTiles(object)) {
+            const key = `${tile.x}:${tile.y}`;
+            if (!cells.has(key)) cells.set(key,[]);
+            cells.get(key).push(object);
+        }
+        if (object.type !== 'wall') continue;
+        const pose = structurePose(object);
+        const hx = (Math.abs(pose.axis.x)*pose.width+Math.abs(pose.normal.x)*pose.depth)/2;
+        const hz = (Math.abs(pose.axis.z)*pose.width+Math.abs(pose.normal.z)*pose.depth)/2;
+        const bottom = getTileHeight(object.tile_x,object.tile_y)+structureLevelOffset(object)+Number(object.properties?.elevation||0);
+        walls.push({object,pose,bottom,top:bottom+getFogObjectHeight(object),
+            minX:pose.x-hx,maxX:pose.x+hx,minZ:pose.z-hz,maxZ:pose.z+hz,
+            openings:portals.map(portal=>doorOnWall(portal,object)).filter(Boolean)});
+    }
+    return visionObjectIndex = {location:currentLocationData,version:movementMapVersion,cells,walls,portals,floors};
+}
+
 function getVisionBlockerHeight(x, y, rayHeight) {
-    const key = `${x}:${y}:${Math.round(rayHeight * 10)}`;
+    const key = `${x}:${y}:${rayHeight}`;
     if (visionBlockerHeightCache?.has(key)) return visionBlockerHeightCache.get(key);
     const tile = currentLocationData?.tiles_data?.[y]?.[x];
     const tileObjects = (tile?.objects || []).filter((object) => blocksVision(object));
-    const locationObjects = (currentLocationData?.objects || []).filter((object) => {
-        if (!blocksVision(object) || !tileHasObjectFootprint(object, x, y)) return false;
+    const index = getVisionObjectIndex();
+    const locationObjects = (index.cells.get(`${x}:${y}`) || []).filter((object) => {
         const bottom = getTileHeight(object.tile_x, object.tile_y) + structureLevelOffset(object) + Number(object.properties?.elevation || 0);
         if (rayHeight < bottom || rayHeight > bottom + getFogObjectHeight(object)) return false;
         if (object.type !== 'wall') return true;
-        return !(currentLocationData.objects || []).some(portal => {
-            if (!['door', 'window'].includes(portal.type) || !portal.properties?.is_open
-                || !tileHasObjectFootprint(portal, x, y)) return false;
+        return !index.portals.some(portal => {
+            if (!tileHasObjectFootprint(portal, x, y)) return false;
             const opening = doorOnWall(portal, object);
             if (!opening) return false;
             const bottom = getTileHeight(object.tile_x, object.tile_y) + structureLevelOffset(object) + Number(object.properties?.elevation || 0) + opening.bottom;
@@ -5737,6 +5925,7 @@ function hasLineOfSight(sourceX, sourceY, targetX, targetY, sourceHeight = null,
         { x: sourceX + 0.5, z: sourceY + 0.5 },
         { x: targetX + 0.5, z: targetY + 0.5 },
         currentLocationData?.objects || [],
+        {walls:getVisionObjectIndex().walls,fromHeight,toHeight},
     );
 }
 
@@ -5849,6 +6038,11 @@ function updateFogOverlay(active, sources) {
 
 function applyFogOfWar() {
     if (!scene || !currentLocationData) return;
+    facingPreviewState = null;
+    if (pendingFacingSelection && facingPreviewPointer) {
+        if (facingPreviewMesh) facingPreviewMesh.count = 0;
+        updateFacingPreview(facingPreviewPointer.clientX,facingPreviewPointer.clientY);
+    }
     visionBlockerHeightCache = new Map();
     const active = fogIsActive();
     loadFogMemory();
@@ -6150,16 +6344,17 @@ export function applyCharacterVisualPose(characterId, proneOnBack) {
     }
 }
 
-function applyCharacterFacingVisual(characterId, facingX = 0, facingY = 1) {
+export function applyCharacterFacingVisual(characterId, facingX = 0, facingY = 1, { deferRefresh = false } = {}) {
     const entry = getCharacterModelEntry(characterId);
     if (!entry) return;
     const x = Number(facingX) || 0;
     const y = Number(facingY) || 0;
     if (x === 0 && y === 0) return;
+    if (entry.facingX === x && entry.facingY === y) return;
     entry.model.rotation.y = Math.atan2(x, y);
     entry.facingX = x;
     entry.facingY = y;
-    applyFogOfWar();
+    if (!deferRefresh) applyFogOfWar();
 }
 
 function applyCharacterGrappleVisual(characterId, combatCharacter = null) {
@@ -6457,6 +6652,23 @@ function ensureCombatHud() {
         font-family: 'Segoe UI', Arial, sans-serif;
     `;
     document.body.appendChild(combatHud);
+    const place = () => {
+        if (!combatHud) return;
+        const participants = document.getElementById('panel-participants')?.getBoundingClientRect();
+        if (combatHud.dataset.moved !== 'true') {
+            combatHud.style.left = '15px';
+            combatHud.style.top = `${Math.max(72, (participants?.bottom || 60) + 12)}px`;
+        }
+        const top = combatHud.getBoundingClientRect().top;
+        combatHud.style.maxHeight = `${Math.max(50, innerHeight - top - 72)}px`;
+        updateCombatHudPosition(combatHud.offsetLeft, combatHud.offsetTop);
+    };
+    const observer = new ResizeObserver(place);
+    observer.observe(document.getElementById('panel-participants'));
+    observer.observe(combatHud);
+    window.addEventListener('resize', place);
+    combatHud._disposeLayout = () => { observer.disconnect(); window.removeEventListener('resize', place); };
+    place();
 }
 
 function closeCombatParticipantMenu() {
@@ -6757,6 +6969,7 @@ function getBloodStageLabel(value) {
 function renderCombatHud() {
     if (!combatState || !window.isLocationActive) {
         if (combatHud && combatHud.parentNode) {
+            combatHud._disposeLayout?.();
             combatHud.parentNode.removeChild(combatHud);
         }
         combatHud = null;
@@ -6815,8 +7028,9 @@ function renderCombatHud() {
     const compactStatus = combatState.status === 'active'
         ? `Раунд ${combatState.round_number || 0} · ${currentVisible ? (combatState.current_character?.name || 'нет хода') : 'Скрытый ход'} · ${currentVisible ? (combatState.current_character?.posture_label || 'Стоя') : ''}`
         : 'Бой не активен';
-    combatHud.style.minWidth = isCollapsed ? '230px' : '260px';
-    combatHud.style.maxHeight = isCollapsed ? '120px' : 'calc(80vh - 24px)';
+    combatHud.dataset.collapsed = String(isCollapsed);
+    combatHud.style.minWidth = isCollapsed ? '0' : '260px';
+    combatHud.style.width = isCollapsed ? '250px' : '360px';
     combatHud.innerHTML = `
         <div class="combat-hud-header" style="
             display:flex;
@@ -7001,7 +7215,7 @@ function renderCombatHud() {
         teamButton.textContent = '\u041a\u043e\u043c\u0430\u043d\u0434\u044b';
         teamButton.style.cssText = 'margin-left:auto; flex:0 0 auto;';
         teamButton.onclick = showTeamManagementModal;
-        combatHud.querySelector('.combat-hud-header')?.appendChild(teamButton);
+        combatHud.querySelector('.combat-hud-body')?.appendChild(teamButton);
         const eventButton = document.createElement('button');
         eventButton.type = 'button';
         eventButton.className = 'btn btn-sm btn-secondary combat-gm-event-btn';
@@ -7009,7 +7223,7 @@ function renderCombatHud() {
         eventButton.title = 'Применить событие к персонажам на локации';
         eventButton.style.cssText = 'margin-left:6px; flex:0 0 auto;';
         eventButton.onclick = showGmEventMenu;
-        combatHud.querySelector('.combat-hud-header')?.appendChild(eventButton);
+        combatHud.querySelector('.combat-hud-body')?.appendChild(eventButton);
         if (gmVisionCharacterId !== null) {
             const fullVisionButton = document.createElement('button');
             fullVisionButton.type = 'button';
@@ -7018,7 +7232,7 @@ function renderCombatHud() {
             fullVisionButton.title = 'Вернуться к полному обзору ГМа';
             fullVisionButton.style.cssText = 'margin-left:6px; flex:0 0 auto;';
             fullVisionButton.onclick = () => toggleGmVision();
-            combatHud.querySelector('.combat-hud-header')?.appendChild(fullVisionButton);
+            combatHud.querySelector('.combat-hud-body')?.appendChild(fullVisionButton);
         }
     }
     const collapseBtn = combatHud.querySelector('.combat-hud-collapse-btn');
@@ -7119,6 +7333,7 @@ export function setCombatState(state) {
             character.character_id,
             character.facing_x,
             character.facing_y,
+            { deferRefresh: true },
         );
         applyCharacterGrappleVisual(character.character_id, character);
         applyCharacterGunpointVisual(character.character_id, character);
@@ -7133,6 +7348,10 @@ export function setCombatState(state) {
     applyFogOfWar();
     showAvailableOpportunityAttack();
     window.dispatchEvent(new CustomEvent('combat-state-updated', { detail: combatState }));
+    if (combatActionMenuCharacterId != null && combatActionMenu?.style.display === 'block') {
+        const rect = combatActionMenu.getBoundingClientRect();
+        showCombatActionMenu(rect.left + rect.width / 2, rect.top + rect.height / 2, combatActionMenuCharacterId);
+    }
     resumeCompletedCombatAction(combatState);
     renderCombatHud();
     void autoEndBlockedCombatTurn();
@@ -7524,6 +7743,23 @@ export function initLocationScene(containerId) {
     locationRenderBatches = createLocationRenderBatches(THREE, scene, () => locationObjectMeshes);
     locationShadowPass = createLocationShadowPass(renderer,()=>[...locationObjectMeshes,...roofMeshes,...objectMeshes,...[...characterModels.values()].map(entry=>entry.model)], draw => locationRenderBatches.withOriginals(draw));
 
+    setLocalMapSceneContext({
+        scene, camera, canvas: renderer.domElement, controls,
+        get locationId() { return getCurrentLocationId(); },
+        get level() { return locationViewLevel; }, unit: 'м',
+        get width() { return currentLocationData?.grid_width || 0; },
+        get height() { return currentLocationData?.grid_height || 0; },
+        point: localMapToolPoint, surface: localMapToolSurface,
+        visibleLevel: level => Number(level || 0) === locationViewLevel,
+        prepareTool() {
+            if (objectEdit || editorHistory.state().busy || isDraggingCharacter) return false;
+            cancelLocationPaste(); clearEditorSelection(); clearLocationAssetPreset(); clearBuildPreview();
+            clearPendingCombatAction(); closeCombatMenus();
+            if (structureActionMenu) structureActionMenu.style.display = 'none';
+            pendingStructureAction = null; armedMoveCharacterId = null;
+            return true;
+        },
+    });
     // Highlight
     createHighlight();
 
@@ -8607,6 +8843,7 @@ function hideStructureInteraction() {
 }
 
 function beginStructureInteractionMode(characterId) {
+    window.cancelCommonMapTool?.();
     if (!isCurrentCombatTurnForCharacter(characterId)) {
         showNotification('Сейчас не ход этого персонажа', 'system');
         return false;
@@ -10144,6 +10381,49 @@ function locationPointerSurfaceHeight(x, z) {
         + Number(floor.properties?.elevation || 0) + FLOOR_SURFACE_OFFSET : getTileHeight(x, z) + offset;
 }
 
+function localMapFloorContains(floor, x, z) {
+    const pose=floorVisualPose(floor,currentLocationData.objects||[]);
+    const dx=x-pose.x,dz=z-pose.z;
+    const along=dx*pose.axis.x+dz*pose.axis.z,across=dx*pose.normal.x+dz*pose.normal.z;
+    return floorSlabParts(floor,currentLocationData.objects||[]).some(part=>
+        Math.abs(along-part.x)<=part.width/2&&Math.abs(across-part.z)<=part.depth/2);
+}
+
+function localMapToolSurface(x, z, level = locationViewLevel) {
+    if (!currentLocationData || x < 0 || z < 0 || x >= currentLocationData.grid_width || z >= currentLocationData.grid_height) return null;
+    const floor = (currentLocationData.objects || []).find(o => o.type === 'floor'
+        && structureLevel(o) === level && localMapFloorContains(o, x, z));
+    if (floor) return getTileHeight(floor.tile_x, floor.tile_y) + level * STOREY_HEIGHT
+        + Number(floor.properties?.elevation || 0) + FLOOR_SURFACE_OFFSET;
+    if (level !== 0) return null;
+    return createTerrainSurfaceHeightSampler(currentLocationData.tiles_data)(x, z);
+}
+
+function localMapToolPoint(clientX, clientY) {
+    if (!currentLocationData || locationSceneLoading) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    camera.updateMatrixWorld(true);
+    const picker = new THREE.Raycaster();
+    picker.setFromCamera(new THREE.Vector2((clientX - rect.left) / rect.width * 2 - 1,
+        -(clientY - rect.top) / rect.height * 2 + 1), camera);
+    // Reuse the rendered terrain raycast and intersect only the selected storey's floors.
+    const terrainHit = locationViewLevel === 0 ? picker.intersectObjects(tileCubes, false)[0] : null;
+    let point = terrainHit?.point.clone() || null;
+    let distance = terrainHit?.distance ?? Infinity;
+    for (const floor of currentLocationData.objects || []) {
+        if (floor.type !== 'floor' || structureLevel(floor) !== locationViewLevel) continue;
+        const y = getTileHeight(floor.tile_x, floor.tile_y) + structureLevelOffset(floor)
+            + Number(floor.properties?.elevation || 0) + FLOOR_SURFACE_OFFSET;
+        const candidate = picker.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -y), new THREE.Vector3());
+        if (!candidate || !localMapFloorContains(floor, candidate.x, candidate.z)) continue;
+        const nextDistance = candidate.distanceTo(picker.ray.origin);
+        if (nextDistance < distance) { point = candidate; distance = nextDistance; }
+    }
+    if (!point || localMapToolSurface(point.x, point.z) == null) return null;
+    point.floor_level = locationViewLevel;
+    return point;
+}
+
 function hoveredEditorTile(clientX, clientY, groundCoords) {
     const levelOffset = editorHoverLevelOffset();
     if (!levelOffset && !(currentLocationData?.objects || []).some(o => o.type === 'floor' && structureLevel(o) === 0)) return groundCoords;
@@ -11255,6 +11535,7 @@ export function setLocationViewLevel(level) {
     updateLocationLampFixtureFloors(lampRenderSources);
     refreshLocationFloorMenu();
     if (editorPaste) updateBuildPreview();
+    window.dispatchEvent(new Event('map-surface-changed'));
 }
 
 let basementCutaway = null;
@@ -14101,6 +14382,7 @@ function sendDecorTileUpdates(positions) {
 }
 
 export function setLocationAssetPreset(assetId) {
+    window.cancelCommonMapTool?.();
     selectedLocationAsset = typeof assetId === 'object' ? assetId : findLocationAsset(assetId);
     if (!selectedLocationAsset) return;
     const lampTrace = selectedLocationAsset.kind === 'lamp' ? beginLampEditTrace('select') : null;
@@ -15037,6 +15319,7 @@ let locationSceneLoading = false;
 
 export function loadLocation(data) {
     for (const stage of buildLocationStages(data)) { /* synchronous callers */ }
+    window.dispatchEvent(new Event('map-surface-changed'));
 }
 
 export async function loadLocationInStages(data, { signal, onProgress } = {}) {
@@ -15054,7 +15337,7 @@ export async function loadLocationInStages(data, { signal, onProgress } = {}) {
         stages.return();
         return false;
     } finally {
-        if (scene === loadingScene) locationSceneLoading = false;
+        if (scene === loadingScene) { locationSceneLoading = false; window.dispatchEvent(new Event('map-surface-changed')); }
     }
 }
 
@@ -15466,6 +15749,7 @@ function flushPendingTerrainRefresh() {
         entry.model.position.y = height;
         entry.label.position.y = height + characterLabelOffset(entry);
     });
+    if (work.height || work.surface || work.roofs) window.dispatchEvent(new Event('map-surface-changed'));
 }
 
 function updateSmoothTerrainColors(changedTiles = null) {
@@ -16486,6 +16770,10 @@ function setupCharacterDragging() {
 
     // mousemove для подсветки
     const onMouseMove = (e) => {
+        if (pendingFacingSelection) {
+            updateFacingPreview(e.clientX, e.clientY);
+            return;
+        }
         if (!isDraggingCharacter) {
             const obj = getCharacterAtScreen(e.clientX, e.clientY);
             if (obj) {
@@ -16520,9 +16808,6 @@ function setupCharacterDragging() {
 
         if (armedMoveCharacterId && !isDraggingCharacter) {
             updateMovementPreview(e.clientX, e.clientY);
-        }
-        if (pendingFacingSelection) {
-            updateFacingPreview(e.clientX, e.clientY);
         }
         if (pendingCombatAction) {
             updateAttackPreview(e.clientX, e.clientY);
@@ -17050,7 +17335,9 @@ export function setupLocationEditing() {
     const locInfo = document.getElementById('location-tile-info');
     locationActive = true;
     let lastBrushTile = null;
-    const removeSecondaryClick=installSecondaryClick(canvas);
+    const removeSecondaryClick=installSecondaryClick(canvas, {
+        contextRoots: () => [canvas.parentElement, combatActionMenu, structureActionMenu, structureRotationMenu],
+    });
     const onCameraRotatePointerDown = (event) => {
         if (event.button === 2 && window.locationEditMode && !isDraggingCharacter) {
             controls.enabled = true;
@@ -17750,6 +18037,7 @@ export function beginCharacterPlacement(characterOrCharacters) {
 
 // ========== Управляющие функции для UI ==========
 export function setLocationEditMode(enabled) {
+    window.cancelCommonMapTool?.();
     if (!enabled) cancelLocationPaste();
     if (!enabled && objectEdit?.phase === 'stroke') void finishLocationBrushStroke(true);
     editMode = enabled;
@@ -17783,6 +18071,7 @@ export function setLocationEditMode(enabled) {
     if (btn) btn.style.background = enabled ? '#4a6fa5' : '';
     const locCheckbox = document.getElementById('loc-edit-toggle-checkbox');
     if (locCheckbox) locCheckbox.checked = enabled;
+    document.getElementById('panel-tools')?.classList.toggle('location-editor-idle', !enabled);
     refreshLocationFloorMenu();
     updateBuildPreview();
 }
@@ -18009,7 +18298,12 @@ export function addLocationGridButton() {
         sync();
     };
     sync();
-    getLocationViewToggleGroup().appendChild(btn);
+    const group = getLocationViewToggleGroup();
+    group.appendChild(btn);
+    for (const id of ['chat-toggle', 'common-tools-toggle']) {
+        const launcher = document.getElementById(id);
+        if (launcher) group.appendChild(launcher);
+    }
     return btn;
 }
 
@@ -18110,6 +18404,8 @@ export function addLocationFloorMenu() {
 }
 
 export function destroyLocationScene() {
+    visionObjectIndex = null;
+    setLocalMapSceneContext(null);
     clearSculptPreview();
     locationSceneLoading = false;
     locationRenderBatches?.dispose();
@@ -18358,6 +18654,7 @@ export function destroyLocationScene() {
     combatState = null;
     window.locationCombatState = null;
     if (combatHud && combatHud.parentNode) {
+        combatHud._disposeLayout?.();
         combatHud.parentNode.removeChild(combatHud);
     }
     combatHud = null;

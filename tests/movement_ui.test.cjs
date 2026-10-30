@@ -5,6 +5,64 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const source = fs.readFileSync(path.join(__dirname, '../app/static/js/locationScene.js'), 'utf8');
+
+test('horizontal facing preserves zero Y when calculating turn angle and payment', () => {
+    const context=vm.createContext({});
+    vm.runInContext(functionSource('getFacingChangeOptions'),context);
+    const character={facing_x:1,facing_y:0,posture:'standing'};
+    assert.equal(context.getFacingChangeOptions(character,1,0).degrees,0);
+    assert.equal(context.getFacingChangeOptions(character,0,1).degrees,90);
+    const reverse=context.getFacingChangeOptions(character,-1,0);
+    assert.equal(reverse.degrees,180);
+    assert.equal(reverse.options.find(o=>o.payment==='action').action,2);
+});
+
+test('facing socket API is exported, idempotent and supports one fog refresh per state batch', () => {
+    assert.match(source, /export function applyCharacterFacingVisual\(/);
+    let refreshes = 0;
+    const entry = {model:{rotation:{}},facingX:0,facingY:1};
+    const context = vm.createContext({getCharacterModelEntry:()=>entry,applyFogOfWar:()=>refreshes++});
+    vm.runInContext(functionSource('applyCharacterFacingVisual'),context);
+    context.applyCharacterFacingVisual(1,1,0,{deferRefresh:true});
+    assert.equal(entry.model.rotation.y,Math.PI/2);
+    assert.equal(refreshes,0);
+    context.applyCharacterFacingVisual(1,1,0);
+    assert.equal(refreshes,0);
+    context.applyCharacterFacingVisual(1,-1,0);
+    assert.equal(refreshes,1);
+    context.applyCharacterFacingVisual(1,0,0);
+    assert.equal(refreshes,1);
+});
+
+test('navigation preview deduplicates requests and rejects responses from an old map version', async () => {
+    let resolve, requests=0;
+    const context=vm.createContext({currentLocationId:1,movementMapVersion:1,
+        navigationPreviews:new Map(),navigationPreviewRequests:new Set(),navigationPreviewErrors:new Set(),
+        navigationPreviewBusy:false,navigationPreviewQueued:null,
+        movementPreviewCharacterId:null,window:{currentLobbyId:1},localStorage:{getItem:()=>''},
+        fetch:()=>{requests++;return new Promise(r=>resolve=r);}});
+    for(const name of ['navigationPreviewKey','serverMovementPreview','sendQueuedNavigationPreview'])vm.runInContext(functionSource(name),context);
+    context.serverMovementPreview(0,0,3,0,1,0);
+    context.serverMovementPreview(0,0,3,0,1,0);
+    assert.equal(requests,1);assert.equal(context.navigationPreviewRequests.size,1);
+    context.movementMapVersion++;
+    resolve({ok:true,json:async()=>({route:{path:[[0,0],[3,0]]}})});
+    await new Promise(r=>setImmediate(r));
+    assert.equal(context.navigationPreviewRequests.size,0);
+    assert.equal([...context.navigationPreviews.values()][0],null);
+    // While one request runs, intermediate pointer destinations are discarded.
+    context.serverMovementPreview(0,0,4,0,1,0);
+    context.serverMovementPreview(0,0,5,0,1,0);
+    context.serverMovementPreview(0,0,6,0,1,0);
+    assert.equal(requests,2);
+    resolve({ok:true,json:async()=>({route:{path:[[0,0],[4,0]]}})});
+    await new Promise(r=>setImmediate(r));
+    assert.equal(requests,3);
+    assert.equal([...context.navigationPreviews.keys()].some(key=>key.endsWith(':5:0:0')),false);
+    resolve({ok:true,json:async()=>({route:{path:[[0,0],[6,0]]}})});
+    await new Promise(r=>setImmediate(r));
+    assert.equal(context.navigationPreviewRequests.size,0);
+});
 function functionSource(name) {
     const start = source.indexOf(`function ${name}(`);
     assert.ok(start >= 0);
@@ -120,6 +178,7 @@ test('actual sight ray sees a standing head but not a crouching head behind low 
         getVisionBlockerHeight: (x, y) => x === 1 && y === 0 ? 2.5 : -Infinity,
         darknessFactorAt: () => 1,
         lightPathOpen: () => true,
+        getVisionObjectIndex: () => ({walls:[]}),
         currentLocationData: { objects: [] },
     });
     for (const name of ['visionEyeHeight', 'hasLineOfSight', 'isPointVisibleToPlayer', 'isCharacterVisibleToPlayer']) {

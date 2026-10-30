@@ -38,7 +38,7 @@ export function createSecondaryDragGuard({ threshold = 3, holdMs = 350, clickMs 
 // Native contextmenu can fire on press, before a camera drag can be identified.
 // Dispatch actions only after a short, stationary release. OrbitControls still
 // receives the original pointer events, including right down/up.
-export function installSecondaryClick(canvas) {
+export function installSecondaryClick(canvas, { contextRoots = () => [canvas] } = {}) {
     const guard=createSecondaryDragGuard();
     let pointer=null;
     const down=e=>{if(e.target===canvas&&e.button===2){pointer=e.pointerId;guard.begin(e.clientX,e.clientY,pointer,e.timeStamp);}};
@@ -52,16 +52,16 @@ export function installSecondaryClick(canvas) {
         }));
     };
     const reset=()=>{pointer=null;guard.reset();};
-    const menu=e=>e.preventDefault();
+    const menu=e=>{if(contextRoots().some(root=>root?.contains(e.target)))e.preventDefault();};
     window.addEventListener('pointerdown',down,{capture:true});
     window.addEventListener('pointermove',move,{capture:true});
     window.addEventListener('pointerup',up,{capture:true});
     window.addEventListener('pointercancel',reset,{capture:true});
     window.addEventListener('blur',reset);
-    canvas.addEventListener('contextmenu',menu);
+    window.addEventListener('contextmenu',menu,{capture:true});
     return ()=>{
         window.removeEventListener('pointerdown',down,{capture:true});window.removeEventListener('pointermove',move,{capture:true});
         window.removeEventListener('pointerup',up,{capture:true});window.removeEventListener('pointercancel',reset,{capture:true});
-        window.removeEventListener('blur',reset);canvas.removeEventListener('contextmenu',menu);reset();
+        window.removeEventListener('blur',reset);window.removeEventListener('contextmenu',menu,{capture:true});reset();
     };
 }
